@@ -191,17 +191,29 @@ class SimpleGamepad(object):
 
 
 eventList = []
+_eventLock = threading.Lock()
+_monitorError = None
+
 def monitorGamepad():
+    global _monitorError
     while True:
         try:
+            _monitorError = None
             for e in inputs.get_gamepad():
-                eventList.append(e)
+                with _eventLock:
+                    eventList.append(e)
         except inputs.UnpluggedError:
+            _monitorError = "Gamepad unplugged"
             time.sleep(0.5)
+        except Exception as ex:
+            _monitorError = str(ex)
+            print(f"[gamepad] monitorGamepad error: {ex}")
+            time.sleep(1.0)
 
 def gamepadEvents():
-    copy = eventList[:]
-    eventList.clear()
+    with _eventLock:
+        copy = eventList[:]
+        eventList.clear()
     return copy
     
 def haveGamepad():

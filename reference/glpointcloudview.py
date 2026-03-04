@@ -396,7 +396,7 @@ class AppState:
     def __init__(self, *args, **kwargs):
         self.WIN_NAME = 'RealSense'
         self.pitch, self.yaw = math.radians(0), math.radians(0)
-        self.translation = np.array([1, 0, 0], dtype=np.float32)
+        self.translation = np.array([0, 0, 0], dtype=np.float32)
         self.distance = 0.0
         self.prev_mouse = 0, 0
         self.mouse_btns = [False, False, False]
@@ -411,7 +411,7 @@ class AppState:
 
     def reset(self):
         self.pitch, self.yaw, self.distance = 0, 0, 0
-        self.translation[:] = 0, 0, 10
+        self.translation[:] = 0, 0, 0
 
     @property
     def rotation(self):
@@ -469,14 +469,14 @@ depth_profile_fw = rs.video_stream_profile(profile_fw.get_stream(rs.stream.depth
 
 
 # Processing blocks
-#pc_td = rs.pointcloud()
-#decimate_td = rs.decimation_filter()
-#decimate_td.set_option(rs.option.filter_magnitude, 2 )
+pc_td = rs.pointcloud()
+decimate_td = rs.decimation_filter()
+decimate_td.set_option(rs.option.filter_magnitude, 2 )
 
 # Processing blocks
-#pc_fw = rs.pointcloud()
-#decimate_fw = rs.decimation_filter()
-#decimate_fw.set_option(rs.option.filter_magnitude, 4)
+pc_fw = rs.pointcloud()
+decimate_fw = rs.decimation_filter()
+decimate_fw.set_option(rs.option.filter_magnitude, 4)
 
 
 
@@ -553,7 +553,7 @@ def depthToPointParams(shape, intrinsics, extrinsics, scale=.001, clip=4):
     rows, cols = shape
     ppx, ppy, fx, fy = intrinsics
     c, r = np.meshgrid(np.arange(cols), np.arange(rows), sparse=True)
-    projx = (c.astype(np.float32) - ppx) / fx
+    projx = -(c.astype(np.float32) - ppx) / fx
     projy = -(r.astype(np.float32) - ppy) / fy
 
     # extrinsics are transform from points to bot base (not base to cam)
@@ -572,11 +572,9 @@ def depthToPointCloud(depthz, depth_to_point_params):
     projx, projy, rv, tv, scale, clip = depth_to_point_params
     depth = depthz.astype(np.float32) 
     depth *= scale # 1000 mm => 0.001 meters
-
-    #remove from the depth image all values above a given value (meters).
-    valid = np.ravel( (depth > .02) & (depth < clip)) 
+    valid = np.ravel( (depth > .02) & (depth < clip)) #remove from the depth image all values above a given value (meters).
    
-    z = -np.ravel(depth)[valid] # positive depth toward viewer (map view)
+    z = -np.ravel(depth)[valid]
     x = np.ravel(depth * projx)[valid]
     y = np.ravel(depth * projy)[valid]
 
@@ -590,266 +588,302 @@ def depthToPointCloud(depthz, depth_to_point_params):
     return verts
 
 
-def flip_intrinsics(cx, cy, fx, fy, width, height):
-    # flip the image 180 degrees
-    cx_new = (width - 1) - cx
-    cy_new = (height - 1) - cy
-    return (cx_new, cy_new, fx, fy)
-
-
-
 out = np.empty((512,512,3), dtype=np.uint8) #1px per cm
 
-# use mask to ignore pixels 'on' the bot and near the (unreliable) edges
 #botmask = cv2.imread('anglerdroid/data/masks/botmask108.png',cv2.IMREAD_GRAYSCALE)
 botmask = cv2.imread('anglerdroid/data/masks/botmask240.png',cv2.IMREAD_GRAYSCALE)
 np.invert(botmask,out=botmask)
 
-# pre-allocate memory for depth and color images used on each frame
-
-
-
-# top down depth and color images (direct from realsense api)
 depth_data_td = np.zeros((240,424),dtype=np.uint16)
 depth_image_td = np.zeros((240,424),dtype=np.uint8)
+align_image_td = np.zeros((240,424),dtype=np.uint8)
 color_image_td = np.zeros((240,424,3),dtype=np.uint8)
 
-# forward depth and color images (direct from realsense api)
+#depth_image_fw = np.zeros_like(botmask,dtype=np.uint16)
 depth_data_fw = np.zeros((60,106),dtype=np.uint16)
 depth_image_fw = np.zeros((60,106),dtype=np.uint8)
 color_image_fw = np.zeros((240,424,3),dtype=np.uint8)
 
-# is a debug image to test bot within mask
-align_image_td = np.zeros((240,424),dtype=np.uint8) 
-
 thresh_td = np.zeros_like(depth_image_td,dtype=np.uint8)
-
-# could use to mask forward images before deprojecting to points
-#depth_image_fw = np.zeros_like(botmask,dtype=np.uint16)
-
 
 #intrinsics = depth_frame_fw.profile.as_video_stream_profile().intrinsics
 intrinsics_td = (209.71139526367188, 116.33296203613281, 209.92787170410156, 209.92787170410156)
 intrinsics_fw = ( 53.14219284057617,  29.85569000244141,  52.77927017211914,  52.77927017211914)
 
 extrinsics_td = (    0.0, 0.0,  0.0, 0.0, 0.0, .9465)
-extrinsics_fw = (25.6-90, 0.0, 90.0, -0.11, -0.025+.05, .4235)
+extrinsics_fw = (25.6-90, 0.0, 90.0, -0.11, -0.025, .4235)
 
-#flip 180 deg intrinsics because we'll flip the data when we read it in
-intrinsics_td = flip_intrinsics(*intrinsics_td, width=424, height=240)
-
-
-# pre-calculate parameters for deprojecting depth to points
-depth2point_td = depthToPointParams(depth_data_td.shape, intrinsics_td, extrinsics_td, scale=.001, clip=.963) #.001 meters per pixel
+depth2point_td = depthToPointParams(depth_data_td.shape, intrinsics_td, extrinsics_td, scale=.001, clip=.963)
 depth2point_fw = depthToPointParams(depth_data_fw.shape, intrinsics_fw, extrinsics_fw, scale=.001, clip=4.0)
 
 h, w = out.shape[:2] 
-view_aspect = float(h) / w
-px_size = .01 # 1cm per pixel
-scale = np.array([ 1 / px_size, -1 / px_size ], dtype=np.float32)
-center = np.array([ w / 2.0, h / 2.0 ], dtype=np.float32)
+view_aspect = float(h)/w
+px_size=.01
+scale = np.array([1/px_size,-1/px_size], dtype=np.float32)
+center = np.array([w/2.0, h/2.0], dtype=np.float32)
 
-# get frames from both cameras
 frames_td = pipeline_td.wait_for_frames()
 frames_fw = pipeline_fw.wait_for_frames()
-
-nframes = 0
+nframes=0
 now = time.time()
+
 
 
 do_color=True
 paused=False
 
-while True:
-    tnow = time.time()
-    key = cv2.waitKey(1)
-
-    if key == ord("b"):
-        print("b")
-        #cv2.imwrite("reference/botmask108.png",thresh_td)
-        #cv2.imwrite("reference/botmask240.png",thresh_td)
-
-    if key == ord("r"):     state.reset()
-
-    if key == ord("p"):     
-        print("p")
-        paused = not paused
-
-    if key == ord("u"):     print("u")
-    if key == ord("i"):     print("i")
-    if key == ord("d"):     print("d")
-    if key == ord("z"):     print("z")
-
-    if key == ord("c"):
-        print("c")
-        do_color = not do_color
-
-    if key == ord("s"):
-        cv2.imwrite('./out.png', out)
-
-    if key == ord("e"):
-        print("not implemented save to ply")
-        #points.export_to_ply('./out.ply', mapped_frame)
-
-    if key in (27, ord("q")) or cv2.getWindowProperty(state.WIN_NAME, cv2.WND_PROP_AUTOSIZE) < 0:
-        break
-
-    if any(state.mouse_btns):
-        pass
-
-    if paused:
-        continue
+#def Surfaces(vertices):
+#    glBegin(GL_TRIANGLE_STRIP)
+#    for i in range(4):
+#    #glColor4f(1, 1, 1, 0.3)
+#    glVertex3fv(vertices[i ,:])
+#    glEnd()
 
 
+class PointCloudPixelsGL:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.cuda_pixel_buffer = None  
+
+        # Create a texture to use as the temporary render target
+        self.texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, self.width, self.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
 
 
-    
-    frames_td = pipeline_td.wait_for_frames()
-    frames_fw = pipeline_fw.wait_for_frames()
-    tstep('wait_for_frames')
-    
-    depth_frame_td = frames_td.get_depth_frame()
-    depth_frame_fw = frames_fw.get_depth_frame()
-    
-    # get intrinsics (has to be for for the decimated images)
-    # commented because we only need it once
-    #depth_frame_td = decimate_td.process(depth_frame_td)
-    #intrinsics = depth_frame_td.profile.as_video_stream_profile().intrinsics
-    #print("intrinsics",intrinsics)
-    
-    #depth_frame_fw = decimate_fw.process(depth_frame_fw)
-    #intrinsics = depth_frame_fw.profile.as_video_stream_profile().intrinsics
+    def setup_buffers(self, max_pixels):
+        ftype = np.uint8  
+        pixel_bytes = 4 * max_pixels * ftype().nbytes
+        flags = cudart.cudaGraphicsRegisterFlags.cudaGraphicsRegisterFlagsWriteDiscard
 
-    # grab depth and downscale (and rotate. see intrinsics_td is flipped)
-    depth_data_td[:,:] = np.asanyarray(depth_frame_td.get_data())[::-2,::-2]#rotate 180 deg
-    depth_data_fw[:,:] = np.asanyarray(depth_frame_fw.get_data())[::4,::4] 
-    
-    # to view depth data scale to 0-255 eg 3000mm to 150 intensity 
-    depth_image_fw[:,:] = ( depth_data_fw ) * .05
-    tstep('get depth frames')
+        PBO = glGenBuffers(1)  
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, PBO)
+        glBufferData(GL_PIXEL_UNPACK_BUFFER, pixel_bytes, None, GL_DYNAMIC_DRAW)
 
-    if do_color:
-        color_frame_td = frames_td.get_color_frame()
-        color_frame_fw = frames_fw.get_color_frame()
-        color_image_td[:,:,:] = np.asanyarray(color_frame_td.get_data())[::-1, ::-1]#rot 180 deg
-        color_image_fw[:,:,:] = np.asanyarray(color_frame_fw.get_data())
-        tstep('get color frames')
-    
-    # top down depth data is around 0 to 1000mm since cam is pointing down
-    # we primarily care about obstacles, and want to see their height clearly
-    # so we clip out the region from floor (96.5cm) to about 12.5cm up
-    
-    zroi_min = 840
-    zroi_max = 965
-    zroi_scale = 2
-
-    # to visualize the depth in greyscale, put data in range 0 to 125*2
-    # 255 - data means range 5 to 255, with 5 being an obstacle 12.5cm or taller
-    depth_image_td[:,:] = 255 - (depth_data_td.clip(zroi_min,zroi_max) -zroi_min)*zroi_scale
-    cv2.imshow("td depth",depth_image_td)
-    tstep('depth_image_td')
-    
-    # we make binary 'obstacle' mask. 118 is about 5.9cm
-    # this represents the floor and low obstacles
-    floor_td = 118
-    #floor_td = 0 #don't clip floor for now
-    thresh_td[:,:]=(depth_image_td > floor_td) * np.uint8(255)
-    #thresh_td[:,:]=np.where(depth_image_td>floor_td,255,0)
-    tstep('threshold depth')
-    
-    cv2.imshow("td thresh",thresh_td)
-    #cv2.imshow("td threshm",botmask)
-
-    # botmask (which is inverted when read in) basically has a stencil
-    # with black for areas inside the bot and the unreliable edge pixels
-    # so any pixel that shows 'through' that stencil is a 'bad pixel'.
-    # So here we can basically see the pixels we're ignoring (bot and edges)
-    # the bot itself is detected as an obstacle, so we see those obstacle
-    # pixels in the empty space of the bot stencil. This lets us align the
-    # cameras since the full bot should be visible with 1px margin inside
-    np.bitwise_or(thresh_td,botmask,out=align_image_td)
-
-    # The REAL obstacles are ones that are on the 'white part' of the 
-    # bot mask. because if it's only on the threshold, but not bot stencil,
-    # ie it shows 'through' the cut out, it's not really an 'obstacle' but
-    # the bot itself (or an unreliable pixel)
-    # And if it's on mask but not threshold then 'nothing is there'
-    # So only if it's in the non-bot area and on the thresholded obstacle
-    # image, then it is an 'actual obstacle'
-    np.bitwise_and(thresh_td,botmask,out=thresh_td)    
-    tstep('show no bot')
-
-    # now that we found pixels that are 'definitely' obstacles
-    # we zero them out so we don't have to process to points
-    depth_data_td[thresh_td==0] = 0 
-    verts_td = depthToPointCloud(depth_data_td, depth2point_td)
-    tstep('tdcloud')
-    
-
-    verts_fw = depthToPointCloud(depth_data_fw, depth2point_fw)
-    tstep('get fw verts')
-
-    verts = np.concatenate((verts_td, verts_fw), axis=0)
-
-    # now we're top view so we clip the ground (to view ground: #verts = verts[verts[:, 2] < .04])
+        self.cuda_pixel_buffer = CudaOpenGLMappedArray(ftype, (max_pixels, 4), PBO, flags)
 
 
-    verts = verts[verts[:, 2] > .05]
-    #print all the z values of allverts out and pause for debugging
-    #40 verts per line
-    #for i in range(0, len(verts), 40):
-    #    print(verts[i:i+40, 2]) 
-    #print the number of verts
-    #print("number of verts",len(verts))
-    #cv2.waitKey(0)
-    tstep('thresh fw verts')
+    def draw(self, num_pixels):
+        # Ensure the viewport matches the buffer size
+        glViewport(0, 0, self.width, self.height)
 
-    verts = np.dot(verts - state.pivot, state.rotation) + state.pivot - state.translation
+        # Clear the default framebuffer
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+
+        # Create a temporary framebuffer to render into
+        temp_fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, temp_fbo)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.texture, 0)
+
+        # Check if the framebuffer is complete
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if status != GL_FRAMEBUFFER_COMPLETE:
+            raise RuntimeError(f"Framebuffer not complete: {status}")
+
+        # Activate the CUDA-OpenGL interop array 
+        with self.cuda_pixel_buffer:
+
+            # After you've modified the buffer in cupy
+            # Directly draw (blit) the pixels from the buffer into the texture attached to the framebuffer
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, self.cuda_pixel_buffer.gl_buffer)
+            glDrawPixels(self.width, self.height, GL_RGBA, GL_UNSIGNED_BYTE, None)
+
+        # Blit the content of the temporary framebuffer to the default framebuffer
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, temp_fbo)
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0)  
+        glBlitFramebuffer(
+            0, 0, self.width, self.height, 
+            0, 0, self.width, self.height, 
+            GL_COLOR_BUFFER_BIT, GL_NEAREST
+        )
+
+        # Cleanup
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glDeleteFramebuffers(1, [temp_fbo])
+
+
+    def __del__(self):
+        self.cuda_pixel_buffer.unregister()
+        glDeleteTextures(1, [self.texture]) 
 
 
 
-    #project 3d vector array to 2d
-    proj = verts[:, :-1] * scale + center #ortho
-    tstep('proj fw verts')
-    
 
-    # make 2d image coordinates and create 4 masks to ignore out-of-bound indices
-    px, py = proj.astype(np.uint32).T
-    m = (py >= 0) & (py < h) & (px >= 0) & (px < w)
 
-    m1=m.copy()
-    m2=m.copy()
-    m1[verts_td.shape[0]:]=False
-    m2[:verts_td.shape[0]]=False
 
-    # that means we skip legal x values if corresponding y value was bad
-    out.fill(0)
-    out[py[m1], px[m1],0] = 255 # depth_values #color[u[m], v[m]]
-    out[py[m2], px[m2],1] = 255 # depth_values #color[u[m], v[m]]
-    tstep('out valid verts')
-    
-
-    #cv2.imshow('td depth scaled',depth_image_td)
-    cv2.imshow("td thresh not bot",thresh_td)  
-    cv2.imshow('startfw',depth_image_fw) 
-    cv2.imshow(state.WIN_NAME, out)
-    cv2.imshow("td align",align_image_td)
-    if do_color:
-        cv2.imshow("col td", color_image_td)
-        cv2.imshow("col fw", color_image_fw)
-    tstep('show images')
-
-    
-    dt = time.time() - now
-    nframes += 1
-    if dt >= 5.0:
-        cv2.setWindowTitle(state.WIN_NAME, "Topdown View %dFPS (%.2fms) " % (math.ceil(nframes/dt), 1000*dt/nframes))
+gl = WindowsGLFW(848,480, "CuPy Cuda/OpenGL Map", 1,1,fps=True)
+pixels = PointCloudPixelsGL(848,480)
+#while not gl.closed():
+#    with pixels.cuda_vertex_buffer as V:
+#        V[0] = 255
         
-        now = time.time()
-        nframes = 0
-        print("times")
-        for k,kt in times.items():
-            print(k,kt)
+
+pcv = PointCloudGL(848*480)
+
+while not gl.closed():
+    with pcv.cuda_vertex_buffer as V:
+            
+        #V[..., 0] = 0
+        #V[..., 1] = 0
+        #V[..., 2] = 0
+
+        #V[0,0] = .5
+        #V[0,1] = .5
+        #V[0,2] = .5
+
+
+        
+
+
+        tnow = time.time()
+        key = cv2.waitKey(1)
+
+        if key == ord("b"):
+            print("b")
+            #cv2.imwrite("reference/botmask108.png",thresh_td)
+            #cv2.imwrite("reference/botmask240.png",thresh_td)
+
+        if key == ord("r"):     state.reset()
+
+        if key == ord("p"):     
+            print("p")
+            paused = not paused
+
+        if key == ord("u"):     print("u")
+        if key == ord("i"):     print("i")
+        if key == ord("d"):     print("d")
+        if key == ord("z"):     print("z")
+
+        if key == ord("c"):
+            print("c")
+            do_color = not do_color
+
+        if key == ord("s"):
+            cv2.imwrite('./out.png', out)
+
+        if key == ord("e"):
+            print("not implemented save to ply")
+            #points.export_to_ply('./out.ply', mapped_frame)
+
+        if key in (27, ord("q")) or cv2.getWindowProperty(state.WIN_NAME, cv2.WND_PROP_AUTOSIZE) < 0:
+            break
+
+        if any(state.mouse_btns):
+            pass
+
+        if paused:
+            continue
+
+
+
+
+        
+        frames_td = pipeline_td.wait_for_frames()
+        frames_fw = pipeline_fw.wait_for_frames()
+        tstep('wait_for_frames')
+        
+        depth_frame_td = frames_td.get_depth_frame()
+        #depth_frame_td = decimate_td.process(depth_frame_td)
+        #intrinsics = depth_frame_td.profile.as_video_stream_profile().intrinsics
+        depth_frame_fw = frames_fw.get_depth_frame()
+        #depth_frame_fw = decimate_fw.process(depth_frame_fw)
+        #intrinsics = depth_frame_fw.profile.as_video_stream_profile().intrinsics
+
+        depth_data_td[:,:] = np.asanyarray(depth_frame_td.get_data())[::2,::2]
+        depth_data_fw[:,:] = np.asanyarray(depth_frame_fw.get_data())[::4,::4] 
+        
+        depth_image_fw[:,:]=( depth_data_fw )*.05
+        tstep('get depth frames')
+
+        if do_color:
+            color_frame_td = frames_td.get_color_frame()
+            color_frame_fw = frames_fw.get_color_frame()
+            color_image_fw[:,:,:] = np.asanyarray(color_frame_fw.get_data())
+            color_image_td[:,:,:] = np.asanyarray(color_frame_td.get_data())
+            tstep('get color frames')
+        
+        zroi_min = 840
+        zroi_max = 965
+        zroi_scale = 2
+        depth_image_td[:,:] =  255-(depth_data_td.clip(zroi_min,zroi_max) -zroi_min)*zroi_scale
+        tstep('depth_image_td')
+        
+        floor_td=118
+        thresh_td[:,:]=(depth_image_td > floor_td) * np.uint8(255)
+        #thresh_td[:,:]=np.where(depth_image_td>floor_td,255,0)
+        tstep('threshold depth')
+        
+        #cv2.imshow("td thresh",thresh_td)
+        #cv2.imshow("td threshm",botmask)
+        np.bitwise_or(thresh_td,botmask,out=align_image_td)
+        np.bitwise_and(thresh_td,botmask,out=thresh_td)    
+        tstep('show no bot')
+
+        depth_data_td[thresh_td==0]=0 #mask floor and bot before deproject to points
+        verts_td = depthToPointCloud(depth_data_td, depth2point_td)
+        tstep('tdcloud')
+        
+
+        verts_fw = depthToPointCloud(depth_data_fw, depth2point_fw)
+        tstep('get fw verts')
+
+        verts = np.concatenate((verts_td, verts_fw), axis=0)
+
+        verts = np.dot(verts - state.pivot, state.rotation) + state.pivot - state.translation
+
+        # now we're top view so we clip the ground (to view ground: #verts = verts[verts[:, 2] > .38])
+        verts = verts[verts[:, 2] < .38]
+        tstep('thresh fw verts')
+
+        #project 3d vector array to 2d
+        proj = verts[:, :-1] * scale + center #ortho
+        tstep('proj fw verts')
+        
+
+        # make 2d image coordinates and create 4 masks to ignore out-of-bound indices
+        px, py = proj.astype(np.uint32).T
+        m = (py >= 0) & (py < h) & (px >= 0) & (px < w)
+
+        m1=m.copy()
+        m2=m.copy()
+        m1[verts_td.shape[0]:]=False
+        m2[:verts_td.shape[0]]=False
+
+        # that means we skip legal x values if corresponding y value was bad
+        out.fill(0)
+        out[py[m1], px[m1],0] = 255 # depth_values #color[u[m], v[m]]
+        out[py[m2], px[m2],1] = 255 # depth_values #color[u[m], v[m]]
+        tstep('out valid verts')
+        
+
+        #cv2.imshow('td depth scaled',depth_image_td)
+        cv2.imshow("td thresh not bot",thresh_td)  
+        cv2.imshow('startfw',depth_image_fw) 
+        cv2.imshow(state.WIN_NAME, out)
+        cv2.imshow("td align",align_image_td)
+        if do_color:
+            cv2.imshow("col td", color_image_td)
+            cv2.imshow("col fw", color_image_fw)
+        tstep('show images')
+
+        
+        dt = time.time() - now
+        nframes += 1
+        if dt >= 5.0:
+            cv2.setWindowTitle(state.WIN_NAME, "Topdown View %dFPS (%.2fms) " % (math.ceil(nframes/dt), 1000*dt/nframes))
+            
+            now = time.time()
+            nframes = 0
+            print("times")
+            for k,kt in times.items():
+                print(k,kt)
+
+        pcv.draw(len(V), gl.width, gl.height)
+        gl.swap()
     
 
 # Stop streaming
