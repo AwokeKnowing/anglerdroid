@@ -61,6 +61,7 @@ def main():
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
+    show_ok = not args.no_show
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     t0 = time.monotonic()
     frame_id = 0
@@ -70,10 +71,14 @@ def main():
 
             # Get latest vision (safe read)
             frames, atlas, ts = tools.get_frames()
-            if not args.no_show and atlas is not None:
-                display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
-                cv2.imshow("vision atlas", display)
-                cv2.waitKey(1)
+            if show_ok and atlas is not None:
+                try:
+                    display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
+                    cv2.imshow("vision atlas", display)
+                    cv2.waitKey(1)
+                except cv2.error:
+                    show_ok = False
+                    print("vision: display not available (headless OpenCV?), continuing without window")
             if HAS_RERUN and not args.no_rerun:
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
@@ -105,8 +110,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if not args.no_show:
-            cv2.destroyAllWindows()
+        if show_ok:
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
         vis.stop()
         u.stop()
         if wb:
