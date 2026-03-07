@@ -2,6 +2,8 @@
 tools.py - Wraps wheelbase, vision, ui. High-level tools for AI loop (sim or real).
 """
 
+from typing import Optional
+
 import numpy as np
 
 try:
@@ -15,8 +17,8 @@ import ui
 
 # --- Shared instances (main script sets these or tools.init) ---
 _wheelbase = None
-_vision: vision.Vision | None = None
-_ui: ui.UI | None = None
+_vision = None  # type: Optional[vision.Vision]
+_ui = None  # type: Optional[ui.UI]
 
 
 def init(
