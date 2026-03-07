@@ -11,7 +11,8 @@ import tools
 try:
     import rerun as rr
     HAS_RERUN = True
-except ImportError:
+except (ImportError, TypeError):
+    rr = None
     HAS_RERUN = False
 
 
