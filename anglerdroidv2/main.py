@@ -5,6 +5,7 @@ main.py - 30 fps loop: frames + tool calls; optional rerun. Entrypoint for angle
 import time
 import argparse
 import numpy as np
+import cv2
 
 import tools
 
@@ -27,6 +28,7 @@ def main():
     parser.add_argument("--rs1", default="", help="RealSense 1 serial")
     parser.add_argument("--rs2", default="", help="RealSense 2 serial")
     parser.add_argument("--rgb1", default="/dev/video0", help="RGB camera device (e.g. /dev/video0)")
+    parser.add_argument("--no-show", action="store_true", help="Do not show vision atlas window")
     args = parser.parse_args()
 
     # Rerun
@@ -68,6 +70,10 @@ def main():
 
             # Get latest vision (safe read)
             frames, atlas, ts = tools.get_frames()
+            if not args.no_show and atlas is not None:
+                display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
+                cv2.imshow("vision atlas", display)
+                cv2.waitKey(1)
             if HAS_RERUN and not args.no_rerun:
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
@@ -99,6 +105,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        if not args.no_show:
+            cv2.destroyAllWindows()
         vis.stop()
         u.stop()
         if wb:

@@ -59,7 +59,8 @@ def _pcd_from_rgbd(color, depth, intr, depth_scale, depth_trunc):
     fx, fy = intr.fx, intr.fy
     cx, cy = intr.ppx, intr.ppy
     intrinsic = o3d.camera.PinholeCameraIntrinsic(FRAME_W, FRAME_H, fx, fy, cx, cy)
-    depth_o3d = o3d.geometry.Image(np.ascontiguousarray((depth / depth_scale).astype(np.uint16)))
+    depth_clean = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+    depth_o3d = o3d.geometry.Image(np.ascontiguousarray((depth_clean / depth_scale).astype(np.uint16)))
     color_o3d = o3d.geometry.Image(np.ascontiguousarray(color))
     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
         color_o3d, depth_o3d,
