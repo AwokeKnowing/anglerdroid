@@ -20,7 +20,7 @@ except ImportError:
 FRAME_W, FRAME_H = 320, 240
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
-# rgb1 USB webcam: capture at 640x480 then scale down for better quality
+# rgb1 USB webcam: capture at 640x480 then scale down for better quality (no stretch)
 RGB1_CAPTURE_W, RGB1_CAPTURE_H = 640, 480
 
 # Rotation: we need 90° CCW correction (sensor is mounted 90° CW).
@@ -288,7 +288,7 @@ class Vision:
         clip_m = 3.0
         while self._running:
             t0 = time.monotonic()
-            # RGB1 (640x480 capture → scale down → rotate; rotate on smaller buffer for performance)
+            # RGB1: 640x480 capture → no stretch to 320x240 (4:3). RS are already 320x240 native.
             rgb1 = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             if self._rgb1_cap and self._rgb1_cap.isOpened():
                 ret, f = self._rgb1_cap.read()
@@ -299,8 +299,13 @@ class Vision:
                         f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
                     if f.shape[1] != FRAME_W or f.shape[0] != FRAME_H:
                         if self._rgb1_rotate_opencv:
-                            f = cv2.resize(f, (FRAME_H, FRAME_W), interpolation=cv2.INTER_AREA)
                             f = cv2.rotate(f, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                            h, w = f.shape[:2]
+                            crop_h = int(w * FRAME_H / FRAME_W)
+                            if crop_h <= h:
+                                y0 = (h - crop_h) // 2
+                                f = f[y0 : y0 + crop_h, :]
+                            f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
                         else:
                             f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
                     f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
