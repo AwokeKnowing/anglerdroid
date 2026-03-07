@@ -19,6 +19,7 @@ except (ImportError, TypeError):
 
 TARGET_FPS = 30
 LOOP_DT = 1.0 / TARGET_FPS
+BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 fps
 
 
 def main():
@@ -63,8 +64,11 @@ def main():
 
     show_ok = not args.no_show
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
-    t0 = time.monotonic()
+    print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
     frame_id = 0
+    last_report = time.monotonic()
+    process_sum = 0.0
+    wait_sum = 0.0
     try:
         while True:
             loop_start = time.monotonic()
@@ -121,12 +125,27 @@ def main():
             if user_text:
                 pass  # Feed to agent when integrated
 
-            # Throttle to 30 fps
-            elapsed = time.monotonic() - loop_start
-            sleep_time = LOOP_DT - elapsed
+            # Throttle to 30 fps and report timing
+            process_sec = time.monotonic() - loop_start
+            process_ms = process_sec * 1000.0
+            sleep_time = LOOP_DT - process_sec
             if sleep_time > 0:
                 time.sleep(sleep_time)
+            wait_ms = sleep_time * 1000.0 if sleep_time > 0 else 0.0
+            process_sum += process_ms
+            wait_sum += wait_ms
             frame_id += 1
+            if frame_id % 30 == 0:
+                now = time.monotonic()
+                elapsed = now - last_report
+                actual_fps = 30.0 / elapsed if elapsed > 0 else 0
+                avg_process = process_sum / 30.0
+                avg_wait = wait_sum / 30.0
+                process_sum = 0.0
+                wait_sum = 0.0
+                last_report = now
+                print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)" % (
+                    actual_fps, avg_process, avg_wait, BUDGET_MS))
     except KeyboardInterrupt:
         pass
     finally:
