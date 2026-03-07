@@ -1,0 +1,7 @@
+numpy
+opencv-python-headless
+pyrealsense2
+open3d
+rerun-sdk
+python-can
+inputs

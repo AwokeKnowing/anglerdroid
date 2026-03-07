@@ -1,0 +1,5 @@
+README.md
+.dockerignore
+__pycache__
+*.pyc
+.git
