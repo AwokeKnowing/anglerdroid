@@ -22,6 +22,24 @@ ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
 
 
+def _open_rgb_capture(device_id):
+    """Open V4L2 camera by path (e.g. /dev/video12) or int index. Tries path first, then index if path looks like /dev/videoN."""
+    import re
+    cap = cv2.VideoCapture(device_id, cv2.CAP_V4L2)
+    if cap.isOpened():
+        return cap
+    cap.release()
+    if isinstance(device_id, str):
+        m = re.search(r"video(\d+)$", device_id)
+        if m:
+            idx = int(m.group(1))
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if cap.isOpened():
+                return cap
+            cap.release()
+    return None
+
+
 def _rs_pipeline(serial: str):
     """Start RealSense pipeline: depth 848x480, color 320x240."""
     cfg = rs.config()
@@ -157,12 +175,15 @@ class Vision:
             self._thread = threading.Thread(target=self._stub_loop, daemon=True)
             self._thread.start()
             return
-        try:
-            self._rgb1_cap = cv2.VideoCapture(self.rgb1_device_id, cv2.CAP_V4L2)
-        except Exception:
+        self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
+        if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        else:
+            if self._rgb1_cap is not None:
+                self._rgb1_cap.release()
             self._rgb1_cap = None
-        self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print("vision: rgb1 camera not opened (try debug_camera.py to test device)")
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
