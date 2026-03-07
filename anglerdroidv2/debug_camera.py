@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
 """
-Debug the forward RGB camera (e.g. /dev/video12). Lists devices, tries open by path and by index, reads frames.
-Usage: python3 debug_camera.py [/dev/video12]
+Debug the forward RGB camera. Lists devices, V4L2 controls (rotation etc.), tries open by path/index.
+Usage: python3 debug_camera.py [/dev/video0]
 """
 
 import sys
 import os
 import re
+import subprocess
 import cv2
 
+
+def v4l2_list_ctrls(device):
+    """Run v4l2-ctl --list-ctrls; return (success, stdout)."""
+    path = device if isinstance(device, str) and device.startswith("/") else "/dev/video%d" % int(device)
+    try:
+        r = subprocess.run(
+            ["v4l2-ctl", "-d", path, "--list-ctrls"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return r.returncode == 0, (r.stdout or "").strip()
+    except FileNotFoundError:
+        return False, "(v4l2-ctl not found; install v4l-utils)"
+    except Exception as e:
+        return False, str(e)
+
+
 def main():
-    device = sys.argv[1] if len(sys.argv) > 1 else "/dev/video12"
+    device = sys.argv[1] if len(sys.argv) > 1 else "/dev/video0"
     print("=== Video devices ===")
     if os.path.isdir("/dev"):
         for name in sorted(os.listdir("/dev")):
@@ -26,6 +45,19 @@ def main():
     if m:
         index_from_path = int(m.group(1))
         print("Index from path:", index_from_path)
+
+    print("\n--- V4L2 controls (rotation etc.; need v4l-utils) ---")
+    ok, out = v4l2_list_ctrls(device)
+    if ok and out:
+        for line in out.splitlines():
+            mark = "  "
+            if "rotat" in line.lower() or "flip" in line.lower() or "orient" in line.lower():
+                mark = "  >>> "
+            print(mark + line)
+        if "rotat" not in out.lower() and "flip" not in out.lower():
+            print("  (no rotation/flip control found; vision will use OpenCV rotate)")
+    else:
+        print("  ", out)
 
     print("\n--- Open by path:", device, "---")
     cap_path = cv2.VideoCapture(device, cv2.CAP_V4L2)
@@ -70,7 +102,7 @@ def main():
         else:
             c.release()
 
-    print("\nDone. If path fails but index works, use --rgb1 12 in main.py (vision will try index as fallback).")
+    print("\nDone. If camera has no V4L2 rotation control, vision uses OpenCV rotate.")
 
 if __name__ == "__main__":
     main()
