@@ -20,6 +20,8 @@ except ImportError:
 FRAME_W, FRAME_H = 320, 240
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
+# rgb1 USB webcam: capture at 640x480 then scale down for better quality
+RGB1_CAPTURE_W, RGB1_CAPTURE_H = 640, 480
 
 # Rotation: we need 90° CCW correction (sensor is mounted 90° CW).
 # Try camera-level first via V4L2 (v4l2-ctl); fall back to OpenCV if not supported.
@@ -252,16 +254,16 @@ class Vision:
             else:
                 self._rgb1_rotate_opencv = True
                 print("vision: rgb1 rotation will be done in OpenCV (camera has no V4L2 rotation control)")
-            # 320x240, MJPG for low latency; minimal buffer
+            # 640x480 capture, then scale down to 320x240 for better quality
             self._rgb1_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, RGB1_CAPTURE_W)
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RGB1_CAPTURE_H)
             self._rgb1_cap.set(cv2.CAP_PROP_FPS, TARGET_FPS)
             try:
                 self._rgb1_cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            print("vision: rgb1 camera opened (320x240, MJPG)")
+            print("vision: rgb1 camera opened (640x480, MJPG → scale to 320x240)")
         else:
             if self._rgb1_cap is not None:
                 self._rgb1_cap.release()
@@ -286,7 +288,7 @@ class Vision:
         clip_m = 3.0
         while self._running:
             t0 = time.monotonic()
-            # RGB1 (USB webcam: 320x240; rotate CCW 90 in OpenCV only if not set at camera level)
+            # RGB1 (640x480 capture → scale down → rotate; rotate on smaller buffer for performance)
             rgb1 = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             if self._rgb1_cap and self._rgb1_cap.isOpened():
                 ret, f = self._rgb1_cap.read()
@@ -295,10 +297,12 @@ class Vision:
                         f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
                     elif f.shape[2] == 4:
                         f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
-                    if self._rgb1_rotate_opencv:
-                        f = cv2.rotate(f, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     if f.shape[1] != FRAME_W or f.shape[0] != FRAME_H:
-                        f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_LINEAR)
+                        if self._rgb1_rotate_opencv:
+                            f = cv2.resize(f, (FRAME_H, FRAME_W), interpolation=cv2.INTER_AREA)
+                            f = cv2.rotate(f, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                        else:
+                            f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
                     f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
                     rgb1 = f
 
