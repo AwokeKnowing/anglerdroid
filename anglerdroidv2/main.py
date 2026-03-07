@@ -83,18 +83,38 @@ def main():
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
-            # Get pending tool calls from agent (e.g. LLM) and execute locally
+            # Wheelbase: feed watchdog every frame and drive from gamepad (no focus needed)
+            left_tps, right_tps = 0.0, 0.0
+            wb = tools.get_wheelbase()
+            if wb is not None:
+                if wb.gamepad is not None:
+                    vels = wb.gamepad.diffDrive()
+                    left_norm = vels.get("left", 0.0)
+                    right_norm = vels.get("right", 0.0)
+                    if abs(left_norm) < 0.08:
+                        left_norm = 0.0
+                    if abs(right_norm) < 0.08:
+                        right_norm = 0.0
+                    left_tps = left_norm * 0.5
+                    right_tps = right_norm * 0.5
+                wb._check_gamepad_health()
+
+            # Apply tool calls (can override gamepad for this frame)
             pending = tools.get_pending_tool_calls()
             for call in pending:
-                # Example: {"name": "set_wheel_vels", "args": {"left_tps": 0.0, "right_tps": 0.0}}
                 name = call.get("name")
-                args = call.get("args", {})
+                cargs = call.get("args", {})
                 if name == "set_wheel_vels":
-                    tools.set_wheel_vels(args.get("left_tps", 0), args.get("right_tps", 0))
+                    left_tps = cargs.get("left_tps", 0)
+                    right_tps = cargs.get("right_tps", 0)
                 elif name == "stop":
-                    tools.stop()
+                    left_tps, right_tps = 0.0, 0.0
                 elif name == "twist":
-                    tools.twist(args.get("forward_mps", 0), args.get("angular_rads", 0))
+                    tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                    left_tps = right_tps = None  # twist already sent
+
+            if wb is not None and left_tps is not None:
+                tools.set_wheel_vels(left_tps, right_tps)
 
             # User text (e.g. for next LLM turn)
             user_text = tools.get_user_text()
