@@ -20,69 +20,8 @@ except ImportError:
 FRAME_W, FRAME_H = 320, 240
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
-# rgb1 USB webcam: capture at 640x480 then scale down for better quality (no stretch)
+# rgb1 USB webcam: capture at 640x480 then scale down to 320x240 (no rotation; camera physically oriented)
 RGB1_CAPTURE_W, RGB1_CAPTURE_H = 640, 480
-
-# Rotation: we need 90° CCW correction (sensor is mounted 90° CW).
-# Try camera-level first via V4L2 (v4l2-ctl); fall back to OpenCV if not supported.
-
-
-def _device_path_for_v4l2(device_id):
-    """Return /dev/videoN path for v4l2-ctl. device_id can be int or '/dev/videoN'."""
-    if isinstance(device_id, int):
-        return "/dev/video%d" % device_id
-    if isinstance(device_id, str) and device_id.startswith("/dev/"):
-        return device_id
-    import re
-    m = re.search(r"video(\d+)$", str(device_id))
-    if m:
-        return "/dev/video%s" % m.group(1)
-    return None
-
-
-def _try_v4l2_rotation(device_id, ccw90=True):
-    """
-    Try to set rotation at camera level via v4l2-ctl. Requires v4l2-utils.
-    ccw90=True: correct for sensor mounted 90° CW (set output so we get 90° CCW).
-    Returns True if we believe rotation was set at camera level, False otherwise.
-    """
-    import subprocess
-    path = _device_path_for_v4l2(device_id)
-    if not path:
-        return False
-    # Try control names and values (driver-dependent). 270° CW = 90° CCW.
-    to_try = [("rotation", "270"), ("rotation", "90"), ("rotate", "270"), ("rotate", "90")]
-    for ctrl, val in to_try:
-        try:
-            r = subprocess.run(
-                ["v4l2-ctl", "-d", path, "--set-ctrl", "%s=%s" % (ctrl, val)],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if r.returncode == 0:
-                return True
-        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-            pass
-    return False
-
-
-def _v4l2_list_ctrls(device_id):
-    """Run v4l2-ctl --list-ctrls for device; return (success, stdout). For debugging."""
-    import subprocess
-    path = _device_path_for_v4l2(device_id)
-    if not path:
-        return False, ""
-    try:
-        r = subprocess.run(
-            ["v4l2-ctl", "-d", path, "--list-ctrls"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        return r.returncode == 0, r.stdout or ""
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
-        return False, ""
 
 
 def _open_rgb_capture(device_id):
@@ -215,7 +154,6 @@ class Vision:
         self._depth_scale1 = 0.001
         self._depth_scale2 = 0.001
         self._rgb1_cap = None
-        self._rgb1_rotate_opencv = True  # If False, rotation was set at camera level (V4L2)
         self._have_rs = HAS_RS
 
     def start(self):
@@ -247,14 +185,7 @@ class Vision:
         # Open rgb1 after RealSense so we only touch the non-RS camera (e.g. USB webcam at video0)
         self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
         if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
-            # Try camera-level rotation (90° CCW correction) via V4L2; else we rotate in OpenCV
-            if _try_v4l2_rotation(self.rgb1_device_id, ccw90=True):
-                self._rgb1_rotate_opencv = False
-                print("vision: rgb1 rotation set at camera level (V4L2)")
-            else:
-                self._rgb1_rotate_opencv = True
-                print("vision: rgb1 rotation will be done in OpenCV (camera has no V4L2 rotation control)")
-            # 640x480 capture, then scale down to 320x240 for better quality
+            # 640x480 capture, scale down to 320x240 (no rotation; camera physically oriented)
             self._rgb1_cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, RGB1_CAPTURE_W)
             self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RGB1_CAPTURE_H)
@@ -288,7 +219,7 @@ class Vision:
         clip_m = 3.0
         while self._running:
             t0 = time.monotonic()
-            # RGB1: 640x480 capture → no stretch to 320x240 (4:3). RS are already 320x240 native.
+            # RGB1: 640x480 capture → scale to 320x240 (same aspect, no rotation/crop)
             rgb1 = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             if self._rgb1_cap and self._rgb1_cap.isOpened():
                 ret, f = self._rgb1_cap.read()
@@ -298,26 +229,17 @@ class Vision:
                     elif f.shape[2] == 4:
                         f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
                     if f.shape[1] != FRAME_W or f.shape[0] != FRAME_H:
-                        if self._rgb1_rotate_opencv:
-                            f = cv2.rotate(f, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                            h, w = f.shape[:2]
-                            crop_h = int(w * FRAME_H / FRAME_W)
-                            if crop_h <= h:
-                                y0 = (h - crop_h) // 2
-                                f = f[y0 : y0 + crop_h, :]
-                            f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
-                        else:
-                            f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
+                        f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
                     f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
                     rgb1 = f
 
-            # RS1
+            # RS1 (top-right in atlas): 320x240 native; flip 180 via numpy view [::-1, ::-1]
             rgbd1 = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             pcd1 = None
             if self._pipe1 and self._align1:
                 c1, d1, i1 = _rs_frame(self._pipe1, self._align1, self._depth_scale1, clip_m)
                 if c1 is not None:
-                    rgbd1 = c1
+                    rgbd1 = c1[::-1, ::-1]
                     if d1 is not None and i1 is not None:
                         pcd1 = _pcd_from_rgbd(c1, d1, i1, self._depth_scale1, clip_m)
 
@@ -339,12 +261,12 @@ class Vision:
                 merged += pcd2
             topdown = _topdown_from_pcd(merged) if len(merged.points) > 0 else np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
 
-            # Update shared state in one go
+            # Update shared state in one go (rgbd1 already 180-flipped via view)
             with self._lock:
                 self.frames[0][:] = rgb1
                 self.frames[1][:] = rgbd1
                 self.frames[2][:] = rgbd2
-                # Atlas: UL=rgb1, UR=rgbd1, LL=rgbd2, LR=topdown
+                # Atlas: UL=rgb1, UR=rgbd1 (180°), LL=rgbd2, LR=topdown
                 self.atlas[0:FRAME_H, 0:FRAME_W] = rgb1
                 self.atlas[0:FRAME_H, FRAME_W:ATLAS_W] = rgbd1
                 self.atlas[FRAME_H:ATLAS_H, 0:FRAME_W] = rgbd2
