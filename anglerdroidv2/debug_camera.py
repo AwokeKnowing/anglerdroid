@@ -11,12 +11,35 @@ import subprocess
 import cv2
 
 
+def _v4l2_path(device):
+    if isinstance(device, str) and device.startswith("/"):
+        return device
+    return "/dev/video%d" % int(device)
+
+
 def v4l2_list_ctrls(device):
     """Run v4l2-ctl --list-ctrls; return (success, stdout)."""
-    path = device if isinstance(device, str) and device.startswith("/") else "/dev/video%d" % int(device)
+    path = _v4l2_path(device)
     try:
         r = subprocess.run(
             ["v4l2-ctl", "-d", path, "--list-ctrls"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return r.returncode == 0, (r.stdout or "").strip()
+    except FileNotFoundError:
+        return False, "(v4l2-ctl not found; install v4l-utils)"
+    except Exception as e:
+        return False, str(e)
+
+
+def v4l2_list_formats_ext(device):
+    """Run v4l2-ctl --list-formats-ext; return (success, stdout). Lists all resolutions and frame rates."""
+    path = _v4l2_path(device)
+    try:
+        r = subprocess.run(
+            ["v4l2-ctl", "-d", path, "--list-formats-ext"],
             capture_output=True,
             text=True,
             timeout=2,
@@ -58,6 +81,13 @@ def main():
             print("  (no rotation/flip control found; vision will use OpenCV rotate)")
     else:
         print("  ", out)
+
+    print("\n--- V4L2 supported formats and resolutions (--list-formats-ext) ---")
+    ok_fmt, out_fmt = v4l2_list_formats_ext(device)
+    if ok_fmt and out_fmt:
+        print(out_fmt)
+    else:
+        print("  ", out_fmt)
 
     print("\n--- Open by path:", device, "---")
     cap_path = cv2.VideoCapture(device, cv2.CAP_V4L2)
