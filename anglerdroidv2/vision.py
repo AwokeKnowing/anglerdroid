@@ -23,20 +23,25 @@ TARGET_FPS = 30
 
 
 def _open_rgb_capture(device_id):
-    """Open V4L2 camera by path (e.g. /dev/video12) or int index. Tries path first, then index if path looks like /dev/videoN."""
+    """Open V4L2 camera by path (e.g. /dev/video12) or int index. Tries path first, then index. Verifies with a test read."""
     import re
-    cap = cv2.VideoCapture(device_id, cv2.CAP_V4L2)
-    if cap.isOpened():
-        return cap
-    cap.release()
-    if isinstance(device_id, str):
-        m = re.search(r"video(\d+)$", device_id)
-        if m:
-            idx = int(m.group(1))
-            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-            if cap.isOpened():
-                return cap
+    for attempt in (device_id, None):
+        if attempt is None:
+            if not isinstance(device_id, str):
+                break
+            m = re.search(r"video(\d+)$", device_id)
+            if not m:
+                break
+            attempt = int(m.group(1))
+        cap = cv2.VideoCapture(attempt, cv2.CAP_V4L2)
+        if not cap.isOpened():
             cap.release()
+            continue
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            continue
+        return cap
     return None
 
 
@@ -150,7 +155,7 @@ class Vision:
         self._have_rs = HAS_RS
 
     def start(self):
-        """Start capture thread (30 fps)."""
+        """Start capture thread (30 fps). Open RGB camera first so we claim it before RealSense."""
         if self._running:
             return
         if not self._have_rs:
@@ -159,6 +164,17 @@ class Vision:
             self._thread = threading.Thread(target=self._stub_loop, daemon=True)
             self._thread.start()
             return
+        # Open RGB camera first (before RealSense) so it isn't starved or blocked
+        self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
+        if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print("vision: rgb1 camera opened")
+        else:
+            if self._rgb1_cap is not None:
+                self._rgb1_cap.release()
+            self._rgb1_cap = None
+            print("vision: rgb1 camera not opened (try debug_camera.py to test device)")
         try:
             if self.rs1_serial:
                 self._pipe1 = _rs_pipeline(self.rs1_serial)
@@ -175,15 +191,6 @@ class Vision:
             self._thread = threading.Thread(target=self._stub_loop, daemon=True)
             self._thread.start()
             return
-        self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
-        if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        else:
-            if self._rgb1_cap is not None:
-                self._rgb1_cap.release()
-            self._rgb1_cap = None
-            print("vision: rgb1 camera not opened (try debug_camera.py to test device)")
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
