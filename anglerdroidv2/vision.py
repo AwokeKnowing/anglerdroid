@@ -155,7 +155,7 @@ class Vision:
         self._have_rs = HAS_RS
 
     def start(self):
-        """Start capture thread (30 fps). Open RGB camera first so we claim it before RealSense."""
+        """Start capture thread (30 fps). RealSense first (by serial), then rgb1 - so we don't steal a RS device."""
         if self._running:
             return
         if not self._have_rs:
@@ -164,17 +164,6 @@ class Vision:
             self._thread = threading.Thread(target=self._stub_loop, daemon=True)
             self._thread.start()
             return
-        # Open RGB camera first (before RealSense) so it isn't starved or blocked
-        self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
-        if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-            print("vision: rgb1 camera opened")
-        else:
-            if self._rgb1_cap is not None:
-                self._rgb1_cap.release()
-            self._rgb1_cap = None
-            print("vision: rgb1 camera not opened (try debug_camera.py to test device)")
         try:
             if self.rs1_serial:
                 self._pipe1 = _rs_pipeline(self.rs1_serial)
@@ -191,6 +180,17 @@ class Vision:
             self._thread = threading.Thread(target=self._stub_loop, daemon=True)
             self._thread.start()
             return
+        # Open rgb1 after RealSense so we only touch the non-RS camera (e.g. USB webcam at video12)
+        self._rgb1_cap = _open_rgb_capture(self.rgb1_device_id)
+        if self._rgb1_cap is not None and self._rgb1_cap.isOpened():
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self._rgb1_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            print("vision: rgb1 camera opened")
+        else:
+            if self._rgb1_cap is not None:
+                self._rgb1_cap.release()
+            self._rgb1_cap = None
+            print("vision: rgb1 camera not opened (use debug_camera.py to find correct device; avoid RealSense nodes)")
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()

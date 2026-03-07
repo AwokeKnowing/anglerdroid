@@ -18,16 +18,16 @@ pip install -r requirements.txt
 python main.py --no-wheelbase --rs1 "" --rs2 ""
 ```
 
-With RealSense and cameras (set serials and device):
+With RealSense and cameras (set serials and device). **rgb1** = USB webcam (forward); use a device that is *not* a RealSense node. From `python3 debug_camera.py`: video0 = 600×800 → USB webcam; video4/6/10/12 = 480×640 → RealSense. So use `--rgb1 /dev/video0` (default) for the forward cam.
 
 ```bash
-python main.py --no-wheelbase --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video12
+python main.py --no-wheelbase --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video0
 ```
 
 With wheelbase (e.g. on robot):
 
 ```bash
-python main.py --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video12
+python main.py --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video0
 ```
 
 ## Docker on Orin NX
