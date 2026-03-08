@@ -11,6 +11,7 @@ import queue
 import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 from typing import List, Optional
 
 import cv2
@@ -163,9 +164,9 @@ class UI:
                         await self._send_all(msg)
                     except queue.Empty:
                         break
-                # stream atlas to browser ~1 fps
+                # stream atlas to browser every ~2s
                 now = time.time()
-                if now - last_atlas_bc > 1.0:
+                if now - last_atlas_bc > 2.0:
                     with self._atlas_lock:
                         atlas = self._latest_atlas
                     if atlas is not None:
@@ -257,6 +258,8 @@ class UI:
 
     # ── Gemini AI ───────────────────────────────────────────────────
 
+    MIN_API_INTERVAL = 6.0  # seconds between API calls (free tier: 10 RPM)
+
     def _start_gemini(self):
         if self._gemini_active:
             return
@@ -267,7 +270,7 @@ class UI:
         self._gemini_active = True
         self._conversation = []
         self._last_activity = time.time()
-        self._last_gemini_send = 0.0
+        self._last_api_call = 0.0
         threading.Thread(target=self._gemini_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
         print("ui: Gemini AI started (%s)" % self._gemini_model)
@@ -293,7 +296,6 @@ class UI:
 
         while self._running and self._gemini_active:
             try:
-                # Drain speech queue into buffer
                 while True:
                     try:
                         speech_buf.append(self._speech_q.get_nowait())
@@ -304,7 +306,6 @@ class UI:
 
                 now = time.time()
 
-                # Send batched speech after BATCH_DELAY (no ambient sends)
                 if speech_buf and (now - buf_start >= BATCH_DELAY):
                     combined = " ".join(speech_buf)
                     speech_buf = []
@@ -313,7 +314,6 @@ class UI:
                         self._send_to_gemini(prompt, combined)
                         self._last_activity = now
 
-                # 20s silence → reset conversation context
                 if now - self._last_activity > 20.0:
                     self._conversation = []
                     self._last_activity = now
@@ -327,13 +327,31 @@ class UI:
                 self._last_activity = time.time()
                 time.sleep(3.0)
 
+    @staticmethod
+    def _strip_images(conversation):
+        """Remove inline_data (images) from all but the last user message."""
+        last_user_idx = -1
+        for i in range(len(conversation) - 1, -1, -1):
+            if conversation[i].get("role") == "user":
+                has_img = any("inline_data" in p for p in conversation[i].get("parts", []))
+                if has_img:
+                    last_user_idx = i
+                    break
+        for i, msg in enumerate(conversation):
+            if i == last_user_idx:
+                continue
+            if msg.get("role") == "user":
+                msg["parts"] = [p for p in msg.get("parts", []) if "inline_data" not in p]
+                if not msg["parts"]:
+                    msg["parts"] = [{"text": "(image removed from history)"}]
+
     def _send_to_gemini(self, system_prompt, user_text=None):
         with self._atlas_lock:
             atlas = self._latest_atlas
         if atlas is None:
             return
 
-        _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 70])
+        _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 60])
         img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
         parts = [
@@ -343,6 +361,7 @@ class UI:
         self._conversation.append({"role": "user", "parts": parts})
         if len(self._conversation) > 20:
             self._conversation = self._conversation[-20:]
+        self._strip_images(self._conversation)
 
         result = self._call_api(system_prompt)
         if not result:
@@ -372,24 +391,19 @@ class UI:
         if model_parts:
             self._conversation.append({"role": "model", "parts": model_parts})
 
+        # Queue function responses for next turn (no immediate follow-up call)
         if func_calls:
             fr = [{"functionResponse": {"name": fc["name"],
                    "response": {"result": "sent to robot"}}} for fc in func_calls]
             self._conversation.append({"role": "user", "parts": fr})
-            r2 = self._call_api(system_prompt)
-            if r2:
-                c2 = r2.get("candidates", [])
-                if c2:
-                    p2 = c2[0].get("content", {}).get("parts", [])
-                    mp2 = []
-                    for pp in p2:
-                        if "text" in pp:
-                            mp2.append({"text": pp["text"]})
-                            self._broadcast({"type": "chat", "sender": "ai", "text": pp["text"]})
-                    if mp2:
-                        self._conversation.append({"role": "model", "parts": mp2})
 
     def _call_api(self, system_prompt):
+        # Rate limit: enforce minimum interval between calls
+        now = time.time()
+        wait = self.MIN_API_INTERVAL - (now - self._last_api_call)
+        if wait > 0:
+            time.sleep(wait)
+
         tools_def = [{"function_declarations": [
             {"name": "twist_for",
              "description": "Move robot: forward_mps (m/s, negative=backward), angular_rads (rad/s, positive=left), duration_secs, ramp_in_secs, ramp_out_secs. Only when user asks.",
@@ -415,9 +429,26 @@ class UI:
         url = GEMINI_URL.format(model=self._gemini_model, key=self._gemini_key)
         req = Request(url, data=json.dumps(body).encode('utf-8'),
                       headers={"Content-Type": "application/json"})
-        try:
-            resp = urlopen(req, timeout=30)
-            return json.loads(resp.read().decode('utf-8'))
-        except Exception as e:
-            print("ui: Gemini API error: %s" % e)
-            return None
+
+        for attempt in range(3):
+            self._last_api_call = time.time()
+            try:
+                resp = urlopen(req, timeout=30)
+                return json.loads(resp.read().decode('utf-8'))
+            except HTTPError as e:
+                body_text = ""
+                try:
+                    body_text = e.read().decode('utf-8', errors='replace')
+                except Exception:
+                    pass
+                print("ui: Gemini HTTP %d: %s" % (e.code, body_text[:500]))
+                if e.code == 429 and attempt < 2:
+                    backoff = (attempt + 1) * 10
+                    print("ui: rate limited, retrying in %ds..." % backoff)
+                    time.sleep(backoff)
+                    continue
+                return None
+            except Exception as e:
+                print("ui: Gemini API error: %s" % e)
+                return None
+        return None
