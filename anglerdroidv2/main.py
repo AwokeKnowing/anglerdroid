@@ -78,6 +78,7 @@ def main():
             if show_ok and atlas is not None:
                 try:
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
+                    display = cv2.resize(display, (display.shape[1] * 2, display.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
                     cv2.imshow("vision atlas", display)
                     cv2.waitKey(1)
                 except cv2.error:
