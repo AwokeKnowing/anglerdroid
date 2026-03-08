@@ -287,23 +287,33 @@ class UI:
 
     def _gemini_loop(self):
         prompt = self._load_prompt()
+        speech_buf = []
+        buf_start = 0.0
+        BATCH_DELAY = 2.0
+
         while self._running and self._gemini_active:
             try:
-                user_text = None
-                try:
-                    user_text = self._speech_q.get_nowait()
-                except queue.Empty:
-                    pass
+                # Drain speech queue into buffer
+                while True:
+                    try:
+                        speech_buf.append(self._speech_q.get_nowait())
+                        if buf_start == 0.0:
+                            buf_start = time.time()
+                    except queue.Empty:
+                        break
 
                 now = time.time()
-                should_send = (user_text is not None) or (now - self._last_gemini_send >= 5.0)
 
-                if should_send and self._latest_atlas is not None:
-                    self._send_to_gemini(prompt, user_text)
-                    self._last_gemini_send = now
-                    if user_text:
+                # Send batched speech after BATCH_DELAY (no ambient sends)
+                if speech_buf and (now - buf_start >= BATCH_DELAY):
+                    combined = " ".join(speech_buf)
+                    speech_buf = []
+                    buf_start = 0.0
+                    if self._latest_atlas is not None:
+                        self._send_to_gemini(prompt, combined)
                         self._last_activity = now
 
+                # 20s silence → reset conversation context
                 if now - self._last_activity > 20.0:
                     self._conversation = []
                     self._last_activity = now

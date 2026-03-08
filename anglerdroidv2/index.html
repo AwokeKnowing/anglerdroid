@@ -68,6 +68,10 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-secondary" id="mic-btn" onclick="toggleMic()">🎤 Mic Off</button>
         <button class="btn-secondary" id="ai-btn" onclick="toggleAI()">🤖 Launch AI</button>
       </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input type="text" id="chat-input" placeholder="Type a message..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #444;background:#222;color:#eee;font-size:.85rem" onkeydown="if(event.key==='Enter')sendChat()">
+        <button class="btn-primary" onclick="sendChat()">Send</button>
+      </div>
     </div>
     <div id="chat"></div>
   </div>
@@ -131,6 +135,14 @@ function sendTwist() {
 
 function sendStop() {
   if (ws) ws.send(JSON.stringify({type: 'stop'}));
+}
+
+function sendChat() {
+  const el = document.getElementById('chat-input');
+  const text = el.value.trim();
+  if (!text || role !== 'control' || !ws) return;
+  ws.send(JSON.stringify({type: 'speech', text: text}));
+  el.value = '';
 }
 
 function toggleAI() {
