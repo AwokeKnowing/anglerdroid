@@ -230,6 +230,7 @@ class Vision:
                         f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
                     if f.shape[1] != FRAME_W or f.shape[0] != FRAME_H:
                         f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
+                    f = f[::-1, :]
                     f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
                     rgb1 = f
 
