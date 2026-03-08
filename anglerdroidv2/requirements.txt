@@ -5,3 +5,4 @@ open3d
 rerun-sdk
 python-can
 inputs
+websockets

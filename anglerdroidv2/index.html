@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AnglerDroid v2</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:system-ui,sans-serif;display:flex;flex-direction:column;height:100vh}
+header{display:flex;justify-content:space-between;align-items:center;padding:8px 16px;background:#1a1a1a;border-bottom:1px solid #333}
+header h1{font-size:1.1rem;font-weight:600}
+#status{font-size:.75rem;color:#888}
+.main{display:flex;flex:1;overflow:hidden}
+.left{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px;gap:12px}
+.right{width:340px;display:flex;flex-direction:column;padding:12px;gap:10px;border-left:1px solid #333;overflow-y:auto}
+#eyes{width:280px;height:140px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:40px;cursor:pointer;position:relative}
+.eye{width:60px;height:72px;background:#fff;border-radius:50%;position:relative;overflow:hidden}
+.pupil{width:24px;height:28px;background:#111;border-radius:50%;position:absolute;top:22px;left:18px;transition:all .15s}
+.eye.blink{animation:blink .2s}
+@keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.05)}}
+#eyes.fullscreen{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999;border-radius:0}
+#eyes.fullscreen .eye{width:120px;height:144px}
+#eyes.fullscreen .pupil{width:48px;height:56px;top:44px;left:36px}
+#atlas{max-width:100%;border-radius:8px;background:#222}
+label{font-size:.8rem;color:#aaa}
+input[type=range]{width:100%}
+.val{font-size:.8rem;color:#6cf;float:right}
+button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:600}
+.btn-primary{background:#2a6;color:#fff}
+.btn-danger{background:#c44;color:#fff}
+.btn-secondary{background:#444;color:#eee}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+#chat{flex:1;overflow-y:auto;background:#1a1a1a;border-radius:8px;padding:8px;font-size:.8rem;min-height:120px}
+.chat-msg{margin:4px 0;padding:4px 8px;border-radius:4px}
+.chat-user{background:#234;color:#8cf}
+.chat-ai{background:#232;color:#8f8}
+.chat-sys{background:#332;color:#cc8;font-style:italic}
+@media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
+</style>
+</head>
+<body>
+<header>
+  <h1>AnglerDroid v2</h1>
+  <div id="auth-area"></div>
+  <div id="status">connecting...</div>
+</header>
+<div class="main">
+  <div class="left">
+    <div id="eyes" onclick="toggleFullscreen()">
+      <div class="eye" id="eyeL"><div class="pupil" id="pupilL"></div></div>
+      <div class="eye" id="eyeR"><div class="pupil" id="pupilR"></div></div>
+    </div>
+    <img id="atlas" alt="robot vision">
+  </div>
+  <div class="right">
+    <div id="controls" style="display:none">
+      <label>Forward m/s <span class="val" id="fwd-val">0.20</span></label>
+      <input type="range" id="fwd" min="-0.5" max="0.5" step="0.05" value="0.2" oninput="document.getElementById('fwd-val').textContent=this.value">
+      <label>Angular rad/s <span class="val" id="ang-val">0.00</span></label>
+      <input type="range" id="ang" min="-1.0" max="1.0" step="0.1" value="0" oninput="document.getElementById('ang-val').textContent=this.value">
+      <label>Duration s <span class="val" id="dur-val">2.0</span></label>
+      <input type="range" id="dur" min="0.5" max="10" step="0.5" value="2" oninput="document.getElementById('dur-val').textContent=this.value">
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn-primary" onclick="sendTwist()">Send twist_for</button>
+        <button class="btn-danger" onclick="sendStop()">STOP</button>
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn-secondary" id="mic-btn" onclick="toggleMic()">🎤 Mic Off</button>
+        <button class="btn-secondary" id="ai-btn" onclick="toggleAI()">🤖 Launch AI</button>
+      </div>
+    </div>
+    <div id="chat"></div>
+  </div>
+</div>
+
+<script>
+const WS_PORT = '__WS_PORT__';
+const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
+let ws = null, role = 'observer', aiActive = false, micOn = false, recognition = null;
+
+function connect() {
+  const host = location.hostname || 'localhost';
+  ws = new WebSocket('ws://' + host + ':' + WS_PORT);
+  ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
+  ws.onclose = () => {
+    document.getElementById('status').textContent = 'disconnected';
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    if (d.type === 'auth_result') {
+      role = d.role;
+      document.getElementById('status').textContent = role + (d.email ? ' (' + d.email + ')' : '');
+      document.getElementById('controls').style.display = role === 'control' ? 'block' : 'none';
+      if (d.need_auth && role === 'observer') initGoogleSignIn();
+    }
+    else if (d.type === 'chat') addChat(d.sender, d.text);
+    else if (d.type === 'atlas') document.getElementById('atlas').src = 'data:image/jpeg;base64,' + d.image;
+    else if (d.type === 'ai_status') {
+      aiActive = d.active;
+      document.getElementById('ai-btn').textContent = aiActive ? '⏹ Stop AI' : '🤖 Launch AI';
+      if (d.error) addChat('sys', d.error);
+      if (d.info) addChat('sys', d.info);
+    }
+  };
+}
+
+function addChat(sender, text) {
+  const el = document.getElementById('chat');
+  const cls = sender === 'user' ? 'chat-user' : sender === 'ai' ? 'chat-ai' : 'chat-sys';
+  el.innerHTML += '<div class="chat-msg ' + cls + '"><b>' + sender + ':</b> ' + text + '</div>';
+  el.scrollTop = el.scrollHeight;
+  if (sender === 'ai') speak(text);
+}
+
+function speak(text) {
+  if (!text || text.startsWith('[')) return;
+  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } catch(e) {}
+}
+
+function sendTwist() {
+  if (role !== 'control' || !ws) return;
+  ws.send(JSON.stringify({
+    type: 'twist_for',
+    forward_mps: parseFloat(document.getElementById('fwd').value),
+    angular_rads: parseFloat(document.getElementById('ang').value),
+    duration_secs: parseFloat(document.getElementById('dur').value),
+    ramp_in_secs: 1.0, ramp_out_secs: 1.0,
+  }));
+}
+
+function sendStop() {
+  if (ws) ws.send(JSON.stringify({type: 'stop'}));
+}
+
+function toggleAI() {
+  if (ws) ws.send(JSON.stringify({type: aiActive ? 'stop_ai' : 'launch_ai'}));
+}
+
+function toggleMic() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    addChat('sys', 'Speech recognition not supported in this browser');
+    return;
+  }
+  micOn = !micOn;
+  document.getElementById('mic-btn').textContent = micOn ? '🎤 Mic On' : '🎤 Mic Off';
+  if (micOn) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = false;
+    recognition.onresult = (ev) => {
+      const text = ev.results[ev.results.length - 1][0].transcript.trim();
+      if (text && ws) ws.send(JSON.stringify({type: 'speech', text: text}));
+    };
+    recognition.onerror = (ev) => { if (ev.error !== 'no-speech') addChat('sys', 'mic: ' + ev.error); };
+    recognition.onend = () => { if (micOn) recognition.start(); };
+    recognition.start();
+  } else if (recognition) {
+    recognition.onend = null;
+    recognition.stop();
+    recognition = null;
+  }
+}
+
+function toggleFullscreen() {
+  document.getElementById('eyes').classList.toggle('fullscreen');
+}
+
+// Eyes blink every 3-6s
+setInterval(() => {
+  document.getElementById('eyeL').classList.add('blink');
+  document.getElementById('eyeR').classList.add('blink');
+  setTimeout(() => {
+    document.getElementById('eyeL').classList.remove('blink');
+    document.getElementById('eyeR').classList.remove('blink');
+  }, 200);
+}, 3000 + Math.random() * 3000);
+
+// Subtle pupil movement
+setInterval(() => {
+  const dx = (Math.random() - 0.5) * 12, dy = (Math.random() - 0.5) * 8;
+  document.getElementById('pupilL').style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+  document.getElementById('pupilR').style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
+}, 2000);
+
+// Google Sign-In (only if client ID is configured)
+function initGoogleSignIn() {
+  if (!GOOGLE_CLIENT_ID) return;
+  const s = document.createElement('script');
+  s.src = 'https://accounts.google.com/gsi/client';
+  s.onload = () => {
+    google.accounts.id.initialize({ client_id: GOOGLE_CLIENT_ID, callback: onGoogleAuth });
+    google.accounts.id.renderButton(document.getElementById('auth-area'), {theme:'outline',size:'small'});
+  };
+  document.head.appendChild(s);
+}
+function onGoogleAuth(resp) {
+  if (ws) ws.send(JSON.stringify({type: 'auth', credential: resp.credential}));
+}
+
+connect();
+</script>
+</body>
+</html>

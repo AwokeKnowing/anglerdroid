@@ -28,6 +28,7 @@ class WheelBase:
     WATCHDOG_FEED_INTERVAL = 1.0
     INCLINE_TORQUE_THRESHOLD = 1.0  # Nm — above this while holding zero = incline
     VEL_SEND_DELTA = 0.02
+    TWIST_FOR_INTERVAL = 0.1  # 10 Hz
 
     def __init__(self,
                  can_interface: str = "can0",
@@ -58,11 +59,14 @@ class WheelBase:
         self._last_sent_right = None
         self._last_send_time = 0.0
         self._zero_vel_since = None
+        self._twist_for_lock = threading.Lock()
+        self._twist_for_params = None  # (forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs, start_time)
 
         self._bring_up_can()
         self._init_odrive()
         self._init_gamepad()
         self._start_idle_watcher()
+        self._start_twist_for_thread()
 
         print(f"✅ WheelBase ready (wheelbase={wheelbase_cm}cm, max_speed=50%)")
 
@@ -224,12 +228,70 @@ class WheelBase:
             print(f"Warning during idle transition: {e}")
 
     def twist(self, forward_mps: float, angular_rads: float):
-        """Planner / auto mode (currently not used in demo)"""
+        """Differential drive: forward m/s, angular rad/s (instant)."""
         v_l = forward_mps - (angular_rads * self.wheelbase_m / 2)
         v_r = forward_mps + (angular_rads * self.wheelbase_m / 2)
         left_tps = v_l / (2 * 3.1415926535 * self.wheel_radius_m)
         right_tps = v_r / (2 * 3.1415926535 * self.wheel_radius_m)
         self.set_wheel_vels(left_tps, right_tps)
+
+    def _start_twist_for_thread(self):
+        self._twist_for_thread = threading.Thread(target=self._twist_for_loop, daemon=True)
+        self._twist_for_thread.start()
+
+    def _twist_for_loop(self):
+        """10 Hz loop: run twist_for profile; new call overrides previous."""
+        while self.running:
+            t0 = time.monotonic()
+            with self._twist_for_lock:
+                params = self._twist_for_params
+            if params is None:
+                time.sleep(self.TWIST_FOR_INTERVAL)
+                continue
+            forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs, start_time = params
+            elapsed = time.monotonic() - start_time
+            if elapsed >= duration_secs:
+                with self._twist_for_lock:
+                    self._twist_for_params = None
+                self.stop()
+                time.sleep(self.TWIST_FOR_INTERVAL)
+                continue
+            if elapsed < ramp_in_secs and ramp_in_secs > 0:
+                frac = elapsed / ramp_in_secs
+                fwd = forward_mps * frac
+            elif elapsed >= duration_secs - ramp_out_secs and ramp_out_secs > 0:
+                ramp_out_elapsed = elapsed - (duration_secs - ramp_out_secs)
+                frac = 1.0 - ramp_out_elapsed / ramp_out_secs
+                fwd = forward_mps * max(0.0, frac)
+            else:
+                fwd = forward_mps
+            self.twist(fwd, angular_rads)
+            time.sleep(max(0, self.TWIST_FOR_INTERVAL - (time.monotonic() - t0)))
+
+    def twist_for(self, forward_mps: float, angular_rads: float,
+                  duration_secs: float = 2.0, ramp_in_secs: float = 1.0, ramp_out_secs: float = 1.0):
+        """
+        Timed differential drive: forward m/s and angular rad/s for duration_secs.
+        Ramp in: forward velocity 0 → target over ramp_in_secs (angular at target from start).
+        Ramp out: forward velocity target → 0 over ramp_out_secs (angular constant until end).
+        Runs on 10 Hz timer. New call overrides any in-progress twist_for.
+        """
+        with self._twist_for_lock:
+            self._twist_for_params = (
+                float(forward_mps), float(angular_rads),
+                float(duration_secs), float(ramp_in_secs), float(ramp_out_secs),
+                time.monotonic(),
+            )
+
+    def is_twist_for_active(self) -> bool:
+        """True while a twist_for profile is running."""
+        with self._twist_for_lock:
+            return self._twist_for_params is not None
+
+    def cancel_twist_for(self):
+        """Cancel any in-progress twist_for (e.g. when gamepad takes over)."""
+        with self._twist_for_lock:
+            self._twist_for_params = None
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):
         """Direct wheel control (turns/s). Deduplicates sends and manages idle."""

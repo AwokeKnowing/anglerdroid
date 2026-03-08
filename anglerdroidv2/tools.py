@@ -63,18 +63,30 @@ def get_atlas():
 
 # --- Wheelbase ---
 
+def twist_for(forward_mps: float, angular_rads: float,
+              duration_secs: float = 2.0, ramp_in_secs: float = 1.0, ramp_out_secs: float = 1.0):
+    """
+    Main method to control the wheelbase. Run differential drive for a set time with ramps.
+    forward_mps: forward speed (m/s), angular_rads: turn rate (rad/s).
+    duration_secs: how long to run; ramp_in_secs/ramp_out_secs: ramp only forward velocity
+    (angular constant during ramps). New call overrides any in-progress twist_for. 10 Hz internal timer.
+    """
+    if _wheelbase is not None:
+        _wheelbase.twist_for(forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs)
+
 def set_wheel_vels(left_tps: float, right_tps: float):
-    """Set wheel velocities (turns per second)."""
+    """Reserved for human gamepad control. Direct wheel velocities (turns/s). AI should use twist_for()."""
     if _wheelbase is not None:
         _wheelbase.set_wheel_vels(left_tps, right_tps)
 
 def stop():
-    """Stop wheels."""
+    """Immediately stop wheels and cancel any active twist_for."""
     if _wheelbase is not None:
+        _wheelbase.cancel_twist_for()
         _wheelbase.stop()
 
 def twist(forward_mps: float, angular_rads: float):
-    """Differential drive: forward m/s, angular rad/s."""
+    """Instant differential drive (forward m/s, angular rad/s). Prefer twist_for() for timed moves."""
     if _wheelbase is not None:
         _wheelbase.twist(forward_mps, angular_rads)
 

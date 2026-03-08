@@ -2,6 +2,7 @@
 main.py - 30 fps loop: frames + tool calls; optional rerun. Entrypoint for anglerdroid v2.
 """
 
+import os
 import time
 import argparse
 import numpy as np
@@ -30,7 +31,15 @@ def main():
     parser.add_argument("--rs2", default="", help="RealSense 2 serial")
     parser.add_argument("--rgb1", default="/dev/video0", help="RGB camera device (e.g. /dev/video0)")
     parser.add_argument("--no-show", action="store_true", help="Do not show vision atlas window")
+    parser.add_argument("--gemini-key", default="", help="Gemini API key (or set GEMINI_KEY env)")
+    parser.add_argument("--gemini-model", default="", help="Gemini model name (default: gemini-2.0-flash)")
+    parser.add_argument("--auth-email", default="", help="Email allowed full control (default: everyone)")
+    parser.add_argument("--google-client-id", default="", help="Google OAuth client ID for sign-in")
+    parser.add_argument("--http-port", type=int, default=8080, help="HTTP server port")
+    parser.add_argument("--ws-port", type=int, default=8081, help="WebSocket server port")
     args = parser.parse_args()
+
+    gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
 
     # Rerun
     if HAS_RERUN and not args.no_rerun:
@@ -55,9 +64,16 @@ def main():
     )
     vis.start()
 
-    # UI (stub)
+    # UI (web server + Gemini)
     from ui import UI
-    u = UI()
+    u = UI(
+        gemini_key=gemini_key,
+        gemini_model=args.gemini_model,
+        auth_email=args.auth_email,
+        google_client_id=args.google_client_id,
+        http_port=args.http_port,
+        ws_port=args.ws_port,
+    )
     u.start()
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
@@ -84,14 +100,19 @@ def main():
                 except cv2.error:
                     show_ok = False
                     print("vision: display not available (headless OpenCV?), continuing without window")
+            # Send atlas to UI at ~1 fps for browser + Gemini
+            if frame_id % TARGET_FPS == 0 and atlas is not None:
+                u.send_atlas(atlas)
+
             if HAS_RERUN and not args.no_rerun:
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
-            # Wheelbase: feed watchdog every frame and drive from gamepad (no focus needed)
-            left_tps, right_tps = 0.0, 0.0
+            # Gamepad: human always has precedence; non-zero stick cancels autonomous motion
             wb = tools.get_wheelbase()
+            gamepad_active = False
             if wb is not None:
+                wb._check_gamepad_health()
                 if wb.gamepad is not None:
                     vels = wb.gamepad.diffDrive()
                     left_norm = vels.get("left", 0.0)
@@ -100,31 +121,33 @@ def main():
                         left_norm = 0.0
                     if abs(right_norm) < 0.08:
                         right_norm = 0.0
-                    left_tps = left_norm * 0.5
-                    right_tps = right_norm * 0.5
-                wb._check_gamepad_health()
+                    if abs(left_norm) > 0 or abs(right_norm) > 0:
+                        gamepad_active = True
+                        wb.cancel_twist_for()
+                        tools.set_wheel_vels(left_norm * 0.5, right_norm * 0.5)
 
-            # Apply tool calls (can override gamepad for this frame)
-            pending = tools.get_pending_tool_calls()
-            for call in pending:
-                name = call.get("name")
-                cargs = call.get("args", {})
-                if name == "set_wheel_vels":
-                    left_tps = cargs.get("left_tps", 0)
-                    right_tps = cargs.get("right_tps", 0)
-                elif name == "stop":
-                    left_tps, right_tps = 0.0, 0.0
-                elif name == "twist":
-                    tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
-                    left_tps = right_tps = None  # twist already sent
+            # Tool calls from agent (only act if gamepad is idle → wheelbase goes to freewheel)
+            if not gamepad_active:
+                pending = tools.get_pending_tool_calls()
+                for call in pending:
+                    name = call.get("name")
+                    cargs = call.get("args", {})
+                    if name == "twist_for":
+                        tools.twist_for(
+                            cargs.get("forward_mps", 0), cargs.get("angular_rads", 0),
+                            duration_secs=cargs.get("duration_secs", 2.0),
+                            ramp_in_secs=cargs.get("ramp_in_secs", 1.0),
+                            ramp_out_secs=cargs.get("ramp_out_secs", 1.0),
+                        )
+                    elif name == "stop":
+                        wb.cancel_twist_for()
+                        tools.stop()
+                    elif name == "twist":
+                        tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                    elif name == "set_wheel_vels":
+                        tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
 
-            if wb is not None and left_tps is not None:
-                tools.set_wheel_vels(left_tps, right_tps)
-
-            # User text (e.g. for next LLM turn)
-            user_text = tools.get_user_text()
-            if user_text:
-                pass  # Feed to agent when integrated
+            # User text (browser speech → Gemini is handled directly in ui.py)
 
             # Throttle to 30 fps and report timing
             process_sec = time.monotonic() - loop_start
