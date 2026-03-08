@@ -18,9 +18,9 @@ header h1{font-size:1.1rem;font-weight:600}
 .pupil{width:24px;height:28px;background:#111;border-radius:50%;position:absolute;top:22px;left:18px;transition:all .15s}
 .eye.blink{animation:blink .2s}
 @keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.05)}}
-#eyes.fullscreen{position:fixed;top:0;left:0;width:100vw;height:100vh;z-index:999;border-radius:0}
-#eyes.fullscreen .eye{width:120px;height:144px}
-#eyes.fullscreen .pupil{width:48px;height:56px;top:44px;left:36px}
+#eyes:fullscreen{width:100vw;height:100vh;border-radius:0;gap:8vmin}
+#eyes:fullscreen .eye{width:20vmin;height:24vmin}
+#eyes:fullscreen .pupil{width:8vmin;height:9.5vmin;top:37%;left:30%;transition:all .2s}
 #atlas{max-width:100%;border-radius:8px;background:#222}
 label{font-size:.8rem;color:#aaa}
 input[type=range]{width:100%}
@@ -176,7 +176,12 @@ function toggleMic() {
 }
 
 function toggleFullscreen() {
-  document.getElementById('eyes').classList.toggle('fullscreen');
+  const el = document.getElementById('eyes');
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else {
+    el.requestFullscreen().catch(function() {});
+  }
 }
 
 // Eyes blink every 3-6s
