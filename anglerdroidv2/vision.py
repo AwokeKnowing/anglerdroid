@@ -22,6 +22,20 @@ ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
 # rgb1 USB webcam: capture at 640x480 then scale down to 320x240 (no rotation; camera physically oriented)
 RGB1_CAPTURE_W, RGB1_CAPTURE_H = 640, 480
+# Center crosshair for alignment: 2 px at center (159-160, 119-120), white at 30% opacity
+CROSSHAIR_CX, CROSSHAIR_CY = 159, 119  # 2 px wide: 159-160, 119-120
+CROSSHAIR_OPACITY = 0.3
+
+
+def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
+    """Draw white center crosshair on 320x240 region; blend at opacity (no copy of region)."""
+    r, c = CROSSHAIR_CY, CROSSHAIR_CX
+    blend = 1.0 - opacity
+    white = 255.0 * opacity
+    region[r, :] = (region[r, :].astype(np.float32) * blend + white).astype(np.uint8)
+    region[r + 1, :] = (region[r + 1, :].astype(np.float32) * blend + white).astype(np.uint8)
+    region[:, c] = (region[:, c].astype(np.float32) * blend + white).astype(np.uint8)
+    region[:, c + 1] = (region[:, c + 1].astype(np.float32) * blend + white).astype(np.uint8)
 
 
 def _open_rgb_capture(device_id):
@@ -272,6 +286,8 @@ class Vision:
                 self.atlas[0:FRAME_H, FRAME_W:ATLAS_W] = rgbd1
                 self.atlas[FRAME_H:ATLAS_H, 0:FRAME_W] = rgbd2
                 self.atlas[FRAME_H:ATLAS_H, FRAME_W:ATLAS_W] = topdown
+                for yo, xo in [(0, 0), (0, FRAME_W), (FRAME_H, 0), (FRAME_H, FRAME_W)]:
+                    _draw_center_crosshair(self.atlas[yo : yo + FRAME_H, xo : xo + FRAME_W])
                 self.timestamp = time.time()
 
             elapsed = time.monotonic() - t0
