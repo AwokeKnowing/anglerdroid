@@ -118,14 +118,12 @@ class WheelBase:
             self.right.set_velocity(0.0)
             time.sleep(0.02)
 
-        self.left.enable_watchdog(2.0)
-        self.right.enable_watchdog(2.0)
-        self._is_closed_loop = True
-        self._is_idle = False
-        self._last_sent_left = 0.0
-        self._last_sent_right = 0.0
-        self._last_send_time = time.time()
-        self._zero_vel_since = time.time()
+        # Motors verified — return to idle until first real command.
+        # set_wheel_vels() handles re-engage + watchdog on first non-zero velocity.
+        for axis in (self.left, self.right):
+            axis.set_velocity(0.0)
+            axis.disable_watchdog()
+            axis.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
 
     def _init_gamepad(self):
         if haveGamepad():

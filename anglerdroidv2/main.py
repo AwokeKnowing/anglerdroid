@@ -108,11 +108,14 @@ def main():
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
-            # Gamepad: human always has precedence; non-zero stick cancels autonomous motion
+            # Gamepad + watchdog: MUST call set_wheel_vels every iteration to feed
+            # the ODrive watchdog (2.0s timeout). Human gamepad has precedence over AI.
             wb = tools.get_wheelbase()
             gamepad_active = False
             if wb is not None:
                 wb._check_gamepad_health()
+                left_tps = 0.0
+                right_tps = 0.0
                 if wb.gamepad is not None:
                     vels = wb.gamepad.diffDrive()
                     left_norm = vels.get("left", 0.0)
@@ -121,10 +124,17 @@ def main():
                         left_norm = 0.0
                     if abs(right_norm) < 0.08:
                         right_norm = 0.0
-                    if abs(left_norm) > 0 or abs(right_norm) > 0:
-                        gamepad_active = True
-                        wb.cancel_twist_for()
-                        tools.set_wheel_vels(left_norm * 0.5, right_norm * 0.5)
+                    left_tps = left_norm * 0.5
+                    right_tps = right_norm * 0.5
+                gamepad_active = abs(left_tps) > 0 or abs(right_tps) > 0
+
+                if gamepad_active:
+                    wb.cancel_twist_for()
+                    tools.set_wheel_vels(left_tps, right_tps)
+                elif not wb.is_twist_for_active():
+                    # Gamepad centered, no twist_for → send 0,0 to feed watchdog
+                    # (set_wheel_vels deduplicates; only sends CAN every 1s)
+                    tools.set_wheel_vels(0.0, 0.0)
 
             # Tool calls from agent (only act if gamepad is idle → wheelbase goes to freewheel)
             if not gamepad_active:
