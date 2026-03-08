@@ -25,7 +25,7 @@ except ImportError:
     _HAS_WS = False
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-GEMINI_MODEL_DEFAULT = "gemini-2.0-flash"
+GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 
 
 def _jwt_email(token):
