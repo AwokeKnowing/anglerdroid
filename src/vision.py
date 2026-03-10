@@ -27,7 +27,7 @@ NEAR_CLIP = np.float32(0.03)
 # Intentional uint8 wrapping gives a non-linear distance mapping that
 # Otsu can cleanly binarise into obstacles vs free space.
 DEPTH_OFFSET = np.float32(0.25)
-DEPTH_SCALE = np.float32(300.0)
+DEPTH_SCALE = np.float32(200.0)
 DEPTH_BIAS = np.uint8(48)
 
 # RS1 (forward camera) extrinsic offset.
