@@ -57,8 +57,7 @@ def get_atlas():
     """Return (atlas 640x480, timestamp)."""
     if _vision is None:
         return np.zeros((480, 640, 3), dtype=np.uint8), 0.0
-    _, atlas, ts = _vision.read()
-    return atlas, ts
+    return _vision.read_atlas()
 
 
 # --- Wheelbase ---

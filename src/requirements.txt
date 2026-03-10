@@ -1,7 +1,6 @@
 numpy
 opencv-python
 pyrealsense2
-open3d
 rerun-sdk
 python-can
 inputs

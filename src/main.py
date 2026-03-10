@@ -21,6 +21,7 @@ except (ImportError, TypeError):
 TARGET_FPS = 30
 LOOP_DT = 1.0 / TARGET_FPS
 BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 fps
+ATLAS_W, ATLAS_H = 640, 480
 
 
 def main():
@@ -89,17 +90,17 @@ def main():
         while True:
             loop_start = time.monotonic()
 
-            # Get latest vision (safe read)
-            frames, atlas, ts = tools.get_frames()
+            # Get latest atlas only (no frame copies)
+            atlas, ts = tools.get_atlas()
             if show_ok and atlas is not None:
                 try:
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
-                    display = cv2.resize(display, (display.shape[1] * 2, display.shape[0] * 2), interpolation=cv2.INTER_NEAREST)
+                    display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
                     cv2.imshow("vision atlas", display)
                     cv2.waitKey(1)
                 except cv2.error:
                     show_ok = False
-                    print("vision: display not available (headless OpenCV?), continuing without window")
+                    print("vision: display not available, continuing without window")
             # Send atlas to UI at ~1 fps for browser + Gemini
             if frame_id % TARGET_FPS == 0 and atlas is not None:
                 u.send_atlas(atlas)
@@ -108,8 +109,7 @@ def main():
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
-            # Gamepad + watchdog: MUST call set_wheel_vels every iteration to feed
-            # the ODrive watchdog (2.0s timeout). Human gamepad has precedence over AI.
+            # Gamepad + watchdog
             wb = tools.get_wheelbase()
             gamepad_active = False
             if wb is not None:
@@ -132,11 +132,9 @@ def main():
                     wb.cancel_twist_for()
                     tools.set_wheel_vels(left_tps, right_tps)
                 elif not wb.is_twist_for_active():
-                    # Gamepad centered, no twist_for → send 0,0 to feed watchdog
-                    # (set_wheel_vels deduplicates; only sends CAN every 1s)
                     tools.set_wheel_vels(0.0, 0.0)
 
-            # Tool calls from agent (only act if gamepad is idle → wheelbase goes to freewheel)
+            # Tool calls from agent (only act if gamepad is idle)
             if not gamepad_active:
                 pending = tools.get_pending_tool_calls()
                 for call in pending:
@@ -157,9 +155,7 @@ def main():
                     elif name == "set_wheel_vels":
                         tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
 
-            # User text (browser speech → Gemini is handled directly in ui.py)
-
-            # Throttle to 30 fps and report timing
+            # Throttle to 30 fps
             process_sec = time.monotonic() - loop_start
             process_ms = process_sec * 1000.0
             sleep_time = LOOP_DT - process_sec

@@ -286,7 +286,7 @@ def pointcloud(out, verts, texcoords, color, painter=False):
     #out= cv2.applyColorMap(out, 9)
     cv2.imshow('depth', out)
     img = out.copy()  
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    #clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
     #cl = clahe.apply(img,dst=out)
     #cv2.imshow('Result', cl)
 
