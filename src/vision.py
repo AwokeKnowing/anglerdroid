@@ -20,7 +20,7 @@ CROSSHAIR_OPACITY = 0.3
 
 # --- Depth-to-topdown parameters (from reference/workingvisionobs3ms.py) ---
 # View transform: z-shift puts virtual camera 1m behind origin
-VIEW_Z_OFFSET = np.float32(1.80)
+VIEW_Z_OFFSET = np.float32(1.60)
 NEAR_CLIP = np.float32(0.03)
 
 # Depth-to-intensity formula: (255 - ((z + OFFSET) * SCALE).uint8) - BIAS
