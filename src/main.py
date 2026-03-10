@@ -84,8 +84,8 @@ def main():
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
         cv2.createTrackbar("height_clip_x100", "vision atlas", int(vision_mod.FW_HEIGHT_CLIP * 100), 300, lambda v: None)
-        cv2.createTrackbar("td_xoff", "vision atlas", 160, 320, lambda v: None)
-        cv2.createTrackbar("fw_xoff", "vision atlas", 160, 320, lambda v: None)
+        cv2.createTrackbar("td_xoff", "vision atlas", 160 + vision_mod.TD_X_OFFSET, 320, lambda v: None)
+        cv2.createTrackbar("fw_xoff", "vision atlas", 160 + vision_mod.FW_X_OFFSET, 320, lambda v: None)
         cv2.createTrackbar("fw_pxmm", "vision atlas", int(float(vision_mod.FW_PX_SIZE) * 1000), 30, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")

@@ -49,7 +49,7 @@ _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 RS2_EXTRINSIC_Y = 0.0
 
 # Alignment offsets (pixels, + = shift right). Adjusted via sliders in main.py.
-TD_X_OFFSET = 0
+TD_X_OFFSET = 85
 FW_X_OFFSET = 0
 
 
@@ -251,7 +251,7 @@ class Vision:
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                 td2 = depth_topdown_forward(self._rs2.verts,
                                             out_h=FRAME_W, out_w=FRAME_H,
-                                            y_offset=RS2_EXTRINSIC_Y, debug=False)
+                                            y_offset=RS2_EXTRINSIC_Y, debug=True)
             td2 = np.rot90(td2, k=-1)
 
             # Apply x-offsets for alignment tuning
