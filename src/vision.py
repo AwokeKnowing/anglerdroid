@@ -102,7 +102,7 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     vals[vals == 255] = 0
 
     out[i[m], j[m]] = vals
-    _, out = cv2.threshold(out, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    _, out = cv2.threshold(out, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return out
 
 
