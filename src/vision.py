@@ -268,11 +268,10 @@ class Vision:
             td2 = np.rot90(td2, k=-1)
 
             # Blit into RGB channels with x-offsets (direct slice, no intermediate copy)
-            # Overlap → white, td1-only → cyan, td2-only → magenta
+            # Overlap → yellow, td1-only → green, td2-only → red
             topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             _blit_x(topdown[:, :, 0], td2, int(FW_X_OFFSET))   # R = forward
             _blit_x(topdown[:, :, 1], td1, int(TD_X_OFFSET))   # G = topdown
-            topdown[:, :, 2] = np.maximum(topdown[:, :, 0], topdown[:, :, 1])  # B = both
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
