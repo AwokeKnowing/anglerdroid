@@ -89,21 +89,55 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     return out
 
 
-def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
+def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0, debug=True):
     """RS2 (forward camera) pointcloud → rotated bird's-eye obstacle map.
     Replicates reference/firstmergedvision-working2cam.py. Returns single-channel uint8."""
     out = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
+        if debug:
+            print("fw: no verts")
         return out
 
     v = verts.copy()
     if y_offset != 0.0:
         v[:, 1] += np.float32(y_offset)
 
+    # Debug: raw pointcloud before rotation (perspective view, same as RS1 style)
+    if debug:
+        dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
+        vr = v.copy()
+        vr[:, 2] += np.float32(1.0)
+        asp = np.float32(out_h) / np.float32(out_w)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            rp = vr[:, :2] / vr[:, 2:3] * np.float32([out_w * asp, out_h]) + np.float32([out_w * 0.5, out_h * 0.5])
+        rj, ri = rp.astype(np.uint32).T
+        rm = (ri < np.uint32(out_h)) & (rj < np.uint32(out_w))
+        dbg_raw[ri[rm], rj[rm]] = 255
+        cv2.imshow("fw_raw_persp", dbg_raw)
+
     v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
+
+    # Debug: after rotation, before height clip
+    if debug:
+        n_total = len(v)
+        n_pass = int(np.sum(v[:, 2] < FW_HEIGHT_CLIP))
+        print("fw: %d verts, %d pass clip (z<%.2f), z range [%.3f, %.3f]" % (
+            n_total, n_pass, float(FW_HEIGHT_CLIP),
+            float(v[:, 2].min()) if n_total > 0 else 0,
+            float(v[:, 2].max()) if n_total > 0 else 0))
+
+        dbg_noclip = np.zeros((out_h, out_w), dtype=np.uint8)
+        sc = np.float32(1.0 / FW_PX_SIZE)
+        pr = v[:, :2] * sc + np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * sc])
+        dj, di = pr.astype(np.uint32).T
+        dm = (di < np.uint32(out_h)) & (dj < np.uint32(out_w))
+        dbg_noclip[di[dm], dj[dm]] = 255
+        cv2.imshow("fw_rotated_noclip", dbg_noclip)
 
     v = v[v[:, 2] < FW_HEIGHT_CLIP]
     if len(v) == 0:
+        if debug:
+            print("fw: all clipped!")
         return out
 
     scale = np.float32(1.0 / FW_PX_SIZE)
@@ -112,8 +146,20 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     j, i = proj.astype(np.uint32).T
     m = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
+    if debug:
+        n_inbounds = int(np.sum(m))
+        print("fw: %d after clip, %d in bounds" % (len(v), n_inbounds))
+
     out[i[m], j[m]] = 255
+
+    if debug:
+        cv2.imshow("fw_before_morph", out.copy())
+
     cv2.morphologyEx(out, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=out)
+
+    if debug:
+        cv2.imshow("fw_final", out.copy())
+
     return out
 
 
