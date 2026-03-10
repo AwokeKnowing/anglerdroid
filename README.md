@@ -1,115 +1,62 @@
-# Kevin
+# AnglerDroid v2
 
+Minimal robot stack: 30 fps loop, tools (wheelbase + vision + ui), single-thread vision atlas.
 
-This is a demo of real time speech to text with OpenAI's Whisper model. It works by constantly recording audio in a thread and concatenating the raw bytes over multiple recordings.
+## Layout (flat)
 
-To install dependencies simply run
-```
-python3 -m venv venv
-source venv/bin/activate
-sudo apt install \
-  git libssl-dev libusb-1.0-0-dev libudev-dev pkg-config libgtk-3-dev libglfw3 libgl1-mesa-dev libglu1-mesa-dev \
-  python3-pyaudio portaudio19-dev ffmpeg flac python3.8-venv python3-pip mosquitto mosquitto-clients
+- `main.py` – entrypoint; 30 fps loop, reads frames + tool calls, optional rerun
+- `tools.py` – wraps wheelbase, vision, ui; high-level API for AI loop
+- `vision.py` – 2 RealSense + 1 RGB cam → 320×240 frames, 640×480 atlas (UL=rgb1, UR=rgbd1, LL=rgbd2, LR=top-down depth)
+- `ui.py` – stub for audio/webview; server thread; `get_user_text()` / `get_pending_tool_calls()`
+- `wheelbase.py` – final (do not change)
+
+## Run locally (no robot)
+
+```bash
+cd anglerdroidv2
 pip install -r requirements.txt
-```
-in an environment of your choosing.
-
-also, enable mosquitto mqtt broker on startup even in desktop mode:
-```
-sudo ln -s /lib/systemd/system/mosquitto.service /etc/systemd/system/graphical.target.wants/mosquitto.service
-
+python main.py --no-wheelbase --rs1 "" --rs2 ""
 ```
 
+With RealSense and cameras (set serials and device). **rgb1** = USB webcam (forward); use a device that is *not* a RealSense node. From `python3 debug_camera.py`: video0 = 600×800 → USB webcam; video4/6/10/12 = 480×640 → RealSense. So use `--rgb1 /dev/video0` (default) for the forward cam.
 
-
-for Jetson had to deal with versions
-```
-pip install numba==0.54
-
-
-sudo apt-get -y install autoconf bc build-essential g++-8 gcc-8 clang-8 lld-8 gettext-base gfortran-8 iputils-ping libbz2-dev libc++-dev libcgal-dev libffi-dev libfreetype6-dev libhdf5-dev libjpeg-dev liblzma-dev libncurses5-dev libncursesw5-dev libpng-dev libreadline-dev libssl-dev libsqlite3-dev libxml2-dev libxslt-dev locales moreutils openssl python-openssl rsync scons libopenblas-dev 
-
-export TORCH_INSTALL=https://developer.download.nvidia.cn/compute/redist/jp/v511/pytorch/torch-2.0.0+nv23.05-cp38-cp38-linux_aarch64.whl
-
-python3 -m pip install --upgrade pip; python3 -m pip install aiohttp numpy=='1.19.4' scipy=='1.5.3' export "LD_LIBRARY_PATH=/usr/lib/llvm-8/lib:$LD_LIBRARY_PATH"; python3 -m pip install --upgrade protobuf; python3 -m pip install --no-cache $TORCH_INSTALL
-
-
-```
-https://docs.nvidia.com/deeplearning/frameworks/install-pytorch-jetson-platform/index.html
-
-
-also cupy, cuda-python, pyopengl 
-was hard but got help looking at images from dusty-nv images. TODO: make one anglerdroid docker:
-
-`https://github.com/dusty-nv/jetson-containers/blob/master/packages/cuda/cuda-python/Dockerfile.builder`
-
-
-```
-pip install cupy-cuda11x
-pip install pyopengl
-pip install pyrr
-pip install glfw
-git clone --branch 11.8.x --depth=1 https://github.com/NVIDIA/cuda-python
-cd cuda-python/
-pip install numba
-sudo apt-get update
-pip3 install numpy
-pip install --no-cache-dir --verbose -r requirements.txt
-cd ..
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/arm64/cuda-ubuntu2004.pin
-sudo mv cuda-ubuntu2004.pin /etc/apt/preferences.d/cuda-repository-pin-600
-wget https://developer.download.nvidia.com/compute/cuda/11.8.0/local_installers/cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb
-sudo dpkg -i cuda-tegra-repo-ubuntu2004-11-8-local_11.8.0-1_arm64.deb
-sudo cp /var/cuda-tegra-repo-ubuntu2004-11-8-local/cuda-*-keyring.gpg /usr/share/keyrings/
-sudo apt-get update
-sudo apt-get -y install cuda
-cd cuda-python/
-python setup.py bdist_wheel --verbose
-cp dist/cuda*.whl /opt
-sudo cp dist/cuda*.whl /opt
-cd ..
-pip install --no-cache-dir --verbose /opt/cuda*.whl
-pip show cuda-python && python3 -c 'import cuda; print(cuda.__version__)'
+```bash
+python main.py --no-wheelbase --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video0
 ```
 
+With wheelbase (e.g. on robot):
 
-
-
-
-
-For more information on Whisper please see https://github.com/openai/whisper
-
-The code in this repository is public domain.
-
-
-
-
-
-
-
-
-
-```
-        sense     (sensor input)
-      perceive    (deep learning encode)
-    emote         (calculate internal low level motivations like battery, connect, help )
-  concern         (attention over world model with possible futures)
-trust             (core policy. score futures. select goal)
-  act             (evaluate actions to acheive goal)
-    try           (select behavior)
-      orchestrate (track progress and emit actions)
-        react     (actuators output)
+```bash
+python main.py --rs1 815412070676 --rs2 944622074292 --rgb1 /dev/video0
 ```
 
+## Docker on Orin NX
 
-def invert()
-spectator
+Build and run on the Orin (ARM64):
 
+```bash
+cd anglerdroidv2
+docker build -t anglerdroidv2 .
+docker run --runtime nvidia --privileged -v /dev:/dev --network host -it anglerdroidv2
+```
 
-tick
-lambda: #Root
-  lambda: #Chooser
-    SensePainCondition() and HandlePainAction() or\
-    IsMovingCondition()  and  or\
-    FindMove()
+- `--privileged` and `-v /dev:/dev`: CAN, cameras, USB
+- `--network host`: if you need LiveKit or other network services
+- Serial numbers and `--rgb1` can be passed: `docker run ... anglerdroidv2 python3 main.py --rs1 XXX --rs2 YYY --rgb1 /dev/video0`
 
+If `pyrealsense2` is not available in pip on Jetson, install the RealSense SDK from JetPack/apt and use the system Python or a venv that can see it; the Dockerfile tries `apt-get install librealsense2` and `pip install pyrealsense2` as fallback.
+
+## Vision API
+
+- `vision.frames`: list of 3 arrays (rgb1, rgbd1, rgbd2), each 320×240 RGB
+- `vision.atlas`: 640×480 RGB (4 quads)
+- `vision.timestamp`: last capture time
+- Use `vision.read()` for a thread-safe copy: `(frames, atlas, timestamp)`
+
+## Tool calls
+
+The main loop consumes `tools.get_pending_tool_calls()`. Each item can be e.g. `{"name": "set_wheel_vels", "args": {"left_tps": 0.0, "right_tps": 0.0}}` or `{"name": "stop"}` / `{"name": "twist", "args": {"forward_mps": 0.0, "angular_rads": 0.0}}`. Execute these in the tight loop so low-level logic (e.g. obstacle stop) can override.
+
+## UI / agent
+
+`ui.py` is a stub. To integrate LiveKit + Gemini/Grok: run the agent in `ui`’s server thread; have it push user transcript with `set_user_text()` and tool calls with `push_tool_calls()`. The browser client connects to localhost; the app serves or connects to LiveKit from that thread.
