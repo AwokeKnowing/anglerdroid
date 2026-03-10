@@ -83,7 +83,7 @@ def main():
     show_ok = not args.no_show
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
-        cv2.createTrackbar("depth_scale", "vision atlas", int(vision_mod.DEPTH_SCALE), 1000, lambda v: None)
+        cv2.createTrackbar("depth_offset_x100", "vision atlas", int(vision_mod.DEPTH_OFFSET * 100), 300, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -97,9 +97,8 @@ def main():
 
             # Read tuning slider and update vision module
             if show_ok:
-                ds = cv2.getTrackbarPos("depth_scale", "vision atlas")
-                if ds > 0:
-                    vision_mod.DEPTH_SCALE = np.float32(ds)
+                do_raw = cv2.getTrackbarPos("depth_offset_x100", "vision atlas")
+                vision_mod.DEPTH_OFFSET = np.float32(do_raw / 100.0)
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
@@ -107,7 +106,7 @@ def main():
                 try:
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
                     display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
-                    cv2.putText(display, "depth_scale=%d" % int(vision_mod.DEPTH_SCALE),
+                    cv2.putText(display, "depth_offset=%.2f" % float(vision_mod.DEPTH_OFFSET),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                     cv2.imshow("vision atlas", display)
                     cv2.waitKey(1)
