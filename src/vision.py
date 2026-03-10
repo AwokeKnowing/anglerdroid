@@ -77,11 +77,12 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
 
 
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
-    """RS1 (top-down camera) pointcloud → obstacle map via perspective projection.
-    Replicates reference/workingvisionobs3ms.py. Returns single-channel uint8."""
-    out = np.zeros((out_h, out_w), dtype=np.uint8)
+    """RS1 (top-down camera) pointcloud → (obstacles, known) via perspective projection.
+    Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
+    obs = np.zeros((out_h, out_w), dtype=np.uint8)
+    known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
-        return out
+        return obs, known
 
     v = verts.copy()
     v[:, 2] += VIEW_Z_OFFSET
@@ -97,90 +98,46 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     j, i = proj.astype(np.uint32).T
     m = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
+    known[i[m], j[m]] = 255
+
     z = verts[m, 2]
     vals = np.uint8(255) - ((z + DEPTH_OFFSET) * DEPTH_SCALE).astype(np.uint8) - DEPTH_BIAS
     vals[vals == 255] = 0
 
-    # Otsu on rendered pixels only (no-data zeros excluded from threshold calc)
     if len(vals) > 0:
         otsu_t, _ = cv2.threshold(vals.reshape(1, -1), 0, 255,
                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        out[i[m][vals > otsu_t], j[m][vals > otsu_t]] = 255
-    return out
+        obs[i[m][vals > otsu_t], j[m][vals > otsu_t]] = 255
+    return obs, known
 
 
-def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0, debug=True):
-    """RS2 (forward camera) pointcloud → rotated bird's-eye obstacle map.
-    Replicates reference/firstmergedvision-working2cam.py. Returns single-channel uint8."""
-    out = np.zeros((out_h, out_w), dtype=np.uint8)
+def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
+    """RS2 (forward camera) pointcloud → (obstacles, known) via rotated bird's-eye.
+    Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
+    obs = np.zeros((out_h, out_w), dtype=np.uint8)
+    known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
-        if debug:
-            print("fw: no verts")
-        return out
+        return obs, known
 
     v = verts.copy()
     if y_offset != 0.0:
         v[:, 1] += np.float32(y_offset)
 
-    # Debug: raw pointcloud before rotation (perspective view, same as RS1 style)
-    if debug:
-        dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
-        vr = v.copy()
-        vr[:, 2] += np.float32(1.0)
-        asp = np.float32(out_h) / np.float32(out_w)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            rp = vr[:, :2] / vr[:, 2:3] * np.float32([out_w * asp, out_h]) + np.float32([out_w * 0.5, out_h * 0.5])
-        rj, ri = rp.astype(np.uint32).T
-        rm = (ri < np.uint32(out_h)) & (rj < np.uint32(out_w))
-        dbg_raw[ri[rm], rj[rm]] = 255
-        cv2.imshow("fw_raw_persp", dbg_raw)
-
     v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
 
-    # Debug: after rotation, before height clip
-    if debug:
-        n_total = len(v)
-        n_pass = int(np.sum(v[:, 2] < FW_HEIGHT_CLIP))
-        print("fw: %d verts, %d pass clip (z<%.2f), z range [%.3f, %.3f]" % (
-            n_total, n_pass, float(FW_HEIGHT_CLIP),
-            float(v[:, 2].min()) if n_total > 0 else 0,
-            float(v[:, 2].max()) if n_total > 0 else 0))
-
-        dbg_noclip = np.zeros((out_h, out_w), dtype=np.uint8)
-        sc = np.float32(1.0 / FW_PX_SIZE)
-        pr = v[:, :2] * sc + np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * sc])
-        dj, di = pr.astype(np.uint32).T
-        dm = (di < np.uint32(out_h)) & (dj < np.uint32(out_w))
-        dbg_noclip[di[dm], dj[dm]] = 255
-        cv2.imshow("fw_rotated_noclip", dbg_noclip)
-
-    v = v[v[:, 2] < FW_HEIGHT_CLIP]
-    if len(v) == 0:
-        if debug:
-            print("fw: all clipped!")
-        return out
-
+    # Project ALL rotated points → known mask (camera footprint)
     scale = np.float32(1.0 / FW_PX_SIZE)
     proj = v[:, :2] * scale + np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * scale])
-
     j, i = proj.astype(np.uint32).T
-    m = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
+    m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
+    known[i[m_all], j[m_all]] = 255
 
-    if debug:
-        n_inbounds = int(np.sum(m))
-        print("fw: %d after clip, %d in bounds" % (len(v), n_inbounds))
+    # Height clip → obstacle points only
+    m_obs = m_all & (v[:, 2] < FW_HEIGHT_CLIP)
+    obs[i[m_obs], j[m_obs]] = 255
+    cv2.morphologyEx(obs, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=obs)
 
-    out[i[m], j[m]] = 255
-
-    if debug:
-        cv2.imshow("fw_before_morph", out.copy())
-
-    cv2.morphologyEx(out, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=out)
-
-    if debug:
-        cv2.imshow("fw_final", out.copy())
-
-    return out
+    return obs, known
 
 
 class Vision:
@@ -255,26 +212,35 @@ class Vision:
             if self._rs2:
                 self._rs2.grab()
 
-            # RS1 top-down depth → rotate 180° (hflip+vflip, view — no copy)
-            td1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            # RS1 top-down depth → (obstacles, known), rotate 180°
+            z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
-                td1 = depth_topdown(self._rs1.verts)
-            td1 = td1[::-1, ::-1]
+                z1, k1 = depth_topdown(self._rs1.verts)
+            obs1 = z1[::-1, ::-1]
+            known1 = k1[::-1, ::-1]
 
-            # RS2 forward depth → generate at (W,H), then CW 90° → (H,W)
-            # np.rot90(k=-1) = transpose + flip = view, no multiply
-            td2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+            # RS2 forward depth → (obstacles, known) at (W,H), then CW 90°
+            z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+            k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                td2 = depth_topdown_forward(self._rs2.verts,
-                                            out_h=FRAME_W, out_w=FRAME_H,
-                                            y_offset=RS2_EXTRINSIC_Y, debug=True)
-            td2 = np.rot90(td2, k=-1)
+                z2, k2 = depth_topdown_forward(self._rs2.verts,
+                                               out_h=FRAME_W, out_w=FRAME_H,
+                                               y_offset=RS2_EXTRINSIC_Y)
+            obs2 = np.rot90(z2, k=-1)
+            known2 = np.rot90(k2, k=-1)
 
-            # Blit into RGB channels with x-offsets (direct slice, no intermediate copy)
-            # Overlap → yellow, td1-only → green, td2-only → red
+            # Blit into RGB: B=known(dim), G=td1 obstacles, R=td2 obstacles
+            # Unknown=black, known-clear=dim blue, td1 obs=green, td2 obs=red
             topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-            _blit_x(topdown[:, :, 0], td2, int(FW_X_OFFSET))   # R = forward
-            _blit_x(topdown[:, :, 1], td1, int(TD_X_OFFSET))   # G = topdown
+            known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            _blit_x(known_combined, known1, int(TD_X_OFFSET))
+            kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            _blit_x(kc_tmp, known2, int(FW_X_OFFSET))
+            np.maximum(known_combined, kc_tmp, out=known_combined)
+            topdown[:, :, 2] = known_combined // 4          # B = known area (dim)
+            _blit_x(topdown[:, :, 0], obs2, int(FW_X_OFFSET))  # R = forward obstacles
+            _blit_x(topdown[:, :, 1], obs1, int(TD_X_OFFSET))  # G = topdown obstacles
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
