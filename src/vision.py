@@ -50,7 +50,20 @@ RS2_EXTRINSIC_Y = 0.0
 
 # Alignment offsets (pixels, + = shift right). Adjusted via sliders in main.py.
 TD_X_OFFSET = -75
-FW_X_OFFSET = 0
+FW_X_OFFSET = 65
+
+
+def _blit_x(dst, src, dx):
+    """Copy src into 2D dst with horizontal pixel offset dx. Clipped, no wrap."""
+    w = dst.shape[1]
+    if abs(dx) >= w:
+        return
+    if dx > 0:
+        dst[:, dx:] = src[:, :w - dx]
+    elif dx < 0:
+        dst[:, :w + dx] = src[:, -dx:]
+    else:
+        np.copyto(dst, src)
 
 
 def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
@@ -254,18 +267,12 @@ class Vision:
                                             y_offset=RS2_EXTRINSIC_Y, debug=True)
             td2 = np.rot90(td2, k=-1)
 
-            # Apply x-offsets for alignment tuning
-            if TD_X_OFFSET != 0:
-                td1 = np.roll(td1, int(TD_X_OFFSET), axis=1)
-            if FW_X_OFFSET != 0:
-                td2 = np.roll(td2, int(FW_X_OFFSET), axis=1)
-
-            # Combine into RGB: G=td1(topdown), R=td2(forward), B=both
+            # Blit into RGB channels with x-offsets (direct slice, no intermediate copy)
             # Overlap → white, td1-only → cyan, td2-only → magenta
             topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-            topdown[:, :, 0] = td2                      # R = forward
-            topdown[:, :, 1] = td1                      # G = topdown
-            topdown[:, :, 2] = np.maximum(td1, td2)     # B = both
+            _blit_x(topdown[:, :, 0], td2, int(FW_X_OFFSET))   # R = forward
+            _blit_x(topdown[:, :, 1], td1, int(TD_X_OFFSET))   # G = topdown
+            topdown[:, :, 2] = np.maximum(topdown[:, :, 0], topdown[:, :, 1])  # B = both
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
