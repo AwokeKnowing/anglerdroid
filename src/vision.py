@@ -49,7 +49,7 @@ _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 RS2_EXTRINSIC_Y = 0.0
 
 # Alignment offsets (pixels, + = shift right). Adjusted via sliders in main.py.
-TD_X_OFFSET = 85
+TD_X_OFFSET = -75
 FW_X_OFFSET = 0
 
 
