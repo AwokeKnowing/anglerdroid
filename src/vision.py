@@ -294,8 +294,8 @@ class Vision:
             merged = o3d.geometry.PointCloud()
             if pcd1 is not None:
                 merged += pcd1
-            if pcd2 is not None:
-                merged += pcd2
+            #if pcd2 is not None:
+            #    merged += pcd2
             topdown = _topdown_from_pcd(merged) if len(merged.points) > 0 else np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
 
             # Update shared state in one go (rgbd1 already 180-flipped via view)
