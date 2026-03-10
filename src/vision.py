@@ -101,8 +101,11 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     vals = np.uint8(255) - ((z + DEPTH_OFFSET) * DEPTH_SCALE).astype(np.uint8) - DEPTH_BIAS
     vals[vals == 255] = 0
 
-    out[i[m], j[m]] = vals
-    _, out = cv2.threshold(out, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Otsu on rendered pixels only (no-data zeros excluded from threshold calc)
+    if len(vals) > 0:
+        otsu_t, _ = cv2.threshold(vals.reshape(1, -1), 0, 255,
+                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        out[i[m][vals > otsu_t], j[m][vals > otsu_t]] = 255
     return out
 
 
