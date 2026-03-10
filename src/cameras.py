@@ -80,9 +80,7 @@ class RSCamera:
             self._decimate = rs.decimation_filter()
             self._decimate.set_option(rs.option.filter_magnitude, decimate_mag)
             self._pc = rs.pointcloud()
-            dec_w = RS_DEPTH_W // decimate_mag
-            dec_h = RS_DEPTH_H // decimate_mag
-            self.verts = np.zeros((dec_w * dec_h, 3), dtype=np.float32)
+            self.verts = None  # allocated on first grab (SDK decimation size varies)
         else:
             self._decimate = None
             self._pc = None
@@ -107,6 +105,8 @@ class RSCamera:
             points = self._pc.calculate(d)
             v = points.get_vertices()
             raw = np.asanyarray(v).view(np.float32).reshape(-1, 3)
+            if self.verts is None or self.verts.shape[0] != raw.shape[0]:
+                self.verts = np.zeros_like(raw)
             np.copyto(self.verts, raw)
 
         self.ok = True
