@@ -42,6 +42,7 @@ FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.01)       # 1px = 1cm
 FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
+_known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
 # RS2 (forward camera) extrinsic Y offset (~10cm higher than calibration).
 # Camera Y-down: camera-higher = negative Y offset.
@@ -107,7 +108,8 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     if len(vals) > 0:
         otsu_t, _ = cv2.threshold(vals.reshape(1, -1), 0, 255,
                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        obs[i[m][vals > otsu_t], j[m][vals > otsu_t]] = 255
+        obs_mask = (vals <= otsu_t) & (vals > 0)
+        obs[i[m][obs_mask], j[m][obs_mask]] = 255
     return obs, known
 
 
@@ -230,15 +232,20 @@ class Vision:
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
 
-            # Blit into RGB: B=known(dim), G=td1 obstacles, R=td2 obstacles
-            # Unknown=black, known-clear=dim blue, td1 obs=green, td2 obs=red
-            topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+            # Build known-area mask (union of both cameras, morph-closed to fill holes)
             known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit_x(known_combined, known1, int(TD_X_OFFSET))
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit_x(kc_tmp, known2, int(FW_X_OFFSET))
             np.maximum(known_combined, kc_tmp, out=known_combined)
-            topdown[:, :, 2] = known_combined // 4          # B = known area (dim)
+            cv2.morphologyEx(known_combined, cv2.MORPH_CLOSE, _known_kernel,
+                             iterations=2, dst=known_combined)
+
+            # RGB: B=unknown(dim), G=td1 obstacles, R=td2 obstacles
+            # Blue=unreachable, black=known-clear, green=td1 obs, red=td2 obs
+            topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+            unknown = np.uint8(255) - known_combined
+            topdown[:, :, 2] = unknown // 4                     # B = unknown (dim blue)
             _blit_x(topdown[:, :, 0], obs2, int(FW_X_OFFSET))  # R = forward obstacles
             _blit_x(topdown[:, :, 1], obs1, int(TD_X_OFFSET))  # G = topdown obstacles
 
