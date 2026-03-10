@@ -48,6 +48,10 @@ _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 # >>> Change to e.g. -0.10 when ready to compensate. <<<
 RS2_EXTRINSIC_Y = 0.0
 
+# Alignment offsets (pixels, + = shift right). Adjusted via sliders in main.py.
+TD_X_OFFSET = 0
+FW_X_OFFSET = 0
+
 
 def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
     r, c = CROSSHAIR_CY, CROSSHAIR_CX
@@ -225,7 +229,6 @@ class Vision:
             time.sleep(max(0, interval - (time.monotonic() - t0)))
 
     def _capture_loop(self):
-        topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
 
         while self._running:
@@ -236,19 +239,33 @@ class Vision:
             if self._rs2:
                 self._rs2.grab()
 
-            # RS1 top-down depth (already top-down, no rotation needed)
+            # RS1 top-down depth → rotate 180° (hflip+vflip, view — no copy)
             td1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
                 td1 = depth_topdown(self._rs1.verts)
+            td1 = td1[::-1, ::-1]
 
-            # RS2 forward depth (rotated to bird's-eye)
-            td2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            # RS2 forward depth → generate at (W,H), then CW 90° → (H,W)
+            # np.rot90(k=-1) = transpose + flip = view, no multiply
+            td2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                td2 = depth_topdown_forward(self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
+                td2 = depth_topdown_forward(self._rs2.verts,
+                                            out_h=FRAME_W, out_w=FRAME_H,
+                                            y_offset=RS2_EXTRINSIC_Y, debug=False)
+            td2 = np.rot90(td2, k=-1)
 
-            # Combine both cameras into one obstacle map
-            combined = np.maximum(td1, td2)
-            topdown = cv2.cvtColor(combined, cv2.COLOR_GRAY2RGB)
+            # Apply x-offsets for alignment tuning
+            if TD_X_OFFSET != 0:
+                td1 = np.roll(td1, int(TD_X_OFFSET), axis=1)
+            if FW_X_OFFSET != 0:
+                td2 = np.roll(td2, int(FW_X_OFFSET), axis=1)
+
+            # Combine into RGB: G=td1(topdown), R=td2(forward), B=both
+            # Overlap → white, td1-only → cyan, td2-only → magenta
+            topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+            topdown[:, :, 0] = td2                      # R = forward
+            topdown[:, :, 1] = td1                      # G = topdown
+            topdown[:, :, 2] = np.maximum(td1, td2)     # B = both
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black

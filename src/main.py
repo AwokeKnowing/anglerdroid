@@ -84,6 +84,8 @@ def main():
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
         cv2.createTrackbar("height_clip_x100", "vision atlas", int(vision_mod.FW_HEIGHT_CLIP * 100), 300, lambda v: None)
+        cv2.createTrackbar("td_xoff", "vision atlas", 160, 320, lambda v: None)
+        cv2.createTrackbar("fw_xoff", "vision atlas", 160, 320, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -95,11 +97,13 @@ def main():
         while True:
             loop_start = time.monotonic()
 
-            # Read tuning slider and update vision module
+            # Read tuning sliders and update vision module
             if show_ok:
                 hc_raw = cv2.getTrackbarPos("height_clip_x100", "vision atlas")
                 if hc_raw > 0:
                     vision_mod.FW_HEIGHT_CLIP = np.float32(hc_raw / 100.0)
+                vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - 160
+                vision_mod.FW_X_OFFSET = cv2.getTrackbarPos("fw_xoff", "vision atlas") - 160
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
@@ -107,7 +111,8 @@ def main():
                 try:
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
                     display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
-                    cv2.putText(display, "height_clip=%.2f" % float(vision_mod.FW_HEIGHT_CLIP),
+                    cv2.putText(display, "clip=%.2f td_x=%d fw_x=%d" % (
+                        float(vision_mod.FW_HEIGHT_CLIP), vision_mod.TD_X_OFFSET, vision_mod.FW_X_OFFSET),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
                     cv2.imshow("vision atlas", display)
                     cv2.waitKey(1)
