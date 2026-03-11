@@ -49,22 +49,27 @@ _known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 # >>> Change to e.g. -0.10 when ready to compensate. <<<
 RS2_EXTRINSIC_Y = 0.0
 
-# Alignment offsets (pixels, + = shift right). Adjusted via sliders in main.py.
+# Alignment offsets (pixels). Adjusted via sliders in main.py.
 TD_X_OFFSET = -75
-FW_X_OFFSET = 65
+FW_X_OFFSET = 66
+FW_Y_OFFSET = -4
 
 
-def _blit_x(dst, src, dx):
-    """Copy src into 2D dst with horizontal pixel offset dx. Clipped, no wrap."""
-    w = dst.shape[1]
-    if abs(dx) >= w:
-        return
-    if dx > 0:
-        dst[:, dx:] = src[:, :w - dx]
-    elif dx < 0:
-        dst[:, :w + dx] = src[:, -dx:]
+def _blit(dst, src, dx, dy=0):
+    """Copy src into 2D dst with pixel offset (dx, dy). Clipped, no wrap."""
+    h, w = dst.shape[:2]
+    # compute source and dest slices for each axis
+    if dy >= 0:
+        sr0, sr1, dr0, dr1 = dy, h, 0, h - dy
     else:
-        np.copyto(dst, src)
+        sr0, sr1, dr0, dr1 = 0, h + dy, -dy, h
+    if dx >= 0:
+        sc0, sc1, dc0, dc1 = 0, w - dx, dx, w
+    else:
+        sc0, sc1, dc0, dc1 = -dx, w, 0, w + dx
+    if sr0 >= sr1 or sc0 >= sc1:
+        return
+    dst[dr0:dr1, dc0:dc1] = src[sr0:sr1, sc0:sc1]
 
 
 def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
@@ -253,21 +258,22 @@ class Vision:
             known2 = np.rot90(k2, k=-1)
 
             # Build known-area mask (union of both cameras, morph-closed to fill holes)
+            fw_dx, fw_dy = int(FW_X_OFFSET), int(FW_Y_OFFSET)
+            td_dx = int(TD_X_OFFSET)
             known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit_x(known_combined, known1, int(TD_X_OFFSET))
+            _blit(known_combined, known1, td_dx)
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit_x(kc_tmp, known2, int(FW_X_OFFSET))
+            _blit(kc_tmp, known2, fw_dx, fw_dy)
             np.maximum(known_combined, kc_tmp, out=known_combined)
             cv2.morphologyEx(known_combined, cv2.MORPH_CLOSE, _known_kernel,
                              iterations=2, dst=known_combined)
 
             # RGB: B=unknown(dim), G=td1 obstacles, R=td2 obstacles
-            # Blue=unreachable, black=known-clear, green=td1 obs, red=td2 obs
             topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
             unknown = np.uint8(255) - known_combined
             topdown[:, :, 2] = unknown // 4                     # B = unknown (dim blue)
-            _blit_x(topdown[:, :, 0], obs2, int(FW_X_OFFSET))  # R = forward obstacles
-            _blit_x(topdown[:, :, 1], obs1, int(TD_X_OFFSET))  # G = topdown obstacles
+            _blit(topdown[:, :, 0], obs2, fw_dx, fw_dy)         # R = forward obstacles
+            _blit(topdown[:, :, 1], obs1, td_dx)                # G = topdown obstacles
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
