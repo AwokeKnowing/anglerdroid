@@ -33,7 +33,7 @@ except ImportError:
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
-GEMINI_TTS_VOICE = "Kore"  # Kore, Charon, Fenrir, Aoede, Puck
+GEMINI_TTS_VOICE = "Umbriel"  # Kore, Charon, Fenrir, Aoede, Puck, Umbriel
 
 
 def _pcm_to_wav_b64(pcm_bytes, sample_rate=24000, channels=1, sample_width=2):
