@@ -56,13 +56,12 @@ FW_Y_OFFSET = -4
 
 
 def _blit(dst, src, dx, dy=0):
-    """Copy src into 2D dst with pixel offset (dx, dy). Clipped, no wrap."""
+    """Copy src into 2D dst with pixel offset (dx, dy). +dy = down, -dy = up. Clipped, no wrap."""
     h, w = dst.shape[:2]
-    # compute source and dest slices for each axis
     if dy >= 0:
-        sr0, sr1, dr0, dr1 = dy, h, 0, h - dy
+        sr0, sr1, dr0, dr1 = 0, h - dy, dy, h
     else:
-        sr0, sr1, dr0, dr1 = 0, h + dy, -dy, h
+        sr0, sr1, dr0, dr1 = -dy, h, 0, h + dy
     if dx >= 0:
         sc0, sc1, dc0, dc1 = 0, w - dx, dx, w
     else:
