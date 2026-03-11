@@ -535,14 +535,15 @@ class UI:
                       headers={"Content-Type": "application/json"})
         try:
             resp = urlopen(req, timeout=30)
-            result = json.loads(resp.read().decode('utf-8'))
+            raw = resp.read().decode('utf-8')
+            result = json.loads(raw)
         except HTTPError as e:
             body_text = ""
             try:
                 body_text = e.read().decode('utf-8', errors='replace')
             except Exception:
                 pass
-            print("ui: TTS HTTP %d: %s" % (e.code, body_text[:300]))
+            print("ui: TTS HTTP %d: %s" % (e.code, body_text[:500]))
             return
         except Exception as e:
             print("ui: TTS request error: %s" % e)
@@ -550,8 +551,14 @@ class UI:
 
         cands = result.get("candidates", [])
         if not cands:
+            print("ui: TTS no candidates. Keys: %s" % list(result.keys()))
+            if "error" in result:
+                print("ui: TTS error: %s" % result["error"])
             return
         parts = cands[0].get("content", {}).get("parts", [])
+        if not parts:
+            print("ui: TTS no parts in response")
+            return
         for p in parts:
             inline = p.get("inline_data", {})
             if inline.get("data"):
@@ -559,8 +566,10 @@ class UI:
                 pcm_bytes = base64.b64decode(pcm_b64)
                 wav_b64 = _pcm_to_wav_b64(pcm_bytes)
                 self._broadcast({"type": "tts_audio", "audio": wav_b64})
-                print("ui: TTS sent %d KB audio" % (len(pcm_bytes) // 1024))
+                print("ui: TTS sent %d KB wav" % (len(wav_b64) * 3 // 4 // 1024))
                 return
+            else:
+                print("ui: TTS part has no inline_data: %s" % list(p.keys()))
 
     def _call_api(self, system_prompt):
         # Rate limit: enforce minimum interval between calls
