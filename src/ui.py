@@ -1,13 +1,16 @@
 """
-ui.py – Web UI server: HTTP + WebSocket + Gemini AI (REST API, no SDK).
+ui.py – Web UI server: HTTPS + WSS + Gemini AI (REST API, no SDK).
+Auto-generates a self-signed cert so mic/getUserMedia works on LAN.
 All communication with the 30fps main loop is via thread-safe queues/locks.
 """
 
 import os
+import ssl
 import json
 import time
 import base64
 import queue
+import subprocess
 import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import Request, urlopen
@@ -26,6 +29,26 @@ except ImportError:
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+
+_CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.certs')
+_CERT_FILE = os.path.join(_CERT_DIR, 'server.crt')
+_KEY_FILE = os.path.join(_CERT_DIR, 'server.key')
+
+
+def _ensure_self_signed_cert():
+    """Generate a self-signed cert if one doesn't exist (needed for HTTPS → getUserMedia)."""
+    if os.path.exists(_CERT_FILE) and os.path.exists(_KEY_FILE):
+        return
+    os.makedirs(_CERT_DIR, exist_ok=True)
+    try:
+        subprocess.run([
+            'openssl', 'req', '-x509', '-newkey', 'rsa:2048',
+            '-keyout', _KEY_FILE, '-out', _CERT_FILE,
+            '-days', '365', '-nodes', '-subj', '/CN=anglerdroid',
+        ], check=True, capture_output=True)
+        print("ui: generated self-signed cert in %s" % _CERT_DIR)
+    except Exception as e:
+        print("ui: WARNING: could not generate cert (%s) — mic may not work over LAN" % e)
 
 
 def _jwt_email(token):
@@ -76,12 +99,18 @@ class UI:
         if self._running:
             return
         self._running = True
+        _ensure_self_signed_cert()
+        self._ssl_ctx = None
+        if os.path.exists(_CERT_FILE) and os.path.exists(_KEY_FILE):
+            self._ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            self._ssl_ctx.load_cert_chain(_CERT_FILE, _KEY_FILE)
         threading.Thread(target=self._run_http, daemon=True).start()
         if _HAS_WS:
             threading.Thread(target=self._run_ws, daemon=True).start()
         else:
             print("ui: websockets not installed – WebSocket disabled")
-        print("ui: HTTP :%d  WS :%d" % (self._http_port, self._ws_port))
+        proto = "HTTPS" if self._ssl_ctx else "HTTP"
+        print("ui: %s :%d  WSS :%d" % (proto, self._http_port, self._ws_port))
 
     def stop(self):
         self._running = False
@@ -143,6 +172,8 @@ class UI:
                 pass
 
         srv = HTTPServer(('0.0.0.0', self._http_port), H)
+        if ui_ref._ssl_ctx:
+            srv.socket = ui_ref._ssl_ctx.wrap_socket(srv.socket, server_side=True)
         srv.timeout = 0.5
         while self._running:
             srv.handle_request()
@@ -155,7 +186,10 @@ class UI:
         self._ws_loop.run_until_complete(self._ws_main())
 
     async def _ws_main(self):
-        async with websockets.serve(self._ws_handler, '0.0.0.0', self._ws_port):
+        ws_kwargs = {}
+        if self._ssl_ctx:
+            ws_kwargs['ssl'] = self._ssl_ctx
+        async with websockets.serve(self._ws_handler, '0.0.0.0', self._ws_port, **ws_kwargs):
             last_atlas_bc = 0.0
             while self._running:
                 # drain broadcast queue

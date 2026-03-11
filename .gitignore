@@ -119,6 +119,9 @@ celerybeat.pid
 # SageMath parsed files
 *.sage.py
 
+# Self-signed certs (auto-generated)
+.certs/
+
 # Environments
 .env
 .venv

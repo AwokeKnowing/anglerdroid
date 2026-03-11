@@ -100,7 +100,8 @@ const VOICE_THRESHOLD = 0.015, CHUNK_MS = 4000;
 
 function connect() {
   const host = location.hostname || 'localhost';
-  ws = new WebSocket('ws://' + host + ':' + WS_PORT);
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + host + ':' + WS_PORT);
   ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
   ws.onclose = () => {
     document.getElementById('status').textContent = 'disconnected';
@@ -187,6 +188,13 @@ function toggleMic() {
 }
 
 async function startAudio() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    addChat('sys', 'Mic unavailable: page must be served over HTTPS or localhost. Current: ' + location.protocol + '//' + location.host);
+    micOn = false;
+    document.getElementById('mic-btn').textContent = '🎤 Mic Off';
+    document.getElementById('mic-level-bar').style.display = 'none';
+    return;
+  }
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
