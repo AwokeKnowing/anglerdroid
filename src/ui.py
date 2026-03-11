@@ -560,7 +560,7 @@ class UI:
             print("ui: TTS no parts in response")
             return
         for p in parts:
-            inline = p.get("inline_data", {})
+            inline = p.get("inlineData") or p.get("inline_data") or {}
             if inline.get("data"):
                 pcm_b64 = inline["data"]
                 pcm_bytes = base64.b64decode(pcm_b64)
@@ -569,7 +569,7 @@ class UI:
                 print("ui: TTS sent %d KB wav" % (len(wav_b64) * 3 // 4 // 1024))
                 return
             else:
-                print("ui: TTS part has no inline_data: %s" % list(p.keys()))
+                print("ui: TTS part keys: %s" % list(p.keys()))
 
     def _call_api(self, system_prompt):
         # Rate limit: enforce minimum interval between calls
