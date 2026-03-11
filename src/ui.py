@@ -314,11 +314,11 @@ class UI:
                         self._send_to_gemini(prompt, combined)
                         self._last_activity = now
 
-                if now - self._last_activity > 20.0:
+                if now - self._last_activity > 900.0:
                     self._conversation = []
                     self._last_activity = now
                     self._broadcast({"type": "ai_status", "active": True,
-                                     "info": "Session reset (20 s silence)"})
+                                     "info": "Session reset (15 min idle)"})
 
                 time.sleep(0.2)
             except Exception as e:

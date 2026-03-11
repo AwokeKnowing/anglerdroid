@@ -30,11 +30,16 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 .btn-danger{background:#c44;color:#fff}
 .btn-secondary{background:#444;color:#eee}
 .btn-row{display:flex;gap:8px;flex-wrap:wrap}
-#chat{flex:1;overflow-y:auto;background:#1a1a1a;border-radius:8px;padding:8px;font-size:.8rem;min-height:120px}
+.tab-bar{display:flex;gap:2px;margin-bottom:4px}
+.tab-btn{flex:1;padding:6px 0;border:none;border-radius:6px 6px 0 0;cursor:pointer;font-size:.8rem;font-weight:600;background:#222;color:#888}
+.tab-btn.active{background:#1a1a1a;color:#eee}
+.tab-panel{flex:1;overflow-y:auto;background:#1a1a1a;border-radius:0 0 8px 8px;padding:8px;font-size:.8rem;min-height:120px;display:none}
+.tab-panel.active{display:block}
 .chat-msg{margin:4px 0;padding:4px 8px;border-radius:4px}
 .chat-user{background:#234;color:#8cf}
 .chat-ai{background:#232;color:#8f8}
 .chat-sys{background:#332;color:#cc8;font-style:italic}
+.log-line{margin:2px 0;color:#777;font-family:monospace;font-size:.7rem}
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
 </head>
@@ -73,7 +78,12 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-primary" onclick="sendChat()">Send</button>
       </div>
     </div>
-    <div id="chat"></div>
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
+      <button class="tab-btn" onclick="switchTab('log')">Log</button>
+    </div>
+    <div id="chat" class="tab-panel active"></div>
+    <div id="log" class="tab-panel"></div>
   </div>
 </div>
 
@@ -81,6 +91,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 const WS_PORT = '__WS_PORT__';
 const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
 let ws = null, role = 'observer', aiActive = false, micOn = false, recognition = null;
+let lastMicError = '', micErrorCount = 0;
 
 function connect() {
   const host = location.hostname || 'localhost';
@@ -109,12 +120,26 @@ function connect() {
   };
 }
 
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.getElementById(name).classList.add('active');
+  document.querySelector('.tab-btn[onclick*="' + name + '"]').classList.add('active');
+}
+
 function addChat(sender, text) {
   const el = document.getElementById('chat');
   const cls = sender === 'user' ? 'chat-user' : sender === 'ai' ? 'chat-ai' : 'chat-sys';
   el.innerHTML += '<div class="chat-msg ' + cls + '"><b>' + sender + ':</b> ' + text + '</div>';
   el.scrollTop = el.scrollHeight;
   if (sender === 'ai') speak(text);
+}
+
+function addLog(text) {
+  const el = document.getElementById('log');
+  el.innerHTML += '<div class="log-line">' + new Date().toLocaleTimeString() + ' ' + text + '</div>';
+  if (el.children.length > 200) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
 }
 
 function speak(text) {
@@ -165,7 +190,13 @@ function toggleMic() {
       const text = ev.results[ev.results.length - 1][0].transcript.trim();
       if (text && ws) ws.send(JSON.stringify({type: 'speech', text: text}));
     };
-    recognition.onerror = (ev) => { if (ev.error !== 'no-speech') addChat('sys', 'mic: ' + ev.error); };
+    recognition.onerror = (ev) => {
+      if (ev.error === 'no-speech') return;
+      if (ev.error === lastMicError) { micErrorCount++; return; }
+      if (micErrorCount > 1) addLog('mic: ' + lastMicError + ' (x' + micErrorCount + ')');
+      lastMicError = ev.error; micErrorCount = 1;
+      addLog('mic: ' + ev.error);
+    };
     recognition.onend = () => { if (micOn) recognition.start(); };
     recognition.start();
   } else if (recognition) {
