@@ -63,6 +63,7 @@ class UI:
         self._broadcast_q = queue.Queue(maxsize=256)
 
         self._speech_q = queue.Queue(maxsize=64)
+        self._audio_q = queue.Queue(maxsize=16)
 
         self._gemini_active = False
         self._conversation = []         # type: List[dict]
@@ -227,6 +228,16 @@ class UI:
                     }}])
                     self._broadcast({"type": "chat", "sender": "sys", "text": "twist_for sent"})
 
+                elif t == "audio":
+                    audio_b64 = data.get("data", "")
+                    mime = data.get("mime", "audio/webm")
+                    if audio_b64:
+                        try:
+                            self._audio_q.put_nowait({"data": audio_b64, "mime": mime})
+                        except queue.Full:
+                            pass
+                        self._last_activity = time.time()
+
                 elif t == "stop":
                     self.push_tool_calls([{"name": "stop", "args": {}}])
                     self._broadcast({"type": "chat", "sender": "sys", "text": "stop sent"})
@@ -291,6 +302,7 @@ class UI:
     def _gemini_loop(self):
         prompt = self._load_prompt()
         speech_buf = []
+        audio_buf = []
         buf_start = 0.0
         BATCH_DELAY = 2.0
 
@@ -304,14 +316,25 @@ class UI:
                     except queue.Empty:
                         break
 
-                now = time.time()
+                while True:
+                    try:
+                        audio_buf.append(self._audio_q.get_nowait())
+                        if buf_start == 0.0:
+                            buf_start = time.time()
+                    except queue.Empty:
+                        break
 
-                if speech_buf and (now - buf_start >= BATCH_DELAY):
-                    combined = " ".join(speech_buf)
+                now = time.time()
+                has_input = speech_buf or audio_buf
+
+                if has_input and (now - buf_start >= BATCH_DELAY):
+                    text = " ".join(speech_buf) if speech_buf else None
+                    audio = audio_buf[:] if audio_buf else None
                     speech_buf = []
+                    audio_buf = []
                     buf_start = 0.0
                     if self._latest_atlas is not None:
-                        self._send_to_gemini(prompt, combined)
+                        self._send_to_gemini(prompt, user_text=text, audio_parts=audio)
                         self._last_activity = now
 
                 if now - self._last_activity > 900.0:
@@ -345,7 +368,7 @@ class UI:
                 if not msg["parts"]:
                     msg["parts"] = [{"text": "(image removed from history)"}]
 
-    def _send_to_gemini(self, system_prompt, user_text=None):
+    def _send_to_gemini(self, system_prompt, user_text=None, audio_parts=None):
         with self._atlas_lock:
             atlas = self._latest_atlas
         if atlas is None:
@@ -356,8 +379,18 @@ class UI:
 
         parts = [
             {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-            {"text": user_text or "[Camera update. Respond only if safety concern.]"},
         ]
+        if audio_parts:
+            for ap in audio_parts:
+                parts.append({"inline_data": {"mime_type": ap["mime"], "data": ap["data"]}})
+            print("ui: sending %d audio chunk(s) to Gemini" % len(audio_parts))
+
+        if user_text:
+            parts.append({"text": user_text})
+        elif audio_parts:
+            parts.append({"text": "[User sent audio. Listen to it and respond to what they said.]"})
+        else:
+            parts.append({"text": "[Camera update. Respond only if safety concern.]"})
         self._conversation.append({"role": "user", "parts": parts})
         if len(self._conversation) > 20:
             self._conversation = self._conversation[-20:]

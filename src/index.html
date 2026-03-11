@@ -73,6 +73,9 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-secondary" id="mic-btn" onclick="toggleMic()">🎤 Mic Off</button>
         <button class="btn-secondary" id="ai-btn" onclick="toggleAI()">🤖 Launch AI</button>
       </div>
+      <div id="mic-level-bar" style="height:6px;background:#333;border-radius:3px;margin-top:4px;display:none">
+        <div id="mic-level" style="height:100%;background:#2a6;border-radius:3px;width:0%;transition:width .05s"></div>
+      </div>
       <div style="display:flex;gap:6px;margin-top:8px">
         <input type="text" id="chat-input" placeholder="Type a message..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #444;background:#222;color:#eee;font-size:.85rem" onkeydown="if(event.key==='Enter')sendChat()">
         <button class="btn-primary" onclick="sendChat()">Send</button>
@@ -90,8 +93,10 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 <script>
 const WS_PORT = '__WS_PORT__';
 const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
-let ws = null, role = 'observer', aiActive = false, micOn = false, recognition = null;
-let lastMicError = '', micErrorCount = 0;
+let ws = null, role = 'observer', aiActive = false, micOn = false;
+let mediaStream = null, mediaRecorder = null, audioCtx = null, analyser = null;
+let audioChunks = [], hadVoice = false;
+const VOICE_THRESHOLD = 0.015, CHUNK_MS = 4000;
 
 function connect() {
   const host = location.hostname || 'localhost';
@@ -175,35 +180,89 @@ function toggleAI() {
 }
 
 function toggleMic() {
-  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-    addChat('sys', 'Speech recognition not supported in this browser');
-    return;
-  }
   micOn = !micOn;
   document.getElementById('mic-btn').textContent = micOn ? '🎤 Mic On' : '🎤 Mic Off';
-  if (micOn) {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    recognition = new SR();
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.onresult = (ev) => {
-      const text = ev.results[ev.results.length - 1][0].transcript.trim();
-      if (text && ws) ws.send(JSON.stringify({type: 'speech', text: text}));
+  document.getElementById('mic-level-bar').style.display = micOn ? 'block' : 'none';
+  if (micOn) startAudio(); else stopAudio();
+}
+
+async function startAudio() {
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = audioCtx.createMediaStreamSource(mediaStream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    source.connect(analyser);
+    updateMicLevel();
+
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+                   : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+    mediaRecorder = new MediaRecorder(mediaStream, mimeType ? {mimeType} : {});
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      if (audioChunks.length > 0 && hadVoice) {
+        const blob = new Blob(audioChunks, {type: mediaRecorder.mimeType});
+        sendAudioBlob(blob);
+      } else if (audioChunks.length > 0) {
+        addLog('mic: chunk discarded (silence)');
+      }
+      audioChunks = []; hadVoice = false;
+      if (micOn && mediaRecorder) {
+        mediaRecorder.start();
+        setTimeout(() => { if (micOn && mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); }, CHUNK_MS);
+      }
     };
-    recognition.onerror = (ev) => {
-      if (ev.error === 'no-speech') return;
-      if (ev.error === lastMicError) { micErrorCount++; return; }
-      if (micErrorCount > 1) addLog('mic: ' + lastMicError + ' (x' + micErrorCount + ')');
-      lastMicError = ev.error; micErrorCount = 1;
-      addLog('mic: ' + ev.error);
-    };
-    recognition.onend = () => { if (micOn) recognition.start(); };
-    recognition.start();
-  } else if (recognition) {
-    recognition.onend = null;
-    recognition.stop();
-    recognition = null;
+    mediaRecorder.start();
+    setTimeout(() => { if (micOn && mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); }, CHUNK_MS);
+    addLog('mic: capture started (' + (mimeType || 'default') + ')');
+  } catch(e) {
+    addLog('mic: failed: ' + e.message);
+    addChat('sys', 'Mic error: ' + e.message);
+    micOn = false;
+    document.getElementById('mic-btn').textContent = '🎤 Mic Off';
+    document.getElementById('mic-level-bar').style.display = 'none';
   }
+}
+
+function stopAudio() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') { mediaRecorder.onstop = null; mediaRecorder.stop(); }
+  mediaRecorder = null;
+  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+  mediaStream = null;
+  if (audioCtx) audioCtx.close();
+  audioCtx = null; analyser = null;
+  addLog('mic: stopped');
+}
+
+function updateMicLevel() {
+  if (!analyser) return;
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(data);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) { const v = (data[i] - 128) / 128; sum += v * v; }
+  const rms = Math.sqrt(sum / data.length);
+  const el = document.getElementById('mic-level');
+  if (el) {
+    const pct = Math.min(100, rms * 400);
+    el.style.width = pct + '%';
+    el.style.background = rms > VOICE_THRESHOLD ? '#2a6' : '#555';
+  }
+  if (rms > VOICE_THRESHOLD) hadVoice = true;
+  requestAnimationFrame(updateMicLevel);
+}
+
+function sendAudioBlob(blob) {
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const b64 = reader.result.split(',')[1];
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({type: 'audio', data: b64, mime: blob.type}));
+      addLog('mic: sent ' + (blob.size / 1024).toFixed(1) + ' KB audio');
+      addChat('sys', '🎤 audio sent (' + (blob.size / 1024).toFixed(1) + ' KB)');
+    }
+  };
+  reader.readAsDataURL(blob);
 }
 
 function toggleFullscreen() {
