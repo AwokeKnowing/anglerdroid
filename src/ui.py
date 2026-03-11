@@ -504,11 +504,13 @@ class UI:
     # ── Gemini TTS ────────────────────────────────────────────────
 
     def _tts_loop(self):
+        print("ui: TTS worker started (voice: %s)" % GEMINI_TTS_VOICE)
         while self._running and self._gemini_active:
             try:
                 text = self._tts_q.get(timeout=1.0)
             except queue.Empty:
                 continue
+            print("ui: TTS generating for: %s" % text[:80])
             try:
                 self._call_tts(text)
             except Exception as e:

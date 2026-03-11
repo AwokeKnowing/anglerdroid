@@ -149,13 +149,6 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     # Debug: all rotated points (before height clip)
     cv2.imshow("fw_rotated_noclip", known.copy())
 
-    n_total = len(v)
-    n_pass = int(np.sum(v[:, 2] < FW_HEIGHT_CLIP))
-    print("fw: %d verts, %d pass clip (z<%.2f), z range [%.3f, %.3f]" % (
-        n_total, n_pass, float(FW_HEIGHT_CLIP),
-        float(v[:, 2].min()) if n_total > 0 else 0,
-        float(v[:, 2].max()) if n_total > 0 else 0))
-
     # Height clip → obstacle points only
     m_obs = m_all & (v[:, 2] < FW_HEIGHT_CLIP)
     obs[i[m_obs], j[m_obs]] = 255
@@ -165,8 +158,6 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     cv2.morphologyEx(obs, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=obs)
 
     cv2.imshow("fw_final", obs.copy())
-
-    print("fw: %d after clip, %d in bounds" % (int(np.sum(m_obs)), int(np.sum(obs > 0))))
 
     return obs, known
 

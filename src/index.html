@@ -73,6 +73,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-secondary" id="mic-btn" onclick="toggleMic()">🎤 Mic Off</button>
         <button class="btn-secondary" id="ai-btn" onclick="toggleAI()">🤖 Launch AI</button>
       </div>
+      <button class="btn-secondary" style="margin-top:4px;font-size:.7rem;padding:4px 8px" onclick="testAudio()">🔊 Test Speaker</button>
       <div id="mic-level-bar" style="height:6px;background:#333;border-radius:3px;margin-top:4px;display:none">
         <div id="mic-level" style="height:100%;background:#2a6;border-radius:3px;width:0%;transition:width .05s"></div>
       </div>
@@ -154,7 +155,17 @@ function addLog(text) {
 
 let ttsQueue = [], ttsPlaying = false;
 
+function testAudio() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = ctx.createOscillator();
+  osc.frequency.value = 440;
+  osc.connect(ctx.destination);
+  osc.start(); osc.stop(ctx.currentTime + 0.3);
+  addChat('sys', 'speaker test: 440 Hz beep');
+}
+
 function playTtsAudio(wavB64) {
+  addLog('tts: received ' + (wavB64.length * 0.75 / 1024).toFixed(1) + ' KB audio');
   ttsQueue.push(wavB64);
   if (!ttsPlaying) drainTtsQueue();
 }
@@ -164,9 +175,10 @@ function drainTtsQueue() {
   ttsPlaying = true;
   const b64 = ttsQueue.shift();
   const audio = new Audio('data:audio/wav;base64,' + b64);
-  audio.onended = drainTtsQueue;
-  audio.onerror = () => { addLog('tts: playback error'); drainTtsQueue(); };
-  audio.play().catch(e => { addLog('tts: ' + e.message); drainTtsQueue(); });
+  audio.onended = () => { addLog('tts: playback finished'); drainTtsQueue(); };
+  audio.onerror = (e) => { addLog('tts: playback error: ' + (e.message || 'unknown')); drainTtsQueue(); };
+  addLog('tts: playing...');
+  audio.play().catch(e => { addLog('tts: play() failed: ' + e.message); drainTtsQueue(); });
 }
 
 function sendTwist() {
