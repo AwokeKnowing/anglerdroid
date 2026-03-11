@@ -125,6 +125,18 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     if y_offset != 0.0:
         v[:, 1] += np.float32(y_offset)
 
+    # Debug: raw pointcloud before rotation (perspective view)
+    dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
+    vr = v.copy()
+    vr[:, 2] += np.float32(1.0)
+    asp = np.float32(out_h) / np.float32(out_w)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        rp = vr[:, :2] / vr[:, 2:3] * np.float32([out_w * asp, out_h]) + np.float32([out_w * 0.5, out_h * 0.5])
+    rj, ri = rp.astype(np.uint32).T
+    rm = (ri < np.uint32(out_h)) & (rj < np.uint32(out_w))
+    dbg_raw[ri[rm], rj[rm]] = 255
+    cv2.imshow("fw_raw_persp", dbg_raw)
+
     v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
 
     # Project ALL rotated points → known mask (camera footprint)
@@ -134,10 +146,27 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
     known[i[m_all], j[m_all]] = 255
 
+    # Debug: all rotated points (before height clip)
+    cv2.imshow("fw_rotated_noclip", known.copy())
+
+    n_total = len(v)
+    n_pass = int(np.sum(v[:, 2] < FW_HEIGHT_CLIP))
+    print("fw: %d verts, %d pass clip (z<%.2f), z range [%.3f, %.3f]" % (
+        n_total, n_pass, float(FW_HEIGHT_CLIP),
+        float(v[:, 2].min()) if n_total > 0 else 0,
+        float(v[:, 2].max()) if n_total > 0 else 0))
+
     # Height clip → obstacle points only
     m_obs = m_all & (v[:, 2] < FW_HEIGHT_CLIP)
     obs[i[m_obs], j[m_obs]] = 255
+
+    cv2.imshow("fw_before_morph", obs.copy())
+
     cv2.morphologyEx(obs, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=obs)
+
+    cv2.imshow("fw_final", obs.copy())
+
+    print("fw: %d after clip, %d in bounds" % (int(np.sum(m_obs)), int(np.sum(obs > 0))))
 
     return obs, known
 

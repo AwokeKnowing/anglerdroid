@@ -105,6 +105,10 @@ function connect() {
   ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
   ws.onclose = () => {
     document.getElementById('status').textContent = 'disconnected';
+    if (location.protocol === 'https:') {
+      document.getElementById('status').textContent = 'disconnected (accept WSS cert?)';
+      document.getElementById('status').title = 'Visit https://' + host + ':' + WS_PORT + ' to accept the cert, then reload.';
+    }
     setTimeout(connect, 2000);
   };
   ws.onmessage = (e) => {
@@ -117,6 +121,7 @@ function connect() {
     }
     else if (d.type === 'chat') addChat(d.sender, d.text);
     else if (d.type === 'atlas') document.getElementById('atlas').src = 'data:image/jpeg;base64,' + d.image;
+    else if (d.type === 'tts_audio') playTtsAudio(d.audio);
     else if (d.type === 'ai_status') {
       aiActive = d.active;
       document.getElementById('ai-btn').textContent = aiActive ? '⏹ Stop AI' : '🤖 Launch AI';
@@ -138,7 +143,6 @@ function addChat(sender, text) {
   const cls = sender === 'user' ? 'chat-user' : sender === 'ai' ? 'chat-ai' : 'chat-sys';
   el.innerHTML += '<div class="chat-msg ' + cls + '"><b>' + sender + ':</b> ' + text + '</div>';
   el.scrollTop = el.scrollHeight;
-  if (sender === 'ai') speak(text);
 }
 
 function addLog(text) {
@@ -148,9 +152,21 @@ function addLog(text) {
   el.scrollTop = el.scrollHeight;
 }
 
-function speak(text) {
-  if (!text || text.startsWith('[')) return;
-  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(text)); } catch(e) {}
+let ttsQueue = [], ttsPlaying = false;
+
+function playTtsAudio(wavB64) {
+  ttsQueue.push(wavB64);
+  if (!ttsPlaying) drainTtsQueue();
+}
+
+function drainTtsQueue() {
+  if (ttsQueue.length === 0) { ttsPlaying = false; return; }
+  ttsPlaying = true;
+  const b64 = ttsQueue.shift();
+  const audio = new Audio('data:audio/wav;base64,' + b64);
+  audio.onended = drainTtsQueue;
+  audio.onerror = () => { addLog('tts: playback error'); drainTtsQueue(); };
+  audio.play().catch(e => { addLog('tts: ' + e.message); drainTtsQueue(); });
 }
 
 function sendTwist() {

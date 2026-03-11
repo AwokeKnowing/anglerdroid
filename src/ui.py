@@ -4,14 +4,17 @@ Auto-generates a self-signed cert so mic/getUserMedia works on LAN.
 All communication with the 30fps main loop is via thread-safe queues/locks.
 """
 
+import io
 import os
 import ssl
 import json
 import time
+import wave
 import base64
 import queue
 import subprocess
 import threading
+from http import HTTPStatus
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -29,6 +32,19 @@ except ImportError:
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+GEMINI_TTS_VOICE = "Kore"  # Kore, Charon, Fenrir, Aoede, Puck
+
+
+def _pcm_to_wav_b64(pcm_bytes, sample_rate=24000, channels=1, sample_width=2):
+    """Convert raw PCM bytes to a base64-encoded WAV string."""
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(sample_width)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return base64.b64encode(buf.getvalue()).decode('ascii')
 
 _CERT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.certs')
 _CERT_FILE = os.path.join(_CERT_DIR, 'server.crt')
@@ -87,6 +103,7 @@ class UI:
 
         self._speech_q = queue.Queue(maxsize=64)
         self._audio_q = queue.Queue(maxsize=16)
+        self._tts_q = queue.Queue(maxsize=16)
 
         self._gemini_active = False
         self._conversation = []         # type: List[dict]
@@ -176,7 +193,12 @@ class UI:
             srv.socket = ui_ref._ssl_ctx.wrap_socket(srv.socket, server_side=True)
         srv.timeout = 0.5
         while self._running:
-            srv.handle_request()
+            try:
+                srv.handle_request()
+            except ssl.SSLError:
+                pass
+            except Exception:
+                pass
 
     # ── WebSocket server ────────────────────────────────────────────
 
@@ -185,8 +207,17 @@ class UI:
         asyncio.set_event_loop(self._ws_loop)
         self._ws_loop.run_until_complete(self._ws_main())
 
+    async def _ws_accept_cert(self, path, headers):
+        """Serve a simple page for non-WebSocket requests (lets browser accept the self-signed cert)."""
+        if headers.get('Upgrade', '').lower() == 'websocket':
+            return None
+        body = (b'<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:40px">'
+                b'<h2>WSS certificate accepted.</h2>'
+                b'<p>Close this tab and reload the main page.</p></body></html>')
+        return (HTTPStatus.OK, [('Content-Type', 'text/html')], body)
+
     async def _ws_main(self):
-        ws_kwargs = {}
+        ws_kwargs = {'process_request': self._ws_accept_cert}
         if self._ssl_ctx:
             ws_kwargs['ssl'] = self._ssl_ctx
         async with websockets.serve(self._ws_handler, '0.0.0.0', self._ws_port, **ws_kwargs):
@@ -317,8 +348,9 @@ class UI:
         self._last_activity = time.time()
         self._last_api_call = 0.0
         threading.Thread(target=self._gemini_loop, daemon=True).start()
+        threading.Thread(target=self._tts_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
-        print("ui: Gemini AI started (%s)" % self._gemini_model)
+        print("ui: Gemini AI started (%s, TTS: %s)" % (self._gemini_model, GEMINI_TTS_MODEL))
 
     def _stop_gemini(self):
         self._gemini_active = False
@@ -446,6 +478,11 @@ class UI:
                 model_parts.append({"text": p["text"]})
                 self._broadcast({"type": "chat", "sender": "ai", "text": p["text"]})
                 self._last_activity = time.time()
+                if p["text"] and not p["text"].startswith("["):
+                    try:
+                        self._tts_q.put_nowait(p["text"])
+                    except queue.Full:
+                        pass
             if "functionCall" in p:
                 fc = p["functionCall"]
                 model_parts.append({"functionCall": fc})
@@ -463,6 +500,65 @@ class UI:
             fr = [{"functionResponse": {"name": fc["name"],
                    "response": {"result": "sent to robot"}}} for fc in func_calls]
             self._conversation.append({"role": "user", "parts": fr})
+
+    # ── Gemini TTS ────────────────────────────────────────────────
+
+    def _tts_loop(self):
+        while self._running and self._gemini_active:
+            try:
+                text = self._tts_q.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._call_tts(text)
+            except Exception as e:
+                print("ui: TTS error: %s" % e)
+
+    def _call_tts(self, text):
+        body = {
+            "contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {
+                "response_modalities": ["AUDIO"],
+                "speech_config": {
+                    "voice_config": {
+                        "prebuilt_voice_config": {
+                            "voice_name": GEMINI_TTS_VOICE,
+                        }
+                    }
+                },
+            },
+        }
+        url = GEMINI_URL.format(model=GEMINI_TTS_MODEL, key=self._gemini_key)
+        req = Request(url, data=json.dumps(body).encode('utf-8'),
+                      headers={"Content-Type": "application/json"})
+        try:
+            resp = urlopen(req, timeout=30)
+            result = json.loads(resp.read().decode('utf-8'))
+        except HTTPError as e:
+            body_text = ""
+            try:
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                pass
+            print("ui: TTS HTTP %d: %s" % (e.code, body_text[:300]))
+            return
+        except Exception as e:
+            print("ui: TTS request error: %s" % e)
+            return
+
+        cands = result.get("candidates", [])
+        if not cands:
+            return
+        parts = cands[0].get("content", {}).get("parts", [])
+        for p in parts:
+            inline = p.get("inline_data", {})
+            if inline.get("data"):
+                pcm_b64 = inline["data"]
+                pcm_bytes = base64.b64decode(pcm_b64)
+                wav_b64 = _pcm_to_wav_b64(pcm_bytes)
+                self._broadcast({"type": "tts_audio", "audio": wav_b64})
+                print("ui: TTS sent %d KB audio" % (len(pcm_bytes) // 1024))
+                return
 
     def _call_api(self, system_prompt):
         # Rate limit: enforce minimum interval between calls
