@@ -97,7 +97,7 @@ const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
 let ws = null, role = 'observer', aiActive = false, micOn = false;
 let mediaStream = null, mediaRecorder = null, audioCtx = null, analyser = null;
 let audioChunks = [], hadVoice = false;
-const VOICE_THRESHOLD = 0.015, CHUNK_MS = 4000;
+const VOICE_THRESHOLD = 0.06, CHUNK_MS = 4000;
 
 function connect() {
   const host = location.hostname || 'localhost';
