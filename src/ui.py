@@ -31,7 +31,7 @@ except ImportError:
     _HAS_WS = False
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-GEMINI_MODEL_DEFAULT = "gemini-2.5-flash"
+GEMINI_MODEL_DEFAULT = "gemini-2.5-flash-lite"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 GEMINI_TTS_VOICE = "Umbriel"  # Kore, Charon, Fenrir, Aoede, Puck, Umbriel
 
@@ -347,7 +347,7 @@ class UI:
 
     # ── Gemini AI ───────────────────────────────────────────────────
 
-    MIN_API_INTERVAL = 6.0  # seconds between API calls (free tier: 10 RPM)
+    MIN_API_INTERVAL = 2.0  # seconds between API calls (flash-lite free tier: 30 RPM)
 
     def _start_gemini(self):
         if self._gemini_active:
@@ -448,7 +448,7 @@ class UI:
                     msg["parts"] = [{"text": "(image removed from history)"}]
 
     AGENT_MAX_TURNS = 10
-    AGENT_OBSERVE_DELAY = 3.0  # seconds between agent turns (let action take effect)
+    AGENT_OBSERVE_DELAY = 2.5  # seconds between agent turns (let action take effect)
 
     def _send_to_gemini(self, system_prompt, user_text=None, audio_parts=None):
         with self._atlas_lock:
