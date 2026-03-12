@@ -1,5 +1,5 @@
 """
-tools.py - Wraps wheelbase, vision, ui, vla. High-level tools for AI loop (sim or real).
+tools.py - Wraps wheelbase, vision, ui, navigator. High-level tools for AI loop (sim or real).
 """
 
 from typing import Optional
@@ -13,31 +13,29 @@ except ImportError:
 
 import vision
 import ui
+import navigator
 
 
 # --- Shared instances (main script sets these or tools.init) ---
 _wheelbase = None
 _vision = None  # type: Optional[vision.Vision]
 _ui = None  # type: Optional[ui.UI]
-_vla = None  # type: Optional[object]
 
 
 def init(
     wheelbase_instance=None,
     vision_instance=None,
     ui_instance=None,
-    vla_instance=None,
     *,
     rs1_serial: str = "",
     rs2_serial: str = "",
     rgb1_device_id=None,
 ):
     """Initialize tools with real or stub components."""
-    global _wheelbase, _vision, _ui, _vla
+    global _wheelbase, _vision, _ui
     _wheelbase = wheelbase_instance
     _vision = vision_instance
     _ui = ui_instance
-    _vla = vla_instance
     if _vision is None and (rs1_serial or rs2_serial):
         _vision = vision.Vision(
             rs1_serial=rs1_serial or "0",
@@ -106,20 +104,18 @@ def get_pending_tool_calls():
     return _ui.get_pending_tool_calls()
 
 
-# --- VLA (Vision-Language-Action) ---
+# --- Navigation (reactive obstacle avoidance) ---
 
-def vision_lang_act(instruction):
-    """Set a navigation instruction for the VLA model. Empty string = stop."""
-    if _vla is not None:
-        _vla.set_instruction(instruction)
-        return True
-    print("tools: VLA not configured (--vla-endpoint)")
-    return False
+def navigate(heading_deg):
+    """Start navigating toward heading. 0=forward, 90=left, -90=right. None=stop."""
+    if heading_deg is None:
+        navigator.clear_goal()
+    else:
+        navigator.set_goal(float(heading_deg))
 
-def vla_stop():
-    """Clear VLA instruction and buffer."""
-    if _vla is not None:
-        _vla.set_instruction("")
+def navigate_stop():
+    """Stop reactive navigation."""
+    navigator.clear_goal()
 
 
 # --- Raw access for main loop ---
@@ -131,6 +127,3 @@ def get_wheelbase():
 
 def get_ui():
     return _ui
-
-def get_vla():
-    return _vla

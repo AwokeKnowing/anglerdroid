@@ -10,6 +10,7 @@ import cv2
 
 import tools
 import vision as vision_mod
+import navigator
 
 try:
     import rerun as rr
@@ -39,7 +40,6 @@ def main():
     parser.add_argument("--google-client-id", default="", help="Google OAuth client ID for sign-in")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP server port")
     parser.add_argument("--ws-port", type=int, default=8081, help="WebSocket server port")
-    parser.add_argument("--vla-endpoint", default="", help="VLA server URL (e.g. http://192.168.1.50:8090)")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -79,16 +79,7 @@ def main():
     )
     u.start()
 
-    # VLA (Vision-Language-Action)
-    vla = None
-    vla_endpoint = args.vla_endpoint or os.environ.get("VLA_ENDPOINT", "")
-    if vla_endpoint:
-        from vla import VLAClient
-        vla = VLAClient(vla_endpoint)
-        vla.start()
-
-    tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u,
-               vla_instance=vla)
+    tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
     show_ok = not args.no_show
     _XOFF_CENTER = 320
@@ -130,6 +121,7 @@ def main():
                         float(vision_mod.FW_HEIGHT_CLIP), vision_mod.TD_X_OFFSET,
                         vision_mod.FW_X_OFFSET, float(vision_mod.FW_PX_SIZE) * 1000),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    navigator.draw_overlay(display)
                     cv2.imshow("vision atlas", display)
                     cv2.waitKey(1)
                 except cv2.error:
@@ -139,9 +131,6 @@ def main():
             if frame_id % TARGET_FPS == 0 and atlas is not None:
                 u.send_atlas(atlas)
 
-            # Feed atlas to VLA at ~10 fps (every 3 frames)
-            if vla is not None and frame_id % 3 == 0 and atlas is not None:
-                vla.update_atlas(atlas)
 
             if HAS_RERUN and not args.no_rerun:
                 rr.set_time_seconds("capture", ts)
@@ -168,14 +157,12 @@ def main():
 
                 if gamepad_active:
                     wb.cancel_twist_for()
-                    if vla:
-                        vla.clear_buffer()
+                    navigator.clear_goal()
                     tools.set_wheel_vels(left_tps, right_tps)
                 elif not wb.is_twist_for_active():
-                    # VLA action or idle
-                    action = vla.get_action() if vla else None
-                    if action is not None:
-                        tools.twist(action["forward_mps"], action["angular_rads"])
+                    twist = navigator.compute_twist(atlas) if atlas is not None else None
+                    if twist is not None:
+                        tools.twist(twist[0], twist[1])
                     else:
                         tools.set_wheel_vels(0.0, 0.0)
 
@@ -195,11 +182,14 @@ def main():
                     elif name == "stop":
                         if wb:
                             wb.cancel_twist_for()
+                        navigator.clear_goal()
                         tools.stop()
-                        if vla:
-                            vla.set_instruction("")
-                    elif name == "vision_lang_act":
-                        tools.vision_lang_act(cargs.get("instruction", ""))
+                    elif name == "navigate":
+                        hdg = cargs.get("heading_deg")
+                        if hdg is not None:
+                            navigator.set_goal(float(hdg))
+                        else:
+                            navigator.clear_goal()
                     elif name == "twist":
                         tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
                     elif name == "set_wheel_vels":
@@ -224,13 +214,12 @@ def main():
                 process_sum = 0.0
                 wait_sum = 0.0
                 last_report = now
-                vla_info = ""
-                if vla:
-                    inst = vla.get_instruction()
-                    vla_info = "  vla=%s buf=%d" % (
-                        ("'%s'" % inst[:20]) if inst else "idle", vla.buffer_size())
+                nav_info = ""
+                hdg = navigator.get_goal()
+                if hdg is not None:
+                    nav_info = "  nav=%.0f°" % hdg
                 print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)%s" % (
-                    actual_fps, avg_process, avg_wait, BUDGET_MS, vla_info))
+                    actual_fps, avg_process, avg_wait, BUDGET_MS, nav_info))
     except KeyboardInterrupt:
         pass
     finally:
@@ -241,8 +230,7 @@ def main():
                 pass
         vis.stop()
         u.stop()
-        if vla:
-            vla.stop()
+        navigator.clear_goal()
         if wb:
             wb.shutdown()
         print("main: shutdown complete")

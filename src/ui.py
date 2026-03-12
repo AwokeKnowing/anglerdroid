@@ -307,19 +307,18 @@ class UI:
                     self.push_tool_calls([{"name": "stop", "args": {}}])
                     self._broadcast({"type": "chat", "sender": "sys", "text": "stop sent"})
 
-                elif t == "reka_cmd":
-                    instruction = data.get("instruction", "").strip()
-                    if instruction:
-                        self.push_tool_calls([{"name": "vision_lang_act",
-                                               "args": {"instruction": instruction}}])
+                elif t == "navigate":
+                    heading = data.get("heading_deg")
+                    if heading is not None:
+                        self.push_tool_calls([{"name": "navigate",
+                                               "args": {"heading_deg": float(heading)}}])
                         self._broadcast({"type": "chat", "sender": "user",
-                                         "text": "[VLA] " + instruction})
+                                         "text": "[NAV] heading %s°" % heading})
 
-                elif t == "vla_stop":
-                    self.push_tool_calls([{"name": "vision_lang_act",
-                                           "args": {"instruction": ""}}])
+                elif t == "nav_stop":
+                    self.push_tool_calls([{"name": "stop", "args": {}}])
                     self._broadcast({"type": "chat", "sender": "sys",
-                                     "text": "VLA stopped"})
+                                     "text": "Navigation stopped"})
 
                 elif t == "launch_ai":
                     self._start_gemini()
@@ -593,14 +592,14 @@ class UI:
             time.sleep(wait)
 
         tools_def = [{"function_declarations": [
-            {"name": "vision_lang_act",
-             "description": "Navigate using the VLA model. Give a concrete instruction like 'go to the chair', 'navigate around the pillow', 'turn to face the door'. The model continuously plans and executes low-level actions from camera frames. Call stop() to cancel.",
+            {"name": "navigate",
+             "description": "Navigate toward a heading. The robot avoids obstacles automatically. 0=forward, 90=left, -90=right, 180=backward. Use this for all movement. Call stop() to halt.",
              "parameters": {"type": "object", "properties": {
-                 "instruction": {"type": "string",
-                                 "description": "Concrete navigation instruction"},
-             }, "required": ["instruction"]}},
+                 "heading_deg": {"type": "number",
+                                 "description": "Goal heading in degrees. 0=forward, 90=left, -90=right, 180=backward"},
+             }, "required": ["heading_deg"]}},
             {"name": "twist_for",
-             "description": "Direct move: forward_mps (m/s), angular_rads (rad/s, positive=left), duration_secs. Use for simple adjustments. For navigation tasks, prefer vision_lang_act.",
+             "description": "Direct timed move without obstacle avoidance. forward_mps (m/s), angular_rads (rad/s, +left). Only for precise adjustments where navigate() is too coarse.",
              "parameters": {"type": "object", "properties": {
                  "forward_mps": {"type": "number"},
                  "angular_rads": {"type": "number"},
@@ -609,7 +608,7 @@ class UI:
                  "ramp_out_secs": {"type": "number"},
              }, "required": ["forward_mps", "angular_rads"]}},
             {"name": "stop",
-             "description": "Immediately stop all motion and cancel VLA navigation",
+             "description": "Immediately stop all motion and navigation",
              "parameters": {"type": "object", "properties": {}}},
         ]}]
 

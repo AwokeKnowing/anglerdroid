@@ -1,7 +1,12 @@
 """
-reka_server.py – Standalone VLA inference server for Reka Edge.
+reka_server.py – VLM-based local planner using Reka Edge.
 Runs on a desktop GPU (e.g. 3090). Robot sends atlas frames over HTTP,
-gets back a batch of twist actions.
+gets back movement actions.
+
+Approach: Discrete action classification (inspired by PIVOT, DeepMind 2024).
+VLMs are good at *choosing* among options, not generating precise numbers.
+We define a fixed set of named actions and ask the model to pick one.
+Action history is included so the model knows what it just did.
 
 Usage:
     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
@@ -24,32 +29,58 @@ _processor = None
 _device = None
 _request_count = 0
 ACTIONS_PER_BATCH = 2
-CONTEXT_TURNS = 4  # keep last N action outputs as conversation memory
 
-_conversation = []  # list of {"role": ..., "content": ...} dicts (text only, no old images)
+# ── Discrete action table ──────────────────────────────────────
+# Each action has a name, forward speed (m/s), and turn rate (rad/s).
+# The VLM picks from these by number. This is a classification problem,
+# which VLMs handle far better than free-form number generation.
+
+ACTION_TABLE = [
+    ("FORWARD",       0.20,  0.0),
+    ("FORWARD_LEFT",  0.15,  0.35),
+    ("FORWARD_RIGHT", 0.15, -0.35),
+    ("LEFT",          0.0,   0.5),
+    ("RIGHT",         0.0,  -0.5),
+    ("SLIGHT_LEFT",   0.20,  0.15),
+    ("SLIGHT_RIGHT",  0.20, -0.15),
+    ("BACKWARD",     -0.15,  0.0),
+    ("STOP",          0.0,   0.0),
+]
+
+_action_by_name = {a[0]: a for a in ACTION_TABLE}
+
+def _action_list_str():
+    lines = []
+    for i, (name, fwd, turn) in enumerate(ACTION_TABLE):
+        lines.append("%d. %s" % (i + 1, name))
+    return "\n".join(lines)
+
+VLA_PROMPT = """You are the local navigation planner for a wheeled robot.
+
+THE IMAGE shows 4 camera views arranged in a 2x2 grid:
+- TOP-LEFT: forward-facing RGB camera (main view of the room)
+- BOTTOM-LEFT: forward-facing depth camera (closer obstacles appear larger/brighter)
+- TOP-RIGHT: top-down overhead view (robot faces RIGHT in this view)
+- BOTTOM-RIGHT: obstacle map (robot faces RIGHT, colored=obstacles, black=clear)
+
+AVAILABLE ACTIONS (pick ONE number):
+%s
+
+RULES:
+- Pick the single best action number for the current situation.
+- Navigate AROUND obstacles, not into them.
+- Use depth camera (bottom-left) and obstacle map (bottom-right) to judge proximity.
+- If the path ahead is clear, prefer FORWARD or SLIGHT turns.
+- If obstacle is close on one side, turn AWAY from it.
+- Only pick STOP if you have arrived at the goal or are about to collide head-on.
+- Only pick BACKWARD if completely stuck.
+
+Reply with ONLY the action number (1-9), nothing else.""" % _action_list_str()
+
+# Server-side action history (last N actions chosen)
+HISTORY_LEN = 4
+_action_history = []  # list of action name strings
 _current_instruction = ""
-
-VLA_PROMPT = """You control a wheeled robot indoors. The image is a 2x2 camera grid:
-- Top-left: forward RGB camera (main view, room layout and target)
-- Bottom-left: forward depth camera RGB (obstacle avoidance, close objects appear large)
-- Top-right: top-down camera RGB (robot faces RIGHT in this view)
-- Bottom-right: obstacle map (robot faces RIGHT, black=clear, colored dots=obstacles)
-
-You are the local planner. Navigate around obstacles to reach the goal.
-You receive a fresh image every second and output 2 actions covering 0.5s each.
-
-Output exactly 2 number pairs: forward_speed,turn_speed;forward_speed,turn_speed
-forward_speed: -0.3 to 0.3 (positive=forward, <0.05 won't move on carpet)
-turn_speed: -1.0 to 1.0 (positive=turn left)
-
-Examples:
-Go forward: 0.2,0;0.2,0
-Turn left: 0,0.5;0,0.5
-Arc right: 0.15,-0.3;0.15,-0.3
-Stop: 0,0;0,0
-
-Steer around obstacles. Only stop if about to collide or you arrived.
-Output ONLY the 2 pairs, nothing else."""
 
 
 def load_model(device_str="cuda", quantize=True):
@@ -86,12 +117,11 @@ def load_model(device_str="cuda", quantize=True):
 
 
 def infer(image_bytes, instruction):
-    global _conversation, _current_instruction
+    global _action_history, _current_instruction
     import torch
 
-    # Reset context if instruction changed
     if instruction != _current_instruction:
-        _conversation = []
+        _action_history = []
         _current_instruction = instruction
 
     fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
@@ -99,23 +129,19 @@ def infer(image_bytes, instruction):
         os.write(fd, image_bytes)
         os.close(fd)
 
-        # Build messages: system prompt + text-only history + current image+instruction
-        messages = []
+        # Build prompt with action history for temporal context
+        prompt_parts = [VLA_PROMPT, "", "Task: " + instruction]
+        if _action_history:
+            recent = _action_history[-HISTORY_LEN:]
+            prompt_parts.append("Your recent actions were: " + ", ".join(recent))
+            prompt_parts.append("Consider whether these actions are working or if you need to adjust.")
 
-        # First turn always gets the system prompt + image
-        if not _conversation:
-            messages.append({"role": "user", "content": [
-                {"type": "image", "image": tmp_path},
-                {"type": "text", "text": VLA_PROMPT + "\n\nInstruction: " + instruction},
-            ]})
-        else:
-            # Replay text-only history, then current image + short prompt
-            for turn in _conversation[-(CONTEXT_TURNS * 2):]:
-                messages.append(turn)
-            messages.append({"role": "user", "content": [
-                {"type": "image", "image": tmp_path},
-                {"type": "text", "text": "New image. Continue: " + instruction},
-            ]})
+        full_prompt = "\n".join(prompt_parts)
+
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": tmp_path},
+            {"type": "text", "text": full_prompt},
+        ]}]
 
         inputs = _processor.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
@@ -131,27 +157,21 @@ def infer(image_bytes, instruction):
         with torch.inference_mode():
             sep_id = _processor.tokenizer.convert_tokens_to_ids("<sep>")
             output_ids = _model.generate(
-                **inputs, max_new_tokens=150, do_sample=False,
+                **inputs, max_new_tokens=10, do_sample=False,
                 eos_token_id=[_processor.tokenizer.eos_token_id, sep_id],
             )
 
         new_tokens = output_ids[0, inputs["input_ids"].shape[1]:]
         text = _processor.tokenizer.decode(new_tokens, skip_special_tokens=True)
         text = text.replace("<sep>", "").strip()
-        print("MODEL RAW: %s" % text[:500])
+        print("MODEL RAW: %s" % text[:200])
 
-        # Append this exchange to context (text only — no images in history)
-        _conversation.append({"role": "user", "content": [
-            {"type": "text", "text": "Instruction: " + instruction},
-        ]})
-        _conversation.append({"role": "assistant", "content": [
-            {"type": "text", "text": text},
-        ]})
-        # Trim to keep bounded
-        if len(_conversation) > CONTEXT_TURNS * 2:
-            _conversation = _conversation[-(CONTEXT_TURNS * 2):]
+        actions, chosen_name = _parse_choice(text)
+        _action_history.append(chosen_name)
+        if len(_action_history) > HISTORY_LEN:
+            _action_history = _action_history[-HISTORY_LEN:]
 
-        return _parse_actions(text), text
+        return actions, "%s -> %s" % (text, chosen_name)
     finally:
         try:
             os.unlink(tmp_path)
@@ -162,61 +182,47 @@ def infer(image_bytes, instruction):
 def mock_infer(image_bytes, instruction):
     """Keyword-based mock for testing without the model."""
     time.sleep(0.3)
-    N = ACTIONS_PER_BATCH
     inst = instruction.lower()
     if "forward" in inst or "straight" in inst or "ahead" in inst:
-        return [{"forward_mps": 0.15, "angular_rads": 0.0}] * N
-    if "left" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": 0.4}] * N
-    if "right" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": -0.4}] * N
-    if "back" in inst:
-        return [{"forward_mps": -0.15, "angular_rads": 0.0}] * N
-    if "spin" in inst or "turn around" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.6}] * N
-    if "stop" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.0}] * N
-    return [{"forward_mps": 0.12, "angular_rads": 0.0}] * N
+        name = "FORWARD"
+    elif "left" in inst:
+        name = "FORWARD_LEFT"
+    elif "right" in inst:
+        name = "FORWARD_RIGHT"
+    elif "back" in inst:
+        name = "BACKWARD"
+    elif "spin" in inst or "turn around" in inst:
+        name = "LEFT"
+    elif "stop" in inst:
+        name = "STOP"
+    else:
+        name = "FORWARD"
+    a = _action_by_name[name]
+    action = {"forward_mps": a[1], "angular_rads": a[2]}
+    return [action.copy() for _ in range(ACTIONS_PER_BATCH)]
 
 
-def _parse_actions(text):
-    """Extract action pairs from any format the model produces."""
-    # Extract all floats from the text
-    nums = [float(x) for x in re.findall(r"-?[\d]+\.?[\d]*", text)]
+def _parse_choice(text):
+    """Parse model output as an action number (1-9). Returns (actions_list, chosen_name)."""
+    # Extract any digit from the response
+    digits = re.findall(r"\d+", text)
+    for d in digits:
+        idx = int(d) - 1  # 1-indexed to 0-indexed
+        if 0 <= idx < len(ACTION_TABLE):
+            name, fwd, turn = ACTION_TABLE[idx]
+            action = {"forward_mps": fwd, "angular_rads": turn}
+            return [action.copy() for _ in range(ACTIONS_PER_BATCH)], name
 
-    if len(nums) >= 2:
-        # Pair them up: (fwd, ang), (fwd, ang), ...
-        out = []
-        for k in range(0, len(nums) - 1, 2):
-            out.append({
-                "forward_mps": max(-0.3, min(0.3, nums[k])),
-                "angular_rads": max(-1.0, min(1.0, nums[k + 1])),
-            })
-        while len(out) < ACTIONS_PER_BATCH:
-            out.append(out[-1].copy())
-        return out[:ACTIONS_PER_BATCH]
+    # Try matching action name directly
+    upper = text.upper().replace(" ", "_")
+    for name, fwd, turn in ACTION_TABLE:
+        if name in upper:
+            action = {"forward_mps": fwd, "angular_rads": turn}
+            return [action.copy() for _ in range(ACTIONS_PER_BATCH)], name
 
-    # Fallback: try JSON array
-    match = re.search(r"\[.*\]", text, re.DOTALL)
-    if match:
-        try:
-            raw = json.loads(match.group())
-            out = []
-            for a in raw:
-                if isinstance(a, dict):
-                    out.append({
-                        "forward_mps": max(-0.3, min(0.3, float(a.get("forward_mps", 0)))),
-                        "angular_rads": max(-1.0, min(1.0, float(a.get("angular_rads", 0)))),
-                    })
-            if out:
-                while len(out) < ACTIONS_PER_BATCH:
-                    out.append(out[-1].copy())
-                return out[:ACTIONS_PER_BATCH]
-        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
-            pass
-
-    print("WARNING: could not parse actions from: %s" % text[:300])
-    return [{"forward_mps": 0.0, "angular_rads": 0.0}] * ACTIONS_PER_BATCH
+    print("WARNING: could not parse choice from: %s — defaulting to STOP" % text[:300])
+    action = {"forward_mps": 0.0, "angular_rads": 0.0}
+    return [action.copy() for _ in range(ACTIONS_PER_BATCH)], "STOP"
 
 
 # ── HTTP handler ──────────────────────────────────────────────────
@@ -264,8 +270,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-        print("#%d  %d actions  %.0f ms  | %s" % (
-            _request_count, len(actions), dt * 1000, instruction[:60]))
+        print("#%d  %d actions  %.0f ms  | %s  ->  %s" % (
+            _request_count, len(actions), dt * 1000, instruction[:40],
+            raw_text[:60] if raw_text else "?"))
 
     def do_GET(self):
         if self.path == "/health":
@@ -303,6 +310,7 @@ def main():
 
     server = HTTPServer(("0.0.0.0", args.port), Handler)
     print("Reka VLA server on :%d   (Ctrl+C to quit)" % args.port)
+    print("Action table: %s" % [a[0] for a in ACTION_TABLE])
     try:
         server.serve_forever()
     except KeyboardInterrupt:
