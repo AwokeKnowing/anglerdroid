@@ -54,7 +54,8 @@ def load_model(device_str="cuda", quantize=True):
     _device = torch.device(device_str)
 
     print("Loading %s on %s (quantize=%s) …" % (model_id, device_str, quantize))
-    _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True,
+                                               use_fast=True)
 
     load_kwargs = {"trust_remote_code": True}
     if quantize:
