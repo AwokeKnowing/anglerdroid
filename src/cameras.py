@@ -158,7 +158,7 @@ class WebCam:
             f = cv2.cvtColor(f, cv2.COLOR_BGRA2BGR)
         if f.shape[1] != FRAME_W or f.shape[0] != FRAME_H:
             f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
-        f = f[::-1, :]  # vflip (camera mounted upside down)
+        f = f[::-1, ::-1]  # vflip + hflip (camera upside down and mirrored)
         f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         np.copyto(self.color, f)
         self.ok = True
