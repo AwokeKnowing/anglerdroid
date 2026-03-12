@@ -23,7 +23,7 @@ FRAMES_PER_ACTION = 10   # 333 ms at 30 fps
 INFER_TIMEOUT = 15.0
 MAX_FORWARD_MPS = 0.3
 MAX_ANGULAR_RDS = 1.0
-MAX_INSTRUCTION_SECS = 8.0  # auto-stop after this many seconds
+MAX_INSTRUCTION_SECS = 15.0  # auto-stop after this many seconds
 
 
 class VLAClient:

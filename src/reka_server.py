@@ -24,45 +24,28 @@ _processor = None
 _device = None
 _request_count = 0
 
-VLA_PROMPT = """You are the local navigation controller for a small wheeled robot indoors on carpet.
-A higher-level planner gives you instructions like "go to the chair" or "turn left".
-You must navigate around obstacles to reach the goal. You receive fresh camera images
-every few seconds and output a short batch of movement actions each time.
+VLA_PROMPT = """You control a wheeled robot indoors. The image is a 2x2 camera grid:
+- Top-left: forward RGB camera (main view, use for room layout and target)
+- Bottom-left: forward depth camera RGB (obstacle avoidance, close objects appear large)
+- Top-right: top-down camera RGB (robot faces RIGHT in this view)
+- Bottom-right: obstacle map (robot faces RIGHT, black=clear, colored dots=obstacles)
 
-Camera grid (2x2 image):
+You are the local planner. Navigate around obstacles to reach the goal. You get fresh images every few seconds.
 
-TOP-LEFT: Forward-facing RGB camera (main view). Use to understand the room, identify
-  furniture, doors, people, and where your target is.
+Output 8 action pairs as: forward_speed,turn_speed separated by semicolons.
+Each pair runs for 0.3 seconds. forward_speed: -0.3 to 0.3 (positive=forward, <0.05 won't move). turn_speed: -1.0 to 1.0 (positive=left).
 
-BOTTOM-LEFT: Forward-facing depth camera RGB (angled slightly down). PRIMARY obstacle
-  camera. Objects close to the robot appear large here. Use this to judge distance to
-  obstacles and find gaps to navigate through.
+Drive forward: 0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0
+Turn left: 0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5
+Arc right: 0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3
+Stop: 0,0;0,0;0,0;0,0;0,0;0,0;0,0;0,0
 
-TOP-RIGHT: Top-down depth camera RGB (looking down from above). The robot faces RIGHT
-  in this view. Obstacles on the right side of this image are directly ahead.
+Steer around obstacles. Only stop if about to collide or arrived.
 
-BOTTOM-RIGHT: Obstacle map from merged depth pointclouds. The robot faces RIGHT.
-  BLACK=clear, GREEN=obstacle (top cam), RED=obstacle (forward cam), YELLOW=both,
-  DIM BLUE=unknown. Obstacles to the RIGHT of center are ahead of the robot.
-
-Output exactly 8 steps as a JSON array. Each step runs 333 ms (~2.7s total).
-You will be called again with a fresh image to continue navigating.
-  forward_mps: -0.3 to 0.3 (positive=forward). Below 0.05 won't move on carpet.
-  angular_rads: -1.0 to 1.0 (positive=turn left).
-
-Navigation guidance:
-- You ARE the local planner. Navigate around furniture, walls, and obstacles.
-- If an obstacle is ahead, slow down and steer around it — don't just stop.
-- Only stop (all zeros) if you are about to collide imminently or you have arrived.
-- Typical forward speed: 0.15-0.25 m/s. Turn in place: angular 0.3-0.6, forward 0.
-- If the goal is not visible, explore by turning to scan the room.
-- If stuck or unable to make progress, output zeros. The higher-level planner will
-  give you a new instruction.
-
-Respond with ONLY the JSON array. No markdown, no text."""
+Output ONLY the 8 pairs. No text, no brackets, no labels."""
 
 
-def load_model(device_str="cuda"):
+def load_model(device_str="cuda", quantize=True):
     global _model, _processor, _device
     import torch
     from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -70,13 +53,28 @@ def load_model(device_str="cuda"):
     model_id = "RekaAI/reka-edge-2603"
     _device = torch.device(device_str)
 
-    print("Loading %s on %s …" % (model_id, device_str))
+    print("Loading %s on %s (quantize=%s) …" % (model_id, device_str, quantize))
     _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+
+    load_kwargs = {"trust_remote_code": True}
+    if quantize:
+        from transformers import BitsAndBytesConfig
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+    else:
+        load_kwargs["torch_dtype"] = torch.float16
+
     _model = AutoModelForImageTextToText.from_pretrained(
-        model_id, trust_remote_code=True, torch_dtype=torch.float16,
-    ).eval().to(_device)
-    print("Model ready (%.1f GB VRAM)" % (
-        sum(p.numel() * p.element_size() for p in _model.parameters()) / 1e9))
+        model_id, **load_kwargs
+    ).eval()
+
+    if not quantize:
+        _model = _model.to(_device)
+
+    param_bytes = sum(p.numel() * p.element_size() for p in _model.parameters())
+    print("Model ready (%.1f GB)" % (param_bytes / 1e9))
 
 
 def infer(image_bytes, instruction):
@@ -107,7 +105,7 @@ def infer(image_bytes, instruction):
         with torch.inference_mode():
             sep_id = _processor.tokenizer.convert_tokens_to_ids("<sep>")
             output_ids = _model.generate(
-                **inputs, max_new_tokens=1024, do_sample=False,
+                **inputs, max_new_tokens=150, do_sample=False,
                 eos_token_id=[_processor.tokenizer.eos_token_id, sep_id],
             )
 
@@ -143,21 +141,39 @@ def mock_infer(image_bytes, instruction):
 
 
 def _parse_actions(text):
-    """Extract a JSON array of actions from model output, with safe fallback."""
+    """Parse 'f,a;f,a;...' pairs, falling back to JSON array, then zeros."""
+    # Try compact format: 0.2,0.0;0.15,-0.3;...
+    pairs = re.findall(r"(-?[\d.]+)\s*,\s*(-?[\d.]+)", text)
+    if len(pairs) >= 2:
+        out = []
+        for fwd_s, ang_s in pairs:
+            try:
+                out.append({
+                    "forward_mps": max(-0.3, min(0.3, float(fwd_s))),
+                    "angular_rads": max(-1.0, min(1.0, float(ang_s))),
+                })
+            except ValueError:
+                continue
+        if out:
+            return out
+
+    # Fallback: try JSON array
     match = re.search(r"\[.*\]", text, re.DOTALL)
     if match:
         try:
             raw = json.loads(match.group())
             out = []
             for a in raw:
-                out.append({
-                    "forward_mps": max(-0.3, min(0.3, float(a.get("forward_mps", 0)))),
-                    "angular_rads": max(-1.0, min(1.0, float(a.get("angular_rads", 0)))),
-                })
+                if isinstance(a, dict):
+                    out.append({
+                        "forward_mps": max(-0.3, min(0.3, float(a.get("forward_mps", 0)))),
+                        "angular_rads": max(-1.0, min(1.0, float(a.get("angular_rads", 0)))),
+                    })
             if out:
                 return out
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
+
     print("WARNING: could not parse actions from: %s" % text[:300])
     return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 8
 
@@ -233,13 +249,15 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--mock", action="store_true", help="Mock inference (no model)")
     ap.add_argument("--device", default="cuda", help="torch device")
+    ap.add_argument("--no-quantize", action="store_true",
+                    help="Disable 4-bit quantization (uses more VRAM, not faster)")
     args = ap.parse_args()
 
     if args.mock:
         print("=== MOCK MODE (no model) ===")
         Handler.infer_fn = staticmethod(mock_infer)
     else:
-        load_model(args.device)
+        load_model(args.device, quantize=not args.no_quantize)
         Handler.infer_fn = staticmethod(infer)
 
     server = HTTPServer(("0.0.0.0", args.port), Handler)

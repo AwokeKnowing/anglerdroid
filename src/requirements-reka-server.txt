@@ -6,3 +6,5 @@ pillow
 tiktoken
 imageio
 einops
+bitsandbytes
+accelerate
