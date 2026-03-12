@@ -1,0 +1,8 @@
+# Desktop GPU requirements for reka_server.py
+# Install torch separately for your CUDA version first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+transformers==4.57.3
+pillow
+tiktoken
+imageio
+einops

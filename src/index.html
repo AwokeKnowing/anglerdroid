@@ -81,6 +81,12 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <input type="text" id="chat-input" placeholder="Type a message..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #444;background:#222;color:#eee;font-size:.85rem" onkeydown="if(event.key==='Enter')sendChat()">
         <button class="btn-primary" onclick="sendChat()">Send</button>
       </div>
+      <div style="display:flex;gap:6px;margin-top:8px">
+        <input type="text" id="reka-input" placeholder="VLA: navigate to..." style="flex:1;padding:8px;border-radius:6px;border:1px solid #644;background:#221;color:#f88;font-size:.85rem" onkeydown="if(event.key==='Enter')sendRekaCmd()">
+        <button class="btn-secondary" onclick="sendRekaCmd()" style="background:#643">Go</button>
+        <button class="btn-secondary" onclick="stopVLA()" style="background:#433;font-size:.7rem">Stop</button>
+      </div>
+      <div id="vla-status" style="font-size:.7rem;color:#666;margin-top:2px"></div>
     </div>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
@@ -202,6 +208,20 @@ function sendChat() {
   if (!text || role !== 'control' || !ws) return;
   ws.send(JSON.stringify({type: 'speech', text: text}));
   el.value = '';
+}
+
+function sendRekaCmd() {
+  const el = document.getElementById('reka-input');
+  const text = el.value.trim();
+  if (!text || role !== 'control' || !ws) return;
+  ws.send(JSON.stringify({type: 'reka_cmd', instruction: text}));
+  document.getElementById('vla-status').textContent = 'VLA: ' + text;
+}
+
+function stopVLA() {
+  if (ws) ws.send(JSON.stringify({type: 'vla_stop'}));
+  document.getElementById('vla-status').textContent = 'VLA: idle';
+  document.getElementById('reka-input').value = '';
 }
 
 function toggleAI() {

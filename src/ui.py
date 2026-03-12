@@ -307,6 +307,20 @@ class UI:
                     self.push_tool_calls([{"name": "stop", "args": {}}])
                     self._broadcast({"type": "chat", "sender": "sys", "text": "stop sent"})
 
+                elif t == "reka_cmd":
+                    instruction = data.get("instruction", "").strip()
+                    if instruction:
+                        self.push_tool_calls([{"name": "vision_lang_act",
+                                               "args": {"instruction": instruction}}])
+                        self._broadcast({"type": "chat", "sender": "user",
+                                         "text": "[VLA] " + instruction})
+
+                elif t == "vla_stop":
+                    self.push_tool_calls([{"name": "vision_lang_act",
+                                           "args": {"instruction": ""}}])
+                    self._broadcast({"type": "chat", "sender": "sys",
+                                     "text": "VLA stopped"})
+
                 elif t == "launch_ai":
                     self._start_gemini()
 
@@ -579,8 +593,14 @@ class UI:
             time.sleep(wait)
 
         tools_def = [{"function_declarations": [
+            {"name": "vision_lang_act",
+             "description": "Navigate using the VLA model. Give a concrete instruction like 'go to the chair', 'navigate around the pillow', 'turn to face the door'. The model continuously plans and executes low-level actions from camera frames. Call stop() to cancel.",
+             "parameters": {"type": "object", "properties": {
+                 "instruction": {"type": "string",
+                                 "description": "Concrete navigation instruction"},
+             }, "required": ["instruction"]}},
             {"name": "twist_for",
-             "description": "Move robot: forward_mps (m/s, negative=backward), angular_rads (rad/s, positive=left), duration_secs, ramp_in_secs, ramp_out_secs. Only when user asks.",
+             "description": "Direct move: forward_mps (m/s), angular_rads (rad/s, positive=left), duration_secs. Use for simple adjustments. For navigation tasks, prefer vision_lang_act.",
              "parameters": {"type": "object", "properties": {
                  "forward_mps": {"type": "number"},
                  "angular_rads": {"type": "number"},
@@ -589,7 +609,7 @@ class UI:
                  "ramp_out_secs": {"type": "number"},
              }, "required": ["forward_mps", "angular_rads"]}},
             {"name": "stop",
-             "description": "Immediately stop the robot",
+             "description": "Immediately stop all motion and cancel VLA navigation",
              "parameters": {"type": "object", "properties": {}}},
         ]}]
 
