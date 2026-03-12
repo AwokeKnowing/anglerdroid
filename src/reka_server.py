@@ -23,26 +23,33 @@ _model = None
 _processor = None
 _device = None
 _request_count = 0
+ACTIONS_PER_BATCH = 2
+CONTEXT_TURNS = 4  # keep last N action outputs as conversation memory
+
+_conversation = []  # list of {"role": ..., "content": ...} dicts (text only, no old images)
+_current_instruction = ""
 
 VLA_PROMPT = """You control a wheeled robot indoors. The image is a 2x2 camera grid:
-- Top-left: forward RGB camera (main view, use for room layout and target)
+- Top-left: forward RGB camera (main view, room layout and target)
 - Bottom-left: forward depth camera RGB (obstacle avoidance, close objects appear large)
 - Top-right: top-down camera RGB (robot faces RIGHT in this view)
 - Bottom-right: obstacle map (robot faces RIGHT, black=clear, colored dots=obstacles)
 
-You are the local planner. Navigate around obstacles to reach the goal. You get fresh images every few seconds.
+You are the local planner. Navigate around obstacles to reach the goal.
+You receive a fresh image every second and output 2 actions covering 0.5s each.
 
-Output 8 action pairs as: forward_speed,turn_speed separated by semicolons.
-Each pair runs for 0.3 seconds. forward_speed: -0.3 to 0.3 (positive=forward, <0.05 won't move). turn_speed: -1.0 to 1.0 (positive=left).
+Output exactly 2 number pairs: forward_speed,turn_speed;forward_speed,turn_speed
+forward_speed: -0.3 to 0.3 (positive=forward, <0.05 won't move on carpet)
+turn_speed: -1.0 to 1.0 (positive=turn left)
 
-Drive forward: 0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0;0.2,0
-Turn left: 0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5;0,0.5
-Arc right: 0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3;0.15,-0.3
-Stop: 0,0;0,0;0,0;0,0;0,0;0,0;0,0;0,0
+Examples:
+Go forward: 0.2,0;0.2,0
+Turn left: 0,0.5;0,0.5
+Arc right: 0.15,-0.3;0.15,-0.3
+Stop: 0,0;0,0
 
-Steer around obstacles. Only stop if about to collide or arrived.
-
-Output ONLY the 8 pairs. No text, no brackets, no labels."""
+Steer around obstacles. Only stop if about to collide or you arrived.
+Output ONLY the 2 pairs, nothing else."""
 
 
 def load_model(device_str="cuda", quantize=True):
@@ -79,18 +86,36 @@ def load_model(device_str="cuda", quantize=True):
 
 
 def infer(image_bytes, instruction):
+    global _conversation, _current_instruction
     import torch
+
+    # Reset context if instruction changed
+    if instruction != _current_instruction:
+        _conversation = []
+        _current_instruction = instruction
 
     fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
     try:
         os.write(fd, image_bytes)
         os.close(fd)
 
-        prompt = VLA_PROMPT + "\n\nInstruction: " + instruction
-        messages = [{"role": "user", "content": [
-            {"type": "image", "image": tmp_path},
-            {"type": "text", "text": prompt},
-        ]}]
+        # Build messages: system prompt + text-only history + current image+instruction
+        messages = []
+
+        # First turn always gets the system prompt + image
+        if not _conversation:
+            messages.append({"role": "user", "content": [
+                {"type": "image", "image": tmp_path},
+                {"type": "text", "text": VLA_PROMPT + "\n\nInstruction: " + instruction},
+            ]})
+        else:
+            # Replay text-only history, then current image + short prompt
+            for turn in _conversation[-(CONTEXT_TURNS * 2):]:
+                messages.append(turn)
+            messages.append({"role": "user", "content": [
+                {"type": "image", "image": tmp_path},
+                {"type": "text", "text": "New image. Continue: " + instruction},
+            ]})
 
         inputs = _processor.apply_chat_template(
             messages, tokenize=True, add_generation_prompt=True,
@@ -114,6 +139,18 @@ def infer(image_bytes, instruction):
         text = _processor.tokenizer.decode(new_tokens, skip_special_tokens=True)
         text = text.replace("<sep>", "").strip()
         print("MODEL RAW: %s" % text[:500])
+
+        # Append this exchange to context (text only — no images in history)
+        _conversation.append({"role": "user", "content": [
+            {"type": "text", "text": "Instruction: " + instruction},
+        ]})
+        _conversation.append({"role": "assistant", "content": [
+            {"type": "text", "text": text},
+        ]})
+        # Trim to keep bounded
+        if len(_conversation) > CONTEXT_TURNS * 2:
+            _conversation = _conversation[-(CONTEXT_TURNS * 2):]
+
         return _parse_actions(text), text
     finally:
         try:
@@ -125,38 +162,39 @@ def infer(image_bytes, instruction):
 def mock_infer(image_bytes, instruction):
     """Keyword-based mock for testing without the model."""
     time.sleep(0.3)
+    N = ACTIONS_PER_BATCH
     inst = instruction.lower()
     if "forward" in inst or "straight" in inst or "ahead" in inst:
-        return [{"forward_mps": 0.15, "angular_rads": 0.0}] * 8
+        return [{"forward_mps": 0.15, "angular_rads": 0.0}] * N
     if "left" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": 0.4}] * 8
+        return [{"forward_mps": 0.10, "angular_rads": 0.4}] * N
     if "right" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": -0.4}] * 8
+        return [{"forward_mps": 0.10, "angular_rads": -0.4}] * N
     if "back" in inst:
-        return [{"forward_mps": -0.15, "angular_rads": 0.0}] * 8
+        return [{"forward_mps": -0.15, "angular_rads": 0.0}] * N
     if "spin" in inst or "turn around" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.6}] * 8
+        return [{"forward_mps": 0.0, "angular_rads": 0.6}] * N
     if "stop" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 8
-    return [{"forward_mps": 0.12, "angular_rads": 0.0}] * 8
+        return [{"forward_mps": 0.0, "angular_rads": 0.0}] * N
+    return [{"forward_mps": 0.12, "angular_rads": 0.0}] * N
 
 
 def _parse_actions(text):
-    """Parse 'f,a;f,a;...' pairs, falling back to JSON array, then zeros."""
-    # Try compact format: 0.2,0.0;0.15,-0.3;...
-    pairs = re.findall(r"(-?[\d.]+)\s*,\s*(-?[\d.]+)", text)
-    if len(pairs) >= 2:
+    """Extract action pairs from any format the model produces."""
+    # Extract all floats from the text
+    nums = [float(x) for x in re.findall(r"-?[\d]+\.?[\d]*", text)]
+
+    if len(nums) >= 2:
+        # Pair them up: (fwd, ang), (fwd, ang), ...
         out = []
-        for fwd_s, ang_s in pairs:
-            try:
-                out.append({
-                    "forward_mps": max(-0.3, min(0.3, float(fwd_s))),
-                    "angular_rads": max(-1.0, min(1.0, float(ang_s))),
-                })
-            except ValueError:
-                continue
-        if out:
-            return out
+        for k in range(0, len(nums) - 1, 2):
+            out.append({
+                "forward_mps": max(-0.3, min(0.3, nums[k])),
+                "angular_rads": max(-1.0, min(1.0, nums[k + 1])),
+            })
+        while len(out) < ACTIONS_PER_BATCH:
+            out.append(out[-1].copy())
+        return out[:ACTIONS_PER_BATCH]
 
     # Fallback: try JSON array
     match = re.search(r"\[.*\]", text, re.DOTALL)
@@ -171,12 +209,14 @@ def _parse_actions(text):
                         "angular_rads": max(-1.0, min(1.0, float(a.get("angular_rads", 0)))),
                     })
             if out:
-                return out
+                while len(out) < ACTIONS_PER_BATCH:
+                    out.append(out[-1].copy())
+                return out[:ACTIONS_PER_BATCH]
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
 
     print("WARNING: could not parse actions from: %s" % text[:300])
-    return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 8
+    return [{"forward_mps": 0.0, "angular_rads": 0.0}] * ACTIONS_PER_BATCH
 
 
 # ── HTTP handler ──────────────────────────────────────────────────

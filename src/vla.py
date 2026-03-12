@@ -17,9 +17,8 @@ from urllib.error import HTTPError, URLError
 import cv2
 import numpy as np
 
-ACTIONS_PER_BATCH = 8
-REFILL_THRESHOLD = 3
-FRAMES_PER_ACTION = 10   # 333 ms at 30 fps
+ACTIONS_PER_BATCH = 2
+FRAMES_PER_ACTION = 15   # 0.5 s at 30 fps (2 actions = 1s, matches 1fps inference)
 INFER_TIMEOUT = 15.0
 MAX_FORWARD_MPS = 0.3
 MAX_ANGULAR_RDS = 1.0
@@ -154,6 +153,7 @@ class VLAClient:
     # ── background thread ─────────────────────────────────────
 
     def _loop(self):
+        """Continuous 1fps loop: send frame → infer → replace actions → repeat."""
         while self._running:
             try:
                 with self._instruction_lock:
@@ -168,18 +168,13 @@ class VLAClient:
                     time.sleep(0.1)
                     continue
 
-                with self._actions_lock:
-                    buf_len = len(self._actions)
+                with self._atlas_lock:
+                    atlas = self._latest_atlas
 
-                if buf_len <= REFILL_THRESHOLD and not self._requesting:
-                    with self._atlas_lock:
-                        atlas = self._latest_atlas
-                    if atlas is not None:
-                        self._request_actions(atlas, instruction)
-                    else:
-                        time.sleep(0.1)
+                if atlas is not None:
+                    self._request_actions(atlas, instruction)
                 else:
-                    time.sleep(0.05)
+                    time.sleep(0.1)
             except Exception as e:
                 print("vla: loop error: %s" % e)
                 time.sleep(1.0)
