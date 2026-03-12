@@ -447,6 +447,9 @@ class UI:
                 if not msg["parts"]:
                     msg["parts"] = [{"text": "(image removed from history)"}]
 
+    AGENT_MAX_TURNS = 10
+    AGENT_OBSERVE_DELAY = 3.0  # seconds between agent turns (let action take effect)
+
     def _send_to_gemini(self, system_prompt, user_text=None, audio_parts=None):
         with self._atlas_lock:
             atlas = self._latest_atlas
@@ -471,17 +474,75 @@ class UI:
         else:
             parts.append({"text": "[Camera update. Respond only if safety concern.]"})
         self._conversation.append({"role": "user", "parts": parts})
-        if len(self._conversation) > 20:
-            self._conversation = self._conversation[-20:]
+
+        func_calls = self._agent_turn(system_prompt)
+
+        # Agent loop: keep observing and acting until done
+        turn = 0
+        while func_calls and turn < self.AGENT_MAX_TURNS:
+            turn += 1
+
+            # Estimate wait: longer for twist_for, shorter for navigate/stop
+            wait = self.AGENT_OBSERVE_DELAY
+            for fc in func_calls:
+                if fc["name"] == "twist_for":
+                    dur = fc.get("args", {}).get("duration_secs", 2.0)
+                    wait = max(wait, dur + 1.0)
+
+            # Wait for action to take effect
+            for _ in range(int(wait * 5)):
+                time.sleep(0.2)
+                if not self._speech_q.empty():
+                    print("ui: agent loop interrupted by user input")
+                    self.push_tool_calls([{"name": "stop", "args": {}}])
+                    self._broadcast({"type": "chat", "sender": "sys",
+                                     "text": "Agent interrupted — auto-stop"})
+                    return
+                if not self._gemini_active:
+                    self.push_tool_calls([{"name": "stop", "args": {}}])
+                    return
+
+            # Send function responses + fresh camera frame
+            fr_parts = [{"functionResponse": {"name": fc["name"],
+                         "response": {"result": "ok"}}} for fc in func_calls]
+            self._conversation.append({"role": "user", "parts": fr_parts})
+
+            with self._atlas_lock:
+                fresh = self._latest_atlas
+            if fresh is not None:
+                _, fbuf = cv2.imencode('.jpg', fresh[:, :, ::-1],
+                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
+                fimg = base64.b64encode(fbuf.tobytes()).decode('ascii')
+                self._conversation.append({"role": "user", "parts": [
+                    {"inline_data": {"mime_type": "image/jpeg", "data": fimg}},
+                    {"text": "[Updated camera view. Continue your task, describe what you see, or stop if done.]"},
+                ]})
+
+            func_calls = self._agent_turn(system_prompt)
+
+        # Safety: ensure robot is stopped when agent loop ends
+        # (unless Gemini already called stop() as its final action)
+        if turn > 0:
+            last_was_stop = any(fc["name"] == "stop" for fc in func_calls) if func_calls else False
+            if not last_was_stop:
+                self.push_tool_calls([{"name": "stop", "args": {}}])
+                self._broadcast({"type": "chat", "sender": "sys",
+                                 "text": "Agent done — auto-stop"})
+            print("ui: agent loop completed after %d turn(s)" % turn)
+
+    def _agent_turn(self, system_prompt):
+        """Make one API call, process response. Returns list of functionCalls (empty if none)."""
+        if len(self._conversation) > 30:
+            self._conversation = self._conversation[-30:]
         self._strip_images(self._conversation)
 
         result = self._call_api(system_prompt)
         if not result:
-            return
+            return []
 
         cands = result.get("candidates", [])
         if not cands:
-            return
+            return []
         resp_parts = cands[0].get("content", {}).get("parts", [])
 
         model_parts = []
@@ -508,11 +569,7 @@ class UI:
         if model_parts:
             self._conversation.append({"role": "model", "parts": model_parts})
 
-        # Queue function responses for next turn (no immediate follow-up call)
-        if func_calls:
-            fr = [{"functionResponse": {"name": fc["name"],
-                   "response": {"result": "sent to robot"}}} for fc in func_calls]
-            self._conversation.append({"role": "user", "parts": fr})
+        return func_calls
 
     # ── Gemini TTS ────────────────────────────────────────────────
 
