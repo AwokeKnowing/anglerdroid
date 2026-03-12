@@ -56,6 +56,11 @@ OBS_THRESH = 100
 _goal_heading = None   # type: float or None (degrees: 0=fwd, 90=left, -90=right)
 _active = False
 
+# Oscillation detection
+_ang_history = []      # last N angular outputs
+_OSCILLATION_WINDOW = 20  # frames to check (~0.67s at 30fps)
+_OSCILLATION_THRESH = 12  # sign changes in window → oscillating
+
 # Last computed debug state (for overlay drawing)
 _dbg = None
 
@@ -73,10 +78,11 @@ def set_goal(heading_deg):
 
 
 def clear_goal():
-    global _goal_heading, _active, _dbg
+    global _goal_heading, _active, _dbg, _ang_history
     _goal_heading = None
     _active = False
     _dbg = None
+    _ang_history = []
 
 
 def is_active():
@@ -93,6 +99,20 @@ def _angle_to_image(angle_deg, radius):
     return (int(radius * math.cos(rad)), int(-radius * math.sin(rad)))
 
 
+def _detect_oscillation(angular):
+    """Track angular sign changes. If too many in a short window, we're oscillating."""
+    global _ang_history
+    _ang_history.append(1 if angular > 0.01 else (-1 if angular < -0.01 else 0))
+    if len(_ang_history) > _OSCILLATION_WINDOW:
+        _ang_history = _ang_history[-_OSCILLATION_WINDOW:]
+    if len(_ang_history) < _OSCILLATION_WINDOW:
+        return False
+    changes = sum(1 for i in range(1, len(_ang_history))
+                  if _ang_history[i] != 0 and _ang_history[i - 1] != 0
+                  and _ang_history[i] != _ang_history[i - 1])
+    return changes >= _OSCILLATION_THRESH
+
+
 def compute_twist(atlas):
     # type: (np.ndarray) -> tuple
     """Compute (forward_mps, angular_rads) from obstacle map. Returns None if inactive."""
@@ -106,15 +126,29 @@ def compute_twist(atlas):
     if h < 480 or w < 640:
         return None
 
+    goal = _goal_heading
+
+    # For large heading angles (>90°), do a pure in-place rotation.
+    # The obstacle map only covers the forward hemisphere, so VFH can't help here.
+    # Just spin toward the goal heading, then normal VFH takes over once we're roughly aimed.
+    if abs(goal) > 90.0:
+        turn_dir = MAX_ANG if goal > 0 else -MAX_ANG
+        _dbg = {
+            "goal": goal, "best_angle": goal, "best_bin": 0,
+            "forward": 0.0, "angular": turn_dir, "nearest_fwd": float(MAX_RANGE),
+            "min_dist": np.full(N_BINS, float(MAX_RANGE), dtype=np.float32),
+            "scores": np.zeros(N_BINS, dtype=np.float32),
+            "mode": "spin",
+        }
+        return (0.0, turn_dir)
+
     quad = atlas[QUAD_Y0:QUAD_Y0 + QUAD_H, QUAD_X0:QUAD_X0 + QUAD_W]
     obs = np.maximum(quad[:, :, 0], quad[:, :, 1])
 
     ys, xs = np.nonzero(obs > OBS_THRESH)
 
     min_dist = np.full(N_BINS, float(MAX_RANGE), dtype=np.float32)
-    threat = np.zeros(N_BINS, dtype=np.float32)
     scores = np.zeros(N_BINS, dtype=np.float32)
-    goal = _goal_heading
 
     if len(xs) > 0:
         dx = xs.astype(np.float32) - ROBOT_CX
@@ -134,7 +168,6 @@ def compute_twist(atlas):
                 mask = bin_idx == b
                 if np.any(mask):
                     bd = dist[mask]
-                    threat[b] = np.sum(1.0 / np.maximum(bd, 1.0))
                     min_dist[b] = bd.min()
 
     for b in range(N_BINS):
@@ -176,6 +209,12 @@ def compute_twist(atlas):
         forward = 0.0
         angular = 0.0
 
+    # Auto-stop on oscillation (poorly tuned heading → jitter)
+    if _detect_oscillation(angular):
+        print("nav: oscillation detected — auto-stopping")
+        clear_goal()
+        return None
+
     _dbg = {
         "goal": goal,
         "best_angle": best_angle,
@@ -185,6 +224,7 @@ def compute_twist(atlas):
         "nearest_fwd": nearest_fwd,
         "min_dist": min_dist.copy(),
         "scores": scores.copy(),
+        "mode": "vfh",
     }
 
     return (forward, angular)
@@ -248,7 +288,8 @@ def draw_overlay(display):
     # Text overlay: speed, turn, heading info
     txt_x = ox + 4
     txt_y = oy + 16
-    cv2.putText(display, "NAV: goal=%d best=%d" % (int(goal), int(best_angle)),
+    mode = _dbg.get("mode", "vfh")
+    cv2.putText(display, "NAV[%s]: goal=%d best=%d" % (mode, int(goal), int(best_angle)),
                 (txt_x, txt_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     cv2.putText(display, "fwd=%.2f ang=%.2f near=%dpx" % (forward, angular, int(nearest_fwd)),
                 (txt_x, txt_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)

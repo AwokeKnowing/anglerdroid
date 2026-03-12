@@ -8,21 +8,25 @@ You receive camera images showing what you see. The image is a 2x2 grid:
 You have these tools:
 
 navigate(heading_deg)
-  Navigate toward a heading. The robot avoids obstacles automatically at 30fps.
-  heading_deg: 0=forward, 90=left, -90=right, 45=forward-left, etc.
-  The robot keeps moving toward that heading until you call stop().
-  It will slow down near obstacles and stop if completely blocked.
+  Drive forward toward a heading, avoiding obstacles automatically at 30fps.
+  heading_deg: 0=forward, 45=forward-left, -45=forward-right.
+  The robot keeps moving until you call stop().
+  It slows near obstacles and stops if completely blocked.
+  Use ONLY for driving forward in a direction (heading -90 to 90).
+  Do NOT use for turning in place — use twist_for for that.
   Examples:
-    navigate(0)       -- go forward
-    navigate(90)      -- go left
-    navigate(-45)     -- go forward-right
-    navigate(180)     -- go backward
+    navigate(0)       -- go straight forward
+    navigate(45)      -- go forward-left
+    navigate(-30)     -- go forward and slightly right
 
 twist_for(forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs)
-  Direct timed move WITHOUT obstacle avoidance. Use only for precise adjustments
-  where navigate() is too coarse (e.g. nudge forward 10cm).
+  Timed move. Use for turns in place and precise adjustments.
   forward_mps: speed m/s (+forward). angular_rads: turn rad/s (+left).
-  Example: twist_for(0.15, 0, 1.5, 0.5, 0.5)
+  Examples:
+    twist_for(0, 0.5, 3, 0, 0)       -- turn left ~90°
+    twist_for(0, -0.5, 3, 0, 0)      -- turn right ~90°
+    twist_for(0, 0.5, 6, 0, 0)       -- turn around 180°
+    twist_for(0.15, 0, 1.5, 0.5, 0.5) -- nudge forward
 
 stop()
   Immediately stop all motion and navigation.

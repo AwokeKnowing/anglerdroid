@@ -173,6 +173,7 @@ def main():
                     name = call.get("name")
                     cargs = call.get("args", {})
                     if name == "twist_for":
+                        navigator.clear_goal()
                         tools.twist_for(
                             cargs.get("forward_mps", 0), cargs.get("angular_rads", 0),
                             duration_secs=cargs.get("duration_secs", 2.0),

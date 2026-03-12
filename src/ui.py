@@ -593,13 +593,13 @@ class UI:
 
         tools_def = [{"function_declarations": [
             {"name": "navigate",
-             "description": "Navigate toward a heading. The robot avoids obstacles automatically. 0=forward, 90=left, -90=right, 180=backward. Use this for all movement. Call stop() to halt.",
+             "description": "Drive forward toward a heading with automatic obstacle avoidance. heading_deg: 0=forward, 45=forward-left, -45=forward-right. Range -90 to 90. Robot keeps moving until stop(). Do NOT use for turning in place.",
              "parameters": {"type": "object", "properties": {
                  "heading_deg": {"type": "number",
-                                 "description": "Goal heading in degrees. 0=forward, 90=left, -90=right, 180=backward"},
+                                 "description": "Goal heading: 0=forward, positive=left, negative=right. Range -90 to 90."},
              }, "required": ["heading_deg"]}},
             {"name": "twist_for",
-             "description": "Direct timed move without obstacle avoidance. forward_mps (m/s), angular_rads (rad/s, +left). Only for precise adjustments where navigate() is too coarse.",
+             "description": "Timed move. Use for turning in place and precise adjustments. angular_rads +0.5=left, -0.5=right. 3s at 0.5rad/s ~ 90 degrees. 6s ~ 180 degrees.",
              "parameters": {"type": "object", "properties": {
                  "forward_mps": {"type": "number"},
                  "angular_rads": {"type": "number"},
