@@ -55,7 +55,7 @@ def load_model(device_str="cuda", quantize=True):
 
     print("Loading %s on %s (quantize=%s) …" % (model_id, device_str, quantize))
     _processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True,
-                                               use_fast=True)
+                                               use_fast=False)
 
     load_kwargs = {"trust_remote_code": True}
     if quantize:
