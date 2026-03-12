@@ -24,26 +24,42 @@ _processor = None
 _device = None
 _request_count = 0
 
-VLA_PROMPT = """You are the navigation controller for a wheeled robot.
-You receive a camera image from the robot – a 2x2 grid:
-- Top-left: forward-facing RGB camera
-- Top-right: depth camera 1 (top-down view, RGB)
-- Bottom-left: depth camera 2 (forward view, RGB)
-- Bottom-right: obstacle map (green=obstacles from above, red=obstacles ahead, dim blue=unknown areas, black=clear path)
+VLA_PROMPT = """You are the local navigation controller for a small wheeled robot indoors on carpet.
+A higher-level planner gives you instructions like "go to the chair" or "turn left".
+You must navigate around obstacles to reach the goal. You receive fresh camera images
+every few seconds and output a short batch of movement actions each time.
 
-Output exactly 16 navigation steps as a JSON array.
-Each step executes for 333 ms and has two fields:
-  forward_mps  – forward speed, range -0.3 … 0.3 m/s (positive = forward)
-  angular_rads – turn rate, range -1.0 … 1.0 rad/s (positive = turn left)
+Camera grid (2x2 image):
 
-Rules:
-- Black areas in the obstacle map are safe to drive through.
-- Coloured areas (green/red/yellow) are obstacles – avoid them.
-- Dim-blue areas are unknown – avoid if possible.
-- Keep speeds conservative (0.10 – 0.15 m/s).
-- If the path is blocked or unclear, output all zeros to stop.
+TOP-LEFT: Forward-facing RGB camera (main view). Use to understand the room, identify
+  furniture, doors, people, and where your target is.
 
-Respond with ONLY the JSON array. No markdown fences, no explanation."""
+BOTTOM-LEFT: Forward-facing depth camera RGB (angled slightly down). PRIMARY obstacle
+  camera. Objects close to the robot appear large here. Use this to judge distance to
+  obstacles and find gaps to navigate through.
+
+TOP-RIGHT: Top-down depth camera RGB (looking down from above). The robot faces RIGHT
+  in this view. Obstacles on the right side of this image are directly ahead.
+
+BOTTOM-RIGHT: Obstacle map from merged depth pointclouds. The robot faces RIGHT.
+  BLACK=clear, GREEN=obstacle (top cam), RED=obstacle (forward cam), YELLOW=both,
+  DIM BLUE=unknown. Obstacles to the RIGHT of center are ahead of the robot.
+
+Output exactly 8 steps as a JSON array. Each step runs 333 ms (~2.7s total).
+You will be called again with a fresh image to continue navigating.
+  forward_mps: -0.3 to 0.3 (positive=forward). Below 0.05 won't move on carpet.
+  angular_rads: -1.0 to 1.0 (positive=turn left).
+
+Navigation guidance:
+- You ARE the local planner. Navigate around furniture, walls, and obstacles.
+- If an obstacle is ahead, slow down and steer around it — don't just stop.
+- Only stop (all zeros) if you are about to collide imminently or you have arrived.
+- Typical forward speed: 0.15-0.25 m/s. Turn in place: angular 0.3-0.6, forward 0.
+- If the goal is not visible, explore by turning to scan the room.
+- If stuck or unable to make progress, output zeros. The higher-level planner will
+  give you a new instruction.
+
+Respond with ONLY the JSON array. No markdown, no text."""
 
 
 def load_model(device_str="cuda"):
@@ -71,7 +87,7 @@ def infer(image_bytes, instruction):
         os.write(fd, image_bytes)
         os.close(fd)
 
-        prompt = VLA_PROMPT + "\n\nCurrent instruction: " + instruction
+        prompt = VLA_PROMPT + "\n\nInstruction: " + instruction
         messages = [{"role": "user", "content": [
             {"type": "image", "image": tmp_path},
             {"type": "text", "text": prompt},
@@ -98,7 +114,8 @@ def infer(image_bytes, instruction):
         new_tokens = output_ids[0, inputs["input_ids"].shape[1]:]
         text = _processor.tokenizer.decode(new_tokens, skip_special_tokens=True)
         text = text.replace("<sep>", "").strip()
-        return _parse_actions(text)
+        print("MODEL RAW: %s" % text[:500])
+        return _parse_actions(text), text
     finally:
         try:
             os.unlink(tmp_path)
@@ -111,18 +128,18 @@ def mock_infer(image_bytes, instruction):
     time.sleep(0.3)
     inst = instruction.lower()
     if "forward" in inst or "straight" in inst or "ahead" in inst:
-        return [{"forward_mps": 0.15, "angular_rads": 0.0}] * 16
+        return [{"forward_mps": 0.15, "angular_rads": 0.0}] * 8
     if "left" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": 0.3}] * 16
+        return [{"forward_mps": 0.10, "angular_rads": 0.4}] * 8
     if "right" in inst:
-        return [{"forward_mps": 0.10, "angular_rads": -0.3}] * 16
+        return [{"forward_mps": 0.10, "angular_rads": -0.4}] * 8
     if "back" in inst:
-        return [{"forward_mps": -0.15, "angular_rads": 0.0}] * 16
+        return [{"forward_mps": -0.15, "angular_rads": 0.0}] * 8
     if "spin" in inst or "turn around" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.8}] * 16
+        return [{"forward_mps": 0.0, "angular_rads": 0.6}] * 8
     if "stop" in inst:
-        return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 16
-    return [{"forward_mps": 0.10, "angular_rads": 0.0}] * 16
+        return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 8
+    return [{"forward_mps": 0.12, "angular_rads": 0.0}] * 8
 
 
 def _parse_actions(text):
@@ -142,7 +159,7 @@ def _parse_actions(text):
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             pass
     print("WARNING: could not parse actions from: %s" % text[:300])
-    return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 16
+    return [{"forward_mps": 0.0, "angular_rads": 0.0}] * 8
 
 
 # ── HTTP handler ──────────────────────────────────────────────────
@@ -173,11 +190,17 @@ class Handler(BaseHTTPRequestHandler):
         image_bytes = base64.b64decode(image_b64)
 
         t0 = time.time()
-        actions = self.infer_fn(image_bytes, instruction)
+        out = self.infer_fn(image_bytes, instruction)
         dt = time.time() - t0
         _request_count += 1
 
-        result = {"actions": actions, "inference_ms": round(dt * 1000, 1)}
+        if isinstance(out, tuple):
+            actions, raw_text = out
+        else:
+            actions, raw_text = out, ""
+
+        result = {"actions": actions, "inference_ms": round(dt * 1000, 1),
+                  "raw_output": raw_text[:500]}
         payload = json.dumps(result).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

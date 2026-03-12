@@ -17,10 +17,13 @@ from urllib.error import HTTPError, URLError
 import cv2
 import numpy as np
 
-ACTIONS_PER_BATCH = 16
-REFILL_THRESHOLD = 8
+ACTIONS_PER_BATCH = 8
+REFILL_THRESHOLD = 3
 FRAMES_PER_ACTION = 10   # 333 ms at 30 fps
 INFER_TIMEOUT = 15.0
+MAX_FORWARD_MPS = 0.3
+MAX_ANGULAR_RDS = 1.0
+MAX_INSTRUCTION_SECS = 8.0  # auto-stop after this many seconds
 
 
 class VLAClient:
@@ -47,6 +50,7 @@ class VLAClient:
         self._requesting = False
         self._connected = False
         self._last_error = ""
+        self._deadline = 0.0  # monotonic time when current instruction expires
 
     # ── lifecycle ─────────────────────────────────────────────
 
@@ -72,13 +76,18 @@ class VLAClient:
         with self._instruction_lock:
             changed = self._instruction != instruction
             self._instruction = instruction
+            if instruction:
+                self._deadline = time.monotonic() + MAX_INSTRUCTION_SECS
+            else:
+                self._deadline = 0.0
         if changed:
             with self._actions_lock:
                 self._actions.clear()
                 self._current_action = None
                 self._action_frames_left = 0
             if instruction:
-                print("vla: instruction = '%s'" % instruction[:80])
+                print("vla: instruction = '%s' (%.0fs timeout)" % (
+                    instruction[:80], MAX_INSTRUCTION_SECS))
             else:
                 print("vla: instruction cleared (idle)")
 
@@ -97,9 +106,20 @@ class VLAClient:
 
     def get_action(self):
         # type: () -> Optional[Dict]
-        """Return current action dict or None if idle / buffer empty."""
+        """Return current action dict or None if idle / buffer empty / timed out."""
         with self._instruction_lock:
             if not self._instruction:
+                return None
+            if self._deadline and time.monotonic() > self._deadline:
+                expired_inst = self._instruction
+                self._instruction = ""
+                self._deadline = 0.0
+                with self._actions_lock:
+                    self._actions.clear()
+                    self._current_action = None
+                    self._action_frames_left = 0
+                print("vla: timeout (%.0fs) — auto-stopped '%s'" % (
+                    MAX_INSTRUCTION_SECS, expired_inst[:60]))
                 return None
 
         with self._actions_lock:
@@ -138,8 +158,13 @@ class VLAClient:
             try:
                 with self._instruction_lock:
                     instruction = self._instruction
+                    deadline = self._deadline
 
                 if not instruction:
+                    time.sleep(0.1)
+                    continue
+
+                if deadline and time.monotonic() > deadline:
                     time.sleep(0.1)
                     continue
 
@@ -186,15 +211,23 @@ class VLAClient:
             with self._actions_lock:
                 self._actions.clear()
                 for a in actions:
+                    fwd = max(-MAX_FORWARD_MPS, min(MAX_FORWARD_MPS,
+                              float(a.get("forward_mps", 0))))
+                    ang = max(-MAX_ANGULAR_RDS, min(MAX_ANGULAR_RDS,
+                              float(a.get("angular_rads", 0))))
                     self._actions.append({
-                        "forward_mps": float(a.get("forward_mps", 0)),
-                        "angular_rads": float(a.get("angular_rads", 0)),
+                        "forward_mps": fwd,
+                        "angular_rads": ang,
                     })
 
             self._connected = True
             self._last_error = ""
-            print("vla: %d actions (infer=%.0fms, rtt=%.0fms)" % (
-                len(actions), infer_ms, dt * 1000))
+            raw_text = result.get("raw_output", "")
+            if raw_text:
+                print("vla: model said: %s" % raw_text[:200])
+            print("vla: %d actions (infer=%.0fms, rtt=%.0fms) first=%s" % (
+                len(actions), infer_ms, dt * 1000,
+                json.dumps(actions[0]) if actions else "none"))
 
         except (HTTPError, URLError) as e:
             self._connected = False
