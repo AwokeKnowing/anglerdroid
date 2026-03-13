@@ -1,7 +1,7 @@
 """vision.py – Process camera frames into atlas + obstacle map.
 Camera hardware lives in cameras.py. Depth processing is pure numpy.
 
-RS1 (top-down camera) pointcloud → perspective depth map (already top-down).
+RS1 (top-down camera) pointcloud → orthographic depth map (already top-down).
 RS2 (forward camera) pointcloud → rotated -64.4° around X → bird's-eye view.
 Both are combined into the topdown obstacle map quadrant.
 
@@ -22,8 +22,8 @@ TARGET_FPS = 30
 CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 CROSSHAIR_OPACITY = 0.3
 
-# --- RS1 (top-down camera) depth params (from reference/workingvisionobs3ms.py) ---
-VIEW_Z_OFFSET = np.float32(1.80)
+# --- RS1 (top-down camera) depth params ---
+TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
 NEAR_CLIP = np.float32(0.03)
 DEPTH_OFFSET = np.float32(0.25)
 DEPTH_SCALE = np.float32(400.0)
@@ -82,7 +82,7 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
 
 
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
-    """RS1 (top-down camera) pointcloud → (obstacles, known) via perspective projection.
+    """RS1 (top-down camera) pointcloud → (obstacles, known) via orthographic projection.
     Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
     known = np.zeros((out_h, out_w), dtype=np.uint8)
@@ -90,18 +90,15 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
         return obs, known
 
     v = verts.copy()
-    v[:, 2] += VIEW_Z_OFFSET
-
-    aspect = np.float32(out_h) / np.float32(out_w)
-    scale = np.float32([out_w * aspect, out_h])
+    scale = np.float32(1.0 / TD_PX_SIZE)
     center = np.float32([out_w * 0.5, out_h * 0.5])
-    with np.errstate(divide='ignore', invalid='ignore'):
-        proj = v[:, :2] / v[:, 2:3] * scale + center
+    proj = v[:, :2] * scale + center
 
     proj[v[:, 2] < NEAR_CLIP] = np.nan
 
-    j, i = proj.astype(np.uint32).T
-    m = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
+    with np.errstate(invalid='ignore'):
+        j, i = proj.astype(np.uint32).T
+    m = np.isfinite(proj).all(axis=1) & (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
     known[i[m], j[m]] = 255
 
