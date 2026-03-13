@@ -24,9 +24,9 @@ CROSSHAIR_OPACITY = 0.3
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
-NEAR_CLIP = np.float32(0.03)
-DEPTH_OFFSET = np.float32(0.25)
-DEPTH_SCALE = np.float32(400.0)
+NEAR_CLIP = np.float32(0.03)     # reject points < 3cm (sensor noise)
+DEPTH_OFFSET = np.float32(0.15)  # shift for depth-to-val mapping
+DEPTH_SCALE = np.float32(100.0)  # was 400: caused overflow for z>0.4m, hid close obstacles
 DEPTH_BIAS = np.uint8(48)
 
 # --- RS2 (forward camera) → bird's-eye rotation ---
