@@ -51,7 +51,7 @@ RS2_EXTRINSIC_Y = 0.0
 
 # Alignment offsets (pixels). TD_X_OFFSET adjustable via slider; FW_X locked to TD + delta.
 TD_X_OFFSET = -75
-FW_TD_X_DELTA = 77              # fw_x = td_x + this
+FW_TD_X_DELTA = 127             # fw_x = td_x + this
 FW_Y_OFFSET = -4                # adjustable via slider
 
 
