@@ -433,6 +433,33 @@ class UI:
                 self._last_activity = time.time()
                 time.sleep(3.0)
 
+    def _trim_conversation(self):
+        """Trim conversation to ~30 messages, but never cut between a model
+        functionCall and its user functionResponse."""
+        conv = self._conversation
+        if len(conv) <= 30:
+            return
+        cut = len(conv) - 30
+        # Advance cut point past any model turn that contains functionCall
+        # so we don't orphan a functionResponse
+        while cut < len(conv):
+            msg = conv[cut]
+            if msg.get("role") == "user":
+                has_fr = any("functionResponse" in p for p in msg.get("parts", []))
+                if has_fr and cut > 0 and conv[cut - 1].get("role") == "model":
+                    cut += 1
+                    continue
+            break
+        # Also don't start on a model functionCall without its preceding user turn
+        if cut < len(conv) and conv[cut].get("role") == "model":
+            has_fc = any("functionCall" in p for p in conv[cut].get("parts", []))
+            if has_fc:
+                cut += 1
+                # skip the functionResponse too
+                if cut < len(conv) and conv[cut].get("role") == "user":
+                    cut += 1
+        self._conversation = conv[cut:]
+
     @staticmethod
     def _strip_images(conversation):
         """Remove inline_data (images) from all but the last user message."""
@@ -451,7 +478,6 @@ class UI:
                 if not msg["parts"]:
                     msg["parts"] = [{"text": "(image removed from history)"}]
 
-    AGENT_MAX_TURNS = 10
     AGENT_OBSERVE_DELAY = 2.5  # seconds between agent turns (let action take effect)
 
     def _send_to_gemini(self, system_prompt, user_text=None, audio_parts=None):
@@ -492,7 +518,7 @@ class UI:
 
         # Agent loop: keep observing and acting until done
         turn = 0
-        while func_calls and turn < self.AGENT_MAX_TURNS:
+        while func_calls:
             turn += 1
 
             # Estimate wait: longer for twist_for, shorter for navigate/stop
@@ -515,10 +541,11 @@ class UI:
                     self.push_tool_calls([{"name": "stop", "args": {}}])
                     return
 
-            # Send function responses + fresh camera frame
+            # Send function responses + fresh camera frame in ONE user message
+            # (Gemini requires functionResponse immediately after functionCall,
+            #  and no two consecutive user turns)
             fr_parts = [{"functionResponse": {"name": fc["name"],
                          "response": {"result": "ok"}}} for fc in func_calls]
-            self._conversation.append({"role": "user", "parts": fr_parts})
 
             with self._atlas_lock:
                 fresh = self._latest_atlas
@@ -530,10 +557,10 @@ class UI:
                 gs2 = goals.get_status()
                 if gs2["active"] and gs2["current_goal"]:
                     obs_text += "\n[GOAL %d/%d: %s]" % (gs2["current"] + 1, gs2["total"], gs2["current_goal"])
-                self._conversation.append({"role": "user", "parts": [
-                    {"inline_data": {"mime_type": "image/jpeg", "data": fimg}},
-                    {"text": obs_text},
-                ]})
+                fr_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": fimg}})
+                fr_parts.append({"text": obs_text})
+
+            self._conversation.append({"role": "user", "parts": fr_parts})
 
             func_calls = self._agent_turn(system_prompt)
 
@@ -550,7 +577,7 @@ class UI:
     def _agent_turn(self, system_prompt):
         """Make one API call, process response. Returns list of functionCalls (empty if none)."""
         if len(self._conversation) > 30:
-            self._conversation = self._conversation[-30:]
+            self._trim_conversation()
         self._strip_images(self._conversation)
 
         result = self._call_api(system_prompt)
