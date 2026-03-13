@@ -84,11 +84,9 @@ def main():
 
     show_ok = not args.no_show
     _OFF_CENTER = 320
-    _YOFF_CENTER = 200
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
         cv2.createTrackbar("td_xoff", "vision atlas", _OFF_CENTER + vision_mod.TD_X_OFFSET, _OFF_CENTER * 2, lambda v: None)
-        cv2.createTrackbar("fw_yoff", "vision atlas", _YOFF_CENTER + vision_mod.FW_Y_OFFSET, _YOFF_CENTER * 2, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -103,7 +101,6 @@ def main():
             # Read tuning sliders and update vision module
             if show_ok:
                 vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _OFF_CENTER
-                vision_mod.FW_Y_OFFSET = cv2.getTrackbarPos("fw_yoff", "vision atlas") - _YOFF_CENTER
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
@@ -112,8 +109,8 @@ def main():
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
                     display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
                     fw_x = vision_mod.TD_X_OFFSET + vision_mod.FW_TD_X_DELTA
-                    cv2.putText(display, "td_x=%d  fw_x=%d  fw_y=%d" % (
-                        vision_mod.TD_X_OFFSET, fw_x, vision_mod.FW_Y_OFFSET),
+                    cv2.putText(display, "td_x=%d  fw_x=%d" % (
+                        vision_mod.TD_X_OFFSET, fw_x),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     navigator.draw_overlay(display)
                     cv2.imshow("vision atlas", display)
