@@ -109,7 +109,8 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     if len(vals) > 0:
         otsu_t, _ = cv2.threshold(vals.reshape(1, -1), 0, 255,
                                   cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        obs_mask = (vals <= otsu_t) & (vals > 0)
+        # Top-down: closer (obstacles) = high vals, farther (floor) = low vals. Mark high as obstacle.
+        obs_mask = (vals >= otsu_t) & (vals > 0) & (vals < 255)
         obs[i[m][obs_mask], j[m][obs_mask]] = 255
     return obs, known
 
