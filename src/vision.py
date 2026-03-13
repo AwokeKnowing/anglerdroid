@@ -39,8 +39,8 @@ FW_ROTATION = _fw_R.astype(np.float32)
 # View transform params (from reference/firstmergedvision-working2cam.py)
 FW_PIVOT = np.array([0.0, -1.0, 0.02], dtype=np.float32)
 FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
-FW_PX_SIZE = np.float32(0.01)       # 1px = 1cm
-FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame
+FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
+FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame (fixed)
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 _known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
@@ -49,10 +49,10 @@ _known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 # >>> Change to e.g. -0.10 when ready to compensate. <<<
 RS2_EXTRINSIC_Y = 0.0
 
-# Alignment offsets (pixels). Adjusted via sliders in main.py.
+# Alignment offsets (pixels). TD_X_OFFSET adjustable via slider; FW_X locked to TD + delta.
 TD_X_OFFSET = -75
-FW_X_OFFSET = 66
-FW_Y_OFFSET = -4
+FW_TD_X_DELTA = 77              # fw_x = td_x + this
+FW_Y_OFFSET = -4                # adjustable via slider
 
 
 def _blit(dst, src, dx, dy=0):
@@ -257,7 +257,7 @@ class Vision:
             known2 = np.rot90(k2, k=-1)
 
             # Build known-area mask (union of both cameras, morph-closed to fill holes)
-            fw_dx, fw_dy = int(FW_X_OFFSET), int(FW_Y_OFFSET)
+            fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
             td_dx = int(TD_X_OFFSET)
             known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(known_combined, known1, td_dx)

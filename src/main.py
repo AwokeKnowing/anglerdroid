@@ -83,13 +83,12 @@ def main():
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
     show_ok = not args.no_show
-    _XOFF_CENTER = 320
+    _OFF_CENTER = 320
+    _YOFF_CENTER = 200
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
-        cv2.createTrackbar("height_clip_x100", "vision atlas", int(vision_mod.FW_HEIGHT_CLIP * 100), 300, lambda v: None)
-        cv2.createTrackbar("td_xoff", "vision atlas", _XOFF_CENTER + vision_mod.TD_X_OFFSET, _XOFF_CENTER * 2, lambda v: None)
-        cv2.createTrackbar("fw_xoff", "vision atlas", _XOFF_CENTER + vision_mod.FW_X_OFFSET, _XOFF_CENTER * 2, lambda v: None)
-        cv2.createTrackbar("fw_pxmm", "vision atlas", int(float(vision_mod.FW_PX_SIZE) * 1000), 30, lambda v: None)
+        cv2.createTrackbar("td_xoff", "vision atlas", _OFF_CENTER + vision_mod.TD_X_OFFSET, _OFF_CENTER * 2, lambda v: None)
+        cv2.createTrackbar("fw_yoff", "vision atlas", _YOFF_CENTER + vision_mod.FW_Y_OFFSET, _YOFF_CENTER * 2, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -103,14 +102,8 @@ def main():
 
             # Read tuning sliders and update vision module
             if show_ok:
-                hc_raw = cv2.getTrackbarPos("height_clip_x100", "vision atlas")
-                if hc_raw > 0:
-                    vision_mod.FW_HEIGHT_CLIP = np.float32(hc_raw / 100.0)
-                vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _XOFF_CENTER
-                vision_mod.FW_X_OFFSET = cv2.getTrackbarPos("fw_xoff", "vision atlas") - _XOFF_CENTER
-                pxmm = cv2.getTrackbarPos("fw_pxmm", "vision atlas")
-                if pxmm >= 3:
-                    vision_mod.FW_PX_SIZE = np.float32(pxmm / 1000.0)
+                vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _OFF_CENTER
+                vision_mod.FW_Y_OFFSET = cv2.getTrackbarPos("fw_yoff", "vision atlas") - _YOFF_CENTER
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
@@ -118,9 +111,9 @@ def main():
                 try:
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
                     display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
-                    cv2.putText(display, "clip=%.2f td_x=%d fw_x=%d px=%.1fmm" % (
-                        float(vision_mod.FW_HEIGHT_CLIP), vision_mod.TD_X_OFFSET,
-                        vision_mod.FW_X_OFFSET, float(vision_mod.FW_PX_SIZE) * 1000),
+                    fw_x = vision_mod.TD_X_OFFSET + vision_mod.FW_TD_X_DELTA
+                    cv2.putText(display, "td_x=%d  fw_x=%d  fw_y=%d" % (
+                        vision_mod.TD_X_OFFSET, fw_x, vision_mod.FW_Y_OFFSET),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     navigator.draw_overlay(display)
                     cv2.imshow("vision atlas", display)
