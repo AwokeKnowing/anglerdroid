@@ -14,6 +14,7 @@ except ImportError:
 import vision
 import ui
 import navigator
+import goals
 
 
 # --- Shared instances (main script sets these or tools.init) ---
@@ -116,6 +117,25 @@ def navigate(heading_deg):
 def navigate_stop():
     """Stop reactive navigation."""
     navigator.clear_goal()
+
+
+# --- Visual goals (landmark-based navigation) ---
+
+def set_visual_goals(landmarks):
+    """Set ordered visual landmarks to navigate to sequentially."""
+    goals.set_goals(landmarks)
+
+def goal_reached():
+    """Mark current visual goal as reached, advance to next. Returns next goal or None."""
+    return goals.advance()
+
+def get_goals_status():
+    """Return current goals state for UI/prompt context."""
+    return goals.get_status()
+
+def clear_goals():
+    """Cancel all visual goals."""
+    goals.clear()
 
 
 # --- Raw access for main loop ---

@@ -23,6 +23,8 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
+import goals
+
 try:
     import websockets
     import asyncio
@@ -31,7 +33,7 @@ except ImportError:
     _HAS_WS = False
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-GEMINI_MODEL_DEFAULT = "gemini-2.5-flash-lite"
+GEMINI_MODEL_DEFAULT = "gemini-3.1-flash-lite-preview"
 GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
 GEMINI_TTS_VOICE = "Umbriel"  # Kore, Charon, Fenrir, Aoede, Puck, Umbriel
 
@@ -126,6 +128,7 @@ class UI:
             threading.Thread(target=self._run_ws, daemon=True).start()
         else:
             print("ui: websockets not installed – WebSocket disabled")
+        goals.set_on_change(lambda status: self._broadcast({"type": "goals", **status}))
         proto = "HTTPS" if self._ssl_ctx else "HTTP"
         print("ui: %s :%d  WSS :%d" % (proto, self._http_port, self._ws_port))
 
@@ -367,6 +370,7 @@ class UI:
 
     def _stop_gemini(self):
         self._gemini_active = False
+        goals.clear()
         self._broadcast({"type": "ai_status", "active": False})
         print("ui: Gemini AI stopped")
 
@@ -467,12 +471,21 @@ class UI:
                 parts.append({"inline_data": {"mime_type": ap["mime"], "data": ap["data"]}})
             print("ui: sending %d audio chunk(s) to Gemini" % len(audio_parts))
 
+        goal_ctx = ""
+        gs = goals.get_status()
+        if gs["active"] and gs["current_goal"]:
+            done = gs["current"]
+            total = gs["total"]
+            goal_ctx = "\n[GOAL %d/%d: %s]" % (done + 1, total, gs["current_goal"])
+            if gs["completed"]:
+                goal_ctx += " [Reached: %s]" % ", ".join(gs["completed"])
+
         if user_text:
-            parts.append({"text": user_text})
+            parts.append({"text": user_text + goal_ctx})
         elif audio_parts:
-            parts.append({"text": "[User sent audio. Listen to it and respond to what they said.]"})
+            parts.append({"text": "[User sent audio. Listen to it and respond to what they said.]" + goal_ctx})
         else:
-            parts.append({"text": "[Camera update. Respond only if safety concern.]"})
+            parts.append({"text": "[Camera update. Respond only if safety concern.]" + goal_ctx})
         self._conversation.append({"role": "user", "parts": parts})
 
         func_calls = self._agent_turn(system_prompt)
@@ -513,9 +526,13 @@ class UI:
                 _, fbuf = cv2.imencode('.jpg', fresh[:, :, ::-1],
                                        [cv2.IMWRITE_JPEG_QUALITY, 60])
                 fimg = base64.b64encode(fbuf.tobytes()).decode('ascii')
+                obs_text = "[Updated camera view. Continue your task, describe what you see, or stop if done.]"
+                gs2 = goals.get_status()
+                if gs2["active"] and gs2["current_goal"]:
+                    obs_text += "\n[GOAL %d/%d: %s]" % (gs2["current"] + 1, gs2["total"], gs2["current_goal"])
                 self._conversation.append({"role": "user", "parts": [
                     {"inline_data": {"mime_type": "image/jpeg", "data": fimg}},
-                    {"text": "[Updated camera view. Continue your task, describe what you see, or stop if done.]"},
+                    {"text": obs_text},
                 ]})
 
             func_calls = self._agent_turn(system_prompt)
@@ -666,6 +683,15 @@ class UI:
              }, "required": ["forward_mps", "angular_rads"]}},
             {"name": "stop",
              "description": "Immediately stop all motion and navigation",
+             "parameters": {"type": "object", "properties": {}}},
+            {"name": "set_visual_goals",
+             "description": "Break a complex navigation task into ordered visual landmarks. The robot will pursue them one by one. Call this FIRST when given a multi-step instruction like 'go to the kitchen then find the cat'.",
+             "parameters": {"type": "object", "properties": {
+                 "landmarks": {"type": "array", "items": {"type": "string"},
+                               "description": "Ordered list of visual landmark descriptions to navigate to, e.g. ['hallway', 'kitchen doorway', 'kitchen counter']"},
+             }, "required": ["landmarks"]}},
+            {"name": "goal_reached",
+             "description": "Mark the current visual goal as reached and advance to the next one. Call when you can see that you have arrived at the current landmark.",
              "parameters": {"type": "object", "properties": {}}},
         ]}]
 

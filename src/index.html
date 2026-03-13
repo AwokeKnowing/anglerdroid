@@ -40,6 +40,10 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 .chat-ai{background:#232;color:#8f8}
 .chat-sys{background:#332;color:#cc8;font-style:italic}
 .log-line{margin:2px 0;color:#777;font-family:monospace;font-size:.7rem}
+.goal-item{padding:3px 6px;margin:2px 0;border-radius:3px;color:#999}
+.goal-done{color:#6a6;text-decoration:line-through}
+.goal-current{color:#fff;background:#254;font-weight:600}
+.goal-pending{color:#777}
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
 </head>
@@ -89,6 +93,10 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-secondary" onclick="navStop()" style="background:#433;font-size:.7rem">■ Stop</button>
       </div>
       <div id="nav-status" style="font-size:.7rem;color:#666;margin-top:2px"></div>
+      <div id="goals-panel" style="display:none;margin-top:8px;padding:8px;background:#1a2a1a;border-radius:6px;font-size:.8rem">
+        <div style="font-weight:600;color:#8f8;margin-bottom:4px">Visual Goals</div>
+        <div id="goals-list"></div>
+      </div>
     </div>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
@@ -131,6 +139,7 @@ function connect() {
     else if (d.type === 'chat') addChat(d.sender, d.text);
     else if (d.type === 'atlas') document.getElementById('atlas').src = 'data:image/jpeg;base64,' + d.image;
     else if (d.type === 'tts_audio') playTtsAudio(d.audio);
+    else if (d.type === 'goals') updateGoals(d);
     else if (d.type === 'ai_status') {
       aiActive = d.active;
       document.getElementById('ai-btn').textContent = aiActive ? '⏹ Stop AI' : '🤖 Launch AI';
@@ -210,6 +219,26 @@ function sendChat() {
   if (!text || role !== 'control' || !ws) return;
   ws.send(JSON.stringify({type: 'speech', text: text}));
   el.value = '';
+}
+
+function updateGoals(d) {
+  const panel = document.getElementById('goals-panel');
+  const list = document.getElementById('goals-list');
+  if (!d.goals || d.goals.length === 0) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  let html = '';
+  for (let i = 0; i < d.goals.length; i++) {
+    let cls = 'goal-item ';
+    let icon = '';
+    if (i < d.current) { cls += 'goal-done'; icon = '✓ '; }
+    else if (i === d.current && d.active) { cls += 'goal-current'; icon = '► '; }
+    else { cls += 'goal-pending'; icon = '○ '; }
+    html += '<div class="' + cls + '">' + icon + (i+1) + '. ' + d.goals[i] + '</div>';
+  }
+  if (!d.active && d.current >= d.goals.length) {
+    html += '<div style="color:#6a6;margin-top:4px;font-weight:600">All goals reached!</div>';
+  }
+  list.innerHTML = html;
 }
 
 function navCmd(deg) {
