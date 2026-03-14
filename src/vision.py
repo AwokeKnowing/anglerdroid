@@ -187,7 +187,7 @@ def _build_costmap(obs_combined, known_combined):
     rcy = CROSSHAIR_CY
     rx0 = max(0, rcx - 20)          # 35 wide mask (extra 5px left for caster)
     ry0 = max(0, rcy - ROBOT_H // 2)
-    rx1 = min(w, rcx + 17)          # +2px front bumper clearance
+    rx1 = min(w, rcx + 16)          # +1px front bumper clearance
     ry1 = min(h, ry0 + ROBOT_H)
     obs_raw[ry0:ry1, rx0:rx1] = False
 
@@ -231,15 +231,15 @@ def _build_costmap(obs_combined, known_combined):
         bg = costmap[obs_in_pillow].astype(np.float32)
         costmap[obs_in_pillow] = (bg * 0.45 + danger * 0.55).astype(np.uint8)
 
-    # Body: 30w × 30h, light blue (RGB)
-    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
+    # Body: 33w × 30h, light blue (RGB) — extends 3px more to rear
+    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 18):rcx + 15] = (100, 160, 255)
     # Tracks: 17w × 6h centred at (rcx+1), dark blue (RGB)
     tx0 = max(0, rcx - 7)
     tx1 = rcx + 10
     costmap[max(0, rcy - 21):max(0, rcy - 15), tx0:tx1] = (30, 60, 180)
     costmap[rcy + 15:min(h, rcy + 21), tx0:tx1] = (30, 60, 180)
-    # Caster: 6w × 3h, dark blue, rear centre
-    costmap[rcy - 1:rcy + 2, max(0, rcx - 20):max(0, rcx - 14)] = (30, 60, 180)
+    # Caster: 6w × 3h, dark blue, rear centre — shifted 3px left
+    costmap[rcy - 1:rcy + 2, max(0, rcx - 23):max(0, rcx - 17)] = (30, 60, 180)
 
     return costmap
 
