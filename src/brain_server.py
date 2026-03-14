@@ -60,7 +60,7 @@ def _init_kokoro():
 
 VLLM_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-GEMINI_DEFAULT_MODEL = "gemini-2.0-flash-lite"
+GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 MAX_CONTEXT = 40
 _STATE_RE = re.compile(r'state\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
@@ -82,6 +82,7 @@ class Brain:
         self._conversation = []
         self._agent_state = ""
         self._last_speak = ""
+        self._last_stt = ""
         self._lock = threading.Lock()
         self._turn = 0
         self._api_ms_total = 0.0
@@ -92,7 +93,7 @@ class Brain:
         """Prime conversation with example exchanges showing realistic pacing."""
         self._conversation = [
             {"role": "user", "content": "frame: 0\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0.3)\nthink(\"let me look around\")"},
+            {"role": "assistant", "content": "twist_for(0, 0.3)\nthink(\"let me look around and see what's here\")"},
             {"role": "user", "content": "frame: 1\nwz: 0.000 0.280\nSPEECH:"},
             {"role": "assistant", "content": "twist_for(0, 0.3)"},
             {"role": "user", "content": "frame: 2\nwz: 0.000 0.290\nSPEECH:"},
@@ -100,11 +101,11 @@ class Brain:
             {"role": "user", "content": "frame: 3\nwz: 0.000 -0.280\nSPEECH:"},
             {"role": "assistant", "content": "twist_for(0, 0)"},
             {"role": "user", "content": "frame: 4\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0)\nthink(\"I see a table and chairs to my left, hallway ahead\")"},
+            {"role": "assistant", "content": "twist_for(0, 0)\nthink(\"nice table with a checkered cloth, cozy place\")"},
             {"role": "user", "content": "frame: 5\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0)\nspeak(\"I can see a table and a hallway ahead\")"},
-            {"role": "user", "content": "frame: 6\nwz: 0.000 0.000\nSPEECH: go to the kitchen"},
-            {"role": "assistant", "content": "twist_for(0, 0)\nstate(\"user wants me to go to the kitchen\")\nspeak(\"Sure, heading to the kitchen\")"},
+            {"role": "assistant", "content": "twist_for(0.12, 0)\nspeak(\"Oh hey, nice table! Love that checkered cloth\")"},
+            {"role": "user", "content": "frame: 6\nwz: 0.110 0.000\nSPEECH: go to the kitchen"},
+            {"role": "assistant", "content": "twist_for(0, 0)\nstate(\"user wants me to go to the kitchen\")\nspeak(\"Sure thing, heading to the kitchen!\")"},
             {"role": "user", "content": "frame: 7\nwz: 0.000 0.000\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
             {"role": "assistant", "content": "twist_for(0, 0.4)\nthink(\"need to find the kitchen, turning to look\")"},
             {"role": "user", "content": "frame: 8\nwz: 0.000 0.380\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
@@ -143,6 +144,7 @@ class Brain:
               speech="", audio_chunks=None, prev_image_b64=None):
         with self._lock:
             stt_text = self.transcribe_audio(audio_chunks)
+            self._last_stt = stt_text or ""
 
             combined = ""
             if speech:
@@ -221,11 +223,11 @@ class Brain:
                 if speak_match:
                     tts_audio = self._synthesize(speak_match.group(1))
 
-            return result, api_ms, tts_audio
+            return result, api_ms, tts_audio, self._last_stt
 
     def _synthesize(self, text):
         try:
-            samples, sr = _kokoro.create(text, voice="af_heart", speed=1.0)
+            samples, sr = _kokoro.create(text, voice="am_michael", speed=1.0)
             pcm = (samples * 32767).astype(np.int16).tobytes()
             buf = io.BytesIO()
             with wave.open(buf, 'wb') as wf:
@@ -327,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "Bad JSON")
             return
 
-        text, api_ms, tts_audio = self.brain.infer(
+        text, api_ms, tts_audio, stt_text = self.brain.infer(
             image_b64=data.get("image", ""),
             frame_id=int(data.get("frame_id", 0)),
             velocity=float(data.get("velocity", 0)),
@@ -341,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
                   "turn": self.brain.turn}
         if tts_audio:
             result["tts_audio"] = tts_audio
+        if stt_text:
+            result["stt_text"] = stt_text
         payload = json.dumps(result).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -396,12 +400,14 @@ def main():
                     help="Don't send images (for text-only models)")
     ap.add_argument("--no-stt", action="store_true",
                     help="Disable STT")
+    ap.add_argument("--name", default="Kevin",
+                    help="Robot name injected into prompt (default: Kevin)")
     args = ap.parse_args()
 
     if not args.model:
         args.model = GEMINI_DEFAULT_MODEL if args.gemini_key else "Qwen/Qwen2.5-VL-3B-Instruct"
 
-    prompt = _load_prompt()
+    prompt = _load_prompt().replace("Kevin", args.name)
     llm_backend = "gemini" if args.gemini_key else "vllm"
     brain = Brain(args.vllm_url, args.model, prompt,
                   vision=not args.no_vision, gemini_key=args.gemini_key)

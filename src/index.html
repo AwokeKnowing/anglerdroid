@@ -354,13 +354,18 @@ function updateMicLevel() {
 }
 
 function sendAudioBlob(blob) {
+  const dataUrl = URL.createObjectURL(blob);
   const reader = new FileReader();
   reader.onloadend = () => {
     const b64 = reader.result.split(',')[1];
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({type: 'audio', data: b64, mime: blob.type}));
       addLog('mic: sent ' + (blob.size / 1024).toFixed(1) + ' KB audio');
-      addChat('sys', '🎤 audio sent (' + (blob.size / 1024).toFixed(1) + ' KB)');
+      const kb = (blob.size / 1024).toFixed(1);
+      const el = document.getElementById('chat');
+      el.innerHTML += '<div class="chat-msg chat-sys"><b>mic:</b> ' + kb + ' KB '
+        + '<audio controls style="height:24px;vertical-align:middle" src="' + dataUrl + '"></audio></div>';
+      el.scrollTop = el.scrollHeight;
     }
   };
   reader.readAsDataURL(blob);

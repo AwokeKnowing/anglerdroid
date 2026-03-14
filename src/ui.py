@@ -458,13 +458,19 @@ class UI:
                 if text:
                     self._parse_and_execute(text)
 
-                elapsed = time.time() - t_loop
-                if elapsed <= self.VISION_MODEL_INTERVAL * 1.5:
+                elapsed_ms = (time.time() - t_loop) * 1000
+                budget_ms = self.VISION_MODEL_INTERVAL * 1000
+                ok = elapsed_ms <= self.VISION_MODEL_INTERVAL * 1500
+                if ok:
                     on_time += 1
                     streak += 1
                     best_streak = max(best_streak, streak)
                 else:
                     streak = 0
+
+                tag = "OK" if ok else "SLOW"
+                print("ai: #%d  api=%3.0fms  total=%3.0fms/%3.0fms  [%s]" % (
+                    turns, api_ms, elapsed_ms, budget_ms, tag))
 
                 if turns % 10 == 0:
                     avg = api_ms_total / turns
@@ -507,8 +513,11 @@ class UI:
                       data=json.dumps(body).encode('utf-8'),
                       headers={"Content-Type": "application/json"})
         try:
-            resp = urlopen(req, timeout=10)
+            resp = urlopen(req, timeout=15)
             data = json.loads(resp.read())
+            if data.get("stt_text"):
+                self._broadcast({"type": "chat", "sender": "stt",
+                                 "text": data["stt_text"]})
             if data.get("tts_audio"):
                 self._broadcast({"type": "tts_audio", "audio": data["tts_audio"]})
             return data.get("text", ".")
@@ -695,7 +704,7 @@ class UI:
                 print("tts: error: %s" % e)
 
     def _call_kokoro_tts(self, text):
-        samples, sr = _kokoro.create(text, voice="af_heart", speed=1.0)
+        samples, sr = _kokoro.create(text, voice="am_michael", speed=1.0)
         pcm = (samples * 32767).astype(np.int16).tobytes()
         wav_b64 = _pcm_to_wav_b64(pcm, sample_rate=sr)
         self._broadcast({"type": "tts_audio", "audio": wav_b64})
