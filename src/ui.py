@@ -590,11 +590,9 @@ class UI:
             return []
         resp_parts = cands[0].get("content", {}).get("parts", [])
 
-        model_parts = []
         func_calls = []
         for p in resp_parts:
             if "text" in p:
-                model_parts.append({"text": p["text"]})
                 self._broadcast({"type": "chat", "sender": "ai", "text": p["text"]})
                 self._last_activity = time.time()
                 if p["text"] and not p["text"].startswith("["):
@@ -604,15 +602,14 @@ class UI:
                         pass
             if "functionCall" in p:
                 fc = p["functionCall"]
-                model_parts.append({"functionCall": fc})
                 func_calls.append(fc)
                 self.push_tool_calls([{"name": fc["name"], "args": fc.get("args", {})}])
                 self._broadcast({"type": "chat", "sender": "ai",
                                  "text": "[%s(%s)]" % (fc["name"], json.dumps(fc.get("args", {})))})
                 self._last_activity = time.time()
 
-        if model_parts:
-            self._conversation.append({"role": "model", "parts": model_parts})
+        if resp_parts:
+            self._conversation.append({"role": "model", "parts": resp_parts})
 
         return func_calls
 
