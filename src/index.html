@@ -14,9 +14,9 @@ header h1{font-size:1.1rem;font-weight:600}
 .left{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px;gap:12px}
 .right{width:340px;display:flex;flex-direction:column;padding:12px;gap:10px;border-left:1px solid #333;overflow-y:auto}
 #fs-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}
-#eyes{width:280px;height:140px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:40px;cursor:pointer;position:relative;flex-shrink:0}
-.eye{width:60px;height:72px;background:#fff;border-radius:50%;position:relative;overflow:hidden}
-.pupil{width:24px;height:28px;background:#111;border-radius:50%;position:absolute;top:22px;left:18px;transition:all .15s}
+#eyes{width:520px;height:260px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:60px;cursor:pointer;position:relative;flex-shrink:0}
+.eye{width:180px;height:216px;background:#fff;border-radius:50%;position:relative;overflow:hidden}
+.pupil{width:72px;height:84px;background:#111;border-radius:50%;position:absolute;top:37%;left:30%;transition:all .15s}
 .eye.blink{animation:blink .2s}
 @keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.05)}}
 #atlas{width:640px;height:480px;background:#000;border-radius:0;flex-shrink:0}
@@ -47,11 +47,11 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 #fs-wrap.fs{position:fixed;inset:0;z-index:9999;background:#000;gap:0;align-items:center;height:100vh}
 #fs-wrap.fs #eyes{width:100%;flex:1;border-radius:0;gap:8vmin}
 #fs-wrap.fs #atlas{width:640px;height:480px;flex-shrink:0}
-#fs-wrap.fs .eye{width:8vmin;height:10vmin}
-#fs-wrap.fs .pupil{width:3.2vmin;height:3.8vmin;top:37%;left:30%}
+#fs-wrap.fs .eye{width:24vmin;height:30vmin}
+#fs-wrap.fs .pupil{width:9.6vmin;height:11.4vmin;top:37%;left:30%}
 #fs-wrap.fs.eyes-big #eyes{height:100vh;flex:none}
-#fs-wrap.fs.eyes-big .eye{width:20vmin;height:24vmin}
-#fs-wrap.fs.eyes-big .pupil{width:8vmin;height:9.5vmin;top:37%;left:30%}
+#fs-wrap.fs.eyes-big .eye{width:60vmin;height:72vmin}
+#fs-wrap.fs.eyes-big .pupil{width:24vmin;height:28.5vmin;top:37%;left:30%}
 #fs-wrap.fs.eyes-big #atlas{display:none}
 
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
