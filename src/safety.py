@@ -33,6 +33,14 @@ MASK_X1 = min(320, RCX + 16)
 MASK_Y1 = MASK_Y0 + ROBOT_H
 BWD_SCAN_X0 = max(0, RCX - 25)  # 5 px extra margin behind caster
 
+# Lateral scan covers the robot's full diagonal extent so spin-corner
+# collisions are caught.  half-diagonal ≈ sqrt(15²+21²) ≈ 26 px.
+_HALF_DIAG = 26
+LAT_X0 = max(0, RCX - _HALF_DIAG)
+LAT_X1 = min(320, RCX + _HALF_DIAG)
+LAT_HARD_PX = 5    # within this → angular = 0
+LAT_SAFE_PX = 12   # above this  → full angular
+
 FPS = 30.0
 DT = 1.0 / FPS
 PREDICT_STEPS = 30
@@ -57,6 +65,7 @@ class SafetyGuard:
         self._hist = deque(maxlen=HISTORY_LEN)
         self._fwd_scale = 1.0
         self._bwd_scale = 1.0
+        self._ang_scale = 1.0
         self._throttled = False
         self._path = []
         self._tick = 0
@@ -72,6 +81,10 @@ class SafetyGuard:
     @property
     def bwd_scale(self):
         return self._bwd_scale
+
+    @property
+    def ang_scale(self):
+        return self._ang_scale
 
     # ── per-frame update ──
 
@@ -125,7 +138,35 @@ class SafetyGuard:
         if bwd_clear <= MIN_CLEARANCE_PX:
             self._bwd_scale = 0.0
 
-        self._throttled = self._fwd_scale < 0.95 or self._bwd_scale < 0.95
+        # ── Lateral scans: above / below robot (diagonal x-extent) ──
+        lx0, lx1 = LAT_X0, LAT_X1
+
+        if MASK_Y0 > 0:
+            strip = obs_map[:MASK_Y0, lx0:lx1][::-1, :]
+            row_hit = np.any(strip >= OBS_THRESH, axis=1)
+            idxs = np.flatnonzero(row_hit)
+            up_clear = int(idxs[0]) if len(idxs) > 0 else strip.shape[0]
+        else:
+            up_clear = 0
+
+        if MASK_Y1 < h_map:
+            strip = obs_map[MASK_Y1:, lx0:lx1]
+            row_hit = np.any(strip >= OBS_THRESH, axis=1)
+            idxs = np.flatnonzero(row_hit)
+            down_clear = int(idxs[0]) if len(idxs) > 0 else strip.shape[0]
+        else:
+            down_clear = 0
+
+        min_lat = min(up_clear, down_clear)
+        if min_lat <= LAT_HARD_PX:
+            self._ang_scale = 0.0
+        elif min_lat < LAT_SAFE_PX:
+            self._ang_scale = (min_lat - LAT_HARD_PX) / float(LAT_SAFE_PX - LAT_HARD_PX)
+        else:
+            self._ang_scale = 1.0
+
+        self._throttled = (self._fwd_scale < 0.95 or self._bwd_scale < 0.95
+                           or self._ang_scale < 0.95)
 
         # ── Trajectory prediction (visualisation only) ──
         self._path = []

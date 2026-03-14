@@ -447,5 +447,9 @@ class Vision:
         return self._safety.bwd_scale
 
     @property
+    def safety_ang_scale(self):
+        return self._safety.ang_scale
+
+    @property
     def safety_throttled(self):
         return self._safety.is_throttled

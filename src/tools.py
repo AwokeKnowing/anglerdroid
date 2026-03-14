@@ -23,12 +23,14 @@ _vision = None  # type: Optional[vision.Vision]
 _ui = None  # type: Optional[ui.UI]
 _safety_fwd = 1.0
 _safety_bwd = 1.0
+_safety_ang = 1.0
 
 
-def set_safety_scales(fwd, bwd):
-    global _safety_fwd, _safety_bwd
+def set_safety_scales(fwd, bwd, ang=1.0):
+    global _safety_fwd, _safety_bwd, _safety_ang
     _safety_fwd = max(0.0, min(1.0, float(fwd)))
     _safety_bwd = max(0.0, min(1.0, float(bwd)))
+    _safety_ang = max(0.0, min(1.0, float(ang)))
 
 
 def init(
@@ -92,6 +94,7 @@ def set_wheel_vels(left_tps: float, right_tps: float):
             fwd *= _safety_fwd
         elif fwd < 0:
             fwd *= _safety_bwd
+        turn *= _safety_ang
         _wheelbase.set_wheel_vels(fwd - turn, fwd + turn)
 
 def stop():
@@ -107,6 +110,7 @@ def twist(forward_mps: float, angular_rads: float):
             forward_mps *= _safety_fwd
         elif forward_mps < 0:
             forward_mps *= _safety_bwd
+        angular_rads *= _safety_ang
         _wheelbase.twist(forward_mps, angular_rads)
 
 
