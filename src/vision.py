@@ -16,6 +16,7 @@ import cv2
 
 from cameras import RSCamera, WebCam, HAS_RS, FRAME_W, FRAME_H
 import odometry
+from safety import SafetyGuard
 
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
@@ -264,6 +265,7 @@ class Vision:
         self.timestamp = 0.0
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._safety = SafetyGuard()
 
         self._running = False
         self._thread = None
@@ -381,7 +383,10 @@ class Vision:
             v = self._persistent_obs[unknown].astype(np.uint16)
             self._persistent_obs[unknown] = ((v * 251) >> 8).astype(np.uint8)
 
+            self._safety.update(self._persistent_obs, yaw, fwd)
             topdown = _build_costmap(self._persistent_obs, known_combined)
+            self._safety.draw_trajectory(topdown)
+            self._safety.draw_wheel_flash(topdown)
 
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
@@ -432,3 +437,11 @@ class Vision:
                 self.atlas.copy(),
                 self.timestamp,
             )
+
+    @property
+    def safety_scale(self):
+        return self._safety.vel_scale
+
+    @property
+    def safety_throttled(self):
+        return self._safety.is_throttled
