@@ -59,6 +59,8 @@ def _init_kokoro():
     print("tts: Kokoro loaded")
 
 VLLM_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
+GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+GEMINI_DEFAULT_MODEL = "gemini-2.0-flash-lite"
 MAX_CONTEXT = 40
 _STATE_RE = re.compile(r'state\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
@@ -67,8 +69,13 @@ _SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 class Brain:
     _TWIST_RE = re.compile(r'twist_for\s*\(')
 
-    def __init__(self, vllm_url, model_name, system_prompt, vision=True):
-        self._vllm_url = vllm_url
+    def __init__(self, vllm_url, model_name, system_prompt, vision=True,
+                 gemini_key=""):
+        self._gemini_key = gemini_key
+        if gemini_key:
+            self._llm_url = GEMINI_OPENAI_URL
+        else:
+            self._llm_url = vllm_url
         self._model = model_name
         self._prompt = system_prompt
         self._vision = vision
@@ -182,7 +189,7 @@ class Brain:
                     messages.append(msg)
 
             t0 = time.time()
-            result = self._call_vllm(messages)
+            result = self._call_llm(messages)
             api_ms = (time.time() - t0) * 1000
             self._api_ms_total += api_ms
             self._turn += 1
@@ -260,7 +267,7 @@ class Brain:
             while self._conversation and self._conversation[0].get("role") != "user":
                 self._conversation.pop(0)
 
-    def _call_vllm(self, messages):
+    def _call_llm(self, messages):
         body = {
             "model": self._model,
             "messages": messages,
@@ -268,11 +275,14 @@ class Brain:
             "temperature": 0.3,
             "top_p": 0.9,
         }
-        req = Request(self._vllm_url,
+        headers = {"Content-Type": "application/json"}
+        if self._gemini_key:
+            headers["Authorization"] = "Bearer " + self._gemini_key
+        req = Request(self._llm_url,
                       data=json.dumps(body).encode("utf-8"),
-                      headers={"Content-Type": "application/json"})
+                      headers=headers)
         try:
-            resp = urlopen(req, timeout=10)
+            resp = urlopen(req, timeout=15)
             data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"].strip()
         except HTTPError as e:
@@ -281,10 +291,10 @@ class Brain:
                 body_text = e.read().decode("utf-8", errors="replace")
             except Exception:
                 pass
-            print("brain: vLLM HTTP %d: %s" % (e.code, body_text[:500]))
+            print("brain: LLM HTTP %d: %s" % (e.code, body_text[:500]))
             return None
         except Exception as e:
-            print("brain: vLLM error: %s" % e)
+            print("brain: LLM error: %s" % e)
             return None
 
     def reset(self):
@@ -376,18 +386,25 @@ def _load_prompt():
 def main():
     ap = argparse.ArgumentParser(description="AnglerDroid Brain Server (3090)")
     ap.add_argument("--port", type=int, default=8090)
+    ap.add_argument("--gemini-key", default="",
+                    help="Gemini API key (uses Gemini instead of local vLLM)")
     ap.add_argument("--vllm-url", default=VLLM_DEFAULT_URL,
-                    help="vLLM OpenAI-compatible endpoint")
-    ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct",
-                    help="Model name for vLLM (must match what vllm serve loaded)")
+                    help="vLLM OpenAI-compatible endpoint (ignored if --gemini-key set)")
+    ap.add_argument("--model", default="",
+                    help="Model name (default: gemini-2.0-flash-lite or Qwen/Qwen2.5-VL-3B-Instruct)")
     ap.add_argument("--no-vision", action="store_true",
                     help="Don't send images (for text-only models)")
     ap.add_argument("--no-stt", action="store_true",
-                    help="Disable Parakeet STT")
+                    help="Disable STT")
     args = ap.parse_args()
 
+    if not args.model:
+        args.model = GEMINI_DEFAULT_MODEL if args.gemini_key else "Qwen/Qwen2.5-VL-3B-Instruct"
+
     prompt = _load_prompt()
-    brain = Brain(args.vllm_url, args.model, prompt, vision=not args.no_vision)
+    llm_backend = "gemini" if args.gemini_key else "vllm"
+    brain = Brain(args.vllm_url, args.model, prompt,
+                  vision=not args.no_vision, gemini_key=args.gemini_key)
 
     if not args.no_stt:
         brain.init_stt()
@@ -395,11 +412,12 @@ def main():
 
     Handler.brain = brain
 
+    llm_url = GEMINI_OPENAI_URL if args.gemini_key else args.vllm_url
     server = HTTPServer(("0.0.0.0", args.port), Handler)
     print("=" * 60)
     print("AnglerDroid Brain Server")
     print("  port:   %d" % args.port)
-    print("  vllm:   %s" % args.vllm_url)
+    print("  llm:    %s (%s)" % (llm_backend, llm_url[:60]))
     print("  model:  %s" % args.model)
     print("  vision: %s" % (not args.no_vision))
     print("  stt:    %s" % (brain._stt_model is not None))
