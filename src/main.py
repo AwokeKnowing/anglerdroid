@@ -87,6 +87,9 @@ def main():
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
         cv2.createTrackbar("td_xoff", "vision atlas", _OFF_CENTER + vision_mod.TD_X_OFFSET, _OFF_CENTER * 2, lambda v: None)
+        cv2.createTrackbar("robot_w", "vision atlas", vision_mod.ROBOT_W, 80, lambda v: None)
+        cv2.createTrackbar("robot_h", "vision atlas", vision_mod.ROBOT_H, 60, lambda v: None)
+        cv2.createTrackbar("robot_cx", "vision atlas", 40 + vision_mod.ROBOT_CX_OFF, 80, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -101,6 +104,9 @@ def main():
             # Read tuning sliders and update vision module
             if show_ok:
                 vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _OFF_CENTER
+                vision_mod.ROBOT_W = max(1, cv2.getTrackbarPos("robot_w", "vision atlas"))
+                vision_mod.ROBOT_H = max(1, cv2.getTrackbarPos("robot_h", "vision atlas"))
+                vision_mod.ROBOT_CX_OFF = cv2.getTrackbarPos("robot_cx", "vision atlas") - 40
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()

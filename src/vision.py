@@ -22,6 +22,11 @@ TARGET_FPS = 30
 CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 CROSSHAIR_OPACITY = 0.3
 
+# Robot body outline on obstacle map (pixels). Robot faces RIGHT.
+ROBOT_W = 35        # front-back (x direction)
+ROBOT_H = 24        # side-to-side (y direction)
+ROBOT_CX_OFF = 5    # forward offset from crosshair center
+
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
 TD_FLOOR_CLIP = np.float32(0.91) # reject floor (farther than this Z). Fixed.
@@ -271,6 +276,11 @@ class Vision:
             topdown[:, :, 2] = unknown // 4                     # B = unknown (dim blue)
             _blit(topdown[:, :, 0], obs2, fw_dx, fw_dy)         # R = forward obstacles
             _blit(topdown[:, :, 1], obs1, td_dx)                # G = topdown obstacles
+
+            # Draw robot body outline (white rectangle)
+            rx0 = CROSSHAIR_CX - (ROBOT_W // 2) + ROBOT_CX_OFF
+            ry0 = CROSSHAIR_CY - (ROBOT_H // 2)
+            cv2.rectangle(topdown, (rx0, ry0), (rx0 + ROBOT_W, ry0 + ROBOT_H), (255, 255, 255), 1)
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
