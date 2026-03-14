@@ -24,7 +24,7 @@ CROSSHAIR_OPACITY = 0.3
 
 # Robot footprint on costmap (pixels). Robot faces RIGHT.
 ROBOT_W = 30        # front-back (x direction)  — locked
-ROBOT_H = 40        # side-to-side (y direction) — locked
+ROBOT_H = 42        # side-to-side (y direction) — locked
 ROBOT_CX_OFF = -78  # x offset from crosshair center — locked
 
 # --- RS1 (top-down camera) depth params ---
@@ -170,15 +170,17 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
 
 
 _INFLATE_PX = 15  # 15cm at 10mm/px
+_grad_layer = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+_pillow_mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+_pillow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
 
 
 def _build_costmap(obs_combined, known_combined):
-    """Costmap from combined obstacle + known masks.
-    255=free (white), 128=unknown (grey), 50=obstacle (dark grey),
-    inflation gradient 15cm around obstacles at 50% opacity,
-    robot drawn as body + two tracks."""
+    """RGB costmap: white=free, grey=unknown, dark=obstacles.
+    Gradient inflation kept in _grad_layer. Morphological pillow around robot
+    intersected with gradient → red danger overlay. Robot drawn in blue."""
     h, w = obs_combined.shape
-    costmap = np.full((h, w), np.uint8(255))
+    costmap = np.full((h, w, 3), 255, dtype=np.uint8)
 
     unknown = known_combined == 0
     obs_mask = obs_combined > 0
@@ -191,6 +193,8 @@ def _build_costmap(obs_combined, known_combined):
     ry1 = min(h, ry0 + ROBOT_H)
     obs_mask[ry0:ry1, rx0:rx1] = False
 
+    # Gradient inflation layer (persistent buffer, 255=near obstacle, 0=far)
+    _grad_layer[:] = 0
     if np.any(obs_mask):
         dist = cv2.distanceTransform(
             (~obs_mask).astype(np.uint8) * 255, cv2.DIST_L2, 5)
@@ -198,20 +202,36 @@ def _build_costmap(obs_combined, known_combined):
         inflate[ry0:ry1, rx0:rx1] = False
         if np.any(inflate):
             t = dist[inflate] / float(_INFLATE_PX)
-            grad = 50.0 + t * 205.0
-            costmap[inflate] = ((255.0 + grad) * 0.5).astype(np.uint8)
+            _grad_layer[inflate] = (255.0 * (1.0 - t)).astype(np.uint8)
+            # Grey gradient on costmap (50% opacity)
+            grad_color = 50.0 + t * 205.0
+            val = ((255.0 + grad_color) * 0.5).astype(np.uint8)
+            costmap[inflate] = val[:, np.newaxis]
 
-    costmap[obs_mask] = 50
-    costmap[unknown] = 128
+    costmap[obs_mask] = (50, 50, 50)
+    costmap[unknown] = (128, 128, 128)
 
-    # Body: 30w x 30h centred at (rcx, rcy)
-    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = 80
-    # Top track: 20w x 5h centred at (rcx+5, rcy-17), very dark grey
-    costmap[max(0, rcy - 20):max(0, rcy - 15), max(0, rcx - 5):rcx + 15] = 40
-    # Bottom track: 20w x 5h centred at (rcx+5, rcy+17), very dark grey
-    costmap[rcy + 15:min(h, rcy + 20), max(0, rcx - 5):rcx + 15] = 40
+    # Extended footprint: morphological dilation of robot rect → pillow shape
+    _pillow_mask[:] = 0
+    _pillow_mask[ry0:ry1, rx0:rx1] = 255
+    cv2.dilate(_pillow_mask, _pillow_kernel, dst=_pillow_mask)
 
-    return cv2.cvtColor(costmap, cv2.COLOR_GRAY2BGR)
+    # Danger: intersection of pillow and gradient → red, intensity from gradient
+    danger = (_pillow_mask > 0) & (_grad_layer > 0)
+    if np.any(danger):
+        costmap[danger, 0] = _grad_layer[danger]
+        costmap[danger, 1] = 0
+        costmap[danger, 2] = 0
+
+    # Body: 30w × 30h, light blue (RGB)
+    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
+    # Tracks: 17w × 6h centred at (rcx+5), dark blue (RGB)
+    tx0 = max(0, rcx - 3)
+    tx1 = rcx + 14
+    costmap[max(0, rcy - 21):max(0, rcy - 15), tx0:tx1] = (30, 60, 180)
+    costmap[rcy + 15:min(h, rcy + 21), tx0:tx1] = (30, 60, 180)
+
+    return costmap
 
 
 class Vision:
