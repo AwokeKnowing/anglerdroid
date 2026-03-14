@@ -360,9 +360,9 @@ class UI:
         except queue.Full:
             pass
 
-    # ── Gemini AI (0.5 FPS reactive control loop) ──────────────────
+    # ── AI control loop ─────────────────────────────────────────────
 
-    GEMINI_INTERVAL = 2.0   # seconds between frames (0.5 FPS)
+    VISION_MODEL_INTERVAL = 1.0  # seconds between frames (1 FPS)
     GEMINI_MAX_CONTEXT = 40
 
     _CALL_RE = re.compile(r'(twist_for|speak|think|state|stop|navigate)\s*\(([^)]*)\)')
@@ -382,8 +382,9 @@ class UI:
         threading.Thread(target=self._ai_loop, daemon=True).start()
         threading.Thread(target=self._tts_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
+        self._prev_img_b64 = None
         backend = "brain:%s" % self._brain_url if self._brain_url else self._gemini_model
-        print("ai: started (%s, interval=%.1fs)" % (backend, self.GEMINI_INTERVAL))
+        print("ai: started (%s, interval=%.1fs)" % (backend, self.VISION_MODEL_INTERVAL))
 
     def _stop_gemini(self):
         self._gemini_active = False
@@ -435,18 +436,20 @@ class UI:
                 _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
                 img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
+                prev_b64 = self._prev_img_b64
+                self._prev_img_b64 = img_b64
 
                 t_api = time.time()
 
                 if self._brain_url:
                     text = self._call_brain(
-                        img_b64, turns,
+                        img_b64, prev_b64, turns,
                         speech=user_text or "",
                         audio_chunks=[ap["data"] for ap in audio_parts]
                                      if audio_parts else None)
                 else:
                     text = self._call_gemini_turn(
-                        img_b64, user_text, audio_parts, prompt)
+                        img_b64, prev_b64, user_text, audio_parts, prompt)
 
                 api_ms = (time.time() - t_api) * 1000
                 api_ms_total += api_ms
@@ -456,7 +459,7 @@ class UI:
                     self._parse_and_execute(text)
 
                 elapsed = time.time() - t_loop
-                if elapsed <= self.GEMINI_INTERVAL * 1.5:
+                if elapsed <= self.VISION_MODEL_INTERVAL * 1.5:
                     on_time += 1
                     streak += 1
                     best_streak = max(best_streak, streak)
@@ -471,10 +474,10 @@ class UI:
                           "streak=%d/%d" % (
                               mode, turns, avg, pct, streak, best_streak))
 
-                remaining = self.GEMINI_INTERVAL - (time.time() - t_loop)
+                remaining = self.VISION_MODEL_INTERVAL - (time.time() - t_loop)
                 while remaining > 0 and self._gemini_active:
                     time.sleep(min(0.2, remaining))
-                    remaining = self.GEMINI_INTERVAL - (time.time() - t_loop)
+                    remaining = self.VISION_MODEL_INTERVAL - (time.time() - t_loop)
 
             except Exception as e:
                 print("ai: loop error: %s" % e)
@@ -485,8 +488,9 @@ class UI:
 
     # ── Brain server backend ─────────────────────────────────────
 
-    def _call_brain(self, img_b64, frame_id, speech="", audio_chunks=None):
-        """POST frame + metadata to brain server, return response text."""
+    def _call_brain(self, img_b64, prev_img_b64, frame_id,
+                     speech="", audio_chunks=None):
+        """POST current + previous frame to brain server, return response text."""
         body = {
             "image": img_b64,
             "frame_id": frame_id,
@@ -494,6 +498,8 @@ class UI:
             "angular_velocity": 0.0,
             "speech": speech,
         }
+        if prev_img_b64:
+            body["prev_image"] = prev_img_b64
         if audio_chunks:
             body["audio_chunks"] = audio_chunks
 
@@ -512,9 +518,14 @@ class UI:
 
     # ── Gemini API backend ───────────────────────────────────────
 
-    def _call_gemini_turn(self, img_b64, user_text, audio_parts, prompt):
+    def _call_gemini_turn(self, img_b64, prev_img_b64, user_text,
+                           audio_parts, prompt):
         """Gemini mode: manage conversation, call API, return response text."""
-        parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]
+        parts = []
+        if prev_img_b64:
+            parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                          "data": prev_img_b64}})
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_b64}})
         if audio_parts:
             for ap in audio_parts:
                 parts.append({"inline_data": {
@@ -564,7 +575,7 @@ class UI:
             self._conversation.pop(0)
 
     def _strip_images(self):
-        """Keep images only in the last 2 user messages."""
+        """Gemini path: keep images only in the last 2 user messages."""
         img_indices = []
         for i, msg in enumerate(self._conversation):
             if msg.get("role") == "user" and \
@@ -601,7 +612,7 @@ class UI:
                 nums = [float(x) for x in self._NUM_RE.findall(raw_args)]
                 fwd = nums[0] if len(nums) > 0 else 0.0
                 ang = nums[1] if len(nums) > 1 else 0.0
-                dur = nums[2] if len(nums) > 2 else self.GEMINI_INTERVAL + 0.5
+                dur = nums[2] if len(nums) > 2 else self.VISION_MODEL_INTERVAL + 0.5
                 self.push_tool_calls([{"name": "twist_for", "args": {
                     "forward_mps": fwd, "angular_rads": ang,
                     "duration_secs": dur,

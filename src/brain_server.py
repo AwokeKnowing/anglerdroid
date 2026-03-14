@@ -1,14 +1,15 @@
 """
 brain_server.py — Local AI inference server for AnglerDroid (runs on 3090 GPU).
 
-Receives camera frames + robot state from the Jetson at 0.5fps via HTTP.
-Optionally receives audio chunks, runs STT (Parakeet TDT).
+Receives current + previous camera frames and robot state from the Jetson
+at 1 FPS via HTTP. Optionally receives audio chunks, runs STT (faster-whisper).
 Uses vLLM (OpenAI-compatible API) for decision making.
 
 Usage:
   # Terminal 1: start vLLM (adjust model as needed)
-  vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
-    --max-model-len 4096 --enforce-eager --gpu-memory-utilization 0.5
+  vllm serve Qwen/Qwen2.5-VL-3B-Instruct --port 8000 \
+    --max-model-len 4096 --enforce-eager --gpu-memory-utilization 0.5 \
+    --limit-mm-per-prompt '{"image":2,"video":0}'
 
   # Terminal 2: start brain server
   python brain_server.py --port 8090
@@ -105,7 +106,7 @@ class Brain:
         return None
 
     def infer(self, image_b64, frame_id, velocity, angular_vel,
-              speech="", audio_chunks=None):
+              speech="", audio_chunks=None, prev_image_b64=None):
         with self._lock:
             stt_text = self.transcribe_audio(audio_chunks)
 
@@ -128,14 +129,14 @@ class Brain:
             text_content = "\n".join(lines)
 
             if self._vision and image_b64:
-                user_msg = {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url",
-                         "image_url": {"url": "data:image/jpeg;base64," + image_b64}},
-                        {"type": "text", "text": text_content},
-                    ],
-                }
+                content = []
+                if prev_image_b64:
+                    content.append({"type": "image_url",
+                                    "image_url": {"url": "data:image/jpeg;base64," + prev_image_b64}})
+                content.append({"type": "image_url",
+                                "image_url": {"url": "data:image/jpeg;base64," + image_b64}})
+                content.append({"type": "text", "text": text_content})
+                user_msg = {"role": "user", "content": content}
             else:
                 user_msg = {"role": "user", "content": text_content}
 
@@ -266,6 +267,7 @@ class Handler(BaseHTTPRequestHandler):
             angular_vel=float(data.get("angular_velocity", 0)),
             speech=data.get("speech", ""),
             audio_chunks=data.get("audio_chunks"),
+            prev_image_b64=data.get("prev_image", ""),
         )
 
         result = {"text": text, "api_ms": round(api_ms, 1),
