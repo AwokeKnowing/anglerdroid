@@ -15,6 +15,7 @@ import numpy as np
 import cv2
 
 from cameras import RSCamera, WebCam, HAS_RS, FRAME_W, FRAME_H
+import odometry
 
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
@@ -177,7 +178,8 @@ _robot_inv = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
 def _build_costmap(obs_combined, known_combined):
     """RGB costmap: white=free, grey=unknown, anti-aliased obstacles.
-    Distance field from robot colours nearby obstacles red→yellow at 30% opacity.
+    obs_combined may be 0-255 (persistent map with faded stale obstacles).
+    Distance field from robot colours nearby obstacles red→yellow at 55% opacity.
     Robot drawn in blue with caster wheel."""
     h, w = obs_combined.shape
     costmap = np.full((h, w, 3), 255, dtype=np.uint8)
@@ -192,8 +194,8 @@ def _build_costmap(obs_combined, known_combined):
     ry1 = min(h, ry0 + ROBOT_H)
     obs_raw[ry0:ry1, rx0:rx1] = False
 
-    # 1px dilation + Gaussian anti-aliasing
-    obs_u8 = obs_raw.astype(np.uint8) * 255
+    obs_u8 = obs_combined.copy()
+    obs_u8[ry0:ry1, rx0:rx1] = 0
     cv2.dilate(obs_u8, _obs_dilate_kernel, dst=obs_u8)
     obs_u8[ry0:ry1, rx0:rx1] = 0
     obs_aa = cv2.GaussianBlur(obs_u8, (3, 3), 0.7)
@@ -261,6 +263,7 @@ class Vision:
         self.atlas = np.zeros((ATLAS_H, ATLAS_W, 3), dtype=np.uint8)
         self.timestamp = 0.0
         self._lock = threading.Lock()
+        self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
         self._running = False
         self._thread = None
@@ -353,7 +356,32 @@ class Vision:
             _blit(obs_tmp, obs2, fw_dx, fw_dy)
             np.maximum(obs_combined, obs_tmp, out=obs_combined)
 
-            topdown = _build_costmap(obs_combined, known_combined)
+            # --- Visual odometry → warp + update persistent obstacle map ---
+            if self._rs2 and self._rs2.ok:
+                fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
+                yaw, fwd = odometry.update(fw_gray)
+            else:
+                yaw, fwd = 0.0, 0.0
+
+            if abs(yaw) > 1e-6 or abs(fwd) > 1e-6:
+                rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
+                rcy_f = float(CROSSHAIR_CY)
+                M_warp = cv2.getRotationMatrix2D((rcx_f, rcy_f),
+                                                 -np.degrees(yaw), 1.0)
+                M_warp[0, 2] -= fwd / float(TD_PX_SIZE)
+                self._persistent_obs = cv2.warpAffine(
+                    self._persistent_obs, M_warp, (FRAME_W, FRAME_H),
+                    borderValue=0)
+
+            free = (known_combined > 0) & (obs_combined == 0)
+            self._persistent_obs[free] = 0
+            self._persistent_obs[obs_combined > 0] = 255
+
+            unknown = known_combined == 0
+            v = self._persistent_obs[unknown].astype(np.uint16)
+            self._persistent_obs[unknown] = ((v * 251) >> 8).astype(np.uint8)
+
+            topdown = _build_costmap(self._persistent_obs, known_combined)
 
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
