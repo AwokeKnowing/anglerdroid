@@ -1,0 +1,24 @@
+# Requirements for brain_server.py (runs on 3090 GPU server)
+#
+# Step 1: Install vLLM and start it separately:
+#   pip install vllm
+#   vllm serve Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
+#     --max-model-len 4096 --enforce-eager --gpu-memory-utilization 0.5
+#
+# Step 2: Install brain server dependencies:
+#   pip install -r requirements-brain.txt
+#
+# Step 3: Start brain server:
+#   python brain_server.py --port 8090
+#
+# Optional: For a vision-language model (can process images directly):
+#   vllm serve Qwen/Qwen2.5-VL-7B-Instruct --port 8000 \
+#     --max-model-len 4096 --gpu-memory-utilization 0.7
+
+numpy
+
+# STT (optional — install for voice input)
+# nemo_toolkit[asr]
+
+# Kokoro TTS (install on JETSON for local TTS):
+# pip install kokoro-onnx

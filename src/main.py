@@ -40,9 +40,12 @@ def main():
     parser.add_argument("--google-client-id", default="", help="Google OAuth client ID for sign-in")
     parser.add_argument("--http-port", type=int, default=8080, help="HTTP server port")
     parser.add_argument("--ws-port", type=int, default=8081, help="WebSocket server port")
+    parser.add_argument("--brain-url", default="",
+                        help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
+    brain_url = args.brain_url or os.environ.get("BRAIN_URL", "")
 
     # Rerun
     if HAS_RERUN and not args.no_rerun:
@@ -76,6 +79,7 @@ def main():
         google_client_id=args.google_client_id,
         http_port=args.http_port,
         ws_port=args.ws_port,
+        brain_url=brain_url,
     )
     u.start()
 

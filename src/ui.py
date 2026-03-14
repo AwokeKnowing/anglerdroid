@@ -1,11 +1,14 @@
 """
-ui.py – Web UI server: HTTPS + WSS + Gemini AI (REST API, no SDK).
+ui.py – Web UI server: HTTPS + WSS + AI control loop.
+Supports two backends:
+  - Gemini API (cloud) — default
+  - Brain server (local 3090) — via --brain-url
 Auto-generates a self-signed cert so mic/getUserMedia works on LAN.
-All communication with the 30fps main loop is via thread-safe queues/locks.
 """
 
 import io
 import os
+import re
 import ssl
 import json
 import time
@@ -23,7 +26,13 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-import re
+try:
+    from kokoro_onnx import Kokoro as _KokoroClass
+    _kokoro = _KokoroClass()
+    _HAS_KOKORO = True
+except Exception:
+    _kokoro = None
+    _HAS_KOKORO = False
 
 try:
     import websockets
@@ -83,9 +92,11 @@ def _jwt_email(token):
 
 class UI:
     def __init__(self, gemini_key="", gemini_model="", auth_email="",
-                 google_client_id="", http_port=8080, ws_port=8081):
+                 google_client_id="", http_port=8080, ws_port=8081,
+                 brain_url=""):
         self._gemini_key = gemini_key
         self._gemini_model = gemini_model or GEMINI_MODEL_DEFAULT
+        self._brain_url = brain_url.rstrip("/") if brain_url else ""
         self._auth_email = auth_email
         self._google_client_id = google_client_id
         self._http_port = http_port
@@ -354,24 +365,25 @@ class UI:
     GEMINI_INTERVAL = 2.0   # seconds between frames (0.5 FPS)
     GEMINI_MAX_CONTEXT = 40
 
-    _CALL_RE = re.compile(r'(twist_for|speak|state|stop|navigate)\s*\(([^)]*)\)')
+    _CALL_RE = re.compile(r'(twist_for|speak|think|state|stop|navigate)\s*\(([^)]*)\)')
     _NUM_RE = re.compile(r'-?[\d.]+')
 
     def _start_gemini(self):
         if self._gemini_active:
             return
-        if not self._gemini_key:
+        if not self._brain_url and not self._gemini_key:
             self._broadcast({"type": "ai_status", "active": False,
-                             "error": "No --gemini-key configured"})
+                             "error": "No --gemini-key or --brain-url configured"})
             return
         self._gemini_active = True
         self._conversation = []
         self._agent_state = ""
         self._last_api_call = 0.0
-        threading.Thread(target=self._gemini_loop, daemon=True).start()
+        threading.Thread(target=self._ai_loop, daemon=True).start()
         threading.Thread(target=self._tts_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
-        print("ai: started (%s, interval=%.1fs)" % (self._gemini_model, self.GEMINI_INTERVAL))
+        backend = "brain:%s" % self._brain_url if self._brain_url else self._gemini_model
+        print("ai: started (%s, interval=%.1fs)" % (backend, self.GEMINI_INTERVAL))
 
     def _stop_gemini(self):
         self._gemini_active = False
@@ -388,7 +400,7 @@ class UI:
         except FileNotFoundError:
             return "You are a helpful robot. Respond with function calls or '.'"
 
-    def _gemini_loop(self):
+    def _ai_loop(self):
         prompt = self._load_prompt()
         turns = 0
         on_time = 0
@@ -424,48 +436,24 @@ class UI:
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
                 img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
-                parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]
-                if audio_parts:
-                    for ap in audio_parts:
-                        parts.append({"inline_data": {
-                            "mime_type": ap["mime"], "data": ap["data"]}})
-
-                text_lines = []
-                if user_text:
-                    text_lines.append("USER: " + user_text)
-                elif audio_parts:
-                    text_lines.append("USER: [audio message]")
-                if self._agent_state:
-                    text_lines.append("STATE: " + self._agent_state)
-                text_lines.append("frame")
-                parts.append({"text": "\n".join(text_lines)})
-
-                self._conversation.append({"role": "user", "parts": parts})
-                self._trim_conversation()
-                self._strip_images()
-
                 t_api = time.time()
-                result = self._call_api(prompt)
+
+                if self._brain_url:
+                    text = self._call_brain(
+                        img_b64, turns,
+                        speech=user_text or "",
+                        audio_chunks=[ap["data"] for ap in audio_parts]
+                                     if audio_parts else None)
+                else:
+                    text = self._call_gemini_turn(
+                        img_b64, user_text, audio_parts, prompt)
+
                 api_ms = (time.time() - t_api) * 1000
                 api_ms_total += api_ms
                 turns += 1
 
-                if result:
-                    cands = result.get("candidates", [])
-                    if cands:
-                        resp_parts = cands[0].get("content", {}).get("parts", [])
-                        text = ""
-                        for p in resp_parts:
-                            if "text" in p and not p.get("thought"):
-                                text += p["text"]
-                        text = text.strip()
-                        if text:
-                            self._conversation.append(
-                                {"role": "model", "parts": [{"text": text}]})
-                            self._parse_and_execute(text)
-                        else:
-                            self._conversation.append(
-                                {"role": "model", "parts": [{"text": "."}]})
+                if text:
+                    self._parse_and_execute(text)
 
                 elapsed = time.time() - t_loop
                 if elapsed <= self.GEMINI_INTERVAL * 1.5:
@@ -478,10 +466,10 @@ class UI:
                 if turns % 10 == 0:
                     avg = api_ms_total / turns
                     pct = on_time / turns * 100
-                    print("ai: turn=%d  avg_api=%.0fms  on_time=%.0f%%  "
-                          "streak=%d/%d  ctx=%d" % (
-                              turns, avg, pct, streak, best_streak,
-                              len(self._conversation)))
+                    mode = "brain" if self._brain_url else "gemini"
+                    print("ai[%s]: turn=%d  avg=%.0fms  on_time=%.0f%%  "
+                          "streak=%d/%d" % (
+                              mode, turns, avg, pct, streak, best_streak))
 
                 remaining = self.GEMINI_INTERVAL - (time.time() - t_loop)
                 while remaining > 0 and self._gemini_active:
@@ -494,6 +482,77 @@ class UI:
                 traceback.print_exc()
                 self._conversation = []
                 time.sleep(3.0)
+
+    # ── Brain server backend ─────────────────────────────────────
+
+    def _call_brain(self, img_b64, frame_id, speech="", audio_chunks=None):
+        """POST frame + metadata to brain server, return response text."""
+        body = {
+            "image": img_b64,
+            "frame_id": frame_id,
+            "velocity": 0.0,
+            "angular_velocity": 0.0,
+            "speech": speech,
+        }
+        if audio_chunks:
+            body["audio_chunks"] = audio_chunks
+
+        req = Request(self._brain_url + "/infer",
+                      data=json.dumps(body).encode('utf-8'),
+                      headers={"Content-Type": "application/json"})
+        try:
+            resp = urlopen(req, timeout=10)
+            data = json.loads(resp.read())
+            return data.get("text", ".")
+        except Exception as e:
+            print("ai: brain error: %s" % e)
+            return None
+
+    # ── Gemini API backend ───────────────────────────────────────
+
+    def _call_gemini_turn(self, img_b64, user_text, audio_parts, prompt):
+        """Gemini mode: manage conversation, call API, return response text."""
+        parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]
+        if audio_parts:
+            for ap in audio_parts:
+                parts.append({"inline_data": {
+                    "mime_type": ap["mime"], "data": ap["data"]}})
+
+        text_lines = []
+        if user_text:
+            text_lines.append("USER: " + user_text)
+        elif audio_parts:
+            text_lines.append("USER: [audio message]")
+        if self._agent_state:
+            text_lines.append("STATE: " + self._agent_state)
+        text_lines.append("frame")
+        parts.append({"text": "\n".join(text_lines)})
+
+        self._conversation.append({"role": "user", "parts": parts})
+        self._trim_conversation()
+        self._strip_images()
+
+        result = self._call_api(prompt)
+        if not result:
+            return None
+
+        cands = result.get("candidates", [])
+        if not cands:
+            return None
+        resp_parts = cands[0].get("content", {}).get("parts", [])
+        text = ""
+        for p in resp_parts:
+            if "text" in p and not p.get("thought"):
+                text += p["text"]
+        text = text.strip()
+        if text:
+            self._conversation.append(
+                {"role": "model", "parts": [{"text": text}]})
+        else:
+            self._conversation.append(
+                {"role": "model", "parts": [{"text": "."}]})
+            text = "."
+        return text
 
     def _trim_conversation(self):
         if len(self._conversation) <= self.GEMINI_MAX_CONTEXT:
@@ -559,6 +618,10 @@ class UI:
                                      "text": msg})
                     log_parts.append("speak")
 
+            elif name == "think":
+                thought = self._parse_string_arg(raw_args)
+                log_parts.append('think("%s")' % thought[:50])
+
             elif name == "state":
                 self._agent_state = self._parse_string_arg(raw_args)
                 log_parts.append('state("%s")' % self._agent_state[:50])
@@ -581,17 +644,33 @@ class UI:
     # ── Gemini TTS ────────────────────────────────────────────────
 
     def _tts_loop(self):
-        print("ui: TTS worker started (voice: %s)" % GEMINI_TTS_VOICE)
+        if _HAS_KOKORO:
+            print("tts: Kokoro ONNX loaded")
+        elif self._gemini_key:
+            print("tts: Gemini TTS (voice: %s)" % GEMINI_TTS_VOICE)
+        else:
+            print("tts: no TTS backend available")
+            return
+
         while self._running and self._gemini_active:
             try:
                 text = self._tts_q.get(timeout=1.0)
             except queue.Empty:
                 continue
-            print("ui: TTS generating for: %s" % text[:80])
             try:
-                self._call_tts(text)
+                if _HAS_KOKORO:
+                    self._call_kokoro_tts(text)
+                elif self._gemini_key:
+                    self._call_tts(text)
             except Exception as e:
-                print("ui: TTS error: %s" % e)
+                print("tts: error: %s" % e)
+
+    def _call_kokoro_tts(self, text):
+        samples, sr = _kokoro.create(text, voice="af_heart", speed=1.0)
+        pcm = (samples * 32767).astype(np.int16).tobytes()
+        wav_b64 = _pcm_to_wav_b64(pcm, sample_rate=sr)
+        self._broadcast({"type": "tts_audio", "audio": wav_b64})
+        print("tts: kokoro sent %d KB" % (len(wav_b64) * 3 // 4 // 1024))
 
     def _call_tts(self, text):
         body = {
