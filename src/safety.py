@@ -44,7 +44,7 @@ LAT_SAFE_PX = 12   # above this  → full angular
 FPS = 30.0
 DT = 1.0 / FPS
 PREDICT_STEPS = 30
-HISTORY_LEN = 30
+HISTORY_LEN = 3
 
 PATH_COLOR = (60, 120, 255)
 TRACK_FLASH = (120, 170, 255)
