@@ -121,9 +121,10 @@ def main():
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
-            # Safety override — scale all velocities by collision proximity
-            tools.set_safety_scale(vis.safety_scale)
-            if vis.safety_scale <= 0.3 and wb is not None and wb.is_twist_for_active():
+            # Safety override — directional scaling (forward / backward independent)
+            tools.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale)
+            if min(vis.safety_fwd_scale, vis.safety_bwd_scale) <= 0.01 \
+                    and wb is not None and wb.is_twist_for_active():
                 wb.cancel_twist_for()
                 tools.stop()
 

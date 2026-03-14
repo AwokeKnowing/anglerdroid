@@ -1,9 +1,9 @@
-"""safety.py – Collision avoidance + trajectory prediction.
+"""safety.py – Directional collision avoidance + trajectory prediction.
 
-Modular virtual sensor overlay.  Checks the robot's predicted path
-against the persistent obstacle map, provides a velocity scale factor
-(0-1) to prevent collisions, and draws a predicted trajectory line.
-Flashes wheel tracks when throttled.
+Scans FORWARD and BACKWARD from the robot's physical edges (not centre)
+for obstacles, computes max safe speed in each direction independently.
+Moving AWAY from an obstacle is always allowed.  Trajectory prediction
+for visualisation only.
 """
 
 import math
@@ -13,7 +13,7 @@ import cv2
 
 # ── Robot physics (from wheelbase.py / odrivecan.py) ──
 WHEEL_RADIUS_M = 0.08565
-VEL_RAMP_RATE = 3.0  # turns/s² (ODrive setting)
+VEL_RAMP_RATE = 3.0  # turns/s²
 DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 LATENCY_S = 0.15
 MIN_CLEARANCE_PX = 3
@@ -25,6 +25,8 @@ ROBOT_W, ROBOT_H = 30, 42
 CX_OFF = -78
 CX, CY = 159, 119
 RCX, RCY = CX + CX_OFF, CY
+
+# Robot mask boundaries (same region _build_costmap clears)
 MASK_X0 = max(0, RCX - 20)
 MASK_Y0 = max(0, RCY - ROBOT_H // 2)
 MASK_X1 = min(320, RCX + 16)
@@ -36,16 +38,25 @@ PREDICT_STEPS = 30
 HISTORY_LEN = 30
 
 PATH_COLOR = (60, 120, 255)
-TRACK_NORMAL = (30, 60, 180)
 TRACK_FLASH = (120, 170, 255)
-FLASH_HALF = 4  # frames per half-cycle ≈ 3.75 Hz
+FLASH_HALF = 4
+
+
+def _max_safe_speed(clear_px):
+    """Max speed (m/s) that allows full stop within *clear_px* pixels."""
+    avail = max(0.0, (clear_px - MIN_CLEARANCE_PX) * PX_M)
+    if avail <= 0.0:
+        return 0.0
+    disc = (LATENCY_S * DECEL_MPS2) ** 2 + 2.0 * DECEL_MPS2 * avail
+    return max(0.0, -LATENCY_S * DECEL_MPS2 + math.sqrt(disc))
 
 
 class SafetyGuard:
     def __init__(self):
         self._hist = deque(maxlen=HISTORY_LEN)
+        self._fwd_scale = 1.0
+        self._bwd_scale = 1.0
         self._throttled = False
-        self._scale = 1.0
         self._path = []
         self._tick = 0
 
@@ -54,83 +65,81 @@ class SafetyGuard:
         return self._throttled
 
     @property
-    def vel_scale(self):
-        return self._scale
+    def fwd_scale(self):
+        return self._fwd_scale
+
+    @property
+    def bwd_scale(self):
+        return self._bwd_scale
 
     # ── per-frame update ──
 
     def update(self, obs_map, yaw_delta, fwd_delta):
-        """Feed per-frame odometry deltas.  Returns velocity scale 0.0-1.0."""
+        """Feed per-frame odometry.  Computes directional scales."""
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
 
-        if len(self._hist) < 3:
-            self._scale, self._throttled, self._path = 1.0, False, []
-            return 1.0
-
-        n = len(self._hist)
-        omega = sum(h[0] for h in self._hist) / n * FPS
-        speed = sum(h[1] for h in self._hist) / n * FPS
-
-        path = []
-        x, y, th = float(RCX), float(RCY), 0.0
-        hw, hh = ROBOT_W // 2, ROBOT_H // 2
         h_map, w_map = obs_map.shape
-        first_hit = None
+        y0, y1 = MASK_Y0, min(h_map, MASK_Y1)
 
-        for step in range(PREDICT_STEPS):
-            x += speed * math.cos(th) / PX_M * DT
-            y -= speed * math.sin(th) / PX_M * DT
-            th += omega * DT
-            path.append((x, y))
-
-            if first_hit is not None:
-                continue
-            ix, iy = int(round(x)), int(round(y))
-            if MASK_X0 <= ix <= MASK_X1 and MASK_Y0 <= iy <= MASK_Y1:
-                continue
-            bx0, by0 = max(0, ix - hw), max(0, iy - hh)
-            bx1, by1 = min(w_map, ix + hw), min(h_map, iy + hh)
-            if bx1 > bx0 and by1 > by0:
-                if np.any(obs_map[by0:by1, bx0:bx1] >= OBS_THRESH):
-                    first_hit = step
-
-        self._path = path
-
-        if first_hit is not None:
-            dist_px = 0.0
-            px, py = float(RCX), float(RCY)
-            for i in range(first_hit + 1):
-                dx, dy = path[i][0] - px, path[i][1] - py
-                dist_px += math.sqrt(dx * dx + dy * dy)
-                px, py = path[i]
-
-            avail_m = max(0.0, (dist_px - MIN_CLEARANCE_PX) * PX_M)
-
-            if avail_m <= 0.0:
-                self._scale = 0.0
-            else:
-                # Max speed that still allows stopping in avail_m:
-                #   v * LATENCY + v² / (2 * decel) = avail_m
-                # Solve quadratic for v:
-                disc = (LATENCY_S * DECEL_MPS2) ** 2 + 2.0 * DECEL_MPS2 * avail_m
-                v_max = -LATENCY_S * DECEL_MPS2 + math.sqrt(disc)
-                v_max = max(0.0, v_max)
-
-                cur = abs(speed)
-                if cur > 1e-4:
-                    self._scale = min(1.0, v_max / cur)
-                else:
-                    self._scale = 1.0 if avail_m > MIN_CLEARANCE_PX * PX_M else 0.0
-
-            self._throttled = self._scale < 0.95
+        # ── Forward scan: from front edge rightward ──
+        if MASK_X1 < w_map:
+            strip = obs_map[y0:y1, MASK_X1:]
+            col_hit = np.any(strip >= OBS_THRESH, axis=0)
+            idxs = np.flatnonzero(col_hit)
+            fwd_clear = int(idxs[0]) if len(idxs) > 0 else strip.shape[1]
         else:
-            self._scale = 1.0
-            self._throttled = False
+            fwd_clear = 0
 
-        return self._scale
+        # ── Backward scan: from rear edge leftward ──
+        if MASK_X0 > 0:
+            strip = obs_map[y0:y1, :MASK_X0][:, ::-1]
+            col_hit = np.any(strip >= OBS_THRESH, axis=0)
+            idxs = np.flatnonzero(col_hit)
+            bwd_clear = int(idxs[0]) if len(idxs) > 0 else strip.shape[1]
+        else:
+            bwd_clear = 0
 
-    # ── drawing helpers (called on the costmap image) ──
+        # ── Max safe speed in each direction ──
+        v_max_fwd = _max_safe_speed(fwd_clear)
+        v_max_bwd = _max_safe_speed(bwd_clear)
+
+        # Use recent history for current speed estimate
+        if len(self._hist) >= 3:
+            n = len(self._hist)
+            cur_speed = abs(sum(h[1] for h in self._hist) / n * FPS)
+        else:
+            cur_speed = 0.0
+
+        if cur_speed > 1e-4:
+            self._fwd_scale = min(1.0, v_max_fwd / cur_speed)
+            self._bwd_scale = min(1.0, v_max_bwd / cur_speed)
+        else:
+            self._fwd_scale = 0.0 if fwd_clear <= MIN_CLEARANCE_PX else 1.0
+            self._bwd_scale = 0.0 if bwd_clear <= MIN_CLEARANCE_PX else 1.0
+
+        # Hard zero when within clearance regardless of speed estimate
+        if fwd_clear <= MIN_CLEARANCE_PX:
+            self._fwd_scale = 0.0
+        if bwd_clear <= MIN_CLEARANCE_PX:
+            self._bwd_scale = 0.0
+
+        self._throttled = self._fwd_scale < 0.95 or self._bwd_scale < 0.95
+
+        # ── Trajectory prediction (visualisation only) ──
+        self._path = []
+        if len(self._hist) >= 3:
+            n = len(self._hist)
+            omega = sum(h[0] for h in self._hist) / n * FPS
+            speed = sum(h[1] for h in self._hist) / n * FPS
+            x, y, th = float(RCX), float(RCY), 0.0
+            for _ in range(PREDICT_STEPS):
+                x += speed * math.cos(th) / PX_M * DT
+                y -= speed * math.sin(th) / PX_M * DT
+                th += omega * DT
+                self._path.append((x, y))
+
+    # ── drawing helpers ──
 
     def draw_trajectory(self, costmap):
         """Draw predicted 1-second path as a 5 px blue line."""

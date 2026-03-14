@@ -21,12 +21,14 @@ import goals
 _wheelbase = None
 _vision = None  # type: Optional[vision.Vision]
 _ui = None  # type: Optional[ui.UI]
-_safety_scale = 1.0
+_safety_fwd = 1.0
+_safety_bwd = 1.0
 
 
-def set_safety_scale(s):
-    global _safety_scale
-    _safety_scale = max(0.0, min(1.0, float(s)))
+def set_safety_scales(fwd, bwd):
+    global _safety_fwd, _safety_bwd
+    _safety_fwd = max(0.0, min(1.0, float(fwd)))
+    _safety_bwd = max(0.0, min(1.0, float(bwd)))
 
 
 def init(
@@ -84,8 +86,13 @@ def twist_for(forward_mps: float, angular_rads: float,
 def set_wheel_vels(left_tps: float, right_tps: float):
     """Reserved for human gamepad control. Direct wheel velocities (turns/s). AI should use twist_for()."""
     if _wheelbase is not None:
-        s = _safety_scale
-        _wheelbase.set_wheel_vels(left_tps * s, right_tps * s)
+        fwd = (left_tps + right_tps) / 2.0
+        turn = (right_tps - left_tps) / 2.0
+        if fwd > 0:
+            fwd *= _safety_fwd
+        elif fwd < 0:
+            fwd *= _safety_bwd
+        _wheelbase.set_wheel_vels(fwd - turn, fwd + turn)
 
 def stop():
     """Immediately stop wheels and cancel any active twist_for."""
@@ -96,8 +103,11 @@ def stop():
 def twist(forward_mps: float, angular_rads: float):
     """Instant differential drive (forward m/s, angular rad/s). Prefer twist_for() for timed moves."""
     if _wheelbase is not None:
-        s = _safety_scale
-        _wheelbase.twist(forward_mps * s, angular_rads * s)
+        if forward_mps > 0:
+            forward_mps *= _safety_fwd
+        elif forward_mps < 0:
+            forward_mps *= _safety_bwd
+        _wheelbase.twist(forward_mps, angular_rads)
 
 
 # --- UI (user text + tool calls from agent) ---
