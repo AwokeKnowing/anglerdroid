@@ -61,21 +61,20 @@ def _init_kokoro():
 VLLM_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+GROQ_OPENAI_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 MAX_CONTEXT = 20
-_STATE_RE = re.compile(r'state\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
-_SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
+_STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
+_SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 
 
 class Brain:
     _TWIST_RE = re.compile(r'twist_for\s*\(')
 
     def __init__(self, vllm_url, model_name, system_prompt, vision=True,
-                 gemini_key=""):
-        self._gemini_key = gemini_key
-        if gemini_key:
-            self._llm_url = GEMINI_OPENAI_URL
-        else:
-            self._llm_url = vllm_url
+                 api_key="", llm_url=""):
+        self._api_key = api_key
+        self._llm_url = llm_url or vllm_url
         self._model = model_name
         self._prompt = system_prompt
         self._vision = vision
@@ -194,14 +193,14 @@ class Brain:
 
                 m = _STATE_RE.search(result)
                 if m:
-                    self._agent_state = m.group(1)
+                    self._agent_state = m.group(2)
 
             self._conversation.append({"role": "assistant", "content": result})
 
             if _HAS_KOKORO and result != ".":
                 speak_match = _SPEAK_RE.search(result)
                 if speak_match:
-                    speak_text = speak_match.group(1)
+                    speak_text = speak_match.group(2)
                     self._tts_thread = threading.Thread(
                         target=self._synthesize_async, args=(speak_text,),
                         daemon=True)
@@ -244,7 +243,7 @@ class Brain:
         """Remove repeated speak text and collapse duplicate conversation turns."""
         speak_match = _SPEAK_RE.search(result)
         if speak_match:
-            speak_text = speak_match.group(1)
+            speak_text = speak_match.group(2)
             if speak_text == self._last_speak:
                 result = _SPEAK_RE.sub("", result).strip()
                 if not result:
@@ -277,8 +276,8 @@ class Brain:
             "temperature": 0.5,
         }
         headers = {"Content-Type": "application/json"}
-        if self._gemini_key:
-            headers["Authorization"] = "Bearer " + self._gemini_key
+        if self._api_key:
+            headers["Authorization"] = "Bearer " + self._api_key
         req = Request(self._llm_url,
                       data=json.dumps(body).encode("utf-8"),
                       headers=headers)
@@ -389,10 +388,12 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--gemini-key", default="",
                     help="Gemini API key (uses Gemini instead of local vLLM)")
+    ap.add_argument("--groq-key", default="",
+                    help="Groq API key (fastest option, ~300ms TTFT)")
     ap.add_argument("--vllm-url", default=VLLM_DEFAULT_URL,
-                    help="vLLM OpenAI-compatible endpoint (ignored if --gemini-key set)")
+                    help="vLLM OpenAI-compatible endpoint (ignored if cloud key set)")
     ap.add_argument("--model", default="",
-                    help="Model name (default: gemini-2.0-flash-lite or Qwen/Qwen2.5-VL-3B-Instruct)")
+                    help="Model name override")
     ap.add_argument("--no-vision", action="store_true",
                     help="Don't send images (for text-only models)")
     ap.add_argument("--no-stt", action="store_true",
@@ -401,13 +402,26 @@ def main():
                     help="Robot name injected into prompt (default: Kevin)")
     args = ap.parse_args()
 
-    if not args.model:
-        args.model = GEMINI_DEFAULT_MODEL if args.gemini_key else "Qwen/Qwen2.5-VL-3B-Instruct"
+    if args.groq_key:
+        api_key = args.groq_key
+        llm_url = GROQ_OPENAI_URL
+        default_model = GROQ_DEFAULT_MODEL
+        llm_backend = "groq"
+    elif args.gemini_key:
+        api_key = args.gemini_key
+        llm_url = GEMINI_OPENAI_URL
+        default_model = GEMINI_DEFAULT_MODEL
+        llm_backend = "gemini"
+    else:
+        api_key = ""
+        llm_url = args.vllm_url
+        default_model = "Qwen/Qwen2.5-VL-3B-Instruct"
+        llm_backend = "vllm"
 
+    model = args.model or default_model
     prompt = _load_prompt().replace("Kevin", args.name)
-    llm_backend = "gemini" if args.gemini_key else "vllm"
-    brain = Brain(args.vllm_url, args.model, prompt,
-                  vision=not args.no_vision, gemini_key=args.gemini_key)
+    brain = Brain(args.vllm_url, model, prompt,
+                  vision=not args.no_vision, api_key=api_key, llm_url=llm_url)
 
     if not args.no_stt:
         brain.init_stt()
@@ -415,13 +429,12 @@ def main():
 
     Handler.brain = brain
 
-    llm_url = GEMINI_OPENAI_URL if args.gemini_key else args.vllm_url
     server = HTTPServer(("0.0.0.0", args.port), Handler)
     print("=" * 60)
     print("AnglerDroid Brain Server")
     print("  port:   %d" % args.port)
-    print("  llm:    %s (%s)" % (llm_backend, llm_url[:60]))
-    print("  model:  %s" % args.model)
+    print("  llm:    %s (%s)" % (llm_backend, llm_url[:50]))
+    print("  model:  %s" % model)
     print("  vision: %s" % (not args.no_vision))
     print("  stt:    %s" % (brain._stt_model is not None))
     print("  tts:    %s" % ("kokoro" if _HAS_KOKORO else "none"))
