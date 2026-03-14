@@ -121,6 +121,7 @@ class UI:
 
         self._gemini_active = False
         self._conversation = []         # type: List[dict]
+        self._prev_img_b64 = None
         self._last_activity = time.time()
         self._last_gemini_send = 0.0
         self._agent_state = ""
@@ -382,7 +383,6 @@ class UI:
         threading.Thread(target=self._ai_loop, daemon=True).start()
         threading.Thread(target=self._tts_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
-        self._prev_img_b64 = None
         backend = "brain:%s" % self._brain_url if self._brain_url else self._gemini_model
         print("ai: started (%s, interval=%.1fs)" % (backend, self.VISION_MODEL_INTERVAL))
 
@@ -602,9 +602,21 @@ class UI:
         calls = self._CALL_RE.findall(text)
         if not calls:
             if text and text != ".":
+                print("ai: raw (no calls): %s" % text[:120])
                 self._broadcast({"type": "chat", "sender": "ai",
                                  "text": text[:200]})
             return
+
+        has_twist = any(name == "twist_for" for name, _ in calls)
+        has_stop = any(name == "stop" for name, _ in calls)
+        has_nav = any(name == "navigate" for name, _ in calls)
+
+        if not has_twist and not has_stop and not has_nav:
+            self.push_tool_calls([{"name": "twist_for", "args": {
+                "forward_mps": 0.0, "angular_rads": 0.0,
+                "duration_secs": self.VISION_MODEL_INTERVAL + 0.5,
+                "ramp_in_secs": 0.0, "ramp_out_secs": 0.0,
+            }}])
 
         log_parts = []
         for name, raw_args in calls:
