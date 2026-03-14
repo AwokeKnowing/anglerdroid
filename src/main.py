@@ -11,7 +11,6 @@ import cv2
 import tools
 import vision as vision_mod
 import navigator
-import goals
 
 try:
     import rerun as rr
@@ -184,17 +183,6 @@ def main():
                             navigator.set_goal(float(hdg))
                         else:
                             navigator.clear_goal()
-                    elif name == "set_visual_goals":
-                        landmarks = cargs.get("landmarks", [])
-                        if landmarks:
-                            goals.set_goals(landmarks)
-                            print("goals: set %d landmarks: %s" % (len(landmarks), landmarks))
-                    elif name == "goal_reached":
-                        nxt = goals.advance()
-                        if nxt:
-                            print("goals: advanced → %s" % nxt)
-                        else:
-                            print("goals: all landmarks reached")
                     elif name == "twist":
                         tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
                     elif name == "set_wheel_vels":

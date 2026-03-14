@@ -23,7 +23,7 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
-import goals
+import re
 
 try:
     import websockets
@@ -112,6 +112,7 @@ class UI:
         self._conversation = []         # type: List[dict]
         self._last_activity = time.time()
         self._last_gemini_send = 0.0
+        self._agent_state = ""
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -129,7 +130,6 @@ class UI:
             threading.Thread(target=self._run_ws, daemon=True).start()
         else:
             print("ui: websockets not installed – WebSocket disabled")
-        goals.set_on_change(lambda status: self._broadcast({"type": "goals", **status}))
         proto = "HTTPS" if self._ssl_ctx else "HTTP"
         print("ui: %s :%d  WSS :%d" % (proto, self._http_port, self._ws_port))
 
@@ -349,9 +349,13 @@ class UI:
         except queue.Full:
             pass
 
-    # ── Gemini AI ───────────────────────────────────────────────────
+    # ── Gemini AI (0.5 FPS reactive control loop) ──────────────────
 
-    MIN_API_INTERVAL = 2.0  # seconds between API calls (flash-lite free tier: 30 RPM)
+    GEMINI_INTERVAL = 2.0   # seconds between frames (0.5 FPS)
+    GEMINI_MAX_CONTEXT = 40
+
+    _CALL_RE = re.compile(r'(twist_for|speak|state|stop|navigate)\s*\(([^)]*)\)')
+    _NUM_RE = re.compile(r'-?[\d.]+')
 
     def _start_gemini(self):
         if self._gemini_active:
@@ -362,18 +366,19 @@ class UI:
             return
         self._gemini_active = True
         self._conversation = []
-        self._last_activity = time.time()
+        self._agent_state = ""
         self._last_api_call = 0.0
         threading.Thread(target=self._gemini_loop, daemon=True).start()
         threading.Thread(target=self._tts_loop, daemon=True).start()
         self._broadcast({"type": "ai_status", "active": True})
-        print("ui: Gemini AI started (%s, TTS: %s)" % (self._gemini_model, GEMINI_TTS_MODEL))
+        print("ai: started (%s, interval=%.1fs)" % (self._gemini_model, self.GEMINI_INTERVAL))
 
     def _stop_gemini(self):
         self._gemini_active = False
-        goals.clear()
+        self._agent_state = ""
+        self.push_tool_calls([{"name": "stop", "args": {}}])
         self._broadcast({"type": "ai_status", "active": False})
-        print("ui: Gemini AI stopped")
+        print("ai: stopped")
 
     def _load_prompt(self):
         p = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'prompt.txt')
@@ -381,230 +386,197 @@ class UI:
             with open(p, 'r') as f:
                 return f.read().strip()
         except FileNotFoundError:
-            return "You are a helpful robot."
+            return "You are a helpful robot. Respond with function calls or '.'"
 
     def _gemini_loop(self):
         prompt = self._load_prompt()
-        speech_buf = []
-        audio_buf = []
-        buf_start = 0.0
-        BATCH_DELAY = 2.0
+        turns = 0
+        on_time = 0
+        streak = 0
+        best_streak = 0
+        api_ms_total = 0.0
 
         while self._running and self._gemini_active:
+            t_loop = time.time()
             try:
-                while True:
+                user_text = None
+                while not self._speech_q.empty():
                     try:
-                        speech_buf.append(self._speech_q.get_nowait())
-                        if buf_start == 0.0:
-                            buf_start = time.time()
+                        t = self._speech_q.get_nowait()
+                        user_text = (user_text + " " + t) if user_text else t
                     except queue.Empty:
                         break
 
-                while True:
+                audio_parts = []
+                while not self._audio_q.empty():
                     try:
-                        audio_buf.append(self._audio_q.get_nowait())
-                        if buf_start == 0.0:
-                            buf_start = time.time()
+                        audio_parts.append(self._audio_q.get_nowait())
                     except queue.Empty:
                         break
 
-                now = time.time()
-                has_input = speech_buf or audio_buf
+                with self._atlas_lock:
+                    atlas = self._latest_atlas
+                if atlas is None:
+                    time.sleep(0.5)
+                    continue
 
-                if has_input and (now - buf_start >= BATCH_DELAY):
-                    text = " ".join(speech_buf) if speech_buf else None
-                    audio = audio_buf[:] if audio_buf else None
-                    speech_buf = []
-                    audio_buf = []
-                    buf_start = 0.0
-                    if self._latest_atlas is not None:
-                        self._send_to_gemini(prompt, user_text=text, audio_parts=audio)
-                        self._last_activity = now
+                _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
+                                      [cv2.IMWRITE_JPEG_QUALITY, 60])
+                img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
 
-                if now - self._last_activity > 900.0:
-                    self._conversation = []
-                    self._last_activity = now
-                    self._broadcast({"type": "ai_status", "active": True,
-                                     "info": "Session reset (15 min idle)"})
+                parts = [{"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}]
+                if audio_parts:
+                    for ap in audio_parts:
+                        parts.append({"inline_data": {
+                            "mime_type": ap["mime"], "data": ap["data"]}})
 
-                time.sleep(0.2)
+                text_lines = []
+                if user_text:
+                    text_lines.append("USER: " + user_text)
+                elif audio_parts:
+                    text_lines.append("USER: [audio message]")
+                if self._agent_state:
+                    text_lines.append("STATE: " + self._agent_state)
+                text_lines.append("frame")
+                parts.append({"text": "\n".join(text_lines)})
+
+                self._conversation.append({"role": "user", "parts": parts})
+                self._trim_conversation()
+                self._strip_images()
+
+                t_api = time.time()
+                result = self._call_api(prompt)
+                api_ms = (time.time() - t_api) * 1000
+                api_ms_total += api_ms
+                turns += 1
+
+                if result:
+                    cands = result.get("candidates", [])
+                    if cands:
+                        resp_parts = cands[0].get("content", {}).get("parts", [])
+                        text = ""
+                        for p in resp_parts:
+                            if "text" in p and not p.get("thought"):
+                                text += p["text"]
+                        text = text.strip()
+                        if text:
+                            self._conversation.append(
+                                {"role": "model", "parts": [{"text": text}]})
+                            self._parse_and_execute(text)
+                        else:
+                            self._conversation.append(
+                                {"role": "model", "parts": [{"text": "."}]})
+
+                elapsed = time.time() - t_loop
+                if elapsed <= self.GEMINI_INTERVAL * 1.5:
+                    on_time += 1
+                    streak += 1
+                    best_streak = max(best_streak, streak)
+                else:
+                    streak = 0
+
+                if turns % 10 == 0:
+                    avg = api_ms_total / turns
+                    pct = on_time / turns * 100
+                    print("ai: turn=%d  avg_api=%.0fms  on_time=%.0f%%  "
+                          "streak=%d/%d  ctx=%d" % (
+                              turns, avg, pct, streak, best_streak,
+                              len(self._conversation)))
+
+                remaining = self.GEMINI_INTERVAL - (time.time() - t_loop)
+                while remaining > 0 and self._gemini_active:
+                    time.sleep(min(0.2, remaining))
+                    remaining = self.GEMINI_INTERVAL - (time.time() - t_loop)
+
             except Exception as e:
-                print("ui: gemini loop error: %s" % e)
+                print("ai: loop error: %s" % e)
+                import traceback
+                traceback.print_exc()
                 self._conversation = []
-                self._last_activity = time.time()
                 time.sleep(3.0)
 
     def _trim_conversation(self):
-        """Trim conversation to ~30 messages. Must start on a plain user turn
-        (not a functionResponse) so we never orphan a functionCall chain."""
-        conv = self._conversation
-        if len(conv) <= 30:
+        if len(self._conversation) <= self.GEMINI_MAX_CONTEXT:
             return
-        cut = len(conv) - 30
-        while cut < len(conv) - 1:
-            msg = conv[cut]
-            if msg.get("role") == "user":
-                has_fr = any("functionResponse" in p for p in msg.get("parts", []))
-                if not has_fr:
-                    break
-            cut += 1
-        self._conversation = conv[cut:]
+        self._conversation = self._conversation[-self.GEMINI_MAX_CONTEXT:]
+        while self._conversation and self._conversation[0].get("role") != "user":
+            self._conversation.pop(0)
+
+    def _strip_images(self):
+        """Keep images only in the last 2 user messages."""
+        img_indices = []
+        for i, msg in enumerate(self._conversation):
+            if msg.get("role") == "user" and \
+               any("inline_data" in p for p in msg.get("parts", [])):
+                img_indices.append(i)
+        for idx in img_indices[:-2]:
+            msg = self._conversation[idx]
+            msg["parts"] = [p for p in msg["parts"] if "inline_data" not in p]
+            if not msg["parts"]:
+                msg["parts"] = [{"text": "(frame)"}]
 
     @staticmethod
-    def _strip_images(conversation):
-        """Remove inline_data (images) from all but the last user message."""
-        last_user_idx = -1
-        for i in range(len(conversation) - 1, -1, -1):
-            if conversation[i].get("role") == "user":
-                has_img = any("inline_data" in p for p in conversation[i].get("parts", []))
-                if has_img:
-                    last_user_idx = i
-                    break
-        for i, msg in enumerate(conversation):
-            if i == last_user_idx:
-                continue
-            if msg.get("role") == "user":
-                msg["parts"] = [p for p in msg.get("parts", []) if "inline_data" not in p]
-                if not msg["parts"]:
-                    msg["parts"] = [{"text": "(image removed from history)"}]
+    def _parse_string_arg(s):
+        s = s.strip()
+        for q in ('"', "'"):
+            if s.startswith(q) and s.endswith(q) and len(s) > 1:
+                return s[1:-1]
+        return s
 
-    AGENT_OBSERVE_DELAY = 2.5  # seconds between agent turns (let action take effect)
-
-    def _send_to_gemini(self, system_prompt, user_text=None, audio_parts=None):
-        with self._atlas_lock:
-            atlas = self._latest_atlas
-        if atlas is None:
+    def _parse_and_execute(self, text):
+        if text == ".":
             return
 
-        _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 60])
-        img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
+        calls = self._CALL_RE.findall(text)
+        if not calls:
+            if text and text != ".":
+                self._broadcast({"type": "chat", "sender": "ai",
+                                 "text": text[:200]})
+            return
 
-        parts = [
-            {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-        ]
-        if audio_parts:
-            for ap in audio_parts:
-                parts.append({"inline_data": {"mime_type": ap["mime"], "data": ap["data"]}})
-            print("ui: sending %d audio chunk(s) to Gemini" % len(audio_parts))
+        log_parts = []
+        for name, raw_args in calls:
+            if name == "twist_for":
+                nums = [float(x) for x in self._NUM_RE.findall(raw_args)]
+                fwd = nums[0] if len(nums) > 0 else 0.0
+                ang = nums[1] if len(nums) > 1 else 0.0
+                dur = nums[2] if len(nums) > 2 else self.GEMINI_INTERVAL + 0.5
+                self.push_tool_calls([{"name": "twist_for", "args": {
+                    "forward_mps": fwd, "angular_rads": ang,
+                    "duration_secs": dur,
+                    "ramp_in_secs": 0.0, "ramp_out_secs": 0.0,
+                }}])
+                log_parts.append("twist_for(%.2f, %.2f)" % (fwd, ang))
 
-        goal_ctx = ""
-        gs = goals.get_status()
-        if gs["active"] and gs["current_goal"]:
-            done = gs["current"]
-            total = gs["total"]
-            goal_ctx = "\n[GOAL %d/%d: %s]" % (done + 1, total, gs["current_goal"])
-            if gs["completed"]:
-                goal_ctx += " [Reached: %s]" % ", ".join(gs["completed"])
-
-        if user_text:
-            parts.append({"text": user_text + goal_ctx})
-        elif audio_parts:
-            parts.append({"text": "[User sent audio. Listen to it and respond to what they said.]" + goal_ctx})
-        else:
-            parts.append({"text": "[Camera update. Respond only if safety concern.]" + goal_ctx})
-        self._conversation.append({"role": "user", "parts": parts})
-
-        func_calls = self._agent_turn(system_prompt)
-
-        # Agent loop: keep observing and acting until done
-        turn = 0
-        while func_calls:
-            turn += 1
-
-            # Estimate wait: longer for twist_for, shorter for navigate/stop
-            wait = self.AGENT_OBSERVE_DELAY
-            for fc in func_calls:
-                if fc["name"] == "twist_for":
-                    dur = fc.get("args", {}).get("duration_secs", 2.0)
-                    wait = max(wait, dur + 1.0)
-
-            # Wait for action to take effect
-            for _ in range(int(wait * 5)):
-                time.sleep(0.2)
-                if not self._speech_q.empty():
-                    print("ui: agent loop interrupted by user input")
-                    self.push_tool_calls([{"name": "stop", "args": {}}])
-                    self._broadcast({"type": "chat", "sender": "sys",
-                                     "text": "Agent interrupted — auto-stop"})
-                    return
-                if not self._gemini_active:
-                    self.push_tool_calls([{"name": "stop", "args": {}}])
-                    return
-
-            # Send function responses + fresh camera frame in ONE user message
-            # (Gemini requires functionResponse immediately after functionCall,
-            #  and no two consecutive user turns)
-            fr_parts = [{"functionResponse": {"name": fc["name"],
-                         "response": {"result": "ok"}}} for fc in func_calls]
-
-            with self._atlas_lock:
-                fresh = self._latest_atlas
-            if fresh is not None:
-                _, fbuf = cv2.imencode('.jpg', fresh[:, :, ::-1],
-                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
-                fimg = base64.b64encode(fbuf.tobytes()).decode('ascii')
-                obs_text = "[Updated camera view. Continue your task, describe what you see, or stop if done.]"
-                gs2 = goals.get_status()
-                if gs2["active"] and gs2["current_goal"]:
-                    obs_text += "\n[GOAL %d/%d: %s]" % (gs2["current"] + 1, gs2["total"], gs2["current_goal"])
-                fr_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": fimg}})
-                fr_parts.append({"text": obs_text})
-
-            self._conversation.append({"role": "user", "parts": fr_parts})
-
-            func_calls = self._agent_turn(system_prompt)
-
-        # Safety: ensure robot is stopped when agent loop ends
-        # (unless Gemini already called stop() as its final action)
-        if turn > 0:
-            last_was_stop = any(fc["name"] == "stop" for fc in func_calls) if func_calls else False
-            if not last_was_stop:
-                self.push_tool_calls([{"name": "stop", "args": {}}])
-                self._broadcast({"type": "chat", "sender": "sys",
-                                 "text": "Agent done — auto-stop"})
-            print("ui: agent loop completed after %d turn(s)" % turn)
-
-    def _agent_turn(self, system_prompt):
-        """Make one API call, process response. Returns list of functionCalls (empty if none)."""
-        if len(self._conversation) > 30:
-            self._trim_conversation()
-        self._strip_images(self._conversation)
-
-        result = self._call_api(system_prompt)
-        if not result:
-            return []
-
-        cands = result.get("candidates", [])
-        if not cands:
-            return []
-        resp_parts = cands[0].get("content", {}).get("parts", [])
-
-        model_parts = []
-        func_calls = []
-        for p in resp_parts:
-            if p.get("thought"):
-                continue
-            model_parts.append(p)
-            if "text" in p:
-                self._broadcast({"type": "chat", "sender": "ai", "text": p["text"]})
-                self._last_activity = time.time()
-                if p["text"] and not p["text"].startswith("["):
+            elif name == "speak":
+                msg = self._parse_string_arg(raw_args)
+                if msg:
                     try:
-                        self._tts_q.put_nowait(p["text"])
+                        self._tts_q.put_nowait(msg)
                     except queue.Full:
                         pass
-            if "functionCall" in p:
-                fc = p["functionCall"]
-                func_calls.append(fc)
-                self.push_tool_calls([{"name": fc["name"], "args": fc.get("args", {})}])
-                self._broadcast({"type": "chat", "sender": "ai",
-                                 "text": "[%s(%s)]" % (fc["name"], json.dumps(fc.get("args", {})))})
-                self._last_activity = time.time()
+                    self._broadcast({"type": "chat", "sender": "ai",
+                                     "text": msg})
+                    log_parts.append("speak")
 
-        if model_parts:
-            self._conversation.append({"role": "model", "parts": model_parts})
+            elif name == "state":
+                self._agent_state = self._parse_string_arg(raw_args)
+                log_parts.append('state("%s")' % self._agent_state[:50])
 
-        return func_calls
+            elif name == "stop":
+                self.push_tool_calls([{"name": "stop", "args": {}}])
+                log_parts.append("stop()")
+
+            elif name == "navigate":
+                nums = [float(x) for x in self._NUM_RE.findall(raw_args)]
+                hdg = nums[0] if nums else 0.0
+                self.push_tool_calls([{"name": "navigate",
+                                       "args": {"heading_deg": hdg}}])
+                log_parts.append("navigate(%.0f)" % hdg)
+
+        if log_parts:
+            summary = " | ".join(log_parts)
+            print("ai: " + summary)
 
     # ── Gemini TTS ────────────────────────────────────────────────
 
@@ -677,72 +649,33 @@ class UI:
                 print("ui: TTS part keys: %s" % list(p.keys()))
 
     def _call_api(self, system_prompt):
-        # Rate limit: enforce minimum interval between calls
-        now = time.time()
-        wait = self.MIN_API_INTERVAL - (now - self._last_api_call)
-        if wait > 0:
-            time.sleep(wait)
-
-        tools_def = [{"function_declarations": [
-            {"name": "navigate",
-             "description": "Drive forward toward a heading with automatic obstacle avoidance. heading_deg: 0=forward, 45=forward-left, -45=forward-right. Range -90 to 90. Robot keeps moving until stop(). Do NOT use for turning in place.",
-             "parameters": {"type": "object", "properties": {
-                 "heading_deg": {"type": "number",
-                                 "description": "Goal heading: 0=forward, positive=left, negative=right. Range -90 to 90."},
-             }, "required": ["heading_deg"]}},
-            {"name": "twist_for",
-             "description": "Timed move. Use for turning in place and precise adjustments. angular_rads +0.5=left, -0.5=right. 3s at 0.5rad/s ~ 90 degrees. 6s ~ 180 degrees.",
-             "parameters": {"type": "object", "properties": {
-                 "forward_mps": {"type": "number"},
-                 "angular_rads": {"type": "number"},
-                 "duration_secs": {"type": "number"},
-                 "ramp_in_secs": {"type": "number"},
-                 "ramp_out_secs": {"type": "number"},
-             }, "required": ["forward_mps", "angular_rads"]}},
-            {"name": "stop",
-             "description": "Immediately stop all motion and navigation",
-             "parameters": {"type": "object", "properties": {}}},
-            {"name": "set_visual_goals",
-             "description": "Break a complex navigation task into ordered visual landmarks. The robot will pursue them one by one. Call this FIRST when given a multi-step instruction like 'go to the kitchen then find the cat'.",
-             "parameters": {"type": "object", "properties": {
-                 "landmarks": {"type": "array", "items": {"type": "string"},
-                               "description": "Ordered list of visual landmark descriptions to navigate to, e.g. ['hallway', 'kitchen doorway', 'kitchen counter']"},
-             }, "required": ["landmarks"]}},
-            {"name": "goal_reached",
-             "description": "Mark the current visual goal as reached and advance to the next one. Call when you can see that you have arrived at the current landmark.",
-             "parameters": {"type": "object", "properties": {}}},
-        ]}]
-
         body = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": self._conversation,
-            "tools": tools_def,
-            "tool_config": {"function_calling_config": {"mode": "AUTO"}},
+            "generationConfig": {
+                "temperature": 0.3,
+                "maxOutputTokens": 200,
+            },
         }
 
         url = GEMINI_URL.format(model=self._gemini_model, key=self._gemini_key)
         req = Request(url, data=json.dumps(body).encode('utf-8'),
                       headers={"Content-Type": "application/json"})
 
-        for attempt in range(3):
-            self._last_api_call = time.time()
+        self._last_api_call = time.time()
+        try:
+            resp = urlopen(req, timeout=15)
+            return json.loads(resp.read().decode('utf-8'))
+        except HTTPError as e:
+            body_text = ""
             try:
-                resp = urlopen(req, timeout=30)
-                return json.loads(resp.read().decode('utf-8'))
-            except HTTPError as e:
-                body_text = ""
-                try:
-                    body_text = e.read().decode('utf-8', errors='replace')
-                except Exception:
-                    pass
-                print("ui: Gemini HTTP %d: %s" % (e.code, body_text[:500]))
-                if e.code == 429 and attempt < 2:
-                    backoff = (attempt + 1) * 10
-                    print("ui: rate limited, retrying in %ds..." % backoff)
-                    time.sleep(backoff)
-                    continue
-                return None
-            except Exception as e:
-                print("ui: Gemini API error: %s" % e)
-                return None
-        return None
+                body_text = e.read().decode('utf-8', errors='replace')
+            except Exception:
+                pass
+            print("ai: Gemini HTTP %d: %s" % (e.code, body_text[:500]))
+            if e.code == 429:
+                time.sleep(10)
+            return None
+        except Exception as e:
+            print("ai: Gemini error: %s" % e)
+            return None
