@@ -72,9 +72,6 @@ class SafetyGuard:
         omega = sum(h[0] for h in self._hist) / n * FPS
         speed = sum(h[1] for h in self._hist) / n * FPS
 
-        stop_m = abs(speed) * LATENCY_S + speed * speed / (2.0 * DECEL_MPS2)
-        stop_px = stop_m / PX_M + MIN_CLEARANCE_PX
-
         path = []
         x, y, th = float(RCX), float(RCY), 0.0
         hw, hh = ROBOT_W // 2, ROBOT_H // 2
@@ -101,20 +98,31 @@ class SafetyGuard:
         self._path = path
 
         if first_hit is not None:
-            dist = 0.0
+            dist_px = 0.0
             px, py = float(RCX), float(RCY)
             for i in range(first_hit + 1):
                 dx, dy = path[i][0] - px, path[i][1] - py
-                dist += math.sqrt(dx * dx + dy * dy)
+                dist_px += math.sqrt(dx * dx + dy * dy)
                 px, py = path[i]
 
-            if dist <= MIN_CLEARANCE_PX:
+            avail_m = max(0.0, (dist_px - MIN_CLEARANCE_PX) * PX_M)
+
+            if avail_m <= 0.0:
                 self._scale = 0.0
-            elif stop_px > 0:
-                self._scale = max(0.0, min(1.0,
-                                           (dist - MIN_CLEARANCE_PX) / stop_px))
             else:
-                self._scale = 1.0
+                # Max speed that still allows stopping in avail_m:
+                #   v * LATENCY + v² / (2 * decel) = avail_m
+                # Solve quadratic for v:
+                disc = (LATENCY_S * DECEL_MPS2) ** 2 + 2.0 * DECEL_MPS2 * avail_m
+                v_max = -LATENCY_S * DECEL_MPS2 + math.sqrt(disc)
+                v_max = max(0.0, v_max)
+
+                cur = abs(speed)
+                if cur > 1e-4:
+                    self._scale = min(1.0, v_max / cur)
+                else:
+                    self._scale = 1.0 if avail_m > MIN_CLEARANCE_PX * PX_M else 0.0
+
             self._throttled = self._scale < 0.95
         else:
             self._scale = 1.0
