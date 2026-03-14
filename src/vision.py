@@ -204,7 +204,7 @@ def _build_costmap(obs_combined, known_combined):
     has_unk = (unk_alpha > 0.0) & (~obs_raw)
     if np.any(has_unk):
         val = (255.0 * (1.0 - unk_alpha[has_unk]) +
-               128.0 * unk_alpha[has_unk]).astype(np.uint8)
+               242.0 * unk_alpha[has_unk]).astype(np.uint8)
         costmap[has_unk] = val[:, np.newaxis]
 
     # Anti-aliased obstacles: alpha-blend dark grey over background
