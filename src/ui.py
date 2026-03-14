@@ -595,8 +595,8 @@ class UI:
         for p in resp_parts:
             if p.get("thought"):
                 continue
+            model_parts.append(p)
             if "text" in p:
-                model_parts.append({"text": p["text"]})
                 self._broadcast({"type": "chat", "sender": "ai", "text": p["text"]})
                 self._last_activity = time.time()
                 if p["text"] and not p["text"].startswith("["):
@@ -606,10 +606,6 @@ class UI:
                         pass
             if "functionCall" in p:
                 fc = p["functionCall"]
-                fc_part = {"functionCall": fc}
-                if "thought_signature" in p:
-                    fc_part["thought_signature"] = p["thought_signature"]
-                model_parts.append(fc_part)
                 func_calls.append(fc)
                 self.push_tool_calls([{"name": fc["name"], "args": fc.get("args", {})}])
                 self._broadcast({"type": "chat", "sender": "ai",
