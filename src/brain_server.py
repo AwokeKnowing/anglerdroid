@@ -65,6 +65,8 @@ _SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 
 
 class Brain:
+    _TWIST_RE = re.compile(r'twist_for\s*\(')
+
     def __init__(self, vllm_url, model_name, system_prompt, vision=True):
         self._vllm_url = vllm_url
         self._model = model_name
@@ -72,10 +74,35 @@ class Brain:
         self._vision = vision
         self._conversation = []
         self._agent_state = ""
+        self._last_speak = ""
         self._lock = threading.Lock()
         self._turn = 0
         self._api_ms_total = 0.0
         self._stt_model = None
+        self._seed_conversation()
+
+    def _seed_conversation(self):
+        """Prime conversation with example exchanges showing realistic pacing."""
+        self._conversation = [
+            {"role": "user", "content": "frame: 0\nwz: 0.000 0.000\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0.3)\nthink(\"let me look around\")"},
+            {"role": "user", "content": "frame: 1\nwz: 0.000 0.280\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0.3)"},
+            {"role": "user", "content": "frame: 2\nwz: 0.000 0.290\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, -0.3)"},
+            {"role": "user", "content": "frame: 3\nwz: 0.000 -0.280\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0)"},
+            {"role": "user", "content": "frame: 4\nwz: 0.000 0.000\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0)\nthink(\"I see a table and chairs to my left, hallway ahead\")"},
+            {"role": "user", "content": "frame: 5\nwz: 0.000 0.000\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0)\nspeak(\"I can see a table and a hallway ahead\")"},
+            {"role": "user", "content": "frame: 6\nwz: 0.000 0.000\nSPEECH: go to the kitchen"},
+            {"role": "assistant", "content": "twist_for(0, 0)\nstate(\"user wants me to go to the kitchen\")\nspeak(\"Sure, heading to the kitchen\")"},
+            {"role": "user", "content": "frame: 7\nwz: 0.000 0.000\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0, 0.4)\nthink(\"need to find the kitchen, turning to look\")"},
+            {"role": "user", "content": "frame: 8\nwz: 0.000 0.380\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
+            {"role": "assistant", "content": "twist_for(0.15, 0)\nthink(\"hallway looks clear, moving forward\")"},
+        ]
 
     def init_stt(self):
         try:
@@ -160,14 +187,20 @@ class Brain:
             self._api_ms_total += api_ms
             self._turn += 1
 
-            if result:
-                self._conversation.append({"role": "assistant", "content": result})
+            if not result:
+                result = "."
+
+            if result != ".":
+                if not self._TWIST_RE.search(result):
+                    result = "twist_for(0, 0)\n" + result
+
+                result = self._dedup_response(result)
+
                 m = _STATE_RE.search(result)
                 if m:
                     self._agent_state = m.group(1)
-            else:
-                self._conversation.append({"role": "assistant", "content": "."})
-                result = "."
+
+            self._conversation.append({"role": "assistant", "content": result})
 
             if self._turn % 10 == 0:
                 avg = self._api_ms_total / self._turn
@@ -197,6 +230,29 @@ class Brain:
         except Exception as e:
             print("brain: TTS error: %s" % e)
             return None
+
+    def _dedup_response(self, result):
+        """Remove repeated speak text and collapse duplicate conversation turns."""
+        speak_match = _SPEAK_RE.search(result)
+        if speak_match:
+            speak_text = speak_match.group(1)
+            if speak_text == self._last_speak:
+                result = _SPEAK_RE.sub("", result).strip()
+                if not result:
+                    result = "twist_for(0, 0)"
+            else:
+                self._last_speak = speak_text
+
+        stripped = result.strip()
+        while len(self._conversation) >= 3:
+            n = len(self._conversation)
+            if (self._conversation[n - 2].get("role") == "assistant" and
+                    self._conversation[n - 2].get("content", "").strip() == stripped):
+                del self._conversation[n - 3:n - 1]
+            else:
+                break
+
+        return result
 
     def _trim(self):
         if len(self._conversation) > MAX_CONTEXT:
@@ -233,8 +289,9 @@ class Brain:
 
     def reset(self):
         with self._lock:
-            self._conversation = []
+            self._seed_conversation()
             self._agent_state = ""
+            self._last_speak = ""
 
     @property
     def turn(self):
