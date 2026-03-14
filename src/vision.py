@@ -24,8 +24,7 @@ CROSSHAIR_OPACITY = 0.3
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
-TD_NEAR_CLIP = np.float32(0.03)  # reject points < 3cm (sensor noise)
-TD_FLOOR_CLIP = np.float32(1.10) # reject points farther than this (floor). Adjustable via slider.
+TD_FLOOR_CLIP = np.float32(0.91) # reject floor (farther than this Z). Fixed.
 
 # --- RS2 (forward camera) → bird's-eye rotation ---
 # Pitch = 25.6° - 90° = -64.4° (camera mounting angle compensation)
@@ -89,7 +88,7 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
         return obs, known
 
     z = verts[:, 2]
-    valid = z >= TD_NEAR_CLIP
+    valid = z > 0
     obstacle = valid & (z < TD_FLOOR_CLIP)
 
     scale = np.float32(1.0 / TD_PX_SIZE)
