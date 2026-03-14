@@ -31,6 +31,7 @@ MASK_X0 = max(0, RCX - 20)
 MASK_Y0 = max(0, RCY - ROBOT_H // 2)
 MASK_X1 = min(320, RCX + 16)
 MASK_Y1 = MASK_Y0 + ROBOT_H
+BWD_SCAN_X0 = max(0, RCX - 25)  # 5 px extra margin behind caster
 
 FPS = 30.0
 DT = 1.0 / FPS
@@ -91,9 +92,9 @@ class SafetyGuard:
         else:
             fwd_clear = 0
 
-        # ── Backward scan: from rear edge leftward ──
-        if MASK_X0 > 0:
-            strip = obs_map[y0:y1, :MASK_X0][:, ::-1]
+        # ── Backward scan: from rear edge leftward (extra caster margin) ──
+        if BWD_SCAN_X0 > 0:
+            strip = obs_map[y0:y1, :BWD_SCAN_X0][:, ::-1]
             col_hit = np.any(strip >= OBS_THRESH, axis=0)
             idxs = np.flatnonzero(col_hit)
             bwd_clear = int(idxs[0]) if len(idxs) > 0 else strip.shape[1]
