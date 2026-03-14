@@ -169,16 +169,15 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     return obs, known
 
 
-_INFLATE_PX = 15  # 15cm at 10mm/px
-_grad_layer = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-_pillow_mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-_pillow_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+_PILLOW_RADIUS = 30  # distance field radius from robot edge (pixels = cm)
+_obs_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+_robot_inv = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
 
 def _build_costmap(obs_combined, known_combined):
     """RGB costmap: white=free, grey=unknown, dark=obstacles.
-    Gradient inflation kept in _grad_layer. Morphological pillow around robot
-    intersected with gradient → red danger overlay. Robot drawn in blue."""
+    Distance field from robot colours obstacles red (close) → yellow (far).
+    3px dilation smooths obstacle edges. Robot drawn in blue."""
     h, w = obs_combined.shape
     costmap = np.full((h, w, 3), 255, dtype=np.uint8)
 
@@ -193,35 +192,28 @@ def _build_costmap(obs_combined, known_combined):
     ry1 = min(h, ry0 + ROBOT_H)
     obs_mask[ry0:ry1, rx0:rx1] = False
 
-    # Gradient inflation layer (persistent buffer, 255=near obstacle, 0=far)
-    _grad_layer[:] = 0
-    if np.any(obs_mask):
-        dist = cv2.distanceTransform(
-            (~obs_mask).astype(np.uint8) * 255, cv2.DIST_L2, 5)
-        inflate = (dist > 0) & (dist <= _INFLATE_PX) & (~unknown)
-        inflate[ry0:ry1, rx0:rx1] = False
-        if np.any(inflate):
-            t = dist[inflate] / float(_INFLATE_PX)
-            _grad_layer[inflate] = (255.0 * (1.0 - t)).astype(np.uint8)
-            # Grey gradient on costmap (50% opacity)
-            grad_color = 50.0 + t * 205.0
-            val = ((255.0 + grad_color) * 0.5).astype(np.uint8)
-            costmap[inflate] = val[:, np.newaxis]
+    # 3px dilation on obstacles (smooth jagged edges, slight thickening)
+    obs_u8 = obs_mask.astype(np.uint8) * 255
+    cv2.dilate(obs_u8, _obs_dilate_kernel, dst=obs_u8)
+    obs_mask = obs_u8 > 0
+    obs_mask[ry0:ry1, rx0:rx1] = False
 
-    costmap[obs_mask] = (50, 50, 50)
+    # Distance from robot edge (pillow field)
+    _robot_inv[:] = 255
+    _robot_inv[ry0:ry1, rx0:rx1] = 0
+    robot_dist = cv2.distanceTransform(_robot_inv, cv2.DIST_L2, 5)
+
+    # Base colours
     costmap[unknown] = (128, 128, 128)
+    costmap[obs_mask] = (50, 50, 50)
 
-    # Extended footprint: morphological dilation of robot rect → pillow shape
-    _pillow_mask[:] = 0
-    _pillow_mask[ry0:ry1, rx0:rx1] = 255
-    cv2.dilate(_pillow_mask, _pillow_kernel, dst=_pillow_mask)
-
-    # Danger: intersection of pillow and gradient → red, intensity from gradient
-    danger = (_pillow_mask > 0) & (_grad_layer > 0)
-    if np.any(danger):
-        costmap[danger, 0] = _grad_layer[danger]
-        costmap[danger, 1] = 0
-        costmap[danger, 2] = 0
+    # Obstacles within pillow radius: red (close) → yellow (far from robot)
+    obs_in_pillow = obs_mask & (robot_dist <= _PILLOW_RADIUS)
+    if np.any(obs_in_pillow):
+        t = np.clip(robot_dist[obs_in_pillow] / float(_PILLOW_RADIUS), 0.0, 1.0)
+        costmap[obs_in_pillow, 0] = 255
+        costmap[obs_in_pillow, 1] = (t * 255).astype(np.uint8)
+        costmap[obs_in_pillow, 2] = 0
 
     # Body: 30w × 30h, light blue (RGB)
     costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
