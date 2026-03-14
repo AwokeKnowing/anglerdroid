@@ -23,9 +23,9 @@ CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 CROSSHAIR_OPACITY = 0.3
 
 # Robot body outline on obstacle map (pixels). Robot faces RIGHT.
-ROBOT_W = 35        # front-back (x direction)
-ROBOT_H = 24        # side-to-side (y direction)
-ROBOT_CX_OFF = 5    # forward offset from crosshair center
+ROBOT_W = 40        # front-back (x direction)
+ROBOT_H = 40        # side-to-side (y direction)
+ROBOT_CX_OFF = -35  # x offset from crosshair center (negative = left/behind)
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)

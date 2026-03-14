@@ -87,9 +87,9 @@ def main():
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
         cv2.createTrackbar("td_xoff", "vision atlas", _OFF_CENTER + vision_mod.TD_X_OFFSET, _OFF_CENTER * 2, lambda v: None)
-        cv2.createTrackbar("robot_w", "vision atlas", vision_mod.ROBOT_W, 80, lambda v: None)
-        cv2.createTrackbar("robot_h", "vision atlas", vision_mod.ROBOT_H, 60, lambda v: None)
-        cv2.createTrackbar("robot_cx", "vision atlas", 40 + vision_mod.ROBOT_CX_OFF, 80, lambda v: None)
+        cv2.createTrackbar("robot_w", "vision atlas", vision_mod.ROBOT_W, 120, lambda v: None)
+        cv2.createTrackbar("robot_h", "vision atlas", vision_mod.ROBOT_H, 120, lambda v: None)
+        cv2.createTrackbar("robot_cx", "vision atlas", 100 + vision_mod.ROBOT_CX_OFF, 200, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -106,7 +106,7 @@ def main():
                 vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _OFF_CENTER
                 vision_mod.ROBOT_W = max(1, cv2.getTrackbarPos("robot_w", "vision atlas"))
                 vision_mod.ROBOT_H = max(1, cv2.getTrackbarPos("robot_h", "vision atlas"))
-                vision_mod.ROBOT_CX_OFF = cv2.getTrackbarPos("robot_cx", "vision atlas") - 40
+                vision_mod.ROBOT_CX_OFF = cv2.getTrackbarPos("robot_cx", "vision atlas") - 100
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
@@ -115,8 +115,9 @@ def main():
                     display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
                     display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
                     fw_x = vision_mod.TD_X_OFFSET + vision_mod.FW_TD_X_DELTA
-                    cv2.putText(display, "td_x=%d  fw_x=%d  floor=%.0fcm" % (
-                        vision_mod.TD_X_OFFSET, fw_x, float(vision_mod.TD_FLOOR_CLIP) * 100),
+                    cv2.putText(display, "td_x=%d  fw_x=%d  bot: w=%d h=%d cx=%d" % (
+                        vision_mod.TD_X_OFFSET, fw_x,
+                        vision_mod.ROBOT_W, vision_mod.ROBOT_H, vision_mod.ROBOT_CX_OFF),
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                     navigator.draw_overlay(display)
                     cv2.imshow("vision atlas", display)
