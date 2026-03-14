@@ -61,7 +61,7 @@ def _init_kokoro():
 VLLM_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
-MAX_CONTEXT = 40
+MAX_CONTEXT = 20
 _STATE_RE = re.compile(r'state\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 
@@ -87,30 +87,8 @@ class Brain:
         self._turn = 0
         self._api_ms_total = 0.0
         self._stt_model = None
-        self._seed_conversation()
-
-    def _seed_conversation(self):
-        """Prime conversation with example exchanges showing realistic pacing."""
-        self._conversation = [
-            {"role": "user", "content": "frame: 0\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0.3)\nthink(\"let me look around and see what's here\")"},
-            {"role": "user", "content": "frame: 1\nwz: 0.000 0.280\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0.3)"},
-            {"role": "user", "content": "frame: 2\nwz: 0.000 0.290\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, -0.3)"},
-            {"role": "user", "content": "frame: 3\nwz: 0.000 -0.280\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0)"},
-            {"role": "user", "content": "frame: 4\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0)\nthink(\"nice table with a checkered cloth, cozy place\")"},
-            {"role": "user", "content": "frame: 5\nwz: 0.000 0.000\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0.12, 0)\nspeak(\"Oh hey, nice table! Love that checkered cloth\")"},
-            {"role": "user", "content": "frame: 6\nwz: 0.110 0.000\nSPEECH: go to the kitchen"},
-            {"role": "assistant", "content": "twist_for(0, 0)\nstate(\"user wants me to go to the kitchen\")\nspeak(\"Sure thing, heading to the kitchen!\")"},
-            {"role": "user", "content": "frame: 7\nwz: 0.000 0.000\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0, 0.4)\nthink(\"need to find the kitchen, turning to look\")"},
-            {"role": "user", "content": "frame: 8\nwz: 0.000 0.380\nSTATE: user wants me to go to the kitchen\nSPEECH:"},
-            {"role": "assistant", "content": "twist_for(0.15, 0)\nthink(\"hallway looks clear, moving forward\")"},
-        ]
+        self._pending_tts = None
+        self._tts_thread = None
 
     def init_stt(self):
         try:
@@ -142,9 +120,16 @@ class Brain:
 
     def infer(self, image_b64, frame_id, velocity, angular_vel,
               speech="", audio_chunks=None, prev_image_b64=None):
+        t_total = time.time()
+
+        tts_ready = self._pending_tts
+        self._pending_tts = None
+
         with self._lock:
+            t_stt = time.time()
             stt_text = self.transcribe_audio(audio_chunks)
             self._last_stt = stt_text or ""
+            stt_ms = (time.time() - t_stt) * 1000
 
             combined = ""
             if speech:
@@ -164,6 +149,7 @@ class Brain:
                 lines.append("SPEECH:")
             text_content = "\n".join(lines)
 
+            t_build = time.time()
             if self._vision and image_b64:
                 content = []
                 if prev_image_b64:
@@ -189,10 +175,11 @@ class Brain:
                     messages.append({"role": msg["role"], "content": text_only})
                 else:
                     messages.append(msg)
+            build_ms = (time.time() - t_build) * 1000
 
-            t0 = time.time()
+            t_api = time.time()
             result = self._call_llm(messages)
-            api_ms = (time.time() - t0) * 1000
+            api_ms = (time.time() - t_api) * 1000
             self._api_ms_total += api_ms
             self._turn += 1
 
@@ -211,22 +198,34 @@ class Brain:
 
             self._conversation.append({"role": "assistant", "content": result})
 
+            if _HAS_KOKORO and result != ".":
+                speak_match = _SPEAK_RE.search(result)
+                if speak_match:
+                    speak_text = speak_match.group(1)
+                    self._tts_thread = threading.Thread(
+                        target=self._synthesize_async, args=(speak_text,),
+                        daemon=True)
+                    self._tts_thread.start()
+
+            total_ms = (time.time() - t_total) * 1000
+            n_imgs = 2 if prev_image_b64 else 1
+            n_ctx = len(self._conversation)
+            print("#%d  api=%3.0fms  build=%.0fms  stt=%.0fms  total=%3.0fms  "
+                  "ctx=%d  imgs=%d  %s" % (
+                      self._turn, api_ms, build_ms, stt_ms, total_ms,
+                      n_ctx, n_imgs, result[:80]))
+
             if self._turn % 10 == 0:
                 avg = self._api_ms_total / self._turn
                 print("brain: turn=%d  avg_api=%.0fms  ctx=%d  state='%s'" % (
-                    self._turn, avg, len(self._conversation),
-                    self._agent_state[:50]))
+                    self._turn, avg, n_ctx, self._agent_state[:50]))
 
-            tts_audio = None
-            if _HAS_KOKORO and result:
-                speak_match = _SPEAK_RE.search(result)
-                if speak_match:
-                    tts_audio = self._synthesize(speak_match.group(1))
+            return result, api_ms, tts_ready, self._last_stt
 
-            return result, api_ms, tts_audio, self._last_stt
-
-    def _synthesize(self, text):
+    def _synthesize_async(self, text):
+        """Run TTS in background, store result for next response."""
         try:
+            t0 = time.time()
             samples, sr = _kokoro.create(text, voice="am_michael", speed=1.0)
             pcm = (samples * 32767).astype(np.int16).tobytes()
             buf = io.BytesIO()
@@ -235,10 +234,11 @@ class Brain:
                 wf.setsampwidth(2)
                 wf.setframerate(sr)
                 wf.writeframes(pcm)
-            return base64.b64encode(buf.getvalue()).decode('ascii')
+            self._pending_tts = base64.b64encode(buf.getvalue()).decode('ascii')
+            print("tts: %.0fms  \"%s\"" % ((time.time() - t0) * 1000, text[:60]))
         except Exception as e:
             print("brain: TTS error: %s" % e)
-            return None
+            self._pending_tts = None
 
     def _dedup_response(self, result):
         """Remove repeated speak text and collapse duplicate conversation turns."""
@@ -273,9 +273,8 @@ class Brain:
         body = {
             "model": self._model,
             "messages": messages,
-            "max_tokens": 200,
-            "temperature": 0.3,
-            "top_p": 0.9,
+            "max_tokens": 100,
+            "temperature": 0.5,
         }
         headers = {"Content-Type": "application/json"}
         if self._gemini_key:
@@ -301,9 +300,10 @@ class Brain:
 
     def reset(self):
         with self._lock:
-            self._seed_conversation()
+            self._conversation = []
             self._agent_state = ""
             self._last_speak = ""
+            self._pending_tts = None
 
     @property
     def turn(self):
@@ -351,9 +351,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
-
-        if text and text != ".":
-            print("#%d  %.0fms  %s" % (self.brain.turn, api_ms, text[:120]))
 
     def do_GET(self):
         if self.path == "/health":
