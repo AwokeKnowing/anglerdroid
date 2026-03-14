@@ -321,7 +321,7 @@ def main():
     ap.add_argument("--port", type=int, default=8090)
     ap.add_argument("--vllm-url", default=VLLM_DEFAULT_URL,
                     help="vLLM OpenAI-compatible endpoint")
-    ap.add_argument("--model", default="Qwen/Qwen3-4B-Instruct-2507",
+    ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct",
                     help="Model name for vLLM (must match what vllm serve loaded)")
     ap.add_argument("--no-vision", action="store_true",
                     help="Don't send images (for text-only models)")
