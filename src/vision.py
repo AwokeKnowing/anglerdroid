@@ -181,7 +181,6 @@ def _build_costmap(obs_combined, known_combined):
     h, w = obs_combined.shape
     costmap = np.full((h, w, 3), 255, dtype=np.uint8)
 
-    unknown = known_combined == 0
     obs_raw = obs_combined > 0
 
     rcx = CROSSHAIR_CX + ROBOT_CX_OFF
@@ -198,7 +197,15 @@ def _build_costmap(obs_combined, known_combined):
     obs_u8[ry0:ry1, rx0:rx1] = 0
     obs_aa = cv2.GaussianBlur(obs_u8, (3, 3), 0.7)
 
-    costmap[unknown] = (128, 128, 128)
+    # Biased alias on known/unknown boundary: blur known mask so open space
+    # feathers outward into unknown (white→grey fade, never grey→white)
+    known_aa = cv2.GaussianBlur(known_combined, (5, 5), 1.0)
+    unk_alpha = 1.0 - known_aa.astype(np.float32) / 255.0  # 0=known, 1=unknown
+    has_unk = (unk_alpha > 0.0) & (~obs_raw)
+    if np.any(has_unk):
+        val = (255.0 * (1.0 - unk_alpha[has_unk]) +
+               128.0 * unk_alpha[has_unk]).astype(np.uint8)
+        costmap[has_unk] = val[:, np.newaxis]
 
     # Anti-aliased obstacles: alpha-blend dark grey over background
     where_obs = obs_aa > 0
