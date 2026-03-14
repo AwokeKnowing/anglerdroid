@@ -231,11 +231,11 @@ def _build_costmap(obs_combined, known_combined):
         bg = costmap[obs_in_pillow].astype(np.float32)
         costmap[obs_in_pillow] = (bg * 0.45 + danger * 0.55).astype(np.uint8)
 
-    # Body: 32w × 30h, light blue (RGB) — extra 2px front = bumper
-    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 17] = (100, 160, 255)
-    # Tracks: 17w × 6h centred at (rcx+5), dark blue (RGB)
-    tx0 = max(0, rcx - 3)
-    tx1 = rcx + 14
+    # Body: 30w × 30h, light blue (RGB)
+    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
+    # Tracks: 17w × 6h centred at (rcx+1), dark blue (RGB)
+    tx0 = max(0, rcx - 7)
+    tx1 = rcx + 10
     costmap[max(0, rcy - 21):max(0, rcy - 15), tx0:tx1] = (30, 60, 180)
     costmap[rcy + 15:min(h, rcy + 21), tx0:tx1] = (30, 60, 180)
     # Caster: 6w × 3h, dark blue, rear centre
