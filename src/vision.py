@@ -188,7 +188,7 @@ def _build_costmap(obs_combined, known_combined):
     rcy = CROSSHAIR_CY
     rx0 = max(0, rcx - 20)          # 35 wide mask (extra 5px left for caster)
     ry0 = max(0, rcy - ROBOT_H // 2)
-    rx1 = min(w, rcx + 15)
+    rx1 = min(w, rcx + 17)          # +2px front bumper clearance
     ry1 = min(h, ry0 + ROBOT_H)
     obs_raw[ry0:ry1, rx0:rx1] = False
 
@@ -213,7 +213,7 @@ def _build_costmap(obs_combined, known_combined):
     _robot_inv[ry0:ry1, rx0:rx1] = 0
     robot_dist = cv2.distanceTransform(_robot_inv, cv2.DIST_L2, 5)
 
-    # Danger overlay: red→yellow at 30% opacity on solid obstacles within pillow
+    # Danger overlay: red→yellow at 55% opacity on solid obstacles within pillow
     obs_in_pillow = (obs_aa >= 128) & (robot_dist <= _PILLOW_RADIUS)
     if np.any(obs_in_pillow):
         t = np.clip(robot_dist[obs_in_pillow] / float(_PILLOW_RADIUS), 0.0, 1.0)
@@ -222,10 +222,10 @@ def _build_costmap(obs_combined, known_combined):
         danger[:, 1] = t * 255.0
         danger[:, 2] = 0.0
         bg = costmap[obs_in_pillow].astype(np.float32)
-        costmap[obs_in_pillow] = (bg * 0.7 + danger * 0.3).astype(np.uint8)
+        costmap[obs_in_pillow] = (bg * 0.45 + danger * 0.55).astype(np.uint8)
 
-    # Body: 30w × 30h, light blue (RGB)
-    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
+    # Body: 32w × 30h, light blue (RGB) — extra 2px front = bumper
+    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 17] = (100, 160, 255)
     # Tracks: 17w × 6h centred at (rcx+5), dark blue (RGB)
     tx0 = max(0, rcx - 3)
     tx1 = rcx + 14
