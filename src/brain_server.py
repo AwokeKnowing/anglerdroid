@@ -50,15 +50,14 @@ class Brain:
 
     def init_stt(self):
         try:
-            import nemo.collections.asr as nemo_asr
-            self._stt_model = nemo_asr.models.ASRModel.from_pretrained(
-                "nvidia/parakeet-tdt-0.6b-v3")
-            print("brain: Parakeet STT loaded")
+            from faster_whisper import WhisperModel
+            self._stt_model = WhisperModel("base", device="cuda",
+                                           compute_type="float16")
+            print("brain: faster-whisper STT loaded (base, cuda)")
         except Exception as e:
             print("brain: STT not available (%s) — text input only" % e)
 
     def transcribe_audio(self, audio_b64_chunks):
-        """Decode base64 PCM16 audio chunks, run STT. Returns text or None."""
         if not self._stt_model or not audio_b64_chunks:
             return None
         try:
@@ -68,9 +67,8 @@ class Brain:
             if len(pcm) < 3200:
                 return None
             audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-            result = self._stt_model.transcribe([audio])
-            text = result[0] if isinstance(result[0], str) else str(result[0])
-            text = text.strip()
+            segments, _ = self._stt_model.transcribe(audio)
+            text = " ".join(s.text for s in segments).strip()
             if text:
                 print("brain: STT → '%s'" % text[:100])
                 return text
