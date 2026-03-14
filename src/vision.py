@@ -24,10 +24,8 @@ CROSSHAIR_OPACITY = 0.3
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
-NEAR_CLIP = np.float32(0.03)     # reject points < 3cm (sensor noise)
-DEPTH_OFFSET = np.float32(0.15)  # shift for depth-to-val mapping
-DEPTH_SCALE = np.float32(100.0)  # was 400: caused overflow for z>0.4m, hid close obstacles
-DEPTH_BIAS = np.uint8(48)
+TD_NEAR_CLIP = np.float32(0.03)  # reject points < 3cm (sensor noise)
+TD_FLOOR_CLIP = np.float32(1.10) # reject points farther than this (floor). Adjustable via slider.
 
 # --- RS2 (forward camera) → bird's-eye rotation ---
 # Pitch = 25.6° - 90° = -64.4° (camera mounting angle compensation)
@@ -83,35 +81,38 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
 
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     """RS1 (top-down camera) pointcloud → (obstacles, known) via orthographic projection.
+    Floor is clipped by Z before projection. Remaining points = obstacles.
     Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
     known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
         return obs, known
 
-    v = verts.copy()
+    z = verts[:, 2]
+    valid = z >= TD_NEAR_CLIP
+    obstacle = valid & (z < TD_FLOOR_CLIP)
+
     scale = np.float32(1.0 / TD_PX_SIZE)
     center = np.float32([out_w * 0.5, out_h * 0.5])
-    proj = v[:, :2] * scale + center
 
-    proj[v[:, 2] < NEAR_CLIP] = np.nan
+    # Known mask: all valid points (including floor)
+    v_valid = verts[valid]
+    if len(v_valid) > 0:
+        p_all = v_valid[:, :2] * scale + center
+        with np.errstate(invalid='ignore'):
+            ja, ia = p_all.astype(np.uint32).T
+        ma = (ia < np.uint32(out_h)) & (ja < np.uint32(out_w))
+        known[ia[ma], ja[ma]] = 255
 
-    with np.errstate(invalid='ignore'):
-        j, i = proj.astype(np.uint32).T
-    m = np.isfinite(proj).all(axis=1) & (i < np.uint32(out_h)) & (j < np.uint32(out_w))
+    # Obstacle mask: only points closer than floor
+    v_obs = verts[obstacle]
+    if len(v_obs) > 0:
+        p_obs = v_obs[:, :2] * scale + center
+        with np.errstate(invalid='ignore'):
+            jo, io = p_obs.astype(np.uint32).T
+        mo = (io < np.uint32(out_h)) & (jo < np.uint32(out_w))
+        obs[io[mo], jo[mo]] = 255
 
-    known[i[m], j[m]] = 255
-
-    z = verts[m, 2]
-    vals = np.uint8(255) - ((z + DEPTH_OFFSET) * DEPTH_SCALE).astype(np.uint8) - DEPTH_BIAS
-    vals[vals == 255] = 0
-
-    if len(vals) > 0:
-        otsu_t, _ = cv2.threshold(vals.reshape(1, -1), 0, 255,
-                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        # Top-down: closer (obstacles) = high vals, farther (floor) = low vals. Mark high as obstacle.
-        obs_mask = (vals >= otsu_t) & (vals > 0) & (vals < 255)
-        obs[i[m][obs_mask], j[m][obs_mask]] = 255
     return obs, known
 
 
