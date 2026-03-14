@@ -83,10 +83,8 @@ def main():
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
     show_ok = not args.no_show
-    _OFF_CENTER = 320
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
-        cv2.createTrackbar("td_xoff", "vision atlas", _OFF_CENTER + vision_mod.TD_X_OFFSET, _OFF_CENTER * 2, lambda v: None)
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -97,10 +95,6 @@ def main():
     try:
         while True:
             loop_start = time.monotonic()
-
-            # Read tuning sliders and update vision module
-            if show_ok:
-                vision_mod.TD_X_OFFSET = cv2.getTrackbarPos("td_xoff", "vision atlas") - _OFF_CENTER
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()

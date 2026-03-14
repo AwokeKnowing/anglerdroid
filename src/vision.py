@@ -169,51 +169,60 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     return obs, known
 
 
-_PILLOW_RADIUS = 30  # distance field radius from robot edge (pixels = cm)
-_obs_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+_PILLOW_RADIUS = 21  # ~70% of 30 — faster falloff
+_obs_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
 _robot_inv = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
 
 def _build_costmap(obs_combined, known_combined):
-    """RGB costmap: white=free, grey=unknown, dark=obstacles.
-    Distance field from robot colours obstacles red (close) → yellow (far).
-    3px dilation smooths obstacle edges. Robot drawn in blue."""
+    """RGB costmap: white=free, grey=unknown, anti-aliased obstacles.
+    Distance field from robot colours nearby obstacles red→yellow at 30% opacity.
+    Robot drawn in blue with caster wheel."""
     h, w = obs_combined.shape
     costmap = np.full((h, w, 3), 255, dtype=np.uint8)
 
     unknown = known_combined == 0
-    obs_mask = obs_combined > 0
+    obs_raw = obs_combined > 0
 
     rcx = CROSSHAIR_CX + ROBOT_CX_OFF
     rcy = CROSSHAIR_CY
-    rx0 = max(0, rcx - ROBOT_W // 2)
+    rx0 = max(0, rcx - 20)          # 35 wide mask (extra 5px left for caster)
     ry0 = max(0, rcy - ROBOT_H // 2)
-    rx1 = min(w, rx0 + ROBOT_W)
+    rx1 = min(w, rcx + 15)
     ry1 = min(h, ry0 + ROBOT_H)
-    obs_mask[ry0:ry1, rx0:rx1] = False
+    obs_raw[ry0:ry1, rx0:rx1] = False
 
-    # 3px dilation on obstacles (smooth jagged edges, slight thickening)
-    obs_u8 = obs_mask.astype(np.uint8) * 255
+    # 1px dilation + Gaussian anti-aliasing
+    obs_u8 = obs_raw.astype(np.uint8) * 255
     cv2.dilate(obs_u8, _obs_dilate_kernel, dst=obs_u8)
-    obs_mask = obs_u8 > 0
-    obs_mask[ry0:ry1, rx0:rx1] = False
+    obs_u8[ry0:ry1, rx0:rx1] = 0
+    obs_aa = cv2.GaussianBlur(obs_u8, (3, 3), 0.7)
+
+    costmap[unknown] = (128, 128, 128)
+
+    # Anti-aliased obstacles: alpha-blend dark grey over background
+    where_obs = obs_aa > 0
+    if np.any(where_obs):
+        alpha = obs_aa[where_obs].astype(np.float32) / 255.0
+        bg = costmap[where_obs].astype(np.float32)
+        costmap[where_obs] = (bg * (1.0 - alpha[:, np.newaxis]) +
+                              50.0 * alpha[:, np.newaxis]).astype(np.uint8)
 
     # Distance from robot edge (pillow field)
     _robot_inv[:] = 255
     _robot_inv[ry0:ry1, rx0:rx1] = 0
     robot_dist = cv2.distanceTransform(_robot_inv, cv2.DIST_L2, 5)
 
-    # Base colours
-    costmap[unknown] = (128, 128, 128)
-    costmap[obs_mask] = (50, 50, 50)
-
-    # Obstacles within pillow radius: red (close) → yellow (far from robot)
-    obs_in_pillow = obs_mask & (robot_dist <= _PILLOW_RADIUS)
+    # Danger overlay: red→yellow at 30% opacity on solid obstacles within pillow
+    obs_in_pillow = (obs_aa >= 128) & (robot_dist <= _PILLOW_RADIUS)
     if np.any(obs_in_pillow):
         t = np.clip(robot_dist[obs_in_pillow] / float(_PILLOW_RADIUS), 0.0, 1.0)
-        costmap[obs_in_pillow, 0] = 255
-        costmap[obs_in_pillow, 1] = (t * 255).astype(np.uint8)
-        costmap[obs_in_pillow, 2] = 0
+        danger = np.empty((int(t.shape[0]), 3), dtype=np.float32)
+        danger[:, 0] = 255.0
+        danger[:, 1] = t * 255.0
+        danger[:, 2] = 0.0
+        bg = costmap[obs_in_pillow].astype(np.float32)
+        costmap[obs_in_pillow] = (bg * 0.7 + danger * 0.3).astype(np.uint8)
 
     # Body: 30w × 30h, light blue (RGB)
     costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = (100, 160, 255)
@@ -222,6 +231,8 @@ def _build_costmap(obs_combined, known_combined):
     tx1 = rcx + 14
     costmap[max(0, rcy - 21):max(0, rcy - 15), tx0:tx1] = (30, 60, 180)
     costmap[rcy + 15:min(h, rcy + 21), tx0:tx1] = (30, 60, 180)
+    # Caster: 6w × 3h, dark blue, rear centre
+    costmap[rcy - 1:rcy + 2, max(0, rcx - 20):max(0, rcx - 14)] = (30, 60, 180)
 
     return costmap
 
