@@ -22,10 +22,10 @@ TARGET_FPS = 30
 CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 CROSSHAIR_OPACITY = 0.3
 
-# Robot body outline on obstacle map (pixels). Robot faces RIGHT.
-ROBOT_W = 40        # front-back (x direction)
-ROBOT_H = 40        # side-to-side (y direction)
-ROBOT_CX_OFF = -35  # x offset from crosshair center (negative = left/behind)
+# Robot footprint on costmap (pixels). Robot faces RIGHT.
+ROBOT_W = 30        # front-back (x direction)  — locked
+ROBOT_H = 40        # side-to-side (y direction) — locked
+ROBOT_CX_OFF = -78  # x offset from crosshair center — locked
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
@@ -169,6 +169,51 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     return obs, known
 
 
+_INFLATE_PX = 15  # 15cm at 10mm/px
+
+
+def _build_costmap(obs_combined, known_combined):
+    """Costmap from combined obstacle + known masks.
+    255=free (white), 128=unknown (grey), 50=obstacle (dark grey),
+    inflation gradient 15cm around obstacles at 50% opacity,
+    robot drawn as body + two tracks."""
+    h, w = obs_combined.shape
+    costmap = np.full((h, w), np.uint8(255))
+
+    unknown = known_combined == 0
+    obs_mask = obs_combined > 0
+
+    rcx = CROSSHAIR_CX + ROBOT_CX_OFF
+    rcy = CROSSHAIR_CY
+    rx0 = max(0, rcx - ROBOT_W // 2)
+    ry0 = max(0, rcy - ROBOT_H // 2)
+    rx1 = min(w, rx0 + ROBOT_W)
+    ry1 = min(h, ry0 + ROBOT_H)
+    obs_mask[ry0:ry1, rx0:rx1] = False
+
+    if np.any(obs_mask):
+        dist = cv2.distanceTransform(
+            (~obs_mask).astype(np.uint8) * 255, cv2.DIST_L2, 5)
+        inflate = (dist > 0) & (dist <= _INFLATE_PX) & (~unknown)
+        inflate[ry0:ry1, rx0:rx1] = False
+        if np.any(inflate):
+            t = dist[inflate] / float(_INFLATE_PX)
+            grad = 50.0 + t * 205.0
+            costmap[inflate] = ((255.0 + grad) * 0.5).astype(np.uint8)
+
+    costmap[obs_mask] = 50
+    costmap[unknown] = 128
+
+    # Body: 30w x 30h centred at (rcx, rcy)
+    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 15):rcx + 15] = 80
+    # Top track: 20w x 5h centred at (rcx+5, rcy-17), very dark grey
+    costmap[max(0, rcy - 20):max(0, rcy - 15), max(0, rcx - 5):rcx + 15] = 40
+    # Bottom track: 20w x 5h centred at (rcx+5, rcy+17), very dark grey
+    costmap[rcy + 15:min(h, rcy + 20), max(0, rcx - 5):rcx + 15] = 40
+
+    return cv2.cvtColor(costmap, cv2.COLOR_GRAY2BGR)
+
+
 class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
@@ -270,17 +315,14 @@ class Vision:
             cv2.morphologyEx(known_combined, cv2.MORPH_CLOSE, _known_kernel,
                              iterations=2, dst=known_combined)
 
-            # RGB: B=unknown(dim), G=td1 obstacles, R=td2 obstacles
-            topdown = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-            unknown = np.uint8(255) - known_combined
-            topdown[:, :, 2] = unknown // 4                     # B = unknown (dim blue)
-            _blit(topdown[:, :, 0], obs2, fw_dx, fw_dy)         # R = forward obstacles
-            _blit(topdown[:, :, 1], obs1, td_dx)                # G = topdown obstacles
+            # Combine obstacles (union of TD and FW cameras)
+            obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            _blit(obs_combined, obs1, td_dx)
+            obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            _blit(obs_tmp, obs2, fw_dx, fw_dy)
+            np.maximum(obs_combined, obs_tmp, out=obs_combined)
 
-            # Draw robot body outline (white rectangle)
-            rx0 = CROSSHAIR_CX - (ROBOT_W // 2) + ROBOT_CX_OFF
-            ry0 = CROSSHAIR_CY - (ROBOT_H // 2)
-            cv2.rectangle(topdown, (rx0, ry0), (rx0 + ROBOT_W, ry0 + ROBOT_H), (255, 255, 255), 1)
+            topdown = _build_costmap(obs_combined, known_combined)
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
