@@ -658,6 +658,9 @@ class UI:
     # ── Gemini TTS ────────────────────────────────────────────────
 
     def _tts_loop(self):
+        if self._brain_url:
+            print("tts: handled by brain server")
+            return
         if _HAS_KOKORO:
             print("tts: Kokoro ONNX loaded")
         elif self._gemini_key:
