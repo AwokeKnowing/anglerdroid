@@ -503,6 +503,8 @@ class UI:
         try:
             resp = urlopen(req, timeout=10)
             data = json.loads(resp.read())
+            if data.get("tts_audio"):
+                self._broadcast({"type": "tts_audio", "audio": data["tts_audio"]})
             return data.get("text", ".")
         except Exception as e:
             print("ai: brain error: %s" % e)
@@ -610,10 +612,11 @@ class UI:
             elif name == "speak":
                 msg = self._parse_string_arg(raw_args)
                 if msg:
-                    try:
-                        self._tts_q.put_nowait(msg)
-                    except queue.Full:
-                        pass
+                    if not self._brain_url:
+                        try:
+                            self._tts_q.put_nowait(msg)
+                        except queue.Full:
+                            pass
                     self._broadcast({"type": "chat", "sender": "ai",
                                      "text": msg})
                     log_parts.append("speak")

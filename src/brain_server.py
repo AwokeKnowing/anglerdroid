@@ -28,11 +28,39 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
+import io
+import wave
 import numpy as np
+
+_kokoro = None
+_HAS_KOKORO = False
+
+def _init_kokoro():
+    global _kokoro, _HAS_KOKORO
+    _model_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.kokoro')
+    _model_file = os.path.join(_model_dir, 'kokoro-v1.0.onnx')
+    _voices_file = os.path.join(_model_dir, 'voices-v1.0.bin')
+    try:
+        from kokoro_onnx import Kokoro
+    except ImportError:
+        print("tts: kokoro-onnx not installed")
+        return
+    if not os.path.exists(_model_file) or not os.path.exists(_voices_file):
+        print("tts: downloading Kokoro model (~300 MB)...")
+        os.makedirs(_model_dir, exist_ok=True)
+        _GH = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/"
+        from urllib.request import urlretrieve
+        urlretrieve(_GH + "kokoro-v1.0.onnx", _model_file)
+        urlretrieve(_GH + "voices-v1.0.bin", _voices_file)
+        print("tts: download complete")
+    _kokoro = Kokoro(_model_file, _voices_file)
+    _HAS_KOKORO = True
+    print("tts: Kokoro loaded")
 
 VLLM_DEFAULT_URL = "http://localhost:8000/v1/chat/completions"
 MAX_CONTEXT = 40
 _STATE_RE = re.compile(r'state\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
+_SPEAK_RE = re.compile(r'speak\s*\(\s*["\']([^"\']*)["\']', re.DOTALL)
 
 
 class Brain:
@@ -146,7 +174,28 @@ class Brain:
                     self._turn, avg, len(self._conversation),
                     self._agent_state[:50]))
 
-            return result, api_ms
+            tts_audio = None
+            if _HAS_KOKORO and result:
+                speak_match = _SPEAK_RE.search(result)
+                if speak_match:
+                    tts_audio = self._synthesize(speak_match.group(1))
+
+            return result, api_ms, tts_audio
+
+    def _synthesize(self, text):
+        try:
+            samples, sr = _kokoro.create(text, voice="af_heart", speed=1.0)
+            pcm = (samples * 32767).astype(np.int16).tobytes()
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(pcm)
+            return base64.b64encode(buf.getvalue()).decode('ascii')
+        except Exception as e:
+            print("brain: TTS error: %s" % e)
+            return None
 
     def _trim(self):
         if len(self._conversation) > MAX_CONTEXT:
@@ -210,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(400, "Bad JSON")
             return
 
-        text, api_ms = self.brain.infer(
+        text, api_ms, tts_audio = self.brain.infer(
             image_b64=data.get("image", ""),
             frame_id=int(data.get("frame_id", 0)),
             velocity=float(data.get("velocity", 0)),
@@ -221,6 +270,8 @@ class Handler(BaseHTTPRequestHandler):
 
         result = {"text": text, "api_ms": round(api_ms, 1),
                   "turn": self.brain.turn}
+        if tts_audio:
+            result["tts_audio"] = tts_audio
         payload = json.dumps(result).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -281,6 +332,7 @@ def main():
 
     if not args.no_stt:
         brain.init_stt()
+    _init_kokoro()
 
     Handler.brain = brain
 
@@ -292,6 +344,7 @@ def main():
     print("  model:  %s" % args.model)
     print("  vision: %s" % (not args.no_vision))
     print("  stt:    %s" % (brain._stt_model is not None))
+    print("  tts:    %s" % ("kokoro" if _HAS_KOKORO else "none"))
     print("=" * 60)
     try:
         server.serve_forever()
