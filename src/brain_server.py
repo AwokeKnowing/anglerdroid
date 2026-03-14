@@ -275,7 +275,10 @@ class Brain:
             "max_tokens": 100,
             "temperature": 0.5,
         }
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "AnglerDroid/1.0",
+        }
         if self._api_key:
             headers["Authorization"] = "Bearer " + self._api_key
         req = Request(self._llm_url,
