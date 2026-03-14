@@ -13,15 +13,13 @@ header h1{font-size:1.1rem;font-weight:600}
 .main{display:flex;flex:1;overflow:hidden}
 .left{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px;gap:12px}
 .right{width:340px;display:flex;flex-direction:column;padding:12px;gap:10px;border-left:1px solid #333;overflow-y:auto}
-#eyes{width:280px;height:140px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:40px;cursor:pointer;position:relative}
+#fs-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}
+#eyes{width:280px;height:140px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:40px;cursor:pointer;position:relative;flex-shrink:0}
 .eye{width:60px;height:72px;background:#fff;border-radius:50%;position:relative;overflow:hidden}
 .pupil{width:24px;height:28px;background:#111;border-radius:50%;position:absolute;top:22px;left:18px;transition:all .15s}
 .eye.blink{animation:blink .2s}
 @keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.05)}}
-#eyes:fullscreen{width:100vw;height:100vh;border-radius:0;gap:8vmin}
-#eyes:fullscreen .eye{width:20vmin;height:24vmin}
-#eyes:fullscreen .pupil{width:8vmin;height:9.5vmin;top:37%;left:30%;transition:all .2s}
-#atlas{max-width:100%;border-radius:8px;background:#222}
+#atlas{max-width:100%;background:#000;border-radius:0}
 label{font-size:.8rem;color:#aaa}
 input[type=range]{width:100%}
 .val{font-size:.8rem;color:#6cf;float:right}
@@ -44,6 +42,18 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 .goal-done{color:#6a6;text-decoration:line-through}
 .goal-current{color:#fff;background:#254;font-weight:600}
 .goal-pending{color:#777}
+
+/* Fullscreen layout */
+#fs-wrap.fs{position:fixed;inset:0;z-index:9999;background:#000;gap:0;justify-content:flex-start;align-items:stretch}
+#fs-wrap.fs #eyes{width:100%;height:120px;border-radius:0;gap:8vmin}
+#fs-wrap.fs #atlas{flex:1;width:100%;object-fit:contain;border-radius:0}
+#fs-wrap.fs .eye{width:40px;height:48px}
+#fs-wrap.fs .pupil{width:16px;height:18px;top:15px;left:12px}
+#fs-wrap.fs.eyes-big #eyes{flex:1;height:auto;gap:8vmin}
+#fs-wrap.fs.eyes-big .eye{width:20vmin;height:24vmin}
+#fs-wrap.fs.eyes-big .pupil{width:8vmin;height:9.5vmin;top:37%;left:30%}
+#fs-wrap.fs.eyes-big #atlas{display:none}
+
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
 </head>
@@ -55,11 +65,13 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 </header>
 <div class="main">
   <div class="left">
-    <div id="eyes" onclick="toggleFullscreen()">
-      <div class="eye" id="eyeL"><div class="pupil" id="pupilL"></div></div>
-      <div class="eye" id="eyeR"><div class="pupil" id="pupilR"></div></div>
+    <div id="fs-wrap">
+      <div id="eyes" onclick="toggleFullscreen()">
+        <div class="eye" id="eyeL"><div class="pupil" id="pupilL"></div></div>
+        <div class="eye" id="eyeR"><div class="pupil" id="pupilR"></div></div>
+      </div>
+      <img id="atlas" alt="robot vision">
     </div>
-    <img id="atlas" alt="robot vision">
   </div>
   <div class="right">
     <div id="controls" style="display:none">
@@ -112,13 +124,15 @@ const WS_PORT = '__WS_PORT__';
 const GOOGLE_CLIENT_ID = '__GOOGLE_CLIENT_ID__';
 let ws = null, role = 'observer', aiActive = false, micOn = false;
 let mediaStream = null, mediaRecorder = null, audioCtx = null, analyser = null;
-let audioChunks = [], hadVoice = false;
+let audioChunks = [], hadVoice = false, eyesBig = false;
 const VOICE_THRESHOLD = 0.06, CHUNK_MS = 4000;
+let _prevAtlasUrl = null;
 
 function connect() {
   const host = location.hostname || 'localhost';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(proto + '://' + host + ':' + WS_PORT);
+  ws.binaryType = 'blob';
   ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
   ws.onclose = () => {
     document.getElementById('status').textContent = 'disconnected';
@@ -129,6 +143,14 @@ function connect() {
     setTimeout(connect, 2000);
   };
   ws.onmessage = (e) => {
+    if (typeof e.data !== 'string') {
+      const url = URL.createObjectURL(e.data);
+      const img = document.getElementById('atlas');
+      if (_prevAtlasUrl) URL.revokeObjectURL(_prevAtlasUrl);
+      _prevAtlasUrl = url;
+      img.src = url;
+      return;
+    }
     const d = JSON.parse(e.data);
     if (d.type === 'auth_result') {
       role = d.role;
@@ -257,6 +279,30 @@ function toggleAI() {
   if (ws) ws.send(JSON.stringify({type: aiActive ? 'stop_ai' : 'launch_ai'}));
 }
 
+function toggleFullscreen() {
+  const wrap = document.getElementById('fs-wrap');
+  if (!wrap.classList.contains('fs')) {
+    wrap.classList.add('fs');
+    wrap.classList.remove('eyes-big');
+    eyesBig = false;
+    if (wrap.requestFullscreen) wrap.requestFullscreen().catch(function(){});
+  } else if (!eyesBig) {
+    eyesBig = true;
+    wrap.classList.add('eyes-big');
+  } else {
+    eyesBig = false;
+    wrap.classList.remove('eyes-big');
+  }
+}
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) {
+    const wrap = document.getElementById('fs-wrap');
+    wrap.classList.remove('fs', 'eyes-big');
+    eyesBig = false;
+  }
+});
+
 function toggleMic() {
   micOn = !micOn;
   document.getElementById('mic-btn').textContent = micOn ? '🎤 Mic On' : '🎤 Mic Off';
@@ -350,16 +396,6 @@ function sendAudioBlob(blob) {
   reader.readAsDataURL(blob);
 }
 
-function toggleFullscreen() {
-  const el = document.getElementById('eyes');
-  if (document.fullscreenElement) {
-    document.exitFullscreen();
-  } else {
-    el.requestFullscreen().catch(function() {});
-  }
-}
-
-// Eyes blink every 3-6s
 setInterval(() => {
   document.getElementById('eyeL').classList.add('blink');
   document.getElementById('eyeR').classList.add('blink');
@@ -369,14 +405,12 @@ setInterval(() => {
   }, 200);
 }, 3000 + Math.random() * 3000);
 
-// Subtle pupil movement
 setInterval(() => {
   const dx = (Math.random() - 0.5) * 12, dy = (Math.random() - 0.5) * 8;
   document.getElementById('pupilL').style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
   document.getElementById('pupilR').style.transform = 'translate(' + dx + 'px,' + dy + 'px)';
 }, 2000);
 
-// Google Sign-In (only if client ID is configured)
 function initGoogleSignIn() {
   if (!GOOGLE_CLIENT_ID) return;
   const s = document.createElement('script');

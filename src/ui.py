@@ -97,6 +97,7 @@ class UI:
         self._last_user_text = ""
 
         self._latest_atlas = None       # type: Optional[np.ndarray]
+        self._atlas_jpeg = None         # type: Optional[bytes]
         self._atlas_lock = threading.Lock()
 
         self._ws_loop = None            # type: Optional[asyncio.AbstractEventLoop]
@@ -139,12 +140,16 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Store latest atlas for Gemini and browser streaming."""
+        """Store latest atlas for Gemini; encode JPEG for browser streaming."""
+        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
+                              [cv2.IMWRITE_JPEG_QUALITY, 70])
+        jpeg = buf.tobytes()
         with self._atlas_lock:
             if self._latest_atlas is None or self._latest_atlas.shape != atlas_rgb.shape:
                 self._latest_atlas = atlas_rgb.copy()
             else:
                 np.copyto(self._latest_atlas, atlas_rgb)
+            self._atlas_jpeg = jpeg
 
     def get_user_text(self):
         with self._lock:
@@ -233,21 +238,17 @@ class UI:
                         await self._send_all(msg)
                     except queue.Empty:
                         break
-                # stream atlas to browser every ~2s
                 now = time.time()
-                if now - last_atlas_bc > 2.0:
+                if now - last_atlas_bc > 0.033:
                     with self._atlas_lock:
-                        atlas = self._latest_atlas
-                    if atlas is not None:
+                        jpeg = self._atlas_jpeg
+                    if jpeg is not None:
                         try:
-                            _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
-                                                  [cv2.IMWRITE_JPEG_QUALITY, 55])
-                            b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-                            await self._send_all(json.dumps({"type": "atlas", "image": b64}))
+                            await self._send_all(jpeg)
                         except Exception:
                             pass
                     last_atlas_bc = now
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(0.008)
 
     async def _ws_handler(self, ws, path='/'):
         info = {"email": "", "role": "control" if not self._google_client_id else "observer"}

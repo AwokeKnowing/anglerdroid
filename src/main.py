@@ -82,7 +82,7 @@ def main():
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
-    show_ok = not args.no_show
+    show_ok = not args.no_show and vision_mod.DEBUG_CAMERAS
     if show_ok:
         cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
 
@@ -113,8 +113,7 @@ def main():
                 except cv2.error:
                     show_ok = False
                     print("vision: display not available, continuing without window")
-            # Send atlas to UI at ~1 fps for browser + Gemini
-            if frame_id % TARGET_FPS == 0 and atlas is not None:
+            if atlas is not None:
                 u.send_atlas(atlas)
 
 
