@@ -435,30 +435,19 @@ class UI:
                 time.sleep(3.0)
 
     def _trim_conversation(self):
-        """Trim conversation to ~30 messages, but never cut between a model
-        functionCall and its user functionResponse."""
+        """Trim conversation to ~30 messages. Must start on a plain user turn
+        (not a functionResponse) so we never orphan a functionCall chain."""
         conv = self._conversation
         if len(conv) <= 30:
             return
         cut = len(conv) - 30
-        # Advance cut point past any model turn that contains functionCall
-        # so we don't orphan a functionResponse
-        while cut < len(conv):
+        while cut < len(conv) - 1:
             msg = conv[cut]
             if msg.get("role") == "user":
                 has_fr = any("functionResponse" in p for p in msg.get("parts", []))
-                if has_fr and cut > 0 and conv[cut - 1].get("role") == "model":
-                    cut += 1
-                    continue
-            break
-        # Also don't start on a model functionCall without its preceding user turn
-        if cut < len(conv) and conv[cut].get("role") == "model":
-            has_fc = any("functionCall" in p for p in conv[cut].get("parts", []))
-            if has_fc:
-                cut += 1
-                # skip the functionResponse too
-                if cut < len(conv) and conv[cut].get("role") == "user":
-                    cut += 1
+                if not has_fr:
+                    break
+            cut += 1
         self._conversation = conv[cut:]
 
     @staticmethod
