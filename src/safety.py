@@ -125,14 +125,10 @@ class SafetyGuard:
         else:
             cur_speed = 0.0
 
-        if cur_speed > 1e-4:
-            self._fwd_scale = min(1.0, v_max_fwd / cur_speed)
-            self._bwd_scale = min(1.0, v_max_bwd / cur_speed)
-        else:
-            self._fwd_scale = 0.0 if fwd_clear <= MIN_CLEARANCE_PX else 1.0
-            self._bwd_scale = 0.0 if bwd_clear <= MIN_CLEARANCE_PX else 1.0
+        ref_speed = max(cur_speed, 0.05)
+        self._fwd_scale = min(1.0, v_max_fwd / ref_speed)
+        self._bwd_scale = min(1.0, v_max_bwd / ref_speed)
 
-        # Hard zero when within clearance regardless of speed estimate
         if fwd_clear <= MIN_CLEARANCE_PX:
             self._fwd_scale = 0.0
         if bwd_clear <= MIN_CLEARANCE_PX:
