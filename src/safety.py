@@ -16,7 +16,7 @@ WHEEL_RADIUS_M = 0.08565
 VEL_RAMP_RATE = 3.0  # turns/s²
 DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 LATENCY_S = 0.15
-MIN_CLEARANCE_PX = 3
+MIN_CLEARANCE_PX = 8
 OBS_THRESH = 100
 
 # ── Costmap geometry (must match vision.py) ──
@@ -125,7 +125,7 @@ class SafetyGuard:
         else:
             cur_speed = 0.0
 
-        ref_speed = max(cur_speed, 0.15)
+        ref_speed = max(cur_speed, 0.10)
         self._fwd_scale = min(1.0, v_max_fwd / ref_speed)
         self._bwd_scale = min(1.0, v_max_bwd / ref_speed)
 
