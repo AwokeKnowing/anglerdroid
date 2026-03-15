@@ -363,7 +363,7 @@ class UI:
 
     # ── AI control loop ─────────────────────────────────────────────
 
-    VISION_MODEL_INTERVAL = 1.0  # seconds between frames (1 FPS)
+    VISION_MODEL_INTERVAL = 2.0  # seconds between frames (0.5 FPS)
     GEMINI_MAX_CONTEXT = 40
 
     _CALL_RE = re.compile(r'(twist_for|speak|state|stop|navigate)\s*\(([^)]*)\)')
