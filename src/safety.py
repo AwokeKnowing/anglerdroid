@@ -39,8 +39,8 @@ BWD_SCAN_X0 = max(0, RCX - 25)  # 5 px extra margin behind caster
 _HALF_DIAG = 26
 LAT_X0 = max(0, RCX - _HALF_DIAG)
 LAT_X1 = min(320, RCX + _HALF_DIAG)
-LAT_HARD_PX = 5    # within this → angular = 0
-LAT_SAFE_PX = 12   # above this  → full angular
+LAT_HARD_PX = 2    # within this → angular = 0
+LAT_SAFE_PX = 9    # above this  → full angular
 
 FPS = 30.0
 DT = 1.0 / FPS
