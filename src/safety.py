@@ -16,7 +16,8 @@ WHEEL_RADIUS_M = 0.08565
 VEL_RAMP_RATE = 3.0  # turns/s²
 DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 LATENCY_S = 0.15
-MIN_CLEARANCE_PX = 5
+MIN_CLEARANCE_PX = 3
+BRAKE_START_PX = 30
 OBS_THRESH = 100
 
 # ── Costmap geometry (must match vision.py) ──
@@ -51,13 +52,14 @@ TRACK_FLASH = (120, 170, 255)
 FLASH_HALF = 4
 
 
-def _max_safe_speed(clear_px):
-    """Max speed (m/s) that allows full stop within *clear_px* pixels."""
-    avail = max(0.0, (clear_px - MIN_CLEARANCE_PX) * PX_M)
-    if avail <= 0.0:
+def _clearance_scale(clear_px):
+    """S-curve 0→1 based purely on distance. No speed dependency."""
+    if clear_px <= MIN_CLEARANCE_PX:
         return 0.0
-    disc = (LATENCY_S * DECEL_MPS2) ** 2 + 2.0 * DECEL_MPS2 * avail
-    return max(0.0, -LATENCY_S * DECEL_MPS2 + math.sqrt(disc))
+    if clear_px >= BRAKE_START_PX:
+        return 1.0
+    t = (clear_px - MIN_CLEARANCE_PX) / float(BRAKE_START_PX - MIN_CLEARANCE_PX)
+    return t * t * (3.0 - 2.0 * t)  # smoothstep
 
 
 class SafetyGuard:
@@ -114,30 +116,8 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        # ── Max safe speed in each direction ──
-        v_max_fwd = _max_safe_speed(fwd_clear)
-        v_max_bwd = _max_safe_speed(bwd_clear)
-
-        # Use recent history for current speed estimate
-        if len(self._hist) >= 3:
-            n = len(self._hist)
-            cur_speed = abs(sum(h[1] for h in self._hist) / n * FPS)
-        else:
-            cur_speed = 0.0
-
-        if fwd_clear <= MIN_CLEARANCE_PX:
-            self._fwd_scale = 0.0
-        elif cur_speed > 1e-4:
-            self._fwd_scale = min(1.0, v_max_fwd / cur_speed)
-        else:
-            self._fwd_scale = 1.0
-
-        if bwd_clear <= MIN_CLEARANCE_PX:
-            self._bwd_scale = 0.0
-        elif cur_speed > 1e-4:
-            self._bwd_scale = min(1.0, v_max_bwd / cur_speed)
-        else:
-            self._bwd_scale = 1.0
+        self._fwd_scale = _clearance_scale(fwd_clear)
+        self._bwd_scale = _clearance_scale(bwd_clear)
 
         # ── Lateral scans: above / below robot (diagonal x-extent) ──
         lx0, lx1 = LAT_X0, LAT_X1
