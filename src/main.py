@@ -169,12 +169,18 @@ def main():
                     name = call.get("name")
                     cargs = call.get("args", {})
                     if name == "twist_for":
+                        fwd = cargs.get("forward_mps", 0)
+                        ang = cargs.get("angular_rads", 0)
+                        dur = cargs.get("duration_secs", 2.0)
+                        sf = tools._safety_fwd if fwd > 0 else tools._safety_bwd if fwd < 0 else 1.0
+                        print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
+                            fwd, ang, dur, sf, tools._safety_ang))
                         navigator.clear_goal()
                         tools.twist_for(
-                            cargs.get("forward_mps", 0), cargs.get("angular_rads", 0),
-                            duration_secs=cargs.get("duration_secs", 2.0),
-                            ramp_in_secs=cargs.get("ramp_in_secs", 1.0),
-                            ramp_out_secs=cargs.get("ramp_out_secs", 1.0),
+                            fwd, ang,
+                            duration_secs=dur,
+                            ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
+                            ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
                         )
                     elif name == "stop":
                         if wb:

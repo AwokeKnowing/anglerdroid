@@ -63,9 +63,13 @@ GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/cha
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 GROQ_OPENAI_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-MAX_CONTEXT = 20
+MAX_CONTEXT = 30
 _STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
+
+
+_TWIST_VALS_RE = re.compile(r'twist_for\s*\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)')
+TWIST_HISTORY_LEN = 20
 
 
 class Brain:
@@ -79,6 +83,7 @@ class Brain:
         self._prompt = system_prompt
         self._vision = vision
         self._conversation = []
+        self._twist_history = []
         self._agent_state = ""
         self._last_speak = ""
         self._last_stt = ""
@@ -140,6 +145,10 @@ class Brain:
                 "frame: %d" % frame_id,
                 "wz: %.3f %.3f" % (velocity, angular_vel),
             ]
+            if self._twist_history:
+                recent = " | ".join("%.2f,%.2f" % (f, a)
+                                    for f, a in self._twist_history[-TWIST_HISTORY_LEN:])
+                lines.append("recent: " + recent)
             if self._agent_state:
                 lines.append("STATE: " + self._agent_state)
             if combined:
@@ -194,6 +203,13 @@ class Brain:
                 m = _STATE_RE.search(result)
                 if m:
                     self._agent_state = m.group(2)
+
+            tv = _TWIST_VALS_RE.search(result)
+            if tv:
+                self._twist_history.append(
+                    (float(tv.group(1)), float(tv.group(2))))
+                if len(self._twist_history) > TWIST_HISTORY_LEN:
+                    self._twist_history = self._twist_history[-TWIST_HISTORY_LEN:]
 
             self._conversation.append({"role": "assistant", "content": result})
 
@@ -303,6 +319,7 @@ class Brain:
     def reset(self):
         with self._lock:
             self._conversation = []
+            self._twist_history = []
             self._agent_state = ""
             self._last_speak = ""
             self._pending_tts = None

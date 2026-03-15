@@ -366,7 +366,7 @@ class UI:
     VISION_MODEL_INTERVAL = 1.0  # seconds between frames (1 FPS)
     GEMINI_MAX_CONTEXT = 40
 
-    _CALL_RE = re.compile(r'(twist_for|speak|think|state|stop|navigate)\s*\(([^)]*)\)')
+    _CALL_RE = re.compile(r'(twist_for|speak|state|stop|navigate)\s*\(([^)]*)\)')
     _NUM_RE = re.compile(r'-?[\d.]+')
 
     def _start_gemini(self):
@@ -652,10 +652,6 @@ class UI:
                     self._broadcast({"type": "chat", "sender": "ai",
                                      "text": msg})
                     log_parts.append("speak")
-
-            elif name == "think":
-                thought = self._parse_string_arg(raw_args)
-                log_parts.append('think("%s")' % thought[:50])
 
             elif name == "state":
                 self._agent_state = self._parse_string_arg(raw_args)
