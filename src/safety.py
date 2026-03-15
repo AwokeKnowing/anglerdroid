@@ -16,7 +16,7 @@ WHEEL_RADIUS_M = 0.08565
 VEL_RAMP_RATE = 3.0  # turns/s²
 DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 LATENCY_S = 0.15
-MIN_CLEARANCE_PX = 8
+MIN_CLEARANCE_PX = 5
 OBS_THRESH = 100
 
 # ── Costmap geometry (must match vision.py) ──
@@ -125,14 +125,19 @@ class SafetyGuard:
         else:
             cur_speed = 0.0
 
-        ref_speed = max(cur_speed, 0.10)
-        self._fwd_scale = min(1.0, v_max_fwd / ref_speed)
-        self._bwd_scale = min(1.0, v_max_bwd / ref_speed)
-
         if fwd_clear <= MIN_CLEARANCE_PX:
             self._fwd_scale = 0.0
+        elif cur_speed > 1e-4:
+            self._fwd_scale = min(1.0, v_max_fwd / cur_speed)
+        else:
+            self._fwd_scale = 1.0
+
         if bwd_clear <= MIN_CLEARANCE_PX:
             self._bwd_scale = 0.0
+        elif cur_speed > 1e-4:
+            self._bwd_scale = min(1.0, v_max_bwd / cur_speed)
+        else:
+            self._bwd_scale = 1.0
 
         # ── Lateral scans: above / below robot (diagonal x-extent) ──
         lx0, lx1 = LAT_X0, LAT_X1
