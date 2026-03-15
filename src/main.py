@@ -127,7 +127,7 @@ def main():
             # Safety override — directional scaling (fwd / bwd / angular independent)
             tools.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
                                     vis.safety_ang_scale)
-            if min(vis.safety_fwd_scale, vis.safety_bwd_scale, vis.safety_ang_scale) <= 0.01 \
+            if (vis.safety_fwd_scale <= 0.01 and vis.safety_bwd_scale <= 0.01) \
                     and wb is not None and wb.is_twist_for_active():
                 wb.cancel_twist_for()
                 tools.stop()
