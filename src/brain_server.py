@@ -63,7 +63,7 @@ GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/cha
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 GROQ_OPENAI_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
-MAX_CONTEXT = 30
+MAX_CONTEXT = 200
 _STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 
@@ -185,6 +185,8 @@ class Brain:
                     messages.append(msg)
             build_ms = (time.time() - t_build) * 1000
 
+            self._log_turn(messages)
+
             t_api = time.time()
             result = self._call_llm(messages)
             api_ms = (time.time() - t_api) * 1000
@@ -212,6 +214,7 @@ class Brain:
                     self._twist_history = self._twist_history[-TWIST_HISTORY_LEN:]
 
             self._conversation.append({"role": "assistant", "content": result})
+            self._log_response(result)
 
             if _HAS_KOKORO and result != ".":
                 speak_match = _SPEAK_RE.search(result)
@@ -277,6 +280,37 @@ class Brain:
                 break
 
         return result
+
+    def _log_turn(self, messages):
+        """Append readable request to debug log file."""
+        try:
+            log_dir = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(log_dir, "brain_debug.log"), "a") as f:
+                f.write("\n=== TURN %d ===\n" % (self._turn + 1))
+                for msg in messages:
+                    role = msg.get("role", "?")
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        parts = []
+                        for p in content:
+                            if p.get("type") == "image_url":
+                                parts.append("[IMAGE]")
+                            elif p.get("type") == "text":
+                                parts.append(p["text"])
+                        f.write("[%s] %s\n" % (role, " ".join(parts)))
+                    else:
+                        text = content if len(content) < 500 else content[:500] + "..."
+                        f.write("[%s] %s\n" % (role, text))
+        except Exception:
+            pass
+
+    def _log_response(self, result):
+        try:
+            log_dir = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(log_dir, "brain_debug.log"), "a") as f:
+                f.write("[response] %s\n" % result)
+        except Exception:
+            pass
 
     def _trim(self):
         if len(self._conversation) > MAX_CONTEXT:

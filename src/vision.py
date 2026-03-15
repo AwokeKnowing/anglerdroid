@@ -265,6 +265,7 @@ class Vision:
         self.timestamp = 0.0
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._trajectory = np.empty((0, 2), dtype=np.float32)
         self._safety = SafetyGuard()
 
         self._running = False
@@ -365,15 +366,31 @@ class Vision:
             else:
                 yaw, fwd = 0.0, 0.0
 
+            rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
+            rcy_f = float(CROSSHAIR_CY)
             if abs(yaw) > 1e-6 or abs(fwd) > 1e-6:
-                rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
-                rcy_f = float(CROSSHAIR_CY)
                 M_warp = cv2.getRotationMatrix2D((rcx_f, rcy_f),
                                                  -np.degrees(yaw), 1.0)
                 M_warp[0, 2] -= fwd / float(TD_PX_SIZE)
                 self._persistent_obs = cv2.warpAffine(
                     self._persistent_obs, M_warp, (FRAME_W, FRAME_H),
                     borderValue=0)
+                if len(self._trajectory) > 0:
+                    pts = np.hstack([self._trajectory,
+                                     np.ones((len(self._trajectory), 1),
+                                             dtype=np.float32)])
+                    self._trajectory = (pts @ M_warp.T).astype(np.float32)
+                    keep = ((self._trajectory[:, 0] >= 0) &
+                            (self._trajectory[:, 0] < FRAME_W) &
+                            (self._trajectory[:, 1] >= 0) &
+                            (self._trajectory[:, 1] < FRAME_H))
+                    self._trajectory = self._trajectory[keep]
+
+            self._trajectory = np.vstack([
+                self._trajectory,
+                np.array([[rcx_f, rcy_f]], dtype=np.float32)])
+            if len(self._trajectory) > 600:
+                self._trajectory = self._trajectory[-600:]
 
             free = (known_combined > 0) & (obs_combined == 0)
             self._persistent_obs[free] = 0
@@ -385,6 +402,11 @@ class Vision:
 
             self._safety.update(self._persistent_obs, yaw, fwd)
             topdown = _build_costmap(self._persistent_obs, known_combined)
+            if len(self._trajectory) >= 2:
+                pts_int = self._trajectory.astype(np.int32).reshape(-1, 1, 2)
+                cv2.polylines(topdown, [pts_int], isClosed=False,
+                              color=(255, 140, 50), thickness=1,
+                              lineType=cv2.LINE_AA)
             self._safety.draw_trajectory(topdown)
             self._safety.draw_wheel_flash(topdown)
 
