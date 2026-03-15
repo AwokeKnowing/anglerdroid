@@ -125,12 +125,9 @@ def main():
                 rr.log("vision/atlas", rr.Image(atlas))
 
             # Safety override — directional scaling (fwd / bwd / angular independent)
-            tools.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
-                                    vis.safety_ang_scale)
-            if (vis.safety_fwd_scale <= 0.01 and vis.safety_bwd_scale <= 0.01) \
-                    and wb is not None and wb.is_twist_for_active():
-                wb.cancel_twist_for()
-                tools.stop()
+            if wb is not None:
+                wb.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
+                                     vis.safety_ang_scale)
 
             # Gamepad + watchdog
             wb = tools.get_wheelbase()
@@ -172,9 +169,9 @@ def main():
                         fwd = cargs.get("forward_mps", 0)
                         ang = cargs.get("angular_rads", 0)
                         dur = cargs.get("duration_secs", 2.0)
-                        sf = tools._safety_fwd if fwd > 0 else tools._safety_bwd if fwd < 0 else 1.0
+                        sf = wb._safety_fwd if fwd > 0 else wb._safety_bwd if fwd < 0 else 1.0
                         print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
-                            fwd, ang, dur, sf, tools._safety_ang))
+                            fwd, ang, dur, sf, wb._safety_ang))
                         navigator.clear_goal()
                         tools.twist_for(
                             fwd, ang,

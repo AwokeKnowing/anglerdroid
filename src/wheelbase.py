@@ -61,6 +61,9 @@ class WheelBase:
         self._zero_vel_since = None
         self._twist_for_lock = threading.Lock()
         self._twist_for_params = None  # (forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs, start_time)
+        self._safety_fwd = 1.0
+        self._safety_bwd = 1.0
+        self._safety_ang = 1.0
 
         self._bring_up_can()
         self._init_odrive()
@@ -293,13 +296,28 @@ class WheelBase:
         with self._twist_for_lock:
             return self._twist_for_params is not None
 
+    def set_safety_scales(self, fwd, bwd, ang):
+        self._safety_fwd = max(0.0, min(1.0, float(fwd)))
+        self._safety_bwd = max(0.0, min(1.0, float(bwd)))
+        self._safety_ang = max(0.0, min(1.0, float(ang)))
+
     def cancel_twist_for(self):
         """Cancel any in-progress twist_for (e.g. when gamepad takes over)."""
         with self._twist_for_lock:
             self._twist_for_params = None
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):
-        """Direct wheel control (turns/s). Deduplicates sends and manages idle."""
+        """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle."""
+        fwd = (left_tps + right_tps) / 2.0
+        turn = (right_tps - left_tps) / 2.0
+        if fwd > 0:
+            fwd *= self._safety_fwd
+        elif fwd < 0:
+            fwd *= self._safety_bwd
+        turn *= self._safety_ang
+        left_tps = fwd - turn
+        right_tps = fwd + turn
+
         is_zero = abs(left_tps) < 0.01 and abs(right_tps) < 0.01
 
         if is_zero:
