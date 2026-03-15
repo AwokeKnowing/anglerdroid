@@ -63,6 +63,8 @@ GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/cha
 GEMINI_DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
 GROQ_OPENAI_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+VERTEX_DEFAULT_REGION = "us-west1"
+VERTEX_DEFAULT_MODEL = "google/gemini-2.5-flash-lite"
 MAX_CONTEXT = 200
 _STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
@@ -444,6 +446,12 @@ def main():
                     help="Gemini API key (uses Gemini instead of local vLLM)")
     ap.add_argument("--groq-key", default="",
                     help="Groq API key (fastest option, ~300ms TTFT)")
+    ap.add_argument("--vertex-key", default="",
+                    help="Vertex AI API key (regional, low-latency)")
+    ap.add_argument("--vertex-project", default="",
+                    help="GCP project ID (required with --vertex-key)")
+    ap.add_argument("--vertex-region", default=VERTEX_DEFAULT_REGION,
+                    help="Vertex AI region (default: us-west1)")
     ap.add_argument("--vllm-url", default=VLLM_DEFAULT_URL,
                     help="vLLM OpenAI-compatible endpoint (ignored if cloud key set)")
     ap.add_argument("--model", default="",
@@ -456,7 +464,19 @@ def main():
                     help="Robot name injected into prompt (default: Kevin)")
     args = ap.parse_args()
 
-    if args.groq_key:
+    if args.vertex_key:
+        if not args.vertex_project:
+            print("ERROR: --vertex-project required with --vertex-key")
+            return
+        api_key = ""
+        region = args.vertex_region
+        project = args.vertex_project
+        llm_url = ("https://%s-aiplatform.googleapis.com/v1/projects/%s"
+                    "/locations/%s/endpoints/openapi/chat/completions"
+                    "?key=%s" % (region, project, region, args.vertex_key))
+        default_model = VERTEX_DEFAULT_MODEL
+        llm_backend = "vertex/%s" % region
+    elif args.groq_key:
         api_key = args.groq_key
         llm_url = GROQ_OPENAI_URL
         default_model = GROQ_DEFAULT_MODEL
@@ -487,7 +507,8 @@ def main():
     print("=" * 60)
     print("AnglerDroid Brain Server")
     print("  port:   %d" % args.port)
-    print("  llm:    %s (%s)" % (llm_backend, llm_url[:50]))
+    display_url = llm_url.split("?")[0] if "?" in llm_url else llm_url
+    print("  llm:    %s (%s)" % (llm_backend, display_url[:80]))
     print("  model:  %s" % model)
     print("  vision: %s" % (not args.no_vision))
     print("  stt:    %s" % (brain._stt_model is not None))
