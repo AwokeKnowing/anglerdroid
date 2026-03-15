@@ -65,6 +65,26 @@ GROQ_OPENAI_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_DEFAULT_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 VERTEX_DEFAULT_REGION = "us-west1"
 VERTEX_DEFAULT_MODEL = "google/gemini-2.5-flash-lite"
+
+
+class _VertexAuth:
+    """OAuth2 token manager for Vertex AI using google-auth."""
+
+    def __init__(self, key_path):
+        from google.oauth2 import service_account
+        self._creds = service_account.Credentials.from_service_account_file(
+            key_path, scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        self._request = None
+
+    def token(self):
+        if not self._creds.valid:
+            from google.auth.transport.requests import Request as AuthRequest
+            if not self._request:
+                self._request = AuthRequest()
+            self._creds.refresh(self._request)
+            print("brain: Vertex OAuth token refreshed")
+        return self._creds.token
+
 MAX_CONTEXT = 200
 _STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 _SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
@@ -78,9 +98,10 @@ class Brain:
     _TWIST_RE = re.compile(r'twist_for\s*\(')
 
     def __init__(self, vllm_url, model_name, system_prompt, vision=True,
-                 api_key="", llm_url=""):
+                 api_key="", llm_url="", vertex_auth=None):
         self._api_key = api_key
         self._llm_url = llm_url or vllm_url
+        self._vertex_auth = vertex_auth
         self._model = model_name
         self._prompt = system_prompt
         self._vision = vision
@@ -331,7 +352,9 @@ class Brain:
             "Content-Type": "application/json",
             "User-Agent": "AnglerDroid/1.0",
         }
-        if self._api_key:
+        if self._vertex_auth:
+            headers["Authorization"] = "Bearer " + self._vertex_auth.token()
+        elif self._api_key:
             headers["Authorization"] = "Bearer " + self._api_key
         req = Request(self._llm_url,
                       data=json.dumps(body).encode("utf-8"),
@@ -446,10 +469,10 @@ def main():
                     help="Gemini API key (uses Gemini instead of local vLLM)")
     ap.add_argument("--groq-key", default="",
                     help="Groq API key (fastest option, ~300ms TTFT)")
-    ap.add_argument("--vertex-key", default="",
-                    help="Vertex AI API key (regional, low-latency)")
+    ap.add_argument("--vertex-sa", default="",
+                    help="Path to Vertex AI service-account JSON key file")
     ap.add_argument("--vertex-project", default="",
-                    help="GCP project ID (required with --vertex-key)")
+                    help="GCP project ID (required with --vertex-sa)")
     ap.add_argument("--vertex-region", default=VERTEX_DEFAULT_REGION,
                     help="Vertex AI region (default: us-west1)")
     ap.add_argument("--vllm-url", default=VLLM_DEFAULT_URL,
@@ -464,16 +487,19 @@ def main():
                     help="Robot name injected into prompt (default: Kevin)")
     args = ap.parse_args()
 
-    if args.vertex_key:
+    vertex_auth = None
+    if args.vertex_sa:
         if not args.vertex_project:
-            print("ERROR: --vertex-project required with --vertex-key")
+            print("ERROR: --vertex-project required with --vertex-sa")
             return
+        vertex_auth = _VertexAuth(args.vertex_sa)
+        vertex_auth.token()  # warm up — fail fast if creds are bad
         api_key = ""
         region = args.vertex_region
         project = args.vertex_project
         llm_url = ("https://%s-aiplatform.googleapis.com/v1/projects/%s"
                     "/locations/%s/endpoints/openapi/chat/completions"
-                    "?key=%s" % (region, project, region, args.vertex_key))
+                    % (region, project, region))
         default_model = VERTEX_DEFAULT_MODEL
         llm_backend = "vertex/%s" % region
     elif args.groq_key:
@@ -495,7 +521,8 @@ def main():
     model = args.model or default_model
     prompt = _load_prompt().replace("Kevin", args.name)
     brain = Brain(args.vllm_url, model, prompt,
-                  vision=not args.no_vision, api_key=api_key, llm_url=llm_url)
+                  vision=not args.no_vision, api_key=api_key, llm_url=llm_url,
+                  vertex_auth=vertex_auth)
 
     if not args.no_stt:
         brain.init_stt()

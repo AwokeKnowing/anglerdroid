@@ -2,3 +2,5 @@ numpy
 vllm
 faster-whisper
 kokoro-onnx
+google-auth
+requests

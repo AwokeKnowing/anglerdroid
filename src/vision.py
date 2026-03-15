@@ -385,12 +385,11 @@ class Vision:
                             (self._trajectory[:, 1] >= 0) &
                             (self._trajectory[:, 1] < FRAME_H))
                     self._trajectory = self._trajectory[keep]
-
-            self._trajectory = np.vstack([
-                self._trajectory,
-                np.array([[rcx_f, rcy_f]], dtype=np.float32)])
-            if len(self._trajectory) > 600:
-                self._trajectory = self._trajectory[-600:]
+                self._trajectory = np.vstack([
+                    self._trajectory,
+                    np.array([[rcx_f, rcy_f]], dtype=np.float32)])
+                if len(self._trajectory) > 600:
+                    self._trajectory = self._trajectory[-600:]
 
             free = (known_combined > 0) & (obs_combined == 0)
             self._persistent_obs[free] = 0
@@ -405,7 +404,7 @@ class Vision:
             if len(self._trajectory) >= 2:
                 pts_int = self._trajectory.astype(np.int32).reshape(-1, 1, 2)
                 cv2.polylines(topdown, [pts_int], isClosed=False,
-                              color=(255, 140, 50), thickness=1,
+                              color=(80, 140, 255), thickness=1,
                               lineType=cv2.LINE_AA)
             self._safety.draw_trajectory(topdown)
             self._safety.draw_wheel_flash(topdown)
