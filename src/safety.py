@@ -125,7 +125,7 @@ class SafetyGuard:
         else:
             cur_speed = 0.0
 
-        ref_speed = max(cur_speed, 0.05)
+        ref_speed = max(cur_speed, 0.15)
         self._fwd_scale = min(1.0, v_max_fwd / ref_speed)
         self._bwd_scale = min(1.0, v_max_bwd / ref_speed)
 
