@@ -17,6 +17,7 @@ import cv2
 from cameras import RSCamera, WebCam, HAS_RS, FRAME_W, FRAME_H
 import odometry
 from safety import SafetyGuard
+from pose import PoseEstimator
 
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
@@ -265,14 +266,20 @@ class Vision:
         self.timestamp = 0.0
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        self._trajectory = np.empty((0, 2), dtype=np.float32)
         self._safety = SafetyGuard()
+        self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
+        self._wheelbase = None
+        self._last_capture_time = None
 
         self._running = False
         self._thread = None
         self._rs1 = None
         self._rs2 = None
         self._webcam = None
+
+    def set_wheelbase(self, wb):
+        """Provide wheelbase reference for wheel odometry fusion."""
+        self._wheelbase = wb
 
     def start(self):
         if self._running:
@@ -359,37 +366,34 @@ class Vision:
             _blit(obs_tmp, obs2, fw_dx, fw_dy)
             np.maximum(obs_combined, obs_tmp, out=obs_combined)
 
-            # --- Visual odometry → warp + update persistent obstacle map ---
+            # --- Odometry: visual + wheel → Kalman fused pose ---
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                yaw, fwd = odometry.update(fw_gray)
+                vis_yaw, vis_fwd = odometry.update(fw_gray)
             else:
-                yaw, fwd = 0.0, 0.0
+                vis_yaw, vis_fwd = 0.0, 0.0
 
+            now = time.monotonic()
+            dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
+            self._last_capture_time = now
+
+            if self._wheelbase is not None:
+                vl, vr = self._wheelbase.get_wheel_velocities_mps()
+            else:
+                vl, vr = 0.0, 0.0
+
+            fused_yaw, fused_fwd = self._pose.update(vl, vr, dt, vis_yaw, vis_fwd)
+
+            # --- Warp persistent obstacle map by fused odometry ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
-            if abs(yaw) > 1e-6 or abs(fwd) > 1e-6:
+            if abs(fused_yaw) > 1e-6 or abs(fused_fwd) > 1e-6:
                 M_warp = cv2.getRotationMatrix2D((rcx_f, rcy_f),
-                                                 -np.degrees(yaw), 1.0)
-                M_warp[0, 2] -= fwd / float(TD_PX_SIZE)
+                                                 -np.degrees(fused_yaw), 1.0)
+                M_warp[0, 2] -= fused_fwd / float(TD_PX_SIZE)
                 self._persistent_obs = cv2.warpAffine(
                     self._persistent_obs, M_warp, (FRAME_W, FRAME_H),
                     borderValue=0)
-                if len(self._trajectory) > 0:
-                    pts = np.hstack([self._trajectory,
-                                     np.ones((len(self._trajectory), 1),
-                                             dtype=np.float32)])
-                    self._trajectory = (pts @ M_warp.T).astype(np.float32)
-                    keep = ((self._trajectory[:, 0] >= 0) &
-                            (self._trajectory[:, 0] < FRAME_W) &
-                            (self._trajectory[:, 1] >= 0) &
-                            (self._trajectory[:, 1] < FRAME_H))
-                    self._trajectory = self._trajectory[keep]
-                self._trajectory = np.vstack([
-                    self._trajectory,
-                    np.array([[rcx_f, rcy_f]], dtype=np.float32)])
-                if len(self._trajectory) > 600:
-                    self._trajectory = self._trajectory[-600:]
 
             free = (known_combined > 0) & (obs_combined == 0)
             self._persistent_obs[free] = 0
@@ -399,13 +403,22 @@ class Vision:
             v = self._persistent_obs[unknown].astype(np.uint16)
             self._persistent_obs[unknown] = ((v * 251) >> 8).astype(np.uint8)
 
-            self._safety.update(self._persistent_obs, yaw, fwd)
+            self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
             topdown = _build_costmap(self._persistent_obs, known_combined)
-            if len(self._trajectory) >= 2:
-                pts_int = self._trajectory.astype(np.int32).reshape(-1, 1, 2)
-                cv2.polylines(topdown, [pts_int], isClosed=False,
-                              color=(80, 140, 255), thickness=1,
-                              lineType=cv2.LINE_AA)
+
+            # --- Draw world-space trajectory on ego costmap ---
+            ego_pts = self._pose.world_to_ego_pixels(
+                float(TD_PX_SIZE), rcx_f, rcy_f)
+            if len(ego_pts) >= 2:
+                keep = ((ego_pts[:, 0] >= 0) & (ego_pts[:, 0] < FRAME_W) &
+                        (ego_pts[:, 1] >= 0) & (ego_pts[:, 1] < FRAME_H))
+                visible = ego_pts[keep]
+                if len(visible) >= 2:
+                    cv2.polylines(topdown,
+                                  [visible.reshape(-1, 1, 2)],
+                                  isClosed=False,
+                                  color=(80, 140, 255), thickness=1,
+                                  lineType=cv2.LINE_AA)
             self._safety.draw_trajectory(topdown)
             self._safety.draw_wheel_flash(topdown)
 

@@ -306,6 +306,17 @@ class WheelBase:
         with self._twist_for_lock:
             self._twist_for_params = None
 
+    def get_wheel_velocities_mps(self):
+        """Return (v_left, v_right) in m/s, positive = forward."""
+        sl = self._last_sent_left
+        sr = self._last_sent_right
+        if sl is None or sr is None:
+            return 0.0, 0.0
+        l_tps = -sl if self.invert_left else sl
+        r_tps = sr
+        circ = 2.0 * 3.1415926535 * self.wheel_radius_m
+        return l_tps * circ, r_tps * circ
+
     def set_wheel_vels(self, left_tps: float, right_tps: float):
         """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle."""
         fwd = (left_tps + right_tps) / 2.0

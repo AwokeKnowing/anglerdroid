@@ -68,6 +68,7 @@ def main():
         rs2_serial=args.rs2 or "0",
         rgb1_device_id=args.rgb1,
     )
+    vis.set_wheelbase(wb)
     vis.start()
 
     # UI (web server + Gemini)
