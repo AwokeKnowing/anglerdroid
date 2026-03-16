@@ -369,9 +369,9 @@ class Vision:
             # --- Odometry: visual + wheel → Kalman fused pose ---
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                vis_yaw, vis_fwd = odometry.update(fw_gray)
+                vis_yaw, vis_fwd, vis_conf = odometry.update(fw_gray)
             else:
-                vis_yaw, vis_fwd = 0.0, 0.0
+                vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
 
             now = time.monotonic()
             dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
@@ -382,7 +382,8 @@ class Vision:
             else:
                 vl, vr = 0.0, 0.0
 
-            fused_yaw, fused_fwd = self._pose.update(vl, vr, dt, vis_yaw, vis_fwd)
+            fused_yaw, fused_fwd = self._pose.update(
+                vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
 
             # --- Warp persistent obstacle map by fused odometry ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
@@ -421,6 +422,10 @@ class Vision:
                                   lineType=cv2.LINE_AA)
             self._safety.draw_trajectory(topdown)
             self._safety.draw_wheel_flash(topdown)
+
+            minimap = self._pose.render_minimap()
+            ms = minimap.shape[0]
+            topdown[0:ms, FRAME_W - ms:FRAME_W] = minimap
 
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
