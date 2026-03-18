@@ -475,7 +475,7 @@ class UI:
 
                 elapsed_ms = (time.time() - t_loop) * 1000
                 budget_ms = self.VISION_MODEL_INTERVAL * 1000
-                ok = elapsed_ms <= self.VISION_MODEL_INTERVAL * 1500
+                ok = elapsed_ms <= self.VISION_MODEL_INTERVAL * 1000
                 if ok:
                     on_time += 1
                     streak += 1
