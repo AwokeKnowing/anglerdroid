@@ -97,6 +97,14 @@ class UI:
         self._gemini_key = gemini_key
         self._gemini_model = gemini_model or GEMINI_MODEL_DEFAULT
         self._brain_url = brain_url.rstrip("/") if brain_url else ""
+        self._brain_zmq = None
+        if self._brain_url.startswith("tcp://"):
+            import zmq
+            self._zmq_ctx = zmq.Context()
+            self._brain_zmq = self._zmq_ctx.socket(zmq.REQ)
+            self._brain_zmq.connect(self._brain_url)
+            self._brain_zmq.setsockopt(zmq.RCVTIMEO, 15000)
+            self._brain_zmq.setsockopt(zmq.SNDTIMEO, 5000)
         self._auth_email = auth_email
         self._google_client_id = google_client_id
         self._http_port = http_port
@@ -437,16 +445,24 @@ class UI:
                                     interpolation=cv2.INTER_AREA)
                 _, buf = cv2.imencode('.jpg', small,
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
-                img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
+                jpeg_bytes = buf.tobytes()
                 t_api = time.time()
 
-                if self._brain_url:
+                if self._brain_zmq:
+                    text = self._call_brain_zmq(
+                        jpeg_bytes, turns,
+                        speech=user_text or "",
+                        audio_chunks=[ap["data"] for ap in audio_parts]
+                                     if audio_parts else None)
+                elif self._brain_url:
+                    img_b64 = base64.b64encode(jpeg_bytes).decode('ascii')
                     text = self._call_brain(
                         img_b64, None, turns,
                         speech=user_text or "",
                         audio_chunks=[ap["data"] for ap in audio_parts]
                                      if audio_parts else None)
                 else:
+                    img_b64 = base64.b64encode(jpeg_bytes).decode('ascii')
                     text = self._call_gemini_turn(
                         img_b64, None, user_text, audio_parts, prompt)
 
@@ -522,6 +538,34 @@ class UI:
             return data.get("text", ".")
         except Exception as e:
             print("ai: brain error: %s" % e)
+            return None
+
+    def _call_brain_zmq(self, jpeg_bytes, frame_id,
+                        speech="", audio_chunks=None):
+        """Send JPEG + metadata via ZMQ, return response text."""
+        metadata = json.dumps({
+            "frame_id": frame_id,
+            "velocity": 0.0,
+            "angular_velocity": 0.0,
+            "speech": speech,
+        }).encode("utf-8")
+
+        parts = [jpeg_bytes, metadata]
+        if audio_chunks:
+            for chunk_b64 in audio_chunks:
+                parts.append(base64.b64decode(chunk_b64))
+
+        try:
+            self._brain_zmq.send_multipart(parts)
+            reply = json.loads(self._brain_zmq.recv().decode("utf-8"))
+            if reply.get("stt_text"):
+                self._broadcast({"type": "chat", "sender": "stt",
+                                 "text": reply["stt_text"]})
+            if reply.get("tts_audio"):
+                self._broadcast({"type": "tts_audio", "audio": reply["tts_audio"]})
+            return reply.get("text", ".")
+        except Exception as e:
+            print("ai: zmq brain error: %s" % e)
             return None
 
     # ── Gemini API backend ───────────────────────────────────────

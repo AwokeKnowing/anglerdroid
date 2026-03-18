@@ -4,3 +4,7 @@ faster-whisper
 kokoro-onnx
 google-auth
 requests
+pyzmq
+transformers
+accelerate
+qwen-vl-utils
