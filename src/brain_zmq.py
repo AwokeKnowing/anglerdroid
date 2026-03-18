@@ -31,7 +31,7 @@ _TWIST_VALS = re.compile(r'twist_for\s*\(\s*([-.0-9]+)\s*,\s*([-.0-9]+)')
 _SPEAK_RE   = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1\s*\)')
 _STATE_RE   = re.compile(r'state\s*\(\s*(["\'])(.*?)\1\s*\)')
 
-MAX_CONTEXT = 200
+MAX_CONTEXT = 4
 TWIST_HISTORY_LEN = 20
 
 # ── TTS (kokoro) ──────────────────────────────────────────────────
