@@ -160,8 +160,8 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Store latest atlas for AI (336x252); encode 2x pixelated for browser."""
-        small = cv2.resize(atlas_rgb, (336, 252), interpolation=cv2.INTER_AREA)
+        """Store latest atlas for AI (112x84); upscale 6x pixelated for browser."""
+        small = cv2.resize(atlas_rgb, (112, 84), interpolation=cv2.INTER_AREA)
         big = cv2.resize(small, (672, 504), interpolation=cv2.INTER_NEAREST)
         _, buf = cv2.imencode('.jpg', big[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 70])
