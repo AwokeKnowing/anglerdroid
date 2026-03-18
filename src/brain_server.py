@@ -28,6 +28,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
+import requests as _requests
 
 import io
 import wave
@@ -116,6 +117,11 @@ class Brain:
         self._stt_model = None
         self._pending_tts = None
         self._tts_thread = None
+        self._http = _requests.Session()
+        self._http.headers.update({
+            "Content-Type": "application/json",
+            "User-Agent": "AnglerDroid/1.0",
+        })
 
     def init_stt(self):
         try:
@@ -348,28 +354,25 @@ class Brain:
             "max_tokens": 100,
             "temperature": 0.5,
         }
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "AnglerDroid/1.0",
-        }
+        auth_hdr = {}
         if self._vertex_auth:
-            headers["Authorization"] = "Bearer " + self._vertex_auth.token()
+            auth_hdr["Authorization"] = "Bearer " + self._vertex_auth.token()
         elif self._api_key:
-            headers["Authorization"] = "Bearer " + self._api_key
-        req = Request(self._llm_url,
-                      data=json.dumps(body).encode("utf-8"),
-                      headers=headers)
+            auth_hdr["Authorization"] = "Bearer " + self._api_key
         try:
-            resp = urlopen(req, timeout=15)
-            data = json.loads(resp.read())
+            resp = self._http.post(self._llm_url, json=body,
+                                   headers=auth_hdr, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
             return data["choices"][0]["message"]["content"].strip()
-        except HTTPError as e:
+        except _requests.HTTPError as e:
             body_text = ""
             try:
-                body_text = e.read().decode("utf-8", errors="replace")
+                body_text = e.response.text[:500] if e.response else ""
             except Exception:
                 pass
-            print("brain: LLM HTTP %d: %s" % (e.code, body_text[:500]))
+            print("brain: LLM HTTP %d: %s" % (
+                e.response.status_code if e.response else 0, body_text))
             return None
         except Exception as e:
             print("brain: LLM error: %s" % e)
