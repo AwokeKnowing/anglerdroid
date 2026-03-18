@@ -28,7 +28,7 @@ from PIL import Image
 # ── Regex for parsing LLM output ──────────────────────────────────
 _TWIST_RE   = re.compile(r'twist_for\s*\(')
 _TWIST_VALS = re.compile(r'twist_for\s*\(\s*([-.0-9]+)\s*,\s*([-.0-9]+)')
-_SPEAK_RE   = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1\s*\)')
+_SPEAK_RE   = re.compile(r'(?:speak|say)\s*\(\s*(["\'])(.*?)\1')
 _STATE_RE   = re.compile(r'state\s*\(\s*(["\'])(.*?)\1\s*\)')
 
 MAX_CONTEXT = 4
@@ -220,9 +220,10 @@ class Brain:
             with torch.no_grad():
                 output_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=100,
-                    temperature=0.5,
+                    max_new_tokens=50,
+                    temperature=0.3,
                     do_sample=True,
+                    repetition_penalty=1.2,
                 )
 
             new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
@@ -254,11 +255,14 @@ class Brain:
             if _HAS_KOKORO and result != ".":
                 speak_match = _SPEAK_RE.search(result)
                 if speak_match:
-                    speak_text = speak_match.group(2)
-                    self._tts_thread = threading.Thread(
-                        target=self._synthesize_async, args=(speak_text,),
-                        daemon=True)
-                    self._tts_thread.start()
+                    full_call = result[speak_match.start():]
+                    is_to_self = "to_self" in full_call.lower()
+                    if not is_to_self:
+                        speak_text = speak_match.group(2)
+                        self._tts_thread = threading.Thread(
+                            target=self._synthesize_async, args=(speak_text,),
+                            daemon=True)
+                        self._tts_thread.start()
 
             total_ms = (time.time() - t_total) * 1000
             n_ctx = len(self._conversation)

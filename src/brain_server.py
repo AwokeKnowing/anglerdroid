@@ -88,7 +88,7 @@ class _VertexAuth:
 
 MAX_CONTEXT = 200
 _STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
-_SPEAK_RE = re.compile(r'speak\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
+_SPEAK_RE = re.compile(r'(?:speak|say)\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 
 
 _TWIST_VALS_RE = re.compile(r'twist_for\s*\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)')

@@ -374,7 +374,7 @@ class UI:
     VISION_MODEL_INTERVAL = 2.0  # seconds between frames (0.5 FPS)
     GEMINI_MAX_CONTEXT = 40
 
-    _CALL_RE = re.compile(r'(twist_for|speak|state|stop|navigate)\s*\(([^)]*)\)')
+    _CALL_RE = re.compile(r'(twist_for|speak|say|state|stop|navigate)\s*\(([^)]*)\)')
     _NUM_RE = re.compile(r'-?[\d.]+')
 
     def _start_gemini(self):
@@ -684,17 +684,21 @@ class UI:
                 }}])
                 log_parts.append("twist_for(%.2f, %.2f)" % (fwd, ang))
 
-            elif name == "speak":
+            elif name in ("speak", "say"):
+                to_self = "to_self" in raw_args.lower() or "true" in raw_args.lower().split(",")[-1]
                 msg = self._parse_string_arg(raw_args)
                 if msg:
-                    if not self._brain_url:
-                        try:
-                            self._tts_q.put_nowait(msg)
-                        except queue.Full:
-                            pass
-                    self._broadcast({"type": "chat", "sender": "ai",
-                                     "text": msg})
-                    log_parts.append("speak")
+                    if to_self:
+                        log_parts.append('say("%s")' % msg[:30])
+                    else:
+                        if not self._brain_url and not self._brain_zmq:
+                            try:
+                                self._tts_q.put_nowait(msg)
+                            except queue.Full:
+                                pass
+                        self._broadcast({"type": "chat", "sender": "ai",
+                                         "text": msg})
+                        log_parts.append("speak")
 
             elif name == "state":
                 self._agent_state = self._parse_string_arg(raw_args)
