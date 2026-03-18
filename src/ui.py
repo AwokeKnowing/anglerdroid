@@ -160,15 +160,17 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Store latest atlas for Gemini; encode JPEG for browser streaming."""
-        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
+        """Store latest atlas for AI (336x252); encode 2x pixelated for browser."""
+        small = cv2.resize(atlas_rgb, (336, 252), interpolation=cv2.INTER_AREA)
+        big = cv2.resize(small, (672, 504), interpolation=cv2.INTER_NEAREST)
+        _, buf = cv2.imencode('.jpg', big[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 70])
         jpeg = buf.tobytes()
         with self._atlas_lock:
-            if self._latest_atlas is None or self._latest_atlas.shape != atlas_rgb.shape:
-                self._latest_atlas = atlas_rgb.copy()
+            if self._latest_atlas is None or self._latest_atlas.shape != small.shape:
+                self._latest_atlas = small.copy()
             else:
-                np.copyto(self._latest_atlas, atlas_rgb)
+                np.copyto(self._latest_atlas, small)
             self._atlas_jpeg = jpeg
 
     def get_user_text(self):
@@ -441,9 +443,7 @@ class UI:
                     time.sleep(0.5)
                     continue
 
-                small = cv2.resize(atlas[:, :, ::-1], (336, 252),
-                                    interpolation=cv2.INTER_AREA)
-                _, buf = cv2.imencode('.jpg', small,
+                _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
                 jpeg_bytes = buf.tobytes()
                 t_api = time.time()
