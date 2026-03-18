@@ -438,20 +438,17 @@ class UI:
                 _, buf = cv2.imencode('.jpg', small,
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
                 img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
-                prev_b64 = self._prev_img_b64
-                self._prev_img_b64 = img_b64
-
                 t_api = time.time()
 
                 if self._brain_url:
                     text = self._call_brain(
-                        img_b64, prev_b64, turns,
+                        img_b64, None, turns,
                         speech=user_text or "",
                         audio_chunks=[ap["data"] for ap in audio_parts]
                                      if audio_parts else None)
                 else:
                     text = self._call_gemini_turn(
-                        img_b64, prev_b64, user_text, audio_parts, prompt)
+                        img_b64, None, user_text, audio_parts, prompt)
 
                 api_ms = (time.time() - t_api) * 1000
                 api_ms_total += api_ms
