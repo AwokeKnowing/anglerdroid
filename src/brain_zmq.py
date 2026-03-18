@@ -60,7 +60,7 @@ def _load_prompt():
 
 # ── Model loader ──────────────────────────────────────────────────
 
-def load_model(model_name, max_pixels=501760):
+def load_model(model_name, max_pixels=28*28*16):
     """Load Qwen2.5-VL model and processor, return (model, processor)."""
     from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
 
@@ -357,8 +357,8 @@ def main():
                     help="Full HF model name (overrides --size)")
     ap.add_argument("--size", default="3b", choices=["3b", "7b"],
                     help="Shorthand: 3b or 7b Qwen2.5-VL (default 3b)")
-    ap.add_argument("--max-pixels", type=int, default=501760,
-                    help="Max vision tokens (lower=faster, default 501760)")
+    ap.add_argument("--max-pixels", type=int, default=28*28*16,
+                    help="Max vision pixels (default 12544 for 112x84)")
     ap.add_argument("--no-stt", action="store_true")
     ap.add_argument("--name", default="Kevin")
     args = ap.parse_args()
