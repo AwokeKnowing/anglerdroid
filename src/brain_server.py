@@ -87,7 +87,7 @@ class _VertexAuth:
         return self._creds.token
 
 MAX_CONTEXT = 200
-_STATE_RE = re.compile(r'state\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
+_STATE_RE = re.compile(r'(?:state|set_goal)\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 _SPEAK_RE = re.compile(r'(?:speak|say)\s*\(\s*(["\'])(.*?)\1', re.DOTALL)
 
 
@@ -179,7 +179,7 @@ class Brain:
                                     for f, a in self._twist_history[-TWIST_HISTORY_LEN:])
                 lines.append("recent: " + recent)
             if self._agent_state:
-                lines.append("STATE: " + self._agent_state)
+                lines.append("GOAL: " + self._agent_state)
             if combined:
                 lines.append("SPEECH: " + combined)
             else:

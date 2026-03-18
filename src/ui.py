@@ -374,7 +374,7 @@ class UI:
     VISION_MODEL_INTERVAL = 2.0  # seconds between frames (0.5 FPS)
     GEMINI_MAX_CONTEXT = 40
 
-    _CALL_RE = re.compile(r'(twist_for|speak|say|state|stop|navigate)\s*\(([^)]*)\)')
+    _CALL_RE = re.compile(r'(twist_for|speak|say|state|set_goal|stop|navigate)\s*\(([^)]*)\)')
     _NUM_RE = re.compile(r'-?[\d.]+')
 
     def _start_gemini(self):
@@ -700,9 +700,9 @@ class UI:
                                          "text": msg})
                         log_parts.append("speak")
 
-            elif name == "state":
+            elif name in ("state", "set_goal"):
                 self._agent_state = self._parse_string_arg(raw_args)
-                log_parts.append('state("%s")' % self._agent_state[:50])
+                log_parts.append('goal("%s")' % self._agent_state[:50])
 
             elif name == "stop":
                 self.push_tool_calls([{"name": "stop", "args": {}}])

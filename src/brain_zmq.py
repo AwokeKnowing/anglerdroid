@@ -29,7 +29,7 @@ from PIL import Image
 _TWIST_RE   = re.compile(r'twist_for\s*\(')
 _TWIST_VALS = re.compile(r'twist_for\s*\(\s*([-.0-9]+)\s*,\s*([-.0-9]+)')
 _SPEAK_RE   = re.compile(r'(?:speak|say)\s*\(\s*(["\'])(.*?)\1')
-_STATE_RE   = re.compile(r'state\s*\(\s*(["\'])(.*?)\1\s*\)')
+_STATE_RE   = re.compile(r'(?:state|set_goal)\s*\(\s*(["\'])(.*?)\1')
 
 MAX_CONTEXT = 4
 TWIST_HISTORY_LEN = 20
@@ -90,9 +90,14 @@ class Brain:
         self._model = model
         self._processor = processor
         self._prompt = system_prompt
-        self._conversation = []    # list of {"role":..., "content":...}
-        self._twist_history = []
-        self._agent_state = ""
+        self._conversation = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "frame: 0\nwz: 0.000 0.000\nSPEECH:"}]},
+            {"role": "assistant",
+             "content": 'twist_for(0.15, 0)\nset_goal("explore the living room")'},
+        ]
+        self._twist_history = [(0.15, 0.0)]
+        self._agent_state = "explore the living room"
         self._last_speak = ""
         self._last_stt = ""
         self._lock = threading.Lock()
@@ -171,7 +176,7 @@ class Brain:
                                     for f, a in self._twist_history[-TWIST_HISTORY_LEN:])
                 lines.append("recent: " + recent)
             if self._agent_state:
-                lines.append("STATE: " + self._agent_state)
+                lines.append("GOAL: " + self._agent_state)
             lines.append("SPEECH: " + combined if combined else "SPEECH:")
             text_content = "\n".join(lines)
 
@@ -220,10 +225,8 @@ class Brain:
             with torch.no_grad():
                 output_ids = self._model.generate(
                     **inputs,
-                    max_new_tokens=50,
-                    temperature=0.3,
-                    do_sample=True,
-                    repetition_penalty=1.2,
+                    max_new_tokens=30,
+                    do_sample=False,
                 )
 
             new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
