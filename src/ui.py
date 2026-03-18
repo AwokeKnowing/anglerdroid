@@ -433,7 +433,9 @@ class UI:
                     time.sleep(0.5)
                     continue
 
-                _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
+                small = cv2.resize(atlas[:, :, ::-1], (384, 384),
+                                    interpolation=cv2.INTER_AREA)
+                _, buf = cv2.imencode('.jpg', small,
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
                 img_b64 = base64.b64encode(buf.tobytes()).decode('ascii')
                 prev_b64 = self._prev_img_b64
