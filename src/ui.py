@@ -441,7 +441,7 @@ class UI:
                     time.sleep(0.5)
                     continue
 
-                small = cv2.resize(atlas[:, :, ::-1], (384, 384),
+                small = cv2.resize(atlas[:, :, ::-1], (336, 252),
                                     interpolation=cv2.INTER_AREA)
                 _, buf = cv2.imencode('.jpg', small,
                                       [cv2.IMWRITE_JPEG_QUALITY, 60])
