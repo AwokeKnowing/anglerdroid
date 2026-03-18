@@ -75,7 +75,7 @@ def load_model(model_name, max_pixels=501760):
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_name,
         dtype=torch.float16,
-        device_map="auto",
+        device_map={"": "cuda:0"},
     )
     model.eval()
 
@@ -353,14 +353,20 @@ def _warmup(brain, processor):
 def main():
     ap = argparse.ArgumentParser(description="AnglerDroid Brain (ZMQ + Qwen2.5-VL)")
     ap.add_argument("--port", type=int, default=5555)
-    ap.add_argument("--model", default="Qwen/Qwen2.5-VL-3B-Instruct")
+    ap.add_argument("--model", default=None,
+                    help="Full HF model name (overrides --size)")
+    ap.add_argument("--size", default="3b", choices=["3b", "7b"],
+                    help="Shorthand: 3b or 7b Qwen2.5-VL (default 3b)")
     ap.add_argument("--max-pixels", type=int, default=501760,
                     help="Max vision tokens (lower=faster, default 501760)")
     ap.add_argument("--no-stt", action="store_true")
     ap.add_argument("--name", default="Kevin")
     args = ap.parse_args()
 
-    model, processor = load_model(args.model, args.max_pixels)
+    _SIZE_MAP = {"3b": "Qwen/Qwen2.5-VL-3B-Instruct",
+                 "7b": "Qwen/Qwen2.5-VL-7B-Instruct"}
+    model_name = args.model or _SIZE_MAP[args.size]
+    model, processor = load_model(model_name, args.max_pixels)
 
     prompt = _load_prompt().replace("Kevin", args.name)
     brain = Brain(model, processor, prompt)
@@ -378,7 +384,7 @@ def main():
     print("=" * 60)
     print("AnglerDroid Brain (ZMQ)")
     print("  bind:   tcp://0.0.0.0:%d" % args.port)
-    print("  model:  %s" % args.model)
+    print("  model:  %s" % model_name)
     print("  pixels: %d" % args.max_pixels)
     print("  stt:    %s" % (brain._stt_model is not None))
     print("  tts:    %s" % ("kokoro" if _HAS_KOKORO else "none"))
