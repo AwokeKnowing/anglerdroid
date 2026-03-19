@@ -242,10 +242,13 @@ class Brain:
             "temperature": 0,
         }
         try:
-            resp = self._http.post(self._sglang_url, json=body, timeout=15)
+            resp = self._http.post(self._sglang_url, json=body, timeout=30)
             resp.raise_for_status()
             data = resp.json()
-            return data["choices"][0]["message"]["content"].strip()
+            raw = data["choices"][0]["message"]["content"].strip()
+            if not raw or raw == ".":
+                print("brain: raw response: %s" % json.dumps(data)[:300])
+            return raw
         except requests.HTTPError as e:
             body_text = ""
             try:
