@@ -43,7 +43,6 @@ FLASHINFER_DISABLE_VERSION_CHECK=1 vllm serve "$MODEL" \
     --reasoning-parser qwen3 \
     --limit-mm-per-prompt '{"image":1}' \
     --max-num-seqs 1 \
-    --enable-prefix-caching \
     $QUANT \
     $EXTRA_VLLM &
 
