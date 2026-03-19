@@ -240,6 +240,7 @@ class Brain:
             "messages": messages,
             "max_tokens": 30,
             "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         try:
             resp = self._http.post(self._sglang_url, json=body, timeout=30)
