@@ -1,10 +1,16 @@
-"""brain_zmq.py — ZMQ + direct Qwen2.5-VL inference for AnglerDroid.
+"""brain_zmq.py — ZMQ brain bridge with SGLang backend for AnglerDroid.
 
-Replaces HTTP + cloud API with ZMQ REP/REQ and local GPU inference.
-Keeps all brain logic: conversation history, twist tracking, dedup, STT, TTS.
+Receives JPEG + metadata from Jetson over ZMQ, calls SGLang's
+OpenAI-compatible API at localhost for vision-language inference.
+Keeps all brain logic: conversation, twist tracking, dedup, STT, TTS.
 
 Usage (3090):
-  python brain_zmq.py --port 5555 --model Qwen/Qwen2.5-VL-3B-Instruct
+  # Option A: use start_brain.sh (starts SGLang + this script)
+  ./start_brain.sh
+
+  # Option B: manual
+  python -m sglang.launch_server --model-path Qwen/Qwen3.5-9B --port 30000 --enable-multimodal
+  python brain_zmq.py --sglang-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-9B
 
 Jetson side:
   python main.py --brain-url tcp://192.168.50.198:5555 ...
@@ -21,9 +27,8 @@ import time
 import wave
 
 import numpy as np
-import torch
+import requests
 import zmq
-from PIL import Image
 
 # ── Regex for parsing LLM output ──────────────────────────────────
 _TWIST_RE   = re.compile(r'twist_for\s*\(')
@@ -58,37 +63,14 @@ def _load_prompt():
         return "You are a helpful robot. Respond with function calls or '.'"
 
 
-# ── Model loader ──────────────────────────────────────────────────
-
-def load_model(model_name, max_pixels=28*28*16):
-    """Load Qwen2.5-VL model and processor, return (model, processor)."""
-    from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-
-    print("brain: loading %s ..." % model_name)
-    t0 = time.time()
-
-    processor = AutoProcessor.from_pretrained(
-        model_name,
-        min_pixels=28 * 28 * 4,
-        max_pixels=max_pixels,
-    )
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        model_name,
-        dtype=torch.float16,
-        device_map={"": "cuda:0"},
-    )
-    model.eval()
-
-    print("brain: model loaded in %.1fs" % (time.time() - t0))
-    return model, processor
-
-
 # ── Brain ─────────────────────────────────────────────────────────
 
 class Brain:
-    def __init__(self, model, processor, system_prompt):
-        self._model = model
-        self._processor = processor
+    def __init__(self, sglang_url, model_name, system_prompt):
+        self._sglang_url = sglang_url.rstrip("/") + "/v1/chat/completions"
+        self._model = model_name
+        self._http = requests.Session()
+        self._http.headers["Content-Type"] = "application/json"
         self._prompt = system_prompt
         self._conversation = [
             {"role": "user", "content": [
@@ -180,57 +162,30 @@ class Brain:
             lines.append("SPEECH: " + combined if combined else "SPEECH:")
             text_content = "\n".join(lines)
 
-            # Build user message with image placeholder
+            img_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+            img_url = "data:image/jpeg;base64," + img_b64
+
             user_msg = {"role": "user", "content": [
-                {"type": "image"},
+                {"type": "image_url", "image_url": {"url": img_url}},
                 {"type": "text", "text": text_content},
             ]}
             self._conversation.append(user_msg)
             self._trim()
 
-            # Build messages for processor — strip images from older turns
             messages = [{"role": "system", "content": self._prompt}]
-            images_for_processor = []
-
             for i, msg in enumerate(self._conversation):
+                is_current = (i == len(self._conversation) - 1)
                 c = msg.get("content")
-                if isinstance(c, list):
-                    is_current = (i == len(self._conversation) - 1)
-                    if is_current:
-                        messages.append(msg)
-                        for part in c:
-                            if part.get("type") == "image":
-                                images_for_processor.append(
-                                    Image.open(io.BytesIO(jpeg_bytes)).convert("RGB"))
-                    else:
-                        text_only = [p for p in c if p.get("type") != "image"]
-                        if not text_only:
-                            text_only = [{"type": "text", "text": "(frame)"}]
-                        messages.append({"role": msg["role"], "content": text_only})
+                if isinstance(c, list) and not is_current:
+                    text_only = [p for p in c if p.get("type") != "image_url"]
+                    if not text_only:
+                        text_only = [{"type": "text", "text": "(frame)"}]
+                    messages.append({"role": msg["role"], "content": text_only})
                 else:
                     messages.append(msg)
 
-            # Tokenize
             t_api = time.time()
-            prompt_text = self._processor.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True)
-            inputs = self._processor(
-                text=[prompt_text],
-                images=images_for_processor if images_for_processor else None,
-                padding=True,
-                return_tensors="pt",
-            ).to(self._model.device)
-
-            # Generate
-            with torch.no_grad():
-                output_ids = self._model.generate(
-                    **inputs,
-                    max_new_tokens=30,
-                    do_sample=False,
-                )
-
-            new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
-            result = self._processor.decode(new_tokens, skip_special_tokens=True).strip()
+            result = self._call_sglang(messages)
             api_ms = (time.time() - t_api) * 1000
             self._api_ms_total += api_ms
             self._turn += 1
@@ -278,6 +233,31 @@ class Brain:
                     self._turn, avg, n_ctx, self._agent_state[:50]))
 
             return result, api_ms, tts_ready, self._last_stt
+
+    def _call_sglang(self, messages):
+        body = {
+            "model": self._model,
+            "messages": messages,
+            "max_tokens": 30,
+            "temperature": 0,
+        }
+        try:
+            resp = self._http.post(self._sglang_url, json=body, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"].strip()
+        except requests.HTTPError as e:
+            body_text = ""
+            try:
+                body_text = e.response.text[:500] if e.response else ""
+            except Exception:
+                pass
+            print("brain: SGLang HTTP %d: %s" % (
+                e.response.status_code if e.response else 0, body_text))
+            return None
+        except Exception as e:
+            print("brain: SGLang error: %s" % e)
+            return None
 
     def _synthesize_async(self, text):
         try:
@@ -337,10 +317,11 @@ class Brain:
 
 # ── Warm-up ───────────────────────────────────────────────────────
 
-def _warmup(brain, processor):
-    """One dummy inference to compile CUDA kernels / warm caches."""
+def _warmup(brain):
+    """One dummy inference to warm SGLang caches."""
     print("brain: warming up (first inference)...")
-    dummy = Image.new("RGB", (384, 384), (128, 128, 128))
+    from PIL import Image
+    dummy = Image.new("RGB", (112, 336), (128, 128, 128))
     buf = io.BytesIO()
     dummy.save(buf, format="JPEG", quality=60)
     brain.infer(buf.getvalue(), {"frame_id": 0})
@@ -351,43 +332,36 @@ def _warmup(brain, processor):
 # ── ZMQ server loop ──────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="AnglerDroid Brain (ZMQ + Qwen2.5-VL)")
+    ap = argparse.ArgumentParser(description="AnglerDroid Brain (ZMQ + SGLang)")
     ap.add_argument("--port", type=int, default=5555)
-    ap.add_argument("--model", default=None,
-                    help="Full HF model name (overrides --size)")
-    ap.add_argument("--size", default="3b", choices=["3b", "7b"],
-                    help="Shorthand: 3b or 7b Qwen2.5-VL (default 3b)")
-    ap.add_argument("--max-pixels", type=int, default=28*28*16,
-                    help="Max vision pixels (default 12544 for 112x84)")
+    ap.add_argument("--sglang-url", default="http://127.0.0.1:30000",
+                    help="SGLang server URL (default http://127.0.0.1:30000)")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-9B",
+                    help="Model name for SGLang API (must match what SGLang loaded)")
     ap.add_argument("--no-stt", action="store_true")
     ap.add_argument("--name", default="Kevin")
     args = ap.parse_args()
 
-    _SIZE_MAP = {"3b": "Qwen/Qwen2.5-VL-3B-Instruct",
-                 "7b": "Qwen/Qwen2.5-VL-7B-Instruct"}
-    model_name = args.model or _SIZE_MAP[args.size]
-    model, processor = load_model(model_name, args.max_pixels)
-
     prompt = _load_prompt().replace("Kevin", args.name)
-    brain = Brain(model, processor, prompt)
+    brain = Brain(args.sglang_url, args.model, prompt)
 
     if not args.no_stt:
         brain.init_stt()
     _init_kokoro()
 
-    _warmup(brain, processor)
+    _warmup(brain)
 
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
     sock.bind("tcp://0.0.0.0:%d" % args.port)
 
     print("=" * 60)
-    print("AnglerDroid Brain (ZMQ)")
-    print("  bind:   tcp://0.0.0.0:%d" % args.port)
-    print("  model:  %s" % model_name)
-    print("  pixels: %d" % args.max_pixels)
-    print("  stt:    %s" % (brain._stt_model is not None))
-    print("  tts:    %s" % ("kokoro" if _HAS_KOKORO else "none"))
+    print("AnglerDroid Brain (ZMQ + SGLang)")
+    print("  bind:    tcp://0.0.0.0:%d" % args.port)
+    print("  sglang:  %s" % args.sglang_url)
+    print("  model:   %s" % args.model)
+    print("  stt:     %s" % (brain._stt_model is not None))
+    print("  tts:     %s" % ("kokoro" if _HAS_KOKORO else "none"))
     print("=" * 60)
 
     while True:
@@ -395,7 +369,6 @@ def main():
             parts = sock.recv_multipart()
             jpeg_bytes = parts[0]
             metadata = json.loads(parts[1].decode("utf-8")) if len(parts) > 1 else {}
-            # Audio chunks come as parts[2:]
             if len(parts) > 2:
                 metadata["audio_chunks"] = [
                     base64.b64encode(p).decode("ascii") for p in parts[2:]]

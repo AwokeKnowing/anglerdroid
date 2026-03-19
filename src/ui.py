@@ -160,17 +160,27 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Store latest atlas for AI (112x84); upscale 6x pixelated for browser."""
-        small = cv2.resize(atlas_rgb, (112, 84), interpolation=cv2.INTER_AREA)
-        big = cv2.resize(small, (672, 504), interpolation=cv2.INTER_NEAREST)
+        """Build vertical atlas (112x336) for AI; upscale for browser."""
+        h, w = atlas_rgb.shape[0] // 2, atlas_rgb.shape[1] // 2
+        quads = [
+            atlas_rgb[0:h, 0:w],       # UL: camera
+            atlas_rgb[0:h, w:w*2],      # UR: depth
+            atlas_rgb[h:h*2, 0:w],      # LL: overhead
+            atlas_rgb[h:h*2, w:w*2],    # LR: costmap
+        ]
+        small_quads = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
+                       for q in quads]
+        vstack = np.vstack(small_quads)  # 112 x 336
+
+        big = cv2.resize(vstack, (224, 672), interpolation=cv2.INTER_NEAREST)
         _, buf = cv2.imencode('.jpg', big[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 70])
         jpeg = buf.tobytes()
         with self._atlas_lock:
-            if self._latest_atlas is None or self._latest_atlas.shape != small.shape:
-                self._latest_atlas = small.copy()
+            if self._latest_atlas is None or self._latest_atlas.shape != vstack.shape:
+                self._latest_atlas = vstack.copy()
             else:
-                np.copyto(self._latest_atlas, small)
+                np.copyto(self._latest_atlas, vstack)
             self._atlas_jpeg = jpeg
 
     def get_user_text(self):
