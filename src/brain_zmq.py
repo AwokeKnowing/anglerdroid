@@ -322,15 +322,32 @@ class Brain:
 # ── Warm-up ───────────────────────────────────────────────────────
 
 def _warmup(brain):
-    """One dummy inference to warm SGLang caches."""
-    print("brain: warming up (first inference)...")
+    """Multi-phase warmup to pre-trigger all torch.compile paths.
+
+    Qwen3.5's hybrid Mamba layers have shape-dependent compiled graphs.
+    The prefill token count changes once prefix caching kicks in (system
+    prompt cached → shorter prefill on subsequent calls), producing a new
+    tensor shape that would otherwise trigger a costly recompilation
+    mid-session.  Running several rounds here ensures both the cold-cache
+    and warm-cache compilation paths are exercised before real traffic.
+    """
     from PIL import Image
-    dummy = Image.new("RGB", (112, 336), (128, 128, 128))
-    buf = io.BytesIO()
-    dummy.save(buf, format="JPEG", quality=60)
-    brain.infer(buf.getvalue(), {"frame_id": 0})
+    WARMUP_ROUNDS = 5
+    colors = [(128, 128, 128), (64, 64, 64), (192, 192, 192),
+              (100, 80, 60), (60, 100, 80)]
+
+    print("brain: warming up (%d rounds to pre-compile all paths)..." % WARMUP_ROUNDS)
+    for i in range(WARMUP_ROUNDS):
+        t0 = time.time()
+        dummy = Image.new("RGB", (112, 336), colors[i % len(colors)])
+        buf = io.BytesIO()
+        dummy.save(buf, format="JPEG", quality=60)
+        brain.infer(buf.getvalue(), {"frame_id": i})
+        ms = (time.time() - t0) * 1000
+        print("brain: warmup %d/%d  %.0fms" % (i + 1, WARMUP_ROUNDS, ms))
+
     brain.reset()
-    print("brain: warm-up done")
+    print("brain: warm-up done — all compile paths cached")
 
 
 # ── ZMQ server loop ──────────────────────────────────────────────
