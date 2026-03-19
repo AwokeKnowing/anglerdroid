@@ -6,6 +6,7 @@ VENV_DIR="$HOME/angler-brain-venv"
 source "$VENV_DIR/bin/activate"
 
 MODEL="Qwen/Qwen3.5-4B"
+QUANT=""
 VLLM_PORT=8000
 ZMQ_PORT=5555
 EXTRA_VLLM=""
@@ -18,6 +19,8 @@ for arg in "$@"; do
         --4b-awq)   MODEL="QuantTrio/Qwen3.5-4B-AWQ" ;;
         --7b)       MODEL="Qwen/Qwen2.5-VL-7B-Instruct" ;;
         --3b)       MODEL="Qwen/Qwen2.5-VL-3B-Instruct" ;;
+        --int8)     QUANT="--quantization compressed-tensors" ;;
+        --bf16)     QUANT="" ;;
         --no-stt)   NO_STT="--no-stt" ;;
         *)          EXTRA_VLLM="$EXTRA_VLLM $arg" ;;
     esac
@@ -26,6 +29,7 @@ done
 echo "============================================"
 echo " AnglerDroid Brain"
 echo "  model:  $MODEL"
+echo "  quant:  ${QUANT:-none (bf16)}"
 echo "  vllm:   localhost:$VLLM_PORT"
 echo "  zmq:    0.0.0.0:$ZMQ_PORT"
 echo "============================================"
@@ -40,6 +44,7 @@ FLASHINFER_DISABLE_VERSION_CHECK=1 vllm serve "$MODEL" \
     --limit-mm-per-prompt '{"image":1}' \
     --max-num-seqs 1 \
     --enable-prefix-caching \
+    $QUANT \
     $EXTRA_VLLM &
 
 VLLM_PID=$!
