@@ -43,6 +43,7 @@ FLASHINFER_DISABLE_VERSION_CHECK=1 vllm serve "$MODEL" \
     --reasoning-parser qwen3 \
     --limit-mm-per-prompt '{"image":1}' \
     --max-num-seqs 1 \
+    --speculative-config '{"method":"mtp","num_speculative_tokens":1}' \
     $QUANT \
     $EXTRA_VLLM &
 
