@@ -36,7 +36,6 @@ _TWIST_VALS = re.compile(r'twist_for\s*\(\s*([-.0-9]+)\s*,\s*([-.0-9]+)')
 _SPEAK_RE   = re.compile(r'(?:speak|say)\s*\(\s*(["\'])(.*?)\1')
 _STATE_RE   = re.compile(r'(?:state|set_goal)\s*\(\s*(["\'])(.*?)\1')
 
-MAX_CONTEXT = 2
 TWIST_HISTORY_LEN = 20
 
 # ── TTS (kokoro) ──────────────────────────────────────────────────
@@ -72,12 +71,6 @@ class Brain:
         self._http = requests.Session()
         self._http.headers["Content-Type"] = "application/json"
         self._prompt = system_prompt
-        self._conversation = [
-            {"role": "user", "content": [
-                {"type": "text", "text": "frame: 0\nwz: 0.000 0.000\nSPEECH:"}]},
-            {"role": "assistant",
-             "content": 'twist_for(0.15, 0)\nset_goal("explore the living room")'},
-        ]
         self._twist_history = [(0.15, 0.0)]
         self._agent_state = "explore the living room"
         self._last_speak = ""
@@ -128,7 +121,7 @@ class Brain:
     # ── Main inference ─────────────────────────────────────────────
 
     def infer(self, jpeg_bytes, metadata):
-        """Run one turn. Returns (text, api_ms, tts_audio, stt_text)."""
+        """Run one turn. Stateless: system + single user message each call."""
         t_total = time.time()
         tts_ready = self._pending_tts
         self._pending_tts = None
@@ -165,24 +158,13 @@ class Brain:
             img_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
             img_url = "data:image/jpeg;base64," + img_b64
 
-            user_msg = {"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": img_url}},
-                {"type": "text", "text": text_content},
-            ]}
-            self._conversation.append(user_msg)
-            self._trim()
-
-            messages = [{"role": "system", "content": self._prompt}]
-            for i, msg in enumerate(self._conversation):
-                is_current = (i == len(self._conversation) - 1)
-                c = msg.get("content")
-                if isinstance(c, list) and not is_current:
-                    text_only = [p for p in c if p.get("type") != "image_url"]
-                    if not text_only:
-                        text_only = [{"type": "text", "text": "(frame)"}]
-                    messages.append({"role": msg["role"], "content": text_only})
-                else:
-                    messages.append(msg)
+            messages = [
+                {"role": "system", "content": self._prompt},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": img_url}},
+                    {"type": "text", "text": text_content},
+                ]},
+            ]
 
             t_api = time.time()
             result = self._call_sglang(messages)
@@ -196,7 +178,6 @@ class Brain:
             if result != ".":
                 if not _TWIST_RE.search(result):
                     result = "twist_for(0, 0)\n" + result
-                result = self._dedup_response(result)
                 m = _STATE_RE.search(result)
                 if m:
                     self._agent_state = m.group(2)
@@ -207,8 +188,6 @@ class Brain:
                     (float(tv.group(1)), float(tv.group(2))))
                 if len(self._twist_history) > TWIST_HISTORY_LEN:
                     self._twist_history = self._twist_history[-TWIST_HISTORY_LEN:]
-
-            self._conversation.append({"role": "assistant", "content": result})
 
             if _HAS_KOKORO and result != ".":
                 speak_match = _SPEAK_RE.search(result)
@@ -223,14 +202,13 @@ class Brain:
                         self._tts_thread.start()
 
             total_ms = (time.time() - t_total) * 1000
-            n_ctx = len(self._conversation)
-            print("#%d  infer=%3.0fms  stt=%.0fms  total=%3.0fms  ctx=%d  %s" % (
-                self._turn, api_ms, stt_ms, total_ms, n_ctx, result[:80]))
+            print("#%d  infer=%3.0fms  stt=%.0fms  total=%3.0fms  %s" % (
+                self._turn, api_ms, stt_ms, total_ms, result[:80]))
 
             if self._turn % 10 == 0:
                 avg = self._api_ms_total / self._turn
-                print("brain: turn=%d  avg_infer=%.0fms  ctx=%d  state='%s'" % (
-                    self._turn, avg, n_ctx, self._agent_state[:50]))
+                print("brain: turn=%d  avg_infer=%.0fms  state='%s'" % (
+                    self._turn, avg, self._agent_state[:50]))
 
             return result, api_ms, tts_ready, self._last_stt
 
@@ -280,35 +258,8 @@ class Brain:
             print("brain: TTS error: %s" % e)
             self._pending_tts = None
 
-    def _dedup_response(self, result):
-        speak_match = _SPEAK_RE.search(result)
-        if speak_match:
-            speak_text = speak_match.group(2)
-            if speak_text == self._last_speak:
-                result = _SPEAK_RE.sub("", result).strip()
-                if not result:
-                    result = "twist_for(0, 0)"
-            else:
-                self._last_speak = speak_text
-        stripped = result.strip()
-        while len(self._conversation) >= 3:
-            n = len(self._conversation)
-            if (self._conversation[n - 2].get("role") == "assistant" and
-                    self._conversation[n - 2].get("content", "").strip() == stripped):
-                del self._conversation[n - 3:n - 1]
-            else:
-                break
-        return result
-
-    def _trim(self):
-        if len(self._conversation) > MAX_CONTEXT:
-            self._conversation = self._conversation[-MAX_CONTEXT:]
-            while self._conversation and self._conversation[0].get("role") != "user":
-                self._conversation.pop(0)
-
     def reset(self):
         with self._lock:
-            self._conversation = []
             self._twist_history = []
             self._agent_state = ""
             self._last_speak = ""
@@ -322,32 +273,22 @@ class Brain:
 # ── Warm-up ───────────────────────────────────────────────────────
 
 def _warmup(brain):
-    """Multi-phase warmup to pre-trigger all torch.compile paths.
-
-    Qwen3.5's hybrid Mamba layers have shape-dependent compiled graphs.
-    The prefill token count changes once prefix caching kicks in (system
-    prompt cached → shorter prefill on subsequent calls), producing a new
-    tensor shape that would otherwise trigger a costly recompilation
-    mid-session.  Running several rounds here ensures both the cold-cache
-    and warm-cache compilation paths are exercised before real traffic.
-    """
+    """Warmup to trigger torch.compile for the single stateless path."""
     from PIL import Image
-    WARMUP_ROUNDS = 5
-    colors = [(128, 128, 128), (64, 64, 64), (192, 192, 192),
-              (100, 80, 60), (60, 100, 80)]
 
-    print("brain: warming up (%d rounds to pre-compile all paths)..." % WARMUP_ROUNDS)
-    for i in range(WARMUP_ROUNDS):
+    print("brain: warming up (2 rounds)...")
+    for i in range(2):
         t0 = time.time()
-        dummy = Image.new("RGB", (112, 336), colors[i % len(colors)])
+        color = (128, 128, 128) if i == 0 else (64, 64, 64)
+        dummy = Image.new("RGB", (112, 336), color)
         buf = io.BytesIO()
         dummy.save(buf, format="JPEG", quality=60)
         brain.infer(buf.getvalue(), {"frame_id": i})
         ms = (time.time() - t0) * 1000
-        print("brain: warmup %d/%d  %.0fms" % (i + 1, WARMUP_ROUNDS, ms))
+        print("brain: warmup %d/2  %.0fms" % (i + 1, ms))
 
     brain.reset()
-    print("brain: warm-up done — all compile paths cached")
+    print("brain: warm-up done")
 
 
 # ── ZMQ server loop ──────────────────────────────────────────────

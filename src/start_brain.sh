@@ -34,8 +34,14 @@ echo "  vllm:   localhost:$VLLM_PORT"
 echo "  zmq:    0.0.0.0:$ZMQ_PORT"
 echo "============================================"
 
+CACHE_DIR="$HOME/.cache/vllm-compile"
+mkdir -p "$CACHE_DIR"
+
 echo "Starting vLLM server ..."
-FLASHINFER_DISABLE_VERSION_CHECK=1 vllm serve "$MODEL" \
+FLASHINFER_DISABLE_VERSION_CHECK=1 \
+TORCHINDUCTOR_CACHE_DIR="$CACHE_DIR/inductor" \
+vllm serve "$MODEL" \
+    --compilation-config '{"cache_dir":"'"$CACHE_DIR"'"}' \
     --port $VLLM_PORT \
     --host 127.0.0.1 \
     --max-model-len 4096 \
