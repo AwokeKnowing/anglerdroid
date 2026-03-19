@@ -575,12 +575,16 @@ class UI:
                 self._broadcast({"type": "tts_audio", "audio": reply["tts_audio"]})
             return reply.get("text", ".")
         except Exception as e:
+            import zmq as _zmq
             print("ai: zmq brain error: %s — resetting socket" % e)
-            self._brain_zmq.close()
-            self._brain_zmq = self._zmq_ctx.socket(zmq.REQ)
+            try:
+                self._brain_zmq.close()
+            except Exception:
+                pass
+            self._brain_zmq = self._zmq_ctx.socket(_zmq.REQ)
             self._brain_zmq.connect(self._brain_url)
-            self._brain_zmq.setsockopt(zmq.RCVTIMEO, 30000)
-            self._brain_zmq.setsockopt(zmq.SNDTIMEO, 5000)
+            self._brain_zmq.setsockopt(_zmq.RCVTIMEO, 30000)
+            self._brain_zmq.setsockopt(_zmq.SNDTIMEO, 5000)
             return None
 
     # ── Gemini API backend ───────────────────────────────────────
