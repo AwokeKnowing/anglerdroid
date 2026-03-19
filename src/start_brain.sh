@@ -45,6 +45,7 @@ python3 -m sglang.launch_server \
     --max-running-requests 1 \
     --mem-fraction-static 0.80 \
     --enable-multimodal \
+    --chat-template "$SCRIPT_DIR/qwen_nonthinking.jinja" \
     $QUANT \
     $EXTRA_SGLANG &
 
