@@ -240,6 +240,7 @@ class Brain:
             "messages": messages,
             "max_tokens": 30,
             "temperature": 0,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         try:
             resp = self._http.post(self._sglang_url, json=body, timeout=30)
@@ -339,8 +340,8 @@ def main():
     ap.add_argument("--port", type=int, default=5555)
     ap.add_argument("--sglang-url", default="http://127.0.0.1:30000",
                     help="SGLang server URL (default http://127.0.0.1:30000)")
-    ap.add_argument("--model", default="Qwen/Qwen3.5-9B",
-                    help="Model name for SGLang API (must match what SGLang loaded)")
+    ap.add_argument("--model", default="Qwen/Qwen3.5-4B",
+                    help="Model name for vLLM API (must match what vLLM loaded)")
     ap.add_argument("--no-stt", action="store_true")
     ap.add_argument("--name", default="Kevin")
     args = ap.parse_args()
