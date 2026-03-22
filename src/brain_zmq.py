@@ -146,10 +146,6 @@ class Brain:
 
             lines = ["frame: %d" % frame_id,
                      "wz: %.3f %.3f" % (velocity, angular_vel)]
-            if self._twist_history:
-                recent = " | ".join("%.2f,%.2f" % (f, a)
-                                    for f, a in self._twist_history[-TWIST_HISTORY_LEN:])
-                lines.append("recent: " + recent)
             if self._agent_state:
                 lines.append("GOAL: " + self._agent_state)
             lines.append("SPEECH: " + combined if combined else "SPEECH:")
