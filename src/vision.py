@@ -275,6 +275,7 @@ class Vision:
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
         self._global_map = GlobalMap()
+        self._obs_mask = self._build_obs_mask()
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -283,6 +284,32 @@ class Vision:
         self._rs1 = None
         self._rs2 = None
         self._webcam = None
+
+    @staticmethod
+    def _build_obs_mask():
+        """Pre-compute ego-space mask: 80° forward cone, 2.5m radius, robot excluded."""
+        rcx = CROSSHAIR_CX + ROBOT_CX_OFF          # 81 — robot center column
+        rcy = CROSSHAIR_CY                          # 119 — robot center row
+        yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]
+        dx = (xx - rcx).astype(np.float32)
+        dy = (yy - rcy).astype(np.float32)
+        dist = np.sqrt(dx * dx + dy * dy)
+        angle = np.abs(np.degrees(np.arctan2(dy, dx)))
+
+        OBS_CONE_HALF_DEG = 40.0                    # ±40° from forward (right)
+        OBS_MAX_RANGE_PX = 250.0                     # 2.5 m at 1 cm/px
+        ROBOT_CLEAR_PX = 22.0                        # ~robot half-diagonal
+
+        mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        inside = (angle <= OBS_CONE_HALF_DEG) & (dist <= OBS_MAX_RANGE_PX) & (dist > ROBOT_CLEAR_PX)
+        mask[inside] = 255
+
+        rx0 = max(0, rcx - ROBOT_W // 2 - 2)
+        ry0 = max(0, rcy - ROBOT_H // 2 - 2)
+        rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
+        ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
+        mask[ry0:ry1, rx0:rx1] = 0
+        return mask
 
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""
@@ -372,6 +399,19 @@ class Vision:
             obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(obs_tmp, obs2, fw_dx, fw_dy)
             np.maximum(obs_combined, obs_tmp, out=obs_combined)
+
+            # Mask observations to 80° forward cone, 2.5m range, robot excluded
+            np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
+            np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
+
+            # Mark robot footprint as known-free (not obstacle, not unknown)
+            rcx_i = CROSSHAIR_CX + ROBOT_CX_OFF
+            rx0 = max(0, rcx_i - ROBOT_W // 2)
+            ry0 = max(0, CROSSHAIR_CY - ROBOT_H // 2)
+            rx1 = min(FRAME_W, rcx_i + ROBOT_W // 2)
+            ry1 = min(FRAME_H, CROSSHAIR_CY + ROBOT_H // 2)
+            obs_combined[ry0:ry1, rx0:rx1] = 0
+            known_combined[ry0:ry1, rx0:rx1] = 255
 
             # --- Odometry: visual + wheel → Kalman fused pose ---
             if self._rs2 and self._rs2.ok:
