@@ -31,8 +31,11 @@ UNK_DISPLAY = 160
 FREE_THRESH = 190
 OBS_THRESH = 90
 
-EVIDENCE_UP = 8
-EVIDENCE_DOWN = 8
+# One consensus (3 agreeing frames at 30fps = 100ms) should be enough
+# to flip a cell.  128 takes unknown→free or unknown→obstacle in a
+# single consensus; free↔obstacle requires 2 (200ms hysteresis).
+EVIDENCE_UP = 128
+EVIDENCE_DOWN = 128
 
 CONSENSUS_N = 3
 
