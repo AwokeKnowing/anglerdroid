@@ -47,16 +47,21 @@ _SC = SPRITE_SZ // 2  # 24 — sprite centre
 class GlobalMap:
     def __init__(self):
         self._map = np.full((MAP_H, MAP_W), UNKNOWN_VAL, dtype=np.uint8)
-        self._ring = [np.zeros((MAP_H, MAP_W), dtype=np.int8)
-                      for _ in range(CONSENSUS_N)]
+        self._ring = [None] * CONSENSUS_N  # (r0,r1,c0,c1,signed_roi) per slot
         self._ring_idx = 0
         self._count = 0
         self._spr_rgba, self._spr_lab = self._make_sprite()
         self._render_times = []
+        self._update_times = []
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
-        """Feed one frame of ego-space observations and robot pose."""
+        """Feed one frame of ego-space observations and robot pose.
+
+        ROI-optimised: only warp/compare/update the bounding box of the
+        observation footprint in global space (~200×200 vs 960×720).
+        """
+        t0 = time.monotonic()
         h, w = obs_ego.shape[:2]
 
         ego_obs = np.zeros((h, w), dtype=np.uint8)
@@ -65,29 +70,72 @@ class GlobalMap:
         ego_obs[obs_ego > 0] = 2
 
         M_fwd = self._forward_affine(x, y, theta, ego_cx, ego_cy, ego_px_size)
-        global_obs = cv2.warpAffine(
-            ego_obs, M_fwd, (MAP_W, MAP_H),
+        t1 = time.monotonic()
+
+        # Compute ROI: transform ego corners → global pixel bounds
+        corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(1, 4, 2)
+        gc = cv2.transform(corners, M_fwd).reshape(-1, 2)
+        r0 = max(0, int(np.floor(gc[:, 1].min())))
+        r1 = min(MAP_H, int(np.ceil(gc[:, 1].max())) + 1)
+        c0 = max(0, int(np.floor(gc[:, 0].min())))
+        c1 = min(MAP_W, int(np.ceil(gc[:, 0].max())) + 1)
+        if r1 <= r0 or c1 <= c0:
+            return
+
+        # Warp only into the ROI-sized output (shift affine origin)
+        M_roi = M_fwd.copy()
+        M_roi[0, 2] -= c0
+        M_roi[1, 2] -= r0
+        roi_w, roi_h = c1 - c0, r1 - r0
+        obs_roi = cv2.warpAffine(
+            ego_obs, M_roi, (roi_w, roi_h),
             flags=cv2.INTER_NEAREST, borderValue=0)
+        t2 = time.monotonic()
 
-        signed = np.zeros((MAP_H, MAP_W), dtype=np.int8)
-        signed[global_obs == 1] = 1
-        signed[global_obs == 2] = -1
+        # Encode as signed: free=+1, obs=-1, unobserved=0
+        signed = np.zeros((roi_h, roi_w), dtype=np.int8)
+        signed[obs_roi == 1] = 1
+        signed[obs_roi == 2] = -1
 
-        self._ring[self._ring_idx] = signed
+        self._ring[self._ring_idx] = (r0, r1, c0, c1, signed)
         self._ring_idx = (self._ring_idx + 1) % CONSENSUS_N
         self._count += 1
 
         if self._count < CONSENSUS_N:
             return
+        t3 = time.monotonic()
 
-        r0, r1, r2 = self._ring
-        all_free = (r0 == 1) & (r1 == 1) & (r2 == 1)
-        all_obs = (r0 == -1) & (r1 == -1) & (r2 == -1)
+        # Consensus within intersection of all 3 ROIs
+        rois = self._ring
+        ir0 = max(r[0] for r in rois)
+        ir1 = min(r[1] for r in rois)
+        ic0 = max(r[2] for r in rois)
+        ic1 = min(r[3] for r in rois)
+        if ir1 <= ir0 or ic1 <= ic0:
+            return
 
-        m = self._map.astype(np.int16)
+        # Extract overlapping sub-regions from each ring entry
+        slices = []
+        for br0, br1, bc0, bc1, s in rois:
+            slices.append(s[ir0 - br0:ir1 - br0, ic0 - bc0:ic1 - bc0])
+        s0, s1, s2 = slices
+
+        all_free = (s0 == 1) & (s1 == 1) & (s2 == 1)
+        all_obs = (s0 == -1) & (s1 == -1) & (s2 == -1)
+
+        roi_map = self._map[ir0:ir1, ic0:ic1]
+        m = roi_map.astype(np.int16)
         m[all_free] = np.minimum(m[all_free] + EVIDENCE_UP, 255)
         m[all_obs] = np.maximum(m[all_obs] - EVIDENCE_DOWN, 0)
-        self._map = m.astype(np.uint8)
+        roi_map[:] = m.astype(np.uint8)
+        t4 = time.monotonic()
+
+        self._update_times.append((t1 - t0, t2 - t1, t3 - t2, t4 - t3))
+        if len(self._update_times) % 100 == 0:
+            avg = np.mean(self._update_times[-100:], axis=0) * 1000
+            print("gmap update: prep=%.1fms warp=%.1fms ring=%.1fms "
+                  "consensus=%.1fms total=%.1fms  roi=%dx%d" %
+                  (*avg, sum(avg), roi_h, roi_w))
 
     def project_to_ego(self, x, y, theta,
                        ego_cx, ego_cy, ego_px_size, ego_h, ego_w):
@@ -105,35 +153,30 @@ class GlobalMap:
         EGO_SCALE = 4.0
         EGO_RX, EGO_RY = HALF // 2, int(MAP_H * 0.80)
 
-        # coloured base map
-        disp = np.full((MAP_H, MAP_W), UNK_DISPLAY, dtype=np.uint8)
-        disp[self._map > FREE_THRESH] = FREE_DISPLAY
-        disp[self._map < OBS_THRESH] = OBS_DISPLAY
-        disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
-        t1 = time.monotonic()
-
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
 
-        # trail + robot on full map
+        # --- Left panel: LUT colorize only the crop, expand to BGR ---
+        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
+        left_raw = self._map[:, cx0:cx0 + HALF]
+        left_g = np.full_like(left_raw, UNK_DISPLAY)
+        left_g[left_raw > FREE_THRESH] = FREE_DISPLAY
+        left_g[left_raw < OBS_THRESH] = OBS_DISPLAY
+        left = cv2.cvtColor(left_g, cv2.COLOR_GRAY2BGR)
+
         if trail_xy is not None and len(trail_xy) >= 2:
-            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
+            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE - cx0).astype(np.int32)
             tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
-            keep = (tc >= 0) & (tc < MAP_W) & (tr >= 0) & (tr < MAP_H)
+            keep = (tc >= 0) & (tc < HALF) & (tr >= 0) & (tr < MAP_H)
             pts = np.column_stack([tc[keep], tr[keep]])
             if len(pts) >= 2:
-                cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
+                cv2.polylines(left, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
-        self._draw_robot(disp, rc, rr, theta,
+        self._draw_robot(left, rc - cx0, rr, theta,
                          fwd_scale, bwd_scale, ang_scale)
-        t2 = time.monotonic()
+        t1 = time.monotonic()
 
-        # left panel: center crop
-        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
-        left = disp[:, cx0:cx0 + HALF]
-        t3 = time.monotonic()
-
-        # right panel: 4× ego zoom from rendered map
+        # --- Right panel: warp single-chan map, LUT, expand, draw robot ---
         ct, st = np.cos(theta), np.sin(theta)
         inv_s = 1.0 / EGO_SCALE
         M_ego = np.float64([
@@ -142,24 +185,29 @@ class GlobalMap:
             [ ct * inv_s,  st * inv_s,
               rr - ct * EGO_RX * inv_s - st * EGO_RY * inv_s],
         ])
-        right = cv2.warpAffine(
-            disp, M_ego, (HALF, MAP_H),
+        ego_raw = cv2.warpAffine(
+            self._map, M_ego, (HALF, MAP_H),
             flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
-            borderValue=(UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY))
-        t4 = time.monotonic()
+            borderValue=UNKNOWN_VAL)
+        ego_g = np.full_like(ego_raw, UNK_DISPLAY)
+        ego_g[ego_raw > FREE_THRESH] = FREE_DISPLAY
+        ego_g[ego_raw < OBS_THRESH] = OBS_DISPLAY
+        right = cv2.cvtColor(ego_g, cv2.COLOR_GRAY2BGR)
+        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
+                         fwd_scale, bwd_scale, ang_scale)
+        t2 = time.monotonic()
 
-        # assemble
+        # --- Assemble ---
         result = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
         result[:, :HALF] = left
         result[:, HALF:] = right
-        t5 = time.monotonic()
+        t3 = time.monotonic()
 
-        self._render_times.append((t1-t0, t2-t1, t3-t2, t4-t3, t5-t4))
+        self._render_times.append((t1 - t0, t2 - t1, t3 - t2))
         if len(self._render_times) % 100 == 0:
             avg = np.mean(self._render_times[-100:], axis=0) * 1000
-            print("globalmap render: colorize=%.1fms trail+robot=%.1fms "
-                  "crop=%.1fms warp=%.1fms assemble=%.1fms total=%.1fms"
-                  % (*avg, sum(avg)))
+            print("globalmap render: left=%.1fms right=%.1fms "
+                  "assemble=%.1fms total=%.1fms" % (*avg, sum(avg)))
 
         return result
 

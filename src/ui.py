@@ -165,6 +165,7 @@ class UI:
         Atlas layout: 960×960 = 3 cameras (320×240 each) top + 960×720 map.
         AI vertical strip: 4 panels (112×84 each) stacked → 112×336.
         """
+        t0 = time.time()
         fw = 320
         cam_h = 240
         cam1 = atlas_rgb[0:cam_h, 0:fw]
@@ -175,16 +176,27 @@ class UI:
         small = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
                  for q in [cam1, cam2, cam3, gmap]]
         vstack = np.vstack(small)  # 112×336
+        t1 = time.time()
 
         _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg = buf.tobytes()
+        t2 = time.time()
+
         with self._atlas_lock:
             if self._latest_atlas is None or self._latest_atlas.shape != vstack.shape:
                 self._latest_atlas = vstack.copy()
             else:
                 np.copyto(self._latest_atlas, vstack)
             self._atlas_jpeg = jpeg
+
+        if not hasattr(self, '_sa_times'):
+            self._sa_times = []
+        self._sa_times.append((t1 - t0, t2 - t1))
+        if len(self._sa_times) % 100 == 0:
+            avg = np.mean(self._sa_times[-100:], axis=0) * 1000
+            print("send_atlas: resize=%.1fms jpeg=%.1fms total=%.1fms"
+                  % (avg[0], avg[1], sum(avg)))
 
     def get_user_text(self):
         with self._lock:
