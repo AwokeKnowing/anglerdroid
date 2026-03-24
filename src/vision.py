@@ -380,6 +380,7 @@ class Vision:
                 z1, k1 = depth_topdown(self._rs1.verts)
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
+            _t_rs1 = time.monotonic()
 
             # RS2 forward depth → (obstacles, known) at (W,H), then CW 90°
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
@@ -492,13 +493,14 @@ class Vision:
                 self.timestamp = time.time()
             _t_end = time.monotonic()
 
-            _loop_times.append((_t_grab - _t0, _t_depth - _t_grab,
-                                _t_obs - _t_depth, _t_odom - _t_obs,
-                                _t_gmap_up - _t_odom, _t_safety - _t_gmap_up,
+            _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
+                                _t_depth - _t_rs1, _t_obs - _t_depth,
+                                _t_odom - _t_obs, _t_gmap_up - _t_odom,
+                                _t_safety - _t_gmap_up,
                                 _t_render - _t_safety, _t_end - _t_render))
             if len(_loop_times) % 100 == 0:
                 avg = np.mean(_loop_times[-100:], axis=0) * 1000
-                print("capture: grab=%.1f depth=%.1f obs=%.1f odom=%.1f "
+                print("capture: grab=%.1f rs1=%.1f rs2=%.1f obs=%.1f odom=%.1f "
                       "gmap_up=%.1f safety=%.1f render=%.1f blit=%.1f "
                       "TOTAL=%.1fms" % (*avg, sum(avg)))
 

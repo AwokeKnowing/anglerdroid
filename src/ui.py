@@ -115,7 +115,8 @@ class UI:
         self._pending_tool_calls = []   # type: List[dict]
         self._last_user_text = ""
 
-        self._latest_atlas = None       # type: Optional[np.ndarray]
+        self._atlas_raw = None          # type: Optional[np.ndarray]  960×960 RGB
+        self._latest_atlas = None       # type: Optional[np.ndarray]  112×336 AI input (lazy)
         self._atlas_jpeg = None         # type: Optional[bytes]
         self._atlas_lock = threading.Lock()
 
@@ -160,45 +161,22 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Build vertical atlas (112×336) for AI; encode full atlas for browser.
+        """Store raw atlas; encode half-res JPEG for browser.
 
-        Atlas layout: 960×960 = 3 cameras (320×240 each) top + 960×720 map.
-        AI vertical strip: 4 panels (112×84 each) stacked → 112×336.
+        AI input (112×336) is built lazily when the AI thread reads it.
+        Browser gets 480×480 JPEG (CSS pixelated upscales to native).
         """
-        t0 = time.time()
-        fw = 320
-        cam_h = 240
-        cam1 = atlas_rgb[0:cam_h, 0:fw]
-        cam2 = atlas_rgb[0:cam_h, fw:fw * 2]
-        cam3 = atlas_rgb[0:cam_h, fw * 2:fw * 3]
-        gmap = atlas_rgb[cam_h:, :]
-
-        small = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
-                 for q in [cam1, cam2, cam3, gmap]]
-        vstack = np.vstack(small)  # 112×336
-        t1 = time.time()
-
-        small_bgr = cv2.resize(atlas_rgb[:, :, ::-1], (240, 240),
-                               interpolation=cv2.INTER_LINEAR)
-        _, buf = cv2.imencode('.jpg', small_bgr,
+        half = cv2.resize(atlas_rgb, (480, 480), interpolation=cv2.INTER_AREA)
+        _, buf = cv2.imencode('.jpg', half[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg = buf.tobytes()
-        t2 = time.time()
 
         with self._atlas_lock:
-            if self._latest_atlas is None or self._latest_atlas.shape != vstack.shape:
-                self._latest_atlas = vstack.copy()
+            if self._atlas_raw is None or self._atlas_raw.shape != atlas_rgb.shape:
+                self._atlas_raw = atlas_rgb.copy()
             else:
-                np.copyto(self._latest_atlas, vstack)
+                np.copyto(self._atlas_raw, atlas_rgb)
             self._atlas_jpeg = jpeg
-
-        if not hasattr(self, '_sa_times'):
-            self._sa_times = []
-        self._sa_times.append((t1 - t0, t2 - t1))
-        if len(self._sa_times) % 100 == 0:
-            avg = np.mean(self._sa_times[-100:], axis=0) * 1000
-            print("send_atlas: resize=%.1fms jpeg=%.1fms total=%.1fms"
-                  % (avg[0], avg[1], sum(avg)))
 
     def get_user_text(self):
         with self._lock:
@@ -465,10 +443,19 @@ class UI:
                         break
 
                 with self._atlas_lock:
-                    atlas = self._latest_atlas
-                if atlas is None:
+                    raw = self._atlas_raw
+                if raw is None:
                     time.sleep(0.5)
                     continue
+
+                fw, cam_h = 320, 240
+                cam1 = raw[0:cam_h, 0:fw]
+                cam2 = raw[0:cam_h, fw:fw * 2]
+                cam3 = raw[0:cam_h, fw * 2:fw * 3]
+                gmap = raw[cam_h:, :]
+                small = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
+                         for q in [cam1, cam2, cam3, gmap]]
+                atlas = np.vstack(small)
 
                 _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
                                       [cv2.IMWRITE_JPEG_QUALITY, 92])
