@@ -39,6 +39,9 @@ EVIDENCE_DOWN = 128
 
 CONSENSUS_N = 3
 
+SPRITE_SZ = 48
+_SC = SPRITE_SZ // 2  # 24 — sprite centre
+
 
 class GlobalMap:
     def __init__(self):
@@ -47,6 +50,7 @@ class GlobalMap:
                       for _ in range(CONSENSUS_N)]
         self._ring_idx = 0
         self._count = 0
+        self._spr_rgba, self._spr_lab = self._make_sprite()
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
@@ -114,62 +118,81 @@ class GlobalMap:
 
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
-        if 10 <= rc < MAP_W - 10 and 10 <= rr < MAP_H - 10:
+        if _SC <= rc < MAP_W - _SC and _SC <= rr < MAP_H - _SC:
             self._draw_robot(disp, rc, rr, theta,
                              fwd_scale, bwd_scale, ang_scale)
         return disp
 
+    # ── sprite-based robot rendering ──────────────────────────────
+
     @staticmethod
-    def _draw_robot(disp, rc, rr, theta, fwd_scale, bwd_scale, ang_scale):
-        """Draw multi-rect robot at 30% opacity with safety gradient.
+    def _make_sprite():
+        """Pre-render robot sprite facing right. Returns (rgba, labels).
 
-        Colors are written in RGB order (image is JPEG-streamed to browser).
+        Labels: 0=background, 1=body, 2=track/caster, 3=arrow.
+        Alpha: body/tracks=153 (60%), arrow=255 (100%).
         """
-        OPACITY = 0.3
-        ct, st = np.cos(theta), np.sin(theta)
+        S, C = SPRITE_SZ, _SC
+        rgba = np.zeros((S, S, 4), dtype=np.uint8)
+        lab = np.zeros((S, S), dtype=np.uint8)
 
-        def _rot(fwd, left):
-            """Robot-local (forward, left) → pixel (dcol, drow)."""
-            return (fwd * ct - left * st,
-                    -(fwd * st + left * ct))
+        def _rect(x0, y0, x1, y1, a, lbl):
+            cv2.rectangle(rgba, (x0, y0), (x1, y1), (0, 0, 0, a), -1)
+            lab[y0:y1 + 1, x0:x1 + 1] = lbl
 
-        def _box(cx, cy, hw, hh, color):
-            """Filled rotated box at robot-local (cx=fwd, cy=left), half-sizes."""
-            corners = []
-            for sx, sy in [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]:
-                dc, dr = _rot(cx + sx, cy + sy)
-                corners.append([int(rc + dc), int(rr + dr)])
-            pts = np.array(corners, dtype=np.int32)
-            overlay = disp.copy()
-            cv2.fillConvexPoly(overlay, pts, color, cv2.LINE_AA)
-            cv2.addWeighted(overlay, OPACITY, disp, 1.0 - OPACITY, 0, dst=disp)
+        _rect(C - 9, C - 7, C + 7, C + 7, 153, 1)       # body 17×15
+        _rect(C - 4, C - 10, C + 4, C - 8, 153, 2)       # left track 9×3
+        _rect(C - 4, C + 8, C + 4, C + 10, 153, 2)       # right track 9×3
+        _rect(C - 11, C - 1, C - 9, C, 153, 2)            # caster 3×2
 
-        # RGB colors: blue (safe) → red (danger)
-        danger = min(fwd_scale, bwd_scale, ang_scale)
-        body_color = (int(255 * (1.0 - danger)),
-                      int(160 * danger + 60 * (1.0 - danger)),
-                      int(255 * danger))
+        cv2.arrowedLine(rgba, (C - 5, C), (C + 6, C),
+                        (255, 180, 0, 255), 1, tipLength=0.35)
+        lab[rgba[:, :, 3] == 255] = 3
 
+        return rgba, lab
+
+    def _draw_robot(self, disp, rc, rr, theta,
+                    fwd_scale, bwd_scale, ang_scale):
+        """Tint, rotate, and alpha-composite the pre-rendered robot sprite."""
+        S, C = SPRITE_SZ, _SC
+        spr = self._spr_rgba.copy()
+
+        # RGB colours: blue (safe) → red (danger)
+        sf = min(fwd_scale, bwd_scale, ang_scale)
+        body_rgb = [int(255 * (1 - sf)),
+                    int(160 * sf + 60 * (1 - sf)),
+                    int(255 * sf)]
         td = 1.0 - min(fwd_scale, bwd_scale)
-        track_color = (int(180 * td),
-                       int(60 + 100 * (1.0 - td)),
-                       int(180 * (1.0 - td)))
+        trk_rgb = [int(180 * td),
+                   int(60 + 100 * (1 - td)),
+                   int(180 * (1 - td))]
 
-        # Body: ~33×30 cm → 16.5×15 px at 2cm/px, offset 1.5cm rear
-        _box(-0.75, 0, 8.25, 7.5, body_color)
-        # Tracks: ~17×6 cm at 2cm/px, offset ±18cm laterally
-        _box(0.75, 9, 4.25, 1.5, track_color)
-        _box(0.75, -9, 4.25, 1.5, track_color)
-        # Caster: ~6×3 cm at 2cm/px, 20cm rear
-        _box(-10, 0, 1.5, 0.75, track_color)
+        spr[self._spr_lab == 1, :3] = body_rgb
+        spr[self._spr_lab == 2, :3] = trk_rgb
 
-        # Direction arrow (1px, fits inside body)
-        adx, adr = _rot(6, 0)
-        bdx, bdr = _rot(-5, 0)
-        cv2.arrowedLine(disp,
-                        (int(rc + bdx), int(rr + bdr)),
-                        (int(rc + adx), int(rr + adr)),
-                        (255, 180, 0), 1, tipLength=0.35)
+        M = cv2.getRotationMatrix2D((float(C), float(C)),
+                                    np.degrees(theta), 1.0)
+        rot = cv2.warpAffine(spr, M, (S, S),
+                             flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT,
+                             borderValue=(0, 0, 0, 0))
+
+        # clip to map bounds
+        x0, y0 = rc - C, rr - C
+        sx0, sy0 = max(0, -x0), max(0, -y0)
+        dx0, dy0 = max(0, x0), max(0, y0)
+        sw = min(S, MAP_W - x0) - sx0
+        sh = min(S, MAP_H - y0) - sy0
+        if sw <= 0 or sh <= 0:
+            return
+
+        patch = rot[sy0:sy0 + sh, sx0:sx0 + sw]
+        alpha = patch[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
+        rgb = patch[:, :, :3].astype(np.float32)
+        region = disp[dy0:dy0 + sh, dx0:dx0 + sw]
+        np.copyto(region,
+                  (region.astype(np.float32) * (1.0 - alpha) +
+                   rgb * alpha).astype(np.uint8))
 
     # ── affine transforms ─────────────────────────────────────────
 

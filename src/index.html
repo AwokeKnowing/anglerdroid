@@ -48,6 +48,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 #fs-wrap.fs.eyes-big .eye{width:60vmin;height:72vmin}
 #fs-wrap.fs.eyes-big .pupil{width:24vmin;height:28.5vmin;top:37%;left:30%}
 #fs-wrap.fs.eyes-big #atlas{display:none}
+#atlas.atlas-fs{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;z-index:10000;background:#000;cursor:zoom-out}
 
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
@@ -399,6 +400,15 @@ function initGoogleSignIn() {
 function onGoogleAuth(resp) {
   if (ws) ws.send(JSON.stringify({type: 'auth', credential: resp.credential}));
 }
+
+/* Click atlas to view fullscreen; click or Escape to exit */
+document.getElementById('atlas').addEventListener('dblclick', function(e) {
+  this.classList.toggle('atlas-fs');
+  e.stopPropagation();
+});
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') document.getElementById('atlas').classList.remove('atlas-fs');
+});
 
 /* Drag-to-pan on the left panel (works when browser-zoomed) */
 (function(){
