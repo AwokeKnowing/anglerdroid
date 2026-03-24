@@ -3,21 +3,28 @@
 ORB feature matching between consecutive greyscale frames.
 Returns yaw (radians), forward translation (metres), and a confidence
 score (0–1) indicating match quality.  Pure OpenCV, no external deps.
+
+Matching uses kNN (k=2) with Lowe's ratio test instead of cross-check,
+which significantly improves match quality and outlier rejection.
 """
 
 import cv2
 import numpy as np
 
-_orb = cv2.ORB_create(500)
-_bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+_orb = cv2.ORB_create(1000)
+_bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 _prev_kp = None
 _prev_des = None
 
 FX = 307.0  # D435 color focal length at 320×240 (approximate)
 
+# Matching
+_LOWE_RATIO = 0.78       # Lowe ratio test threshold (lower = stricter)
+_MAX_MATCHES = 100        # keep best N after ratio test
+
 # Confidence tuning
-_INLIER_SATURATE = 25   # inlier count at which count-confidence saturates
-_MAX_GOOD_DIST = 40.0   # mean match distance above this → zero dist-confidence
+_INLIER_SATURATE = 30     # inlier count at which count-confidence saturates
+_MAX_GOOD_DIST = 45.0     # mean match distance above this → zero dist-confidence
 
 
 def update(gray, avg_depth=1.5):
@@ -37,18 +44,26 @@ def update(gray, avg_depth=1.5):
         _prev_kp, _prev_des = kp, des
         return 0.0, 0.0, 0.0
 
-    matches = _bf.match(_prev_des, des)
+    raw = _bf.knnMatch(_prev_des, des, k=2)
 
-    if len(matches) < 8:
+    good = []
+    for pair in raw:
+        if len(pair) == 2:
+            m, n = pair
+            if m.distance < _LOWE_RATIO * n.distance:
+                good.append(m)
+
+    if len(good) < 8:
         _prev_kp, _prev_des = kp, des
         return 0.0, 0.0, 0.0
 
-    matches = sorted(matches, key=lambda m: m.distance)[:60]
+    good = sorted(good, key=lambda m: m.distance)[:_MAX_MATCHES]
 
-    pts_p = np.float32([_prev_kp[m.queryIdx].pt for m in matches])
-    pts_c = np.float32([kp[m.trainIdx].pt for m in matches])
+    pts_p = np.float32([_prev_kp[m.queryIdx].pt for m in good])
+    pts_c = np.float32([kp[m.trainIdx].pt for m in good])
 
-    M, inliers = cv2.estimateAffinePartial2D(pts_p, pts_c, method=cv2.RANSAC)
+    M, inliers = cv2.estimateAffinePartial2D(pts_p, pts_c, method=cv2.RANSAC,
+                                              ransacReprojThreshold=2.0)
 
     _prev_kp, _prev_des = kp, des
 
@@ -67,12 +82,12 @@ def update(gray, avg_depth=1.5):
     forward = (scale - 1.0) * avg_depth
 
     # --- Confidence from match quality ---
-    n_total = len(matches)
+    n_total = len(good)
     inlier_ratio = n_inliers / n_total if n_total > 0 else 0.0
     count_conf = min(1.0, n_inliers / _INLIER_SATURATE)
 
     inlier_mask = inliers.ravel().astype(bool)
-    inlier_dists = np.array([matches[i].distance for i in range(n_total)
+    inlier_dists = np.array([good[i].distance for i in range(n_total)
                              if inlier_mask[i]], dtype=np.float32)
     mean_dist = float(np.mean(inlier_dists)) if len(inlier_dists) > 0 else _MAX_GOOD_DIST
     dist_conf = max(0.0, 1.0 - mean_dist / _MAX_GOOD_DIST)
@@ -82,7 +97,7 @@ def update(gray, avg_depth=1.5):
     predicted = pts_p_h @ M.T
     residuals = np.linalg.norm(predicted - pts_c, axis=1)
     mean_reproj = float(np.mean(residuals[inlier_mask]))
-    reproj_conf = max(0.0, 1.0 - mean_reproj / 3.0)  # >3px residual → 0
+    reproj_conf = max(0.0, 1.0 - mean_reproj / 4.0)  # >4px → 0 (was 3px)
 
     confidence = count_conf * inlier_ratio * dist_conf * reproj_conf
 

@@ -1,7 +1,11 @@
 """pose.py – Kalman-filtered 2D pose estimation.
 
-Wheel odometry is the authoritative source.  Visual odometry is only
-used as a *small correction* for wheel slip — never the other way around.
+Wheel odometry is the primary source, with visual odometry providing
+corrections for systematic bias (carpet slip, uneven surfaces).
+
+A configurable ANGULAR_SLIP_SCALE compensates for the fact that
+tracked vehicles on soft surfaces (carpet) systematically under-report
+rotation — typically 3–5% on medium-pile carpet.
 
 Gating hierarchy (any failure → visual odom rejected, wheel odom used):
   1. Physical plausibility  — exceeds robot's max speed × dt?
@@ -21,27 +25,37 @@ import numpy as np
 # ── History ────────────────────────────────────────────────────────
 HISTORY_SIZE = 900
 
+# ── Surface slip compensation ──────────────────────────────────────
+# Tracked vehicles on carpet systematically under-report rotation.
+# 15° lost per 360° revolution → 360/345 ≈ 1.044.
+# Set to 1.0 for hard floors.  Tune empirically: spin N revolutions
+# and measure accumulated heading error.
+ANGULAR_SLIP_SCALE = 1.044
+LINEAR_SLIP_SCALE  = 1.0      # forward slip (usually negligible)
+
 # ── Robot physics (generous upper bounds) ──────────────────────────
 MAX_SPEED_MPS = 1.0       # absolute max forward speed the robot can reach
 MAX_OMEGA_RPS = 4.0       # absolute max angular velocity
 PHYS_MARGIN   = 3.0       # multiplier on physics limit for gate
 
 # ── Visual odometry gating ─────────────────────────────────────────
-MIN_VIS_CONFIDENCE  = 0.15    # below this, discard visual entirely
+MIN_VIS_CONFIDENCE  = 0.10    # below this, discard visual entirely
 STATIONARY_THRESH   = 0.01    # m/s and rad/s — wheels below this = stopped
-AGREEMENT_FACTOR    = 5.0     # max ratio: |vis_delta| / |wheel_delta|
-AGREEMENT_ABS_YAW   = 0.02    # rad — visual can disagree by at most this
+AGREEMENT_FACTOR    = 8.0     # max ratio: |vis_delta| / |wheel_delta|
+AGREEMENT_ABS_YAW   = 0.03    # rad — visual can disagree by at most this
 AGREEMENT_ABS_FWD   = 0.01    # m   — even when wheels say zero
 
 # ── Kalman noise ───────────────────────────────────────────────────
-# Wheel odom process noise (1-sigma, scales with magnitude + floor)
-Q_YAW_SCALE  = 0.05      # 5% of |dtheta|
+# Wheel odom process noise (1-sigma, scales with magnitude + floor).
+# Higher Q_YAW_SCALE = trust wheels less for yaw → more visual correction.
+Q_YAW_SCALE  = 0.10      # 10% of |dtheta| (was 5% — increased for carpet)
 Q_FWD_SCALE  = 0.05      # 5% of |ds|
-Q_YAW_FLOOR  = 0.001     # rad
+Q_YAW_FLOOR  = 0.0015    # rad
 Q_FWD_FLOOR  = 0.0005    # m
 
-# Visual odom measurement noise (base 1-sigma, scaled by 1/confidence)
-R_YAW_BASE = 0.003   # rad
+# Visual odom measurement noise (base 1-sigma, scaled by 1/confidence).
+# Lower R_YAW_BASE = trust visual more for yaw.
+R_YAW_BASE = 0.002   # rad (was 0.003)
 R_FWD_BASE = 0.002   # m
 
 # Mahalanobis gate — chi-squared, 2 DOF, 95%
@@ -88,11 +102,11 @@ class PoseEstimator:
         if dt <= 0:
             return 0.0, 0.0
 
-        # ── 1. Wheel odometry (always computed) ──
+        # ── 1. Wheel odometry with slip compensation ──
         v     = (v_left_mps + v_right_mps) * 0.5
         omega = (v_right_mps - v_left_mps) / self._wb
-        dtheta_w = omega * dt
-        ds_w     = v * dt
+        dtheta_w = omega * dt * ANGULAR_SLIP_SCALE
+        ds_w     = v * dt * LINEAR_SLIP_SCALE
 
         # ── 2. Gate visual odometry ──
         vis_ok = self._gate_visual(
