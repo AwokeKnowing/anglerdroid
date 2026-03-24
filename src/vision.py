@@ -360,14 +360,18 @@ class Vision:
 
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        _loop_times = []
 
         while self._running:
+            _t0 = time.monotonic()
+
             if self._webcam:
                 self._webcam.grab()
             if self._rs1:
                 self._rs1.grab()
             if self._rs2:
                 self._rs2.grab()
+            _t_grab = time.monotonic()
 
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -386,6 +390,7 @@ class Vision:
                                                y_offset=RS2_EXTRINSIC_Y)
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
+            _t_depth = time.monotonic()
 
             # Build known-area mask (union of both cameras, morph-closed to fill holes)
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
@@ -409,6 +414,17 @@ class Vision:
             np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
             np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
 
+            # Robot footprint is always known-free
+            rcx = CROSSHAIR_CX + ROBOT_CX_OFF
+            rcy = CROSSHAIR_CY
+            rx0 = max(0, rcx - ROBOT_W // 2 - 2)
+            ry0 = max(0, rcy - ROBOT_H // 2 - 2)
+            rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
+            ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
+            obs_combined[ry0:ry1, rx0:rx1] = 0
+            known_combined[ry0:ry1, rx0:rx1] = 255
+            _t_obs = time.monotonic()
+
             # --- Odometry: visual + wheel → Kalman fused pose ---
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
@@ -427,6 +443,7 @@ class Vision:
 
             fused_yaw, fused_fwd = self._pose.update(
                 vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
+            _t_odom = time.monotonic()
 
             # --- Update global occupancy map ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
@@ -436,20 +453,19 @@ class Vision:
                 obs_combined, known_combined,
                 self._pose.x, self._pose.y, self._pose.theta,
                 rcx_f, rcy_f, float(TD_PX_SIZE))
+            _t_gmap_up = time.monotonic()
 
             # Project global map to ego space for costmap/safety.
-            # Raw byte: 0=strong obstacle, 128=unknown, 255=strong free.
             ego_proj = self._global_map.project_to_ego(
                 self._pose.x, self._pose.y, self._pose.theta,
                 rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
-            # Convert to persistent_obs format (0=free, 255=obstacle)
-            # and merge with current frame for immediate reactivity.
             self._persistent_obs[:] = 0
-            self._persistent_obs[ego_proj < 90] = 255  # confirmed obstacles
-            self._persistent_obs[obs_combined > 0] = 255  # current frame (instant)
+            self._persistent_obs[ego_proj < 90] = 255
+            self._persistent_obs[obs_combined > 0] = 255
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
+            _t_safety = time.monotonic()
 
             # --- Render global map with trajectory + safety overlay ---
             trail = self._pose.get_world_history()
@@ -459,6 +475,7 @@ class Vision:
                 fwd_scale=self._safety.fwd_scale,
                 bwd_scale=self._safety.bwd_scale,
                 ang_scale=self._safety.ang_scale)
+            _t_render = time.monotonic()
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
@@ -473,6 +490,17 @@ class Vision:
                 self.atlas[0:CAM_ROW_H, FRAME_W * 2:FRAME_W * 3] = rgbd2
                 self.atlas[CAM_ROW_H:ATLAS_H, 0:ATLAS_W] = gmap_render
                 self.timestamp = time.time()
+            _t_end = time.monotonic()
+
+            _loop_times.append((_t_grab - _t0, _t_depth - _t_grab,
+                                _t_obs - _t_depth, _t_odom - _t_obs,
+                                _t_gmap_up - _t_odom, _t_safety - _t_gmap_up,
+                                _t_render - _t_safety, _t_end - _t_render))
+            if len(_loop_times) % 100 == 0:
+                avg = np.mean(_loop_times[-100:], axis=0) * 1000
+                print("capture: grab=%.1f depth=%.1f obs=%.1f odom=%.1f "
+                      "gmap_up=%.1f safety=%.1f render=%.1f blit=%.1f "
+                      "TOTAL=%.1fms" % (*avg, sum(avg)))
 
     def stop(self):
         self._running = False
