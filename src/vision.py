@@ -52,6 +52,7 @@ FW_PIVOT = np.array([0.0, -1.0, 0.02], dtype=np.float32)
 FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame (fixed)
+FW_FLOOR_CLIP  = np.float32(0.02)   # min height: ignore below 2cm (carpet/floor)
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 _known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
@@ -164,7 +165,7 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     if DEBUG_CAMERAS:
         cv2.imshow("fw_rotated_noclip", known.copy())
 
-    m_obs = m_all & (v[:, 2] < FW_HEIGHT_CLIP)
+    m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
     obs[i[m_obs], j[m_obs]] = 255
 
     if DEBUG_CAMERAS:
