@@ -97,16 +97,42 @@ class GlobalMap:
 
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """MAP_W × MAP_H BGR image with robot footprint and optional trajectory.
+        """960×720 split view: left=center crop, right=8× ego zoom forward-up.
 
         trail_xy: (N, 2) float64 world [x, y] array, oldest→newest.
         fwd/bwd/ang_scale: 0–1 safety throttle (1=safe, 0=blocked).
         """
+        HALF = MAP_W // 2                          # 480
+        EGO_SCALE = 8.0
+        EGO_RX = HALF // 2                         # 240 — robot col in ego panel
+        EGO_RY = int(MAP_H * 0.80)                 # 576 — robot row in ego panel
+
+        # coloured base map (no robot/trail yet)
         disp = np.full((MAP_H, MAP_W), UNK_DISPLAY, dtype=np.uint8)
         disp[self._map > FREE_THRESH] = FREE_DISPLAY
         disp[self._map < OBS_THRESH] = OBS_DISPLAY
         disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
 
+        rc = int(ORIGIN_X + x / PX_SIZE)
+        rr = int(ORIGIN_Y - y / PX_SIZE)
+
+        # --- right panel: 8× ego zoom, forward=up ---
+        ct, st = np.cos(theta), np.sin(theta)
+        inv_s = 1.0 / EGO_SCALE
+        M_ego = np.float64([
+            [ st * inv_s, -ct * inv_s,
+              rc - st * EGO_RX * inv_s + ct * EGO_RY * inv_s],
+            [ ct * inv_s,  st * inv_s,
+              rr - ct * EGO_RX * inv_s - st * EGO_RY * inv_s],
+        ])
+        right = cv2.warpAffine(
+            disp, M_ego, (HALF, MAP_H),
+            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+            borderValue=(UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY))
+        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
+                         fwd_scale, bwd_scale, ang_scale)
+
+        # draw trail + robot on base map (needed for left panel)
         if trail_xy is not None and len(trail_xy) >= 2:
             tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
             tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
@@ -116,12 +142,17 @@ class GlobalMap:
                 cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
 
-        rc = int(ORIGIN_X + x / PX_SIZE)
-        rr = int(ORIGIN_Y - y / PX_SIZE)
-        if _SC <= rc < MAP_W - _SC and _SC <= rr < MAP_H - _SC:
-            self._draw_robot(disp, rc, rr, theta,
-                             fwd_scale, bwd_scale, ang_scale)
-        return disp
+        # --- left panel: center crop around robot ---
+        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
+        left = disp[:, cx0:cx0 + HALF].copy()
+        lrc = rc - cx0
+        self._draw_robot(left, lrc, rr, theta,
+                         fwd_scale, bwd_scale, ang_scale)
+
+        result = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
+        result[:, :HALF] = left
+        result[:, HALF:] = right
+        return result
 
     # ── sprite-based robot rendering ──────────────────────────────
 
@@ -155,9 +186,9 @@ class GlobalMap:
                     fwd_scale, bwd_scale, ang_scale):
         """Tint, rotate, and alpha-composite the pre-rendered robot sprite."""
         S, C = SPRITE_SZ, _SC
+        h, w = disp.shape[:2]
         spr = self._spr_rgba.copy()
 
-        # RGB colours: blue (safe) → red (danger)
         sf = min(fwd_scale, bwd_scale, ang_scale)
         body_rgb = [int(255 * (1 - sf)),
                     int(160 * sf + 60 * (1 - sf)),
@@ -177,12 +208,11 @@ class GlobalMap:
                              borderMode=cv2.BORDER_CONSTANT,
                              borderValue=(0, 0, 0, 0))
 
-        # clip to map bounds
         x0, y0 = rc - C, rr - C
         sx0, sy0 = max(0, -x0), max(0, -y0)
         dx0, dy0 = max(0, x0), max(0, y0)
-        sw = min(S, MAP_W - x0) - sx0
-        sh = min(S, MAP_H - y0) - sy0
+        sw = min(S, w - x0) - sx0
+        sh = min(S, h - y0) - sy0
         if sw <= 0 or sh <= 0:
             return
 

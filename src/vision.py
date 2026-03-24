@@ -409,15 +409,6 @@ class Vision:
             np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
             np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
 
-            # Mark robot footprint as known-free (not obstacle, not unknown)
-            rcx_i = CROSSHAIR_CX + ROBOT_CX_OFF
-            rx0 = max(0, rcx_i - ROBOT_W // 2)
-            ry0 = max(0, CROSSHAIR_CY - ROBOT_H // 2)
-            rx1 = min(FRAME_W, rcx_i + ROBOT_W // 2)
-            ry1 = min(FRAME_H, CROSSHAIR_CY + ROBOT_H // 2)
-            obs_combined[ry0:ry1, rx0:rx1] = 0
-            known_combined[ry0:ry1, rx0:rx1] = 255
-
             # --- Odometry: visual + wheel → Kalman fused pose ---
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)

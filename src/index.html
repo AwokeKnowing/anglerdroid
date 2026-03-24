@@ -11,7 +11,7 @@ header{display:flex;justify-content:space-between;align-items:center;padding:8px
 header h1{font-size:1.1rem;font-weight:600}
 #status{font-size:.75rem;color:#888}
 .main{display:flex;flex:1;overflow:hidden}
-.left{flex:1;display:flex;flex-direction:column;padding:12px;gap:12px;overflow:auto;min-height:0;min-width:0;cursor:grab}
+.left{flex:1;display:flex;flex-direction:column;padding:12px;gap:12px;overflow:auto;min-height:0;min-width:0}
 .right{width:340px;display:flex;flex-direction:column;padding:12px;gap:10px;border-left:1px solid #333;overflow-y:auto}
 #fs-wrap{display:flex;flex-direction:column;align-items:center;gap:12px;margin:auto;flex-shrink:0}
 #eyes{width:520px;height:260px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:60px;cursor:pointer;position:relative;flex-shrink:0}
@@ -19,7 +19,7 @@ header h1{font-size:1.1rem;font-weight:600}
 .pupil{width:72px;height:84px;background:#111;border-radius:50%;position:absolute;top:37%;left:30%;transition:all .15s}
 .eye.blink{animation:blink .2s}
 @keyframes blink{0%,100%{transform:scaleY(1)}50%{transform:scaleY(.05)}}
-#atlas{width:960px;height:960px;background:#000;border-radius:0;flex-shrink:0}
+#atlas{width:960px;height:960px;background:#000;border-radius:0;flex-shrink:0;image-rendering:pixelated}
 label{font-size:.8rem;color:#aaa}
 input[type=range]{width:100%}
 .val{font-size:.8rem;color:#6cf;float:right}
@@ -48,7 +48,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 #fs-wrap.fs.eyes-big .eye{width:60vmin;height:72vmin}
 #fs-wrap.fs.eyes-big .pupil{width:24vmin;height:28.5vmin;top:37%;left:30%}
 #fs-wrap.fs.eyes-big #atlas{display:none}
-#atlas.atlas-fs{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;z-index:10000;background:#000;cursor:zoom-out}
+#atlas.atlas-fs{position:fixed;inset:0;width:100vw;height:100vh;object-fit:contain;z-index:10000;background:#000;cursor:zoom-out;image-rendering:pixelated}
 
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
@@ -401,34 +401,19 @@ function onGoogleAuth(resp) {
   if (ws) ws.send(JSON.stringify({type: 'auth', credential: resp.credential}));
 }
 
-/* Click atlas to view fullscreen; click or Escape to exit */
-document.getElementById('atlas').addEventListener('dblclick', function(e) {
-  this.classList.toggle('atlas-fs');
-  e.stopPropagation();
-});
-document.addEventListener('keydown', function(e) {
-  if (e.key === 'Escape') document.getElementById('atlas').classList.remove('atlas-fs');
-});
-
-/* Drag-to-pan on the left panel (works when browser-zoomed) */
+/* Click atlas → fullscreen; click again or Escape → exit */
 (function(){
-  const el = document.querySelector('.left');
-  let dragging = false, sx, sy, sl, st;
-  el.addEventListener('mousedown', e => {
-    if (e.target.closest('#eyes')) return;
-    dragging = true; sx = e.clientX; sy = e.clientY;
-    sl = el.scrollLeft; st = el.scrollTop;
-    el.style.cursor = 'grabbing';
-    e.preventDefault();
+  const atlas = document.getElementById('atlas');
+  let _moved = false;
+  atlas.addEventListener('mousedown', () => { _moved = false; });
+  atlas.addEventListener('mousemove', () => { _moved = true; });
+  atlas.addEventListener('click', function(e) {
+    if (_moved) return;
+    this.classList.toggle('atlas-fs');
+    e.stopPropagation();
   });
-  window.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    el.scrollLeft = sl - (e.clientX - sx);
-    el.scrollTop  = st - (e.clientY - sy);
-  });
-  window.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false; el.style.cursor = 'grab';
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') atlas.classList.remove('atlas-fs');
   });
 })();
 
