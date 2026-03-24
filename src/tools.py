@@ -60,6 +60,12 @@ def get_atlas():
         return np.zeros((480, 640, 3), dtype=np.uint8), 0.0
     return _vision.read_atlas()
 
+def get_global_map():
+    """Return 512x512 BGR global map image."""
+    if _vision is None:
+        return np.full((512, 512, 3), 160, dtype=np.uint8)
+    return _vision.read_global_map()
+
 
 # --- Wheelbase ---
 

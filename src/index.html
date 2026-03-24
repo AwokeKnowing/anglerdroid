@@ -48,6 +48,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
 #fs-wrap.fs.eyes-big .eye{width:60vmin;height:72vmin}
 #fs-wrap.fs.eyes-big .pupil{width:24vmin;height:28.5vmin;top:37%;left:30%}
 #fs-wrap.fs.eyes-big #atlas{display:none}
+#fs-wrap.fs.eyes-big #globalmap{display:none}
 
 @media(max-width:700px){.main{flex-direction:column}.right{width:100%;border-left:none;border-top:1px solid #333}}
 </style>
@@ -66,6 +67,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <div class="eye" id="eyeR"><div class="pupil" id="pupilR"></div></div>
       </div>
       <img id="atlas" alt="robot vision">
+      <img id="globalmap" alt="global map" style="width:512px;height:512px;background:#000;display:block">
     </div>
   </div>
   <div class="right">
@@ -123,7 +125,7 @@ function connect() {
   const host = location.hostname || 'localhost';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(proto + '://' + host + ':' + WS_PORT);
-  ws.binaryType = 'blob';
+  ws.binaryType = 'arraybuffer';
   ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
   ws.onclose = () => {
     document.getElementById('status').textContent = 'disconnected';
@@ -133,13 +135,25 @@ function connect() {
     }
     setTimeout(connect, 2000);
   };
+  let _prevGmapUrl = null;
   ws.onmessage = (e) => {
-    if (typeof e.data !== 'string') {
-      const url = URL.createObjectURL(e.data);
-      const img = document.getElementById('atlas');
-      if (_prevAtlasUrl) URL.revokeObjectURL(_prevAtlasUrl);
-      _prevAtlasUrl = url;
-      img.src = url;
+    if (e.data instanceof ArrayBuffer) {
+      const bytes = new Uint8Array(e.data);
+      if (bytes.length < 2) return;
+      const tag = bytes[0];
+      const blob = new Blob([bytes.slice(1)], {type: 'image/jpeg'});
+      const url = URL.createObjectURL(blob);
+      if (tag === 0) {
+        const img = document.getElementById('atlas');
+        if (_prevAtlasUrl) URL.revokeObjectURL(_prevAtlasUrl);
+        _prevAtlasUrl = url;
+        img.src = url;
+      } else if (tag === 1) {
+        const img = document.getElementById('globalmap');
+        if (_prevGmapUrl) URL.revokeObjectURL(_prevGmapUrl);
+        _prevGmapUrl = url;
+        img.src = url;
+      }
       return;
     }
     const d = JSON.parse(e.data);

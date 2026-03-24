@@ -117,6 +117,7 @@ class UI:
 
         self._latest_atlas = None       # type: Optional[np.ndarray]
         self._atlas_jpeg = None         # type: Optional[bytes]
+        self._gmap_jpeg = None          # type: Optional[bytes]
         self._atlas_lock = threading.Lock()
 
         self._ws_loop = None            # type: Optional[asyncio.AbstractEventLoop]
@@ -182,6 +183,13 @@ class UI:
             else:
                 np.copyto(self._latest_atlas, vstack)
             self._atlas_jpeg = jpeg
+
+    def send_global_map(self, gmap_bgr):
+        """Encode 512×512 BGR global map as JPEG for browser streaming."""
+        _, buf = cv2.imencode('.jpg', gmap_bgr,
+                              [cv2.IMWRITE_JPEG_QUALITY, 80])
+        with self._atlas_lock:
+            self._gmap_jpeg = buf.tobytes()
 
     def get_user_text(self):
         with self._lock:
@@ -274,9 +282,15 @@ class UI:
                 if now - last_atlas_bc > 0.033:
                     with self._atlas_lock:
                         jpeg = self._atlas_jpeg
+                        gmap = self._gmap_jpeg
                     if jpeg is not None:
                         try:
-                            await self._send_all(jpeg)
+                            await self._send_all(b'\x00' + jpeg)
+                        except Exception:
+                            pass
+                    if gmap is not None:
+                        try:
+                            await self._send_all(b'\x01' + gmap)
                         except Exception:
                             pass
                     last_atlas_bc = now

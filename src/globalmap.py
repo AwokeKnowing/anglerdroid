@@ -114,7 +114,7 @@ class GlobalMap:
         return cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
 
     def render_full(self, x, y, theta):
-        """512×512 BGR image for cv2.imshow."""
+        """512×512 BGR image for streaming to browser."""
         disp = np.full((SIZE, SIZE), UNK_DISPLAY, dtype=np.uint8)
         disp[self._map > FREE_THRESH] = FREE_DISPLAY
         disp[self._map < OBS_THRESH] = OBS_DISPLAY

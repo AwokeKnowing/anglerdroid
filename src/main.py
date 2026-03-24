@@ -5,9 +5,6 @@ main.py - 30 fps loop: frames + tool calls; optional rerun. Entrypoint for angle
 import os
 import time
 import argparse
-import numpy as np
-import cv2
-
 import tools
 import vision as vision_mod
 import navigator
@@ -23,7 +20,6 @@ except (ImportError, TypeError):
 TARGET_FPS = 30
 LOOP_DT = 1.0 / TARGET_FPS
 BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 fps
-ATLAS_W, ATLAS_H = 640, 480
 
 
 def main():
@@ -33,7 +29,6 @@ def main():
     parser.add_argument("--rs1", default="", help="RealSense 1 serial")
     parser.add_argument("--rs2", default="", help="RealSense 2 serial")
     parser.add_argument("--rgb1", default="/dev/video0", help="RGB camera device (e.g. /dev/video0)")
-    parser.add_argument("--no-show", action="store_true", help="Do not show vision atlas window")
     parser.add_argument("--gemini-key", default="", help="Gemini API key (or set GEMINI_KEY env)")
     parser.add_argument("--gemini-model", default="", help="Gemini model name (default: gemini-2.5-flash)")
     parser.add_argument("--auth-email", default="", help="Email allowed full control (default: everyone)")
@@ -86,10 +81,6 @@ def main():
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
-    show_ok = not args.no_show and vision_mod.DEBUG_CAMERAS
-    if show_ok:
-        cv2.namedWindow("vision atlas", cv2.WINDOW_AUTOSIZE)
-
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
     frame_id = 0
@@ -102,23 +93,9 @@ def main():
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()
-            if show_ok and atlas is not None:
-                try:
-                    display = cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR)
-                    display = cv2.resize(display, (ATLAS_W * 2, ATLAS_H * 2), interpolation=cv2.INTER_NEAREST)
-                    fw_x = vision_mod.TD_X_OFFSET + vision_mod.FW_TD_X_DELTA
-                    cv2.putText(display, "td_x=%d  fw_x=%d  floor=%.0fcm" % (
-                        vision_mod.TD_X_OFFSET, fw_x,
-                        float(vision_mod.TD_FLOOR_CLIP) * 100),
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                    navigator.draw_overlay(display)
-                    cv2.imshow("vision atlas", display)
-                    cv2.waitKey(1)
-                except cv2.error:
-                    show_ok = False
-                    print("vision: display not available, continuing without window")
             if atlas is not None:
                 u.send_atlas(atlas)
+                u.send_global_map(tools.get_global_map())
 
 
             if HAS_RERUN and not args.no_rerun:
@@ -224,11 +201,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if show_ok:
-            try:
-                cv2.destroyAllWindows()
-            except cv2.error:
-                pass
         vis.stop()
         u.stop()
         navigator.clear_goal()

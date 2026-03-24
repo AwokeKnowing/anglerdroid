@@ -270,6 +270,7 @@ class Vision:
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
         self._global_map = GlobalMap()
+        self._global_map_bgr = np.zeros((512, 512, 3), dtype=np.uint8)
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -432,9 +433,6 @@ class Vision:
             gs = gmap_disp.shape[0]  # 128
             topdown[0:gs, FRAME_W - gs:FRAME_W] = gmap_disp
 
-            cv2.imshow("global_map", self._global_map.render_full(
-                self._pose.x, self._pose.y, self._pose.theta))
-
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
                 dbg_td[:, :, 2] = (np.uint8(255) - known_combined) // 4
@@ -446,6 +444,9 @@ class Vision:
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
             rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
 
+            gmap_full = self._global_map.render_full(
+                self._pose.x, self._pose.y, self._pose.theta)
+
             with self._lock:
                 self.frames[0][:] = rgb1
                 self.frames[1][:] = rgbd1
@@ -454,6 +455,7 @@ class Vision:
                 self.atlas[0:FRAME_H, FRAME_W:ATLAS_W] = rgbd1
                 self.atlas[FRAME_H:ATLAS_H, 0:FRAME_W] = rgbd2
                 self.atlas[FRAME_H:ATLAS_H, FRAME_W:ATLAS_W] = topdown
+                self._global_map_bgr[:] = gmap_full
                 if DEBUG_CAMERAS:
                     for yo, xo in [(0, 0), (0, FRAME_W), (FRAME_H, 0), (FRAME_H, FRAME_W)]:
                         _draw_center_crosshair(self.atlas[yo:yo + FRAME_H, xo:xo + FRAME_W])
@@ -475,6 +477,11 @@ class Vision:
         """Return (atlas_copy, timestamp) -- lightweight read for main loop."""
         with self._lock:
             return self.atlas.copy(), self.timestamp
+
+    def read_global_map(self):
+        """Return 512×512 BGR global map image (copy)."""
+        with self._lock:
+            return self._global_map_bgr.copy()
 
     def read(self):
         """Return (frames, atlas, timestamp) under lock (safe copy)."""
