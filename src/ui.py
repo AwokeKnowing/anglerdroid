@@ -115,8 +115,6 @@ class UI:
         self._pending_tool_calls = []   # type: List[dict]
         self._last_user_text = ""
 
-        self._atlas_raw = None          # type: Optional[np.ndarray]  960×960 RGB
-        self._latest_atlas = None       # type: Optional[np.ndarray]  112×336 AI input (lazy)
         self._atlas_jpeg = None         # type: Optional[bytes]
         self._atlas_lock = threading.Lock()
 
@@ -161,21 +159,11 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Store raw atlas; encode half-res JPEG for browser.
-
-        AI input (112×336) is built lazily when the AI thread reads it.
-        Browser gets 480×480 JPEG (CSS pixelated upscales to native).
-        """
-        half = cv2.resize(atlas_rgb, (480, 480), interpolation=cv2.INTER_AREA)
-        _, buf = cv2.imencode('.jpg', half[:, :, ::-1],
+        """Encode atlas to JPEG once — same bytes go to browser and AI."""
+        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg = buf.tobytes()
-
         with self._atlas_lock:
-            if self._atlas_raw is None or self._atlas_raw.shape != atlas_rgb.shape:
-                self._atlas_raw = atlas_rgb.copy()
-            else:
-                np.copyto(self._atlas_raw, atlas_rgb)
             self._atlas_jpeg = jpeg
 
     def get_user_text(self):
@@ -443,23 +431,10 @@ class UI:
                         break
 
                 with self._atlas_lock:
-                    raw = self._atlas_raw
-                if raw is None:
+                    jpeg_bytes = self._atlas_jpeg
+                if jpeg_bytes is None:
                     time.sleep(0.5)
                     continue
-
-                fw, cam_h = 320, 240
-                cam1 = raw[0:cam_h, 0:fw]
-                cam2 = raw[0:cam_h, fw:fw * 2]
-                cam3 = raw[0:cam_h, fw * 2:fw * 3]
-                gmap = raw[cam_h:, :]
-                small = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
-                         for q in [cam1, cam2, cam3, gmap]]
-                atlas = np.vstack(small)
-
-                _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
-                                      [cv2.IMWRITE_JPEG_QUALITY, 92])
-                jpeg_bytes = buf.tobytes()
                 t_api = time.time()
 
                 if self._brain_zmq:

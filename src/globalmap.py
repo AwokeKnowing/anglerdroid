@@ -53,6 +53,9 @@ class GlobalMap:
         self._spr_rgba, self._spr_lab = self._make_sprite()
         self._render_times = []
         self._update_times = []
+        self._disp = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
+        self._right = np.empty((MAP_H, MAP_W // 2, 3), dtype=np.uint8)
+        self._out = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
@@ -147,8 +150,11 @@ class GlobalMap:
 
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """960×720 split view: left=center crop, right=4× ego zoom forward-up."""
-        t0 = time.monotonic()
+        """960×720 split view: left=center crop, right=4× ego zoom forward-up.
+
+        Robot+trail are drawn on the full map first so the ego warp
+        picks them up at correct scale.
+        """
         HALF = MAP_W // 2
         EGO_SCALE = 4.0
         EGO_RX, EGO_RY = HALF // 2, int(MAP_H * 0.80)
@@ -156,27 +162,39 @@ class GlobalMap:
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
 
-        # --- Left panel: LUT colorize only the crop, expand to BGR ---
-        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
-        left_raw = self._map[:, cx0:cx0 + HALF]
-        left_g = np.full_like(left_raw, UNK_DISPLAY)
-        left_g[left_raw > FREE_THRESH] = FREE_DISPLAY
-        left_g[left_raw < OBS_THRESH] = OBS_DISPLAY
-        left = cv2.cvtColor(left_g, cv2.COLOR_GRAY2BGR)
+        # Colorize full map into pre-allocated BGR buffer
+        disp = self._disp
+        g = self._map
+        disp[:, :, 0] = UNK_DISPLAY
+        disp[:, :, 1] = UNK_DISPLAY
+        disp[:, :, 2] = UNK_DISPLAY
+        free = g > FREE_THRESH
+        disp[free, 0] = FREE_DISPLAY
+        disp[free, 1] = FREE_DISPLAY
+        disp[free, 2] = FREE_DISPLAY
+        obs = g < OBS_THRESH
+        disp[obs, 0] = OBS_DISPLAY
+        disp[obs, 1] = OBS_DISPLAY
+        disp[obs, 2] = OBS_DISPLAY
 
+        # Trail + robot on full map (so ego warp captures them)
         if trail_xy is not None and len(trail_xy) >= 2:
-            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE - cx0).astype(np.int32)
+            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
             tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
-            keep = (tc >= 0) & (tc < HALF) & (tr >= 0) & (tr < MAP_H)
+            keep = (tc >= 0) & (tc < MAP_W) & (tr >= 0) & (tr < MAP_H)
             pts = np.column_stack([tc[keep], tr[keep]])
             if len(pts) >= 2:
-                cv2.polylines(left, [pts.reshape(-1, 1, 2)], False,
+                cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
-        self._draw_robot(left, rc - cx0, rr, theta,
+        self._draw_robot(disp, rc, rr, theta,
                          fwd_scale, bwd_scale, ang_scale)
-        t1 = time.monotonic()
 
-        # --- Right panel: warp single-chan map, LUT, expand, draw robot ---
+        # Left panel: center crop
+        out = self._out
+        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
+        out[:, :HALF] = disp[:, cx0:cx0 + HALF]
+
+        # Right panel: 4× ego zoom from rendered map, robot pointing up
         ct, st = np.cos(theta), np.sin(theta)
         inv_s = 1.0 / EGO_SCALE
         M_ego = np.float64([
@@ -185,31 +203,13 @@ class GlobalMap:
             [ ct * inv_s,  st * inv_s,
               rr - ct * EGO_RX * inv_s - st * EGO_RY * inv_s],
         ])
-        ego_raw = cv2.warpAffine(
-            self._map, M_ego, (HALF, MAP_H),
-            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
-            borderValue=UNKNOWN_VAL)
-        ego_g = np.full_like(ego_raw, UNK_DISPLAY)
-        ego_g[ego_raw > FREE_THRESH] = FREE_DISPLAY
-        ego_g[ego_raw < OBS_THRESH] = OBS_DISPLAY
-        right = cv2.cvtColor(ego_g, cv2.COLOR_GRAY2BGR)
-        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
-                         fwd_scale, bwd_scale, ang_scale)
-        t2 = time.monotonic()
+        cv2.warpAffine(disp, M_ego, (HALF, MAP_H),
+                        dst=self._right,
+                        flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                        borderValue=(UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY))
+        out[:, HALF:] = self._right
 
-        # --- Assemble ---
-        result = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
-        result[:, :HALF] = left
-        result[:, HALF:] = right
-        t3 = time.monotonic()
-
-        self._render_times.append((t1 - t0, t2 - t1, t3 - t2))
-        if len(self._render_times) % 100 == 0:
-            avg = np.mean(self._render_times[-100:], axis=0) * 1000
-            print("globalmap render: left=%.1fms right=%.1fms "
-                  "assemble=%.1fms total=%.1fms" % (*avg, sum(avg)))
-
-        return result
+        return out
 
     # ── sprite-based robot rendering ──────────────────────────────
 
