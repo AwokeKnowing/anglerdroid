@@ -266,12 +266,16 @@ class GlobalMap:
             return
 
         patch = rot[sy0:sy0 + sh, sx0:sx0 + sw]
-        alpha = patch[:, :, 3:4].astype(np.float32) * (1.0 / 255.0)
-        rgb = patch[:, :, :3].astype(np.float32)
+        a = patch[:, :, 3]
+        mask = a > 0
+        if not mask.any():
+            return
         region = disp[dy0:dy0 + sh, dx0:dx0 + sw]
-        np.copyto(region,
-                  (region.astype(np.float32) * (1.0 - alpha) +
-                   rgb * alpha).astype(np.uint8))
+        am = a[mask].astype(np.uint16)[:, None]
+        inv = np.uint16(255) - am
+        region[mask] = ((region[mask].astype(np.uint16) * inv +
+                         patch[:, :, :3][mask].astype(np.uint16) * am
+                         ) >> 8).astype(np.uint8)
 
     # ── affine transforms ─────────────────────────────────────────
 
