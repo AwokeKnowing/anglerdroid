@@ -177,7 +177,7 @@ class UI:
         vstack = np.vstack(small)  # 112×336
 
         _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
-                              [cv2.IMWRITE_JPEG_QUALITY, 80])
+                              [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg = buf.tobytes()
         with self._atlas_lock:
             if self._latest_atlas is None or self._latest_atlas.shape != vstack.shape:
@@ -457,7 +457,7 @@ class UI:
                     continue
 
                 _, buf = cv2.imencode('.jpg', atlas[:, :, ::-1],
-                                      [cv2.IMWRITE_JPEG_QUALITY, 60])
+                                      [cv2.IMWRITE_JPEG_QUALITY, 92])
                 jpeg_bytes = buf.tobytes()
                 t_api = time.time()
 

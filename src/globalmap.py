@@ -163,14 +163,13 @@ class GlobalMap:
         # Caster: ~6×3 cm at 2cm/px, 20cm rear
         _box(-10, 0, 1.5, 0.75, track_color)
 
-        # Direction arrow (solid, on top)
-        length = 10
-        adx, adr = _rot(length, 0)
-        bdx, bdr = _rot(-length, 0)
+        # Direction arrow (1px, fits inside body)
+        adx, adr = _rot(6, 0)
+        bdx, bdr = _rot(-5, 0)
         cv2.arrowedLine(disp,
                         (int(rc + bdx), int(rr + bdr)),
                         (int(rc + adx), int(rr + adr)),
-                        (255, 180, 0), 2, tipLength=0.3)
+                        (255, 180, 0), 1, tipLength=0.35)
 
     # ── affine transforms ─────────────────────────────────────────
 
