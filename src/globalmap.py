@@ -252,6 +252,8 @@ class GlobalMap:
         out_c = out_s // 2
         M = cv2.getRotationMatrix2D((float(C), float(C)),
                                     np.degrees(theta), zoom)
+        M[0, 2] += out_c - C
+        M[1, 2] += out_c - C
         rot = cv2.warpAffine(spr, M, (out_s, out_s),
                              flags=cv2.INTER_LINEAR,
                              borderMode=cv2.BORDER_CONSTANT,
