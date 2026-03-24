@@ -26,12 +26,12 @@ import numpy as np
 HISTORY_SIZE = 900
 
 # ── Surface slip compensation ──────────────────────────────────────
-# Tracked vehicles on carpet systematically under-report rotation.
-# Set to 1.0 for hard floors.  Tune empirically: spin a known number
-# of revolutions and adjust until heading drift is near zero.
-# Typical carpet: 1.08–1.12.
-ANGULAR_SLIP_SCALE = 1.10
-LINEAR_SLIP_SCALE  = 1.0      # forward slip (usually negligible)
+# Tracked vehicles on carpet: treads slide on the pile and encoders
+# over-report rotation (body turns less than treads move).
+# <1.0 = reduce reported rotation.  Set 1.0 for hard floors.
+# 15° over-report per revolution → 360/(360+15) ≈ 0.96.
+ANGULAR_SLIP_SCALE = 0.96
+LINEAR_SLIP_SCALE  = 1.0
 
 # ── Robot physics (generous upper bounds) ──────────────────────────
 MAX_SPEED_MPS = 1.0       # absolute max forward speed the robot can reach
@@ -118,14 +118,6 @@ class PoseEstimator:
             r_scale = 1.0 / max(vis_confidence, 0.1)
             dtheta, ds = self._fuse(dtheta_w, ds_w,
                                     vis_yaw, vis_fwd, r_scale)
-            # Visual must not fight the slip correction: if wheels say
-            # we're turning and visual says we turned LESS, clamp to
-            # at least the slip-corrected wheel value.
-            if abs(dtheta_w) > 1e-6:
-                if dtheta_w > 0:
-                    dtheta = max(dtheta, dtheta_w)
-                else:
-                    dtheta = min(dtheta, dtheta_w)
         else:
             dtheta, ds = dtheta_w, ds_w
 
