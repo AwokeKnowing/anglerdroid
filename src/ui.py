@@ -178,7 +178,9 @@ class UI:
         vstack = np.vstack(small)  # 112×336
         t1 = time.time()
 
-        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
+        small_bgr = cv2.resize(atlas_rgb[:, :, ::-1], (240, 240),
+                               interpolation=cv2.INTER_LINEAR)
+        _, buf = cv2.imencode('.jpg', small_bgr,
                               [cv2.IMWRITE_JPEG_QUALITY, 92])
         jpeg = buf.tobytes()
         t2 = time.time()
