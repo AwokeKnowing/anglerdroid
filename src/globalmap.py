@@ -52,6 +52,14 @@ class GlobalMap:
         self._count = 0
         self._spr_rgba, self._spr_lab = self._make_sprite()
 
+        # Pre-allocated render buffers — zero per-frame allocations
+        HALF = MAP_W // 2
+        self._gray_lut = np.full(256, UNK_DISPLAY, dtype=np.uint8)
+        self._gray_lut[:OBS_THRESH] = OBS_DISPLAY
+        self._gray_lut[FREE_THRESH + 1:] = FREE_DISPLAY
+        self._out = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
+        self._ego_tmp = np.empty((MAP_H, HALF), dtype=np.uint8)
+
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
         """Feed one frame of ego-space observations and robot pose."""
@@ -99,40 +107,39 @@ class GlobalMap:
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
         """960×720 split view: left=center crop, right=4× ego zoom forward-up.
 
-        Both panels are derived from the same fully-rendered global map,
-        so the robot sprite and trail appear at the correct scale in both.
+        Optimised: warpAffine on single-channel map, pre-allocated buffers,
+        LUT colorisation.  Target ≤16 ms on Jetson.
         """
-        HALF = MAP_W // 2                          # 480
+        HALF = MAP_W // 2
         EGO_SCALE = 4.0
-        EGO_RX = HALF // 2                         # 240 — robot col in ego output
-        EGO_RY = int(MAP_H * 0.80)                 # 576 — robot row in ego output
-
-        # build + render full map with trail and robot
-        disp = np.full((MAP_H, MAP_W), UNK_DISPLAY, dtype=np.uint8)
-        disp[self._map > FREE_THRESH] = FREE_DISPLAY
-        disp[self._map < OBS_THRESH] = OBS_DISPLAY
-        disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+        EGO_RX, EGO_RY = HALF // 2, int(MAP_H * 0.80)
 
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
+        out = self._out
+        left = out[:, :HALF]
+        right = out[:, HALF:]
+
+        # --- left: crop raw map → LUT → replicate gray to BGR ---
+        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
+        left_g = cv2.LUT(self._map[:, cx0:cx0 + HALF], self._gray_lut)
+        left[:, :, 0] = left_g
+        left[:, :, 1] = left_g
+        left[:, :, 2] = left_g
 
         if trail_xy is not None and len(trail_xy) >= 2:
-            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
+            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE - cx0).astype(np.int32)
             tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
-            keep = (tc >= 0) & (tc < MAP_W) & (tr >= 0) & (tr < MAP_H)
+            keep = (tc >= 0) & (tc < HALF) & (tr >= 0) & (tr < MAP_H)
             pts = np.column_stack([tc[keep], tr[keep]])
             if len(pts) >= 2:
-                cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
+                cv2.polylines(left, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
 
-        self._draw_robot(disp, rc, rr, theta,
+        self._draw_robot(left, rc - cx0, rr, theta,
                          fwd_scale, bwd_scale, ang_scale)
 
-        # --- left panel: center crop around robot ---
-        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
-        left = disp[:, cx0:cx0 + HALF]
-
-        # --- right panel: 4× ego zoom from rendered map, forward=up ---
+        # --- right: warp single-chan → LUT → replicate gray to BGR ---
         ct, st = np.cos(theta), np.sin(theta)
         inv_s = 1.0 / EGO_SCALE
         M_ego = np.float64([
@@ -141,15 +148,18 @@ class GlobalMap:
             [ ct * inv_s,  st * inv_s,
               rr - ct * EGO_RX * inv_s - st * EGO_RY * inv_s],
         ])
-        right = cv2.warpAffine(
-            disp, M_ego, (HALF, MAP_H),
-            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
-            borderValue=(UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY))
+        cv2.warpAffine(self._map, M_ego, (HALF, MAP_H),
+                        dst=self._ego_tmp,
+                        flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                        borderValue=UNKNOWN_VAL)
+        ego_g = cv2.LUT(self._ego_tmp, self._gray_lut)
+        right[:, :, 0] = ego_g
+        right[:, :, 1] = ego_g
+        right[:, :, 2] = ego_g
 
-        result = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
-        result[:, :HALF] = left
-        result[:, HALF:] = right
-        return result
+        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
+                         fwd_scale, bwd_scale, ang_scale)
+        return out
 
     # ── sprite-based robot rendering ──────────────────────────────
 
