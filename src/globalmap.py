@@ -40,8 +40,8 @@ EVIDENCE_DOWN = 128
 
 CONSENSUS_N = 3
 
-SPRITE_SZ = 48
-_SC = SPRITE_SZ // 2  # 24 — sprite centre
+SPRITE_SZ = 192
+_SC = SPRITE_SZ // 2  # 96 — sprite centre
 
 
 class GlobalMap:
@@ -174,10 +174,11 @@ class GlobalMap:
                 cv2.polylines(left, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
         self._draw_robot(left, rc - cx0, rr, theta,
-                         fwd_scale, bwd_scale, ang_scale)
+                         fwd_scale, bwd_scale, ang_scale,
+                         zoom=1.0 / EGO_SCALE)
         out[:, :HALF] = left
 
-        # --- Right panel: warp single-chan, colorize, draw scaled robot ---
+        # --- Right panel: warp single-chan, colorize, draw native robot ---
         ct, st = np.cos(theta), np.sin(theta)
         inv_s = 1.0 / EGO_SCALE
         M_ego = np.float64([
@@ -195,8 +196,7 @@ class GlobalMap:
         ego_g[ego_raw < OBS_THRESH] = OBS_DISPLAY
         right = cv2.cvtColor(ego_g, cv2.COLOR_GRAY2BGR)
         self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
-                         fwd_scale, bwd_scale, ang_scale,
-                         zoom=EGO_SCALE)
+                         fwd_scale, bwd_scale, ang_scale)
         out[:, HALF:] = right
 
         return out
@@ -205,10 +205,11 @@ class GlobalMap:
 
     @staticmethod
     def _make_sprite():
-        """Pre-render robot sprite facing right. Returns (rgba, labels).
+        """Pre-render robot sprite facing right at 192×192. Returns (rgba, labels).
 
         Labels: 0=background, 1=body, 2=track/caster, 3=arrow.
         Alpha: body/tracks=153 (60%), arrow=255 (100%).
+        Drawn at 4× resolution; scaled down to 48×48 for global view.
         """
         S, C = SPRITE_SZ, _SC
         rgba = np.zeros((S, S, 4), dtype=np.uint8)
@@ -218,13 +219,13 @@ class GlobalMap:
             cv2.rectangle(rgba, (x0, y0), (x1, y1), (0, 0, 0, a), -1)
             lab[y0:y1 + 1, x0:x1 + 1] = lbl
 
-        _rect(C - 9, C - 7, C + 7, C + 7, 153, 1)       # body 17×15
-        _rect(C - 4, C - 10, C + 4, C - 8, 153, 2)       # left track 9×3
-        _rect(C - 4, C + 8, C + 4, C + 10, 153, 2)       # right track 9×3
-        _rect(C - 11, C - 1, C - 9, C, 153, 2)            # caster 3×2
+        _rect(C - 36, C - 28, C + 28, C + 28, 153, 1)    # body 65×57
+        _rect(C - 16, C - 40, C + 16, C - 32, 153, 2)    # left track 33×9
+        _rect(C - 16, C + 32, C + 16, C + 40, 153, 2)    # right track 33×9
+        _rect(C - 44, C - 4, C - 36, C + 3, 153, 2)      # caster 9×8
 
-        cv2.arrowedLine(rgba, (C - 5, C), (C + 6, C),
-                        (255, 180, 0, 255), 1, tipLength=0.35)
+        cv2.arrowedLine(rgba, (C - 20, C), (C + 24, C),
+                        (255, 180, 0, 255), 2, tipLength=0.35)
         lab[rgba[:, :, 3] == 255] = 3
 
         return rgba, lab
