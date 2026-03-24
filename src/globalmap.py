@@ -97,17 +97,17 @@ class GlobalMap:
 
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """960×720 split view: left=center crop, right=8× ego zoom forward-up.
+        """960×720 split view: left=center crop, right=4× ego zoom forward-up.
 
-        trail_xy: (N, 2) float64 world [x, y] array, oldest→newest.
-        fwd/bwd/ang_scale: 0–1 safety throttle (1=safe, 0=blocked).
+        Both panels are derived from the same fully-rendered global map,
+        so the robot sprite and trail appear at the correct scale in both.
         """
         HALF = MAP_W // 2                          # 480
-        EGO_SCALE = 8.0
-        EGO_RX = HALF // 2                         # 240 — robot col in ego panel
-        EGO_RY = int(MAP_H * 0.80)                 # 576 — robot row in ego panel
+        EGO_SCALE = 4.0
+        EGO_RX = HALF // 2                         # 240 — robot col in ego output
+        EGO_RY = int(MAP_H * 0.80)                 # 576 — robot row in ego output
 
-        # coloured base map (no robot/trail yet)
+        # build + render full map with trail and robot
         disp = np.full((MAP_H, MAP_W), UNK_DISPLAY, dtype=np.uint8)
         disp[self._map > FREE_THRESH] = FREE_DISPLAY
         disp[self._map < OBS_THRESH] = OBS_DISPLAY
@@ -116,7 +116,23 @@ class GlobalMap:
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
 
-        # --- right panel: 8× ego zoom, forward=up ---
+        if trail_xy is not None and len(trail_xy) >= 2:
+            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
+            tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
+            keep = (tc >= 0) & (tc < MAP_W) & (tr >= 0) & (tr < MAP_H)
+            pts = np.column_stack([tc[keep], tr[keep]])
+            if len(pts) >= 2:
+                cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
+                              (80, 140, 255), 1, cv2.LINE_AA)
+
+        self._draw_robot(disp, rc, rr, theta,
+                         fwd_scale, bwd_scale, ang_scale)
+
+        # --- left panel: center crop around robot ---
+        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
+        left = disp[:, cx0:cx0 + HALF]
+
+        # --- right panel: 4× ego zoom from rendered map, forward=up ---
         ct, st = np.cos(theta), np.sin(theta)
         inv_s = 1.0 / EGO_SCALE
         M_ego = np.float64([
@@ -129,25 +145,6 @@ class GlobalMap:
             disp, M_ego, (HALF, MAP_H),
             flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
             borderValue=(UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY))
-        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
-                         fwd_scale, bwd_scale, ang_scale)
-
-        # draw trail + robot on base map (needed for left panel)
-        if trail_xy is not None and len(trail_xy) >= 2:
-            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.int32)
-            tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
-            keep = (tc >= 0) & (tc < MAP_W) & (tr >= 0) & (tr < MAP_H)
-            pts = np.column_stack([tc[keep], tr[keep]])
-            if len(pts) >= 2:
-                cv2.polylines(disp, [pts.reshape(-1, 1, 2)], False,
-                              (80, 140, 255), 1, cv2.LINE_AA)
-
-        # --- left panel: center crop around robot ---
-        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
-        left = disp[:, cx0:cx0 + HALF].copy()
-        lrc = rc - cx0
-        self._draw_robot(left, lrc, rr, theta,
-                         fwd_scale, bwd_scale, ang_scale)
 
         result = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
         result[:, :HALF] = left
