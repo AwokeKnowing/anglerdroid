@@ -113,6 +113,23 @@ class GlobalMap:
                            interpolation=cv2.INTER_NEAREST)
         return cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
 
+    def render_full(self, x, y, theta):
+        """512×512 BGR image for cv2.imshow."""
+        disp = np.full((SIZE, SIZE), UNK_DISPLAY, dtype=np.uint8)
+        disp[self._map > FREE_THRESH] = FREE_DISPLAY
+        disp[self._map < OBS_THRESH] = OBS_DISPLAY
+        disp = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+
+        rc = int(ORIGIN + x / PX_SIZE)
+        rr = int(ORIGIN - y / PX_SIZE)
+        if 4 <= rc < SIZE - 4 and 4 <= rr < SIZE - 4:
+            length = 8
+            dx = int(length * np.cos(theta))
+            dy = int(-length * np.sin(theta))
+            cv2.arrowedLine(disp, (rc - dx, rr - dy), (rc + dx, rr + dy),
+                            (255, 180, 0), 2, tipLength=0.35)
+        return disp
+
     def render_display_with_robot(self, x, y, theta):
         """128×128 BGR display with robot marker."""
         disp = self.render_display()

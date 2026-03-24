@@ -432,6 +432,9 @@ class Vision:
             gs = gmap_disp.shape[0]  # 128
             topdown[0:gs, FRAME_W - gs:FRAME_W] = gmap_disp
 
+            cv2.imshow("global_map", self._global_map.render_full(
+                self._pose.x, self._pose.y, self._pose.theta))
+
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
                 dbg_td[:, :, 2] = (np.uint8(255) - known_combined) // 4
