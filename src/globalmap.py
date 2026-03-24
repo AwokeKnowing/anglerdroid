@@ -91,10 +91,12 @@ class GlobalMap:
             self._map, M_inv, (ego_w, ego_h),
             flags=cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
 
-    def render(self, x, y, theta, trail_xy=None):
-        """MAP_W × MAP_H BGR image with robot arrow and optional trajectory.
+    def render(self, x, y, theta, trail_xy=None,
+               fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
+        """MAP_W × MAP_H BGR image with robot footprint and optional trajectory.
 
         trail_xy: (N, 2) float64 world [x, y] array, oldest→newest.
+        fwd/bwd/ang_scale: 0–1 safety throttle (1=safe, 0=blocked).
         """
         disp = np.full((MAP_H, MAP_W), UNK_DISPLAY, dtype=np.uint8)
         disp[self._map > FREE_THRESH] = FREE_DISPLAY
@@ -112,13 +114,60 @@ class GlobalMap:
 
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
-        if 6 <= rc < MAP_W - 6 and 6 <= rr < MAP_H - 6:
-            length = 10
-            dx = int(length * np.cos(theta))
-            dy = int(-length * np.sin(theta))
-            cv2.arrowedLine(disp, (rc - dx, rr - dy), (rc + dx, rr + dy),
-                            (255, 180, 0), 2, tipLength=0.3)
+        if 10 <= rc < MAP_W - 10 and 10 <= rr < MAP_H - 10:
+            self._draw_robot(disp, rc, rr, theta,
+                             fwd_scale, bwd_scale, ang_scale)
         return disp
+
+    @staticmethod
+    def _draw_robot(disp, rc, rr, theta, fwd_scale, bwd_scale, ang_scale):
+        """Draw multi-rect robot at 30% opacity with safety gradient."""
+        OPACITY = 0.3
+        ct, st = np.cos(theta), np.sin(theta)
+
+        def _rot(dx, dy):
+            """Rotate (dx right, dy up) in world to (col, row) offsets."""
+            return (dx * ct + dy * st, -dx * st + dy * ct)
+
+        def _box(cx, cy, hw, hh, color):
+            """Draw a filled rotated box at world-relative (cx, cy) half-sizes (hw, hh)."""
+            corners = []
+            for sx, sy in [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]:
+                dc, dr = _rot(cx + sx, cy + sy)
+                corners.append([int(rc + dc), int(rr - dr)])
+            pts = np.array(corners, dtype=np.int32)
+            overlay = disp.copy()
+            cv2.fillConvexPoly(overlay, pts, color, cv2.LINE_AA)
+            cv2.addWeighted(overlay, OPACITY, disp, 1.0 - OPACITY, 0, dst=disp)
+
+        danger = min(fwd_scale, bwd_scale, ang_scale)
+        body_r = int(255 * (1.0 - danger))
+        body_g = int(160 * danger + 60 * (1.0 - danger))
+        body_b = int(255 * danger)
+        body_color = (body_b, body_g, body_r)
+
+        track_danger = 1.0 - min(fwd_scale, bwd_scale)
+        tr_r = int(180 * track_danger)
+        tr_g = int(60 + 100 * (1.0 - track_danger))
+        tr_b = int(180 * (1.0 - track_danger))
+        track_color = (tr_b, tr_g, tr_r)
+
+        # Robot body: 16w × 15h px on map (≈32×30 cm). Centre offset 1px rear.
+        _box(-1, 0, 8, 7.5, body_color)
+        # Left track: 8.5w × 3h, offset ±10.5 laterally
+        _box(0.5, 10.5, 4.25, 1.5, track_color)
+        _box(0.5, -10.5, 4.25, 1.5, track_color)
+        # Caster: 3w × 1.5h, rear centre
+        _box(-7, 0, 1.5, 0.75, track_color)
+
+        # Direction arrow (solid, on top)
+        length = 10
+        adx, adr = _rot(length, 0)
+        bdx, bdr = _rot(-length, 0)
+        cv2.arrowedLine(disp,
+                        (int(rc + bdx), int(rr - bdr)),
+                        (int(rc + adx), int(rr - adr)),
+                        (255, 180, 0), 2, tipLength=0.3)
 
     # ── affine transforms ─────────────────────────────────────────
 

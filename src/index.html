@@ -11,7 +11,7 @@ header{display:flex;justify-content:space-between;align-items:center;padding:8px
 header h1{font-size:1.1rem;font-weight:600}
 #status{font-size:.75rem;color:#888}
 .main{display:flex;flex:1;overflow:hidden}
-.left{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:12px;gap:12px}
+.left{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:12px;gap:12px;overflow:auto;cursor:grab}
 .right{width:340px;display:flex;flex-direction:column;padding:12px;gap:10px;border-left:1px solid #333;overflow-y:auto}
 #fs-wrap{display:flex;flex-direction:column;align-items:center;gap:12px}
 #eyes{width:520px;height:260px;background:#000;border-radius:16px;display:flex;align-items:center;justify-content:center;gap:60px;cursor:pointer;position:relative;flex-shrink:0}
@@ -399,6 +399,28 @@ function initGoogleSignIn() {
 function onGoogleAuth(resp) {
   if (ws) ws.send(JSON.stringify({type: 'auth', credential: resp.credential}));
 }
+
+/* Drag-to-pan on the left panel (works when browser-zoomed) */
+(function(){
+  const el = document.querySelector('.left');
+  let dragging = false, sx, sy, sl, st;
+  el.addEventListener('mousedown', e => {
+    if (e.target.closest('#eyes')) return;
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    sl = el.scrollLeft; st = el.scrollTop;
+    el.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    el.scrollLeft = sl - (e.clientX - sx);
+    el.scrollTop  = st - (e.clientY - sy);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; el.style.cursor = 'grab';
+  });
+})();
 
 connect();
 </script>

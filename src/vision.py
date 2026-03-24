@@ -460,11 +460,14 @@ class Vision:
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
 
-            # --- Render global map with trajectory ---
+            # --- Render global map with trajectory + safety overlay ---
             trail = self._pose.get_world_history()
             gmap_render = self._global_map.render(
                 self._pose.x, self._pose.y, self._pose.theta,
-                trail_xy=trail)
+                trail_xy=trail,
+                fwd_scale=self._safety.fwd_scale,
+                bwd_scale=self._safety.bwd_scale,
+                ang_scale=self._safety.ang_scale)
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
