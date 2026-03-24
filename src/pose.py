@@ -30,7 +30,7 @@ HISTORY_SIZE = 900
 # over-report rotation (body turns less than treads move).
 # <1.0 = reduce reported rotation.  Set 1.0 for hard floors.
 # 15° over-report per revolution → 360/(360+15) ≈ 0.96.
-ANGULAR_SLIP_SCALE = 0.96
+ANGULAR_SLIP_SCALE = 0.92
 LINEAR_SLIP_SCALE  = 1.0
 
 # ── Robot physics (generous upper bounds) ──────────────────────────
