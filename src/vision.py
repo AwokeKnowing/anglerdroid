@@ -52,7 +52,7 @@ FW_PIVOT = np.array([0.0, -1.0, 0.02], dtype=np.float32)
 FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame (fixed)
-FW_FLOOR_CLIP  = np.float32(0.02)   # min height: ignore below 2cm (carpet/floor)
+FW_FLOOR_CLIP  = np.float32(0.05)   # min height: ignore below 5cm (carpet/floor)
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 _known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
