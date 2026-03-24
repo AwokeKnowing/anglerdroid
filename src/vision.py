@@ -18,6 +18,7 @@ from cameras import RSCamera, WebCam, HAS_RS, FRAME_W, FRAME_H
 import odometry
 from safety import SafetyGuard
 from pose import PoseEstimator
+from globalmap import GlobalMap
 
 ATLAS_W, ATLAS_H = 640, 480
 TARGET_FPS = 30
@@ -268,6 +269,7 @@ class Vision:
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
+        self._global_map = GlobalMap()
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -385,24 +387,26 @@ class Vision:
             fused_yaw, fused_fwd = self._pose.update(
                 vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
 
-            # --- Warp persistent obstacle map by fused odometry ---
+            # --- Update global occupancy map ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
-            if abs(fused_yaw) > 1e-6 or abs(fused_fwd) > 1e-6:
-                M_warp = cv2.getRotationMatrix2D((rcx_f, rcy_f),
-                                                 -np.degrees(fused_yaw), 1.0)
-                M_warp[0, 2] -= fused_fwd / float(TD_PX_SIZE)
-                self._persistent_obs = cv2.warpAffine(
-                    self._persistent_obs, M_warp, (FRAME_W, FRAME_H),
-                    borderValue=0)
 
-            free = (known_combined > 0) & (obs_combined == 0)
-            self._persistent_obs[free] = 0
-            self._persistent_obs[obs_combined > 0] = 255
+            self._global_map.update(
+                obs_combined, known_combined,
+                self._pose.x, self._pose.y, self._pose.theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE))
 
-            unknown = known_combined == 0
-            v = self._persistent_obs[unknown].astype(np.uint16)
-            self._persistent_obs[unknown] = ((v * 251) >> 8).astype(np.uint8)
+            # Project global map to ego space for costmap/safety.
+            # Raw byte: 0=strong obstacle, 128=unknown, 255=strong free.
+            ego_proj = self._global_map.project_to_ego(
+                self._pose.x, self._pose.y, self._pose.theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+
+            # Convert to persistent_obs format (0=free, 255=obstacle)
+            # and merge with current frame for immediate reactivity.
+            self._persistent_obs[:] = 0
+            self._persistent_obs[ego_proj < 90] = 255  # confirmed obstacles
+            self._persistent_obs[obs_combined > 0] = 255  # current frame (instant)
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
             topdown = _build_costmap(self._persistent_obs, known_combined)
@@ -423,9 +427,10 @@ class Vision:
             self._safety.draw_trajectory(topdown)
             self._safety.draw_wheel_flash(topdown)
 
-            minimap = self._pose.render_minimap()
-            ms = minimap.shape[0]
-            topdown[0:ms, FRAME_W - ms:FRAME_W] = minimap
+            gmap_disp = self._global_map.render_display_with_robot(
+                self._pose.x, self._pose.y, self._pose.theta)
+            gs = gmap_disp.shape[0]  # 128
+            topdown[0:gs, FRAME_W - gs:FRAME_W] = gmap_disp
 
             if DEBUG_CAMERAS:
                 dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
