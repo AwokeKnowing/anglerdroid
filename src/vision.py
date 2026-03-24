@@ -287,23 +287,28 @@ class Vision:
 
     @staticmethod
     def _build_obs_mask():
-        """Pre-compute ego-space mask: 80° forward cone, 2.5m radius, robot excluded."""
+        """Pre-compute ego-space mask: RS1 rectangle (edge-trimmed) ∪ RS2 80° cone, robot excluded."""
         rcx = CROSSHAIR_CX + ROBOT_CX_OFF          # 81 — robot center column
         rcy = CROSSHAIR_CY                          # 119 — robot center row
+
+        mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+
+        # RS1 top-down rectangle: covers ego cols 0..(FRAME_W+TD_X_OFFSET), full rows.
+        # Trim edges by TD_EDGE px for sensor-boundary noise.
+        TD_EDGE = 10
+        td_col_end = FRAME_W + int(TD_X_OFFSET)     # 245
+        mask[TD_EDGE:FRAME_H - TD_EDGE, TD_EDGE:td_col_end - TD_EDGE] = 255
+
+        # RS2 forward 80° cone (±40°), 2.5m range, from robot center
         yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]
         dx = (xx - rcx).astype(np.float32)
         dy = (yy - rcy).astype(np.float32)
         dist = np.sqrt(dx * dx + dy * dy)
         angle = np.abs(np.degrees(np.arctan2(dy, dx)))
+        cone = (angle <= 40.0) & (dist <= 250.0)
+        mask[cone] = 255
 
-        OBS_CONE_HALF_DEG = 40.0                    # ±40° from forward (right)
-        OBS_MAX_RANGE_PX = 250.0                     # 2.5 m at 1 cm/px
-        ROBOT_CLEAR_PX = 22.0                        # ~robot half-diagonal
-
-        mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        inside = (angle <= OBS_CONE_HALF_DEG) & (dist <= OBS_MAX_RANGE_PX) & (dist > ROBOT_CLEAR_PX)
-        mask[inside] = 255
-
+        # Clear robot footprint (force-set to known+free in capture loop)
         rx0 = max(0, rcx - ROBOT_W // 2 - 2)
         ry0 = max(0, rcy - ROBOT_H // 2 - 2)
         rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
