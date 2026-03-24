@@ -117,7 +117,6 @@ class UI:
 
         self._latest_atlas = None       # type: Optional[np.ndarray]
         self._atlas_jpeg = None         # type: Optional[bytes]
-        self._gmap_jpeg = None          # type: Optional[bytes]
         self._atlas_lock = threading.Lock()
 
         self._ws_loop = None            # type: Optional[asyncio.AbstractEventLoop]
@@ -161,21 +160,24 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Build vertical atlas (112x336) for AI; upscale for browser."""
-        h, w = atlas_rgb.shape[0] // 2, atlas_rgb.shape[1] // 2
-        quads = [
-            atlas_rgb[0:h, 0:w],       # UL: camera
-            atlas_rgb[0:h, w:w*2],      # UR: depth
-            atlas_rgb[h:h*2, 0:w],      # LL: overhead
-            atlas_rgb[h:h*2, w:w*2],    # LR: costmap
-        ]
-        small_quads = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
-                       for q in quads]
-        vstack = np.vstack(small_quads)  # 112 x 336
+        """Build vertical atlas (112×336) for AI; encode full atlas for browser.
 
-        big = cv2.resize(vstack, (224, 672), interpolation=cv2.INTER_NEAREST)
-        _, buf = cv2.imencode('.jpg', big[:, :, ::-1],
-                              [cv2.IMWRITE_JPEG_QUALITY, 70])
+        Atlas layout: 960×960 = 3 cameras (320×240 each) top + 960×720 map.
+        AI vertical strip: 4 panels (112×84 each) stacked → 112×336.
+        """
+        fw = 320
+        cam_h = 240
+        cam1 = atlas_rgb[0:cam_h, 0:fw]
+        cam2 = atlas_rgb[0:cam_h, fw:fw * 2]
+        cam3 = atlas_rgb[0:cam_h, fw * 2:fw * 3]
+        gmap = atlas_rgb[cam_h:, :]
+
+        small = [cv2.resize(q, (112, 84), interpolation=cv2.INTER_AREA)
+                 for q in [cam1, cam2, cam3, gmap]]
+        vstack = np.vstack(small)  # 112×336
+
+        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
+                              [cv2.IMWRITE_JPEG_QUALITY, 80])
         jpeg = buf.tobytes()
         with self._atlas_lock:
             if self._latest_atlas is None or self._latest_atlas.shape != vstack.shape:
@@ -183,13 +185,6 @@ class UI:
             else:
                 np.copyto(self._latest_atlas, vstack)
             self._atlas_jpeg = jpeg
-
-    def send_global_map(self, gmap_bgr):
-        """Encode 512×512 BGR global map as JPEG for browser streaming."""
-        _, buf = cv2.imencode('.jpg', gmap_bgr,
-                              [cv2.IMWRITE_JPEG_QUALITY, 80])
-        with self._atlas_lock:
-            self._gmap_jpeg = buf.tobytes()
 
     def get_user_text(self):
         with self._lock:
@@ -282,15 +277,9 @@ class UI:
                 if now - last_atlas_bc > 0.033:
                     with self._atlas_lock:
                         jpeg = self._atlas_jpeg
-                        gmap = self._gmap_jpeg
                     if jpeg is not None:
                         try:
-                            await self._send_all(b'\x00' + jpeg)
-                        except Exception:
-                            pass
-                    if gmap is not None:
-                        try:
-                            await self._send_all(b'\x01' + gmap)
+                            await self._send_all(jpeg)
                         except Exception:
                             pass
                     last_atlas_bc = now

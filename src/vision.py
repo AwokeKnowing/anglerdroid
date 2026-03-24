@@ -5,7 +5,9 @@ RS1 (top-down camera) pointcloud → orthographic depth map (already top-down).
 RS2 (forward camera) pointcloud → rotated -64.4° around X → bird's-eye view.
 Both are combined into the topdown obstacle map quadrant.
 
-Atlas layout (640x480): UL=rgb1, UR=rgbd1_rgb, LL=rgbd2_rgb, LR=topdown obstacle map.
+Atlas layout (960×960):
+  Row 0–239:   rgb1 (320×240) | rgbd1 (320×240) | rgbd2 (320×240)
+  Row 240–959:  global map (960×720)
 """
 
 import math
@@ -18,9 +20,11 @@ from cameras import RSCamera, WebCam, HAS_RS, FRAME_W, FRAME_H
 import odometry
 from safety import SafetyGuard
 from pose import PoseEstimator
-from globalmap import GlobalMap
+from globalmap import GlobalMap, MAP_W, MAP_H
 
-ATLAS_W, ATLAS_H = 640, 480
+CAM_ROW_H = FRAME_H                          # 240
+ATLAS_W = FRAME_W * 3                        # 960
+ATLAS_H = CAM_ROW_H + MAP_H                  # 960
 TARGET_FPS = 30
 
 CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
@@ -270,7 +274,6 @@ class Vision:
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
         self._global_map = GlobalMap()
-        self._global_map_bgr = np.zeros((512, 512, 3), dtype=np.uint8)
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -410,55 +413,25 @@ class Vision:
             self._persistent_obs[obs_combined > 0] = 255  # current frame (instant)
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
-            topdown = _build_costmap(self._persistent_obs, known_combined)
 
-            # --- Draw world-space trajectory on ego costmap ---
-            ego_pts = self._pose.world_to_ego_pixels(
-                float(TD_PX_SIZE), rcx_f, rcy_f)
-            if len(ego_pts) >= 2:
-                keep = ((ego_pts[:, 0] >= 0) & (ego_pts[:, 0] < FRAME_W) &
-                        (ego_pts[:, 1] >= 0) & (ego_pts[:, 1] < FRAME_H))
-                visible = ego_pts[keep]
-                if len(visible) >= 2:
-                    cv2.polylines(topdown,
-                                  [visible.reshape(-1, 1, 2)],
-                                  isClosed=False,
-                                  color=(80, 140, 255), thickness=1,
-                                  lineType=cv2.LINE_AA)
-            self._safety.draw_trajectory(topdown)
-            self._safety.draw_wheel_flash(topdown)
-
-            gmap_disp = self._global_map.render_display_with_robot(
-                self._pose.x, self._pose.y, self._pose.theta)
-            gs = gmap_disp.shape[0]  # 128
-            topdown[0:gs, FRAME_W - gs:FRAME_W] = gmap_disp
-
-            if DEBUG_CAMERAS:
-                dbg_td = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-                dbg_td[:, :, 2] = (np.uint8(255) - known_combined) // 4
-                _blit(dbg_td[:, :, 0], obs2, fw_dx, fw_dy)
-                _blit(dbg_td[:, :, 1], obs1, td_dx)
-                cv2.imshow("obstacles_debug", dbg_td)
+            # --- Render global map with trajectory ---
+            trail = self._pose.get_world_history()
+            gmap_render = self._global_map.render(
+                self._pose.x, self._pose.y, self._pose.theta,
+                trail_xy=trail)
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
             rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
 
-            gmap_full = self._global_map.render_full(
-                self._pose.x, self._pose.y, self._pose.theta)
-
             with self._lock:
                 self.frames[0][:] = rgb1
                 self.frames[1][:] = rgbd1
                 self.frames[2][:] = rgbd2
-                self.atlas[0:FRAME_H, 0:FRAME_W] = rgb1
-                self.atlas[0:FRAME_H, FRAME_W:ATLAS_W] = rgbd1
-                self.atlas[FRAME_H:ATLAS_H, 0:FRAME_W] = rgbd2
-                self.atlas[FRAME_H:ATLAS_H, FRAME_W:ATLAS_W] = topdown
-                self._global_map_bgr[:] = gmap_full
-                if DEBUG_CAMERAS:
-                    for yo, xo in [(0, 0), (0, FRAME_W), (FRAME_H, 0), (FRAME_H, FRAME_W)]:
-                        _draw_center_crosshair(self.atlas[yo:yo + FRAME_H, xo:xo + FRAME_W])
+                self.atlas[0:CAM_ROW_H, 0:FRAME_W] = rgb1
+                self.atlas[0:CAM_ROW_H, FRAME_W:FRAME_W * 2] = rgbd1
+                self.atlas[0:CAM_ROW_H, FRAME_W * 2:FRAME_W * 3] = rgbd2
+                self.atlas[CAM_ROW_H:ATLAS_H, 0:ATLAS_W] = gmap_render
                 self.timestamp = time.time()
 
     def stop(self):
@@ -477,11 +450,6 @@ class Vision:
         """Return (atlas_copy, timestamp) -- lightweight read for main loop."""
         with self._lock:
             return self.atlas.copy(), self.timestamp
-
-    def read_global_map(self):
-        """Return 512×512 BGR global map image (copy)."""
-        with self._lock:
-            return self._global_map_bgr.copy()
 
     def read(self):
         """Return (frames, atlas, timestamp) under lock (safe copy)."""

@@ -95,7 +95,6 @@ def main():
             atlas, ts = tools.get_atlas()
             if atlas is not None:
                 u.send_atlas(atlas)
-                u.send_global_map(tools.get_global_map())
 
 
             if HAS_RERUN and not args.no_rerun:
