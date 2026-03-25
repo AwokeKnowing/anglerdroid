@@ -331,7 +331,7 @@ class Vision:
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
         self._global_map = GlobalMap()
-        self._obs_mask = self._build_obs_mask()
+        self._obs_mask, self._fw_cone_mask = self._build_obs_mask()
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -343,14 +343,20 @@ class Vision:
 
     @staticmethod
     def _build_obs_mask():
-        """Pre-compute ego-space mask: RS1 rectangle (edge-trimmed) ∪ RS2 80° cone, robot excluded."""
+        """Pre-compute ego-space masks.
+
+        Returns (combined_mask, fw_cone_mask):
+          combined_mask — RS1 rectangle ∪ RS2 80° cone, robot excluded.
+          fw_cone_mask — RS2 80° cone only (used to clip RS2 known before
+                         combining with RS1 known, preventing the raycasted
+                         known area from leaking into the RS1 rectangle).
+        """
         rcx = CROSSHAIR_CX + ROBOT_CX_OFF          # 81 — robot center column
         rcy = CROSSHAIR_CY                          # 119 — robot center row
 
         mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
         # RS1 top-down rectangle: covers ego cols 0..(FRAME_W+TD_X_OFFSET), full rows.
-        # Trim edges by TD_EDGE px for sensor-boundary noise.
         TD_EDGE = 10
         td_col_end = FRAME_W + int(TD_X_OFFSET)     # 245
         mask[TD_EDGE:FRAME_H - TD_EDGE, TD_EDGE:td_col_end - TD_EDGE] = 255
@@ -362,6 +368,10 @@ class Vision:
         dist = np.sqrt(dx * dx + dy * dy)
         angle = np.abs(np.degrees(np.arctan2(dy, dx)))
         cone = (angle <= 40.0) & (dist <= 250.0)
+
+        fw_cone = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        fw_cone[cone] = 255
+
         mask[cone] = 255
 
         # Clear robot footprint (force-set to known+free in capture loop)
@@ -370,7 +380,7 @@ class Vision:
         rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
         ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
         mask[ry0:ry1, rx0:rx1] = 0
-        return mask
+        return mask, fw_cone
 
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""
@@ -459,6 +469,7 @@ class Vision:
             _blit(known_combined, known1, td_dx)
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(kc_tmp, known2, fw_dx, fw_dy)
+            np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
             np.maximum(known_combined, kc_tmp, out=known_combined)
             cv2.morphologyEx(known_combined, cv2.MORPH_CLOSE, _known_kernel,
                              iterations=2, dst=known_combined)
