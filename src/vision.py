@@ -373,6 +373,9 @@ class Vision:
                 self._rs2.grab()
             _t_grab = time.monotonic()
 
+            # Snapshot pose at capture time (before odometry advances it)
+            cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
+
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -452,7 +455,7 @@ class Vision:
 
             self._global_map.update(
                 obs_combined, known_combined,
-                self._pose.x, self._pose.y, self._pose.theta,
+                cap_x, cap_y, cap_theta,
                 rcx_f, rcy_f, float(TD_PX_SIZE))
             _t_gmap_up = time.monotonic()
 
