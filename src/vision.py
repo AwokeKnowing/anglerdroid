@@ -130,9 +130,18 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     return obs, known
 
 
+_raycast_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+_N_RAYS = 500
+
+
 def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     """RS2 (forward camera) pointcloud → (obstacles, known) via rotated bird's-eye.
-    Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
+
+    Known mask is built via 2D raycasting from the camera centre in the
+    top-down plane.  Rays stop at the nearest obstacle, so space behind
+    obstacles remains *unknown* rather than being falsely marked free.
+    Returns two single-channel uint8 arrays of shape (out_h, out_w).
+    """
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
     known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
@@ -157,14 +166,13 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
 
     scale = np.float32(1.0 / FW_PX_SIZE)
-    proj = v[:, :2] * scale + np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * scale])
-    j, i = proj.astype(np.uint32).T
+    offset = np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * scale])
+    proj = v[:, :2] * scale + offset
+    with np.errstate(invalid='ignore'):
+        j, i = proj.astype(np.uint32).T
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
-    known[i[m_all], j[m_all]] = 255
 
-    if DEBUG_CAMERAS:
-        cv2.imshow("fw_rotated_noclip", known.copy())
-
+    # --- Obstacle mask (height-filtered + morph close) ---
     m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
     obs[i[m_obs], j[m_obs]] = 255
 
@@ -175,6 +183,54 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_final", obs.copy())
+
+    # --- 2D raycasting: known mask via polar line-of-sight ---
+    # Camera origin projected into the top-down pixel grid
+    cam_world = (np.dot(np.float32([0, 0, 0]) - FW_PIVOT, FW_ROTATION)
+                 + FW_PIVOT - FW_TRANSLATION)
+    cam_px = cam_world[:2] * scale + offset
+    cx, cy = float(cam_px[0]), float(cam_px[1])
+
+    max_r = int(math.sqrt(float(out_h) ** 2 + float(out_w) ** 2)) + 1
+    center = (cx, cy)
+
+    # obs → polar (rows = angle bins, cols = distance from camera)
+    polar_obs = cv2.warpPolar(
+        obs, (max_r, _N_RAYS), center, float(max_r),
+        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
+
+    # Valid-point mask (dilated to fill gaps) → polar
+    valid_mask = np.zeros((out_h, out_w), dtype=np.uint8)
+    valid_mask[i[m_all], j[m_all]] = 255
+    cv2.dilate(valid_mask, _raycast_dilate_kern, dst=valid_mask)
+    polar_valid = cv2.warpPolar(
+        valid_mask, (max_r, _N_RAYS), center, float(max_r),
+        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
+
+    # Per-angle: nearest obstacle, farthest valid point
+    has_obs_row = polar_obs > 0
+    any_obs_row = has_obs_row.any(axis=1)
+    first_obs_col = np.argmax(has_obs_row, axis=1)
+
+    has_val_row = polar_valid > 0
+    any_val_row = has_val_row.any(axis=1)
+    last_val_col = max_r - 1 - np.argmax(has_val_row[:, ::-1], axis=1)
+
+    # Endpoint: nearest obstacle if any, else farthest valid, else no ray
+    endpoint = np.where(
+        any_obs_row, first_obs_col,
+        np.where(any_val_row, last_val_col, np.int32(-1)))
+
+    # Build polar known: cols 0..endpoint = 255 per row
+    cols = np.arange(max_r, dtype=np.int32)
+    polar_known = np.where(
+        (endpoint[:, None] >= 0) & (cols[None, :] <= endpoint[:, None]),
+        np.uint8(255), np.uint8(0)).astype(np.uint8)
+
+    # Warp back to Cartesian
+    known = cv2.warpPolar(
+        polar_known, (out_w, out_h), center, float(max_r),
+        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
 
     return obs, known
 
