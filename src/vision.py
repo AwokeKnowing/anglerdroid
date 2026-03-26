@@ -142,6 +142,7 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
 
 
 _raycast_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+_polar_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3))
 _N_RAYS = 500
 
 
@@ -215,6 +216,9 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     polar_obs = cv2.warpPolar(
         obs, (max_r, _N_RAYS), center, float(max_r),
         cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
+    # Dilate in polar space to close sampling gaps (prevents rays leaking
+    # through thin obstacles).  Only affects ray termination, not output obs.
+    cv2.dilate(polar_obs, _polar_dilate_kern, dst=polar_obs)
 
     # Valid-point mask (dilated to fill gaps) → polar
     valid_mask = np.zeros((out_h, out_w), dtype=np.uint8)
