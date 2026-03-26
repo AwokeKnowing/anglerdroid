@@ -1,9 +1,14 @@
 """vision.py – Process camera frames into atlas + obstacle map.
-Camera hardware lives in cameras.py. Depth processing is pure numpy.
+Camera hardware lives in cameras.py.  Depth processing is pure numpy/cv2.
 
-RS1 (top-down camera) pointcloud → orthographic depth map (already top-down).
-RS2 (forward camera) pointcloud → rotated -64.4° around X → bird's-eye view.
-Both are combined into the topdown obstacle map quadrant.
+Each depth camera produces a per-pixel classification:
+  FREE      — floor detected (known, no obstacle)
+  OBSTACLE  — object above floor detected
+  UNOBSERVED — no valid depth data (blind spot, behind obstacle, outside FOV)
+
+RS1 (top-down camera): orthographic projection, classification by Z threshold.
+RS2 (forward camera):  pitch-rotated to bird's-eye, 2D raycasting for known mask.
+Both are combined, masked to their respective FOVs, and fed to the global map.
 
 Atlas layout (960×960):
   Row 0–239:   rgb1 (320×240) | rgbd1 (320×240) | rgbd2 (320×240)
@@ -54,7 +59,6 @@ FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame (fixed)
 FW_FLOOR_CLIP  = np.float32(0.05)   # min height: ignore below 5cm (carpet/floor)
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
-_known_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
 
 # RS2 (forward camera) extrinsic Y offset (~10cm higher than calibration).
 # Camera Y-down: camera-higher = negative Y offset.
@@ -94,9 +98,16 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
 
 
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
-    """RS1 (top-down camera) pointcloud → (obstacles, known) via orthographic projection.
-    Floor is clipped by Z before projection. Remaining points = obstacles.
-    Returns two single-channel uint8 arrays of shape (out_h, out_w)."""
+    """RS1 (top-down camera) pointcloud → (obs, known) via orthographic projection.
+
+    Classification (per pixel):
+      known=255, obs=0   → floor detected (z >= TD_FLOOR_CLIP) — free
+      known=255, obs=255 → object detected (0 < z < TD_FLOOR_CLIP) — obstacle
+      known=0            → no valid depth at this pixel — unobserved
+
+    Only pixels with actual depth measurements are marked known.
+    Returns two uint8 arrays of shape (out_h, out_w).
+    """
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
     known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
@@ -135,12 +146,18 @@ _N_RAYS = 500
 
 
 def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
-    """RS2 (forward camera) pointcloud → (obstacles, known) via rotated bird's-eye.
+    """RS2 (forward camera) pointcloud → (obs, known) via rotated bird's-eye.
 
-    Known mask is built via 2D raycasting from the camera centre in the
-    top-down plane.  Rays stop at the nearest obstacle, so space behind
-    obstacles remains *unknown* rather than being falsely marked free.
-    Returns two single-channel uint8 arrays of shape (out_h, out_w).
+    Classification (per pixel):
+      known=255, obs=0   → camera ray passed through without hitting anything — free
+      known=255, obs=255 → object detected (FW_FLOOR_CLIP < z < FW_HEIGHT_CLIP) — obstacle
+      known=0            → unobserved (behind obstacle, outside FOV, no data)
+
+    Known mask uses 2D raycasting from camera centre in the top-down plane:
+    for each angular bin, a ray extends from the camera to the nearest
+    obstacle (or to the farthest valid point if no obstacle).  Space behind
+    obstacles stays unknown.  The capture loop clips to an 80° cone.
+    Returns two uint8 arrays of shape (out_h, out_w).
     """
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
     known = np.zeros((out_h, out_w), dtype=np.uint8)
@@ -233,82 +250,6 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
 
     return obs, known
-
-
-_PILLOW_RADIUS = 21  # ~70% of 30 — faster falloff
-_obs_dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-_robot_inv = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-
-
-def _build_costmap(obs_combined, known_combined):
-    """RGB costmap: white=free, grey=unknown, anti-aliased obstacles.
-    obs_combined may be 0-255 (persistent map with faded stale obstacles).
-    Distance field from robot colours nearby obstacles red→yellow at 55% opacity.
-    Robot drawn in blue with caster wheel."""
-    h, w = obs_combined.shape
-    costmap = np.full((h, w, 3), 255, dtype=np.uint8)
-
-    obs_raw = obs_combined > 0
-
-    rcx = CROSSHAIR_CX + ROBOT_CX_OFF
-    rcy = CROSSHAIR_CY
-    rx0 = max(0, rcx - 20)          # 35 wide mask (extra 5px left for caster)
-    ry0 = max(0, rcy - ROBOT_H // 2)
-    rx1 = min(w, rcx + 16)          # +1px front bumper clearance
-    ry1 = min(h, ry0 + ROBOT_H)
-    obs_raw[ry0:ry1, rx0:rx1] = False
-
-    obs_u8 = obs_combined.copy()
-    obs_u8[ry0:ry1, rx0:rx1] = 0
-    cv2.dilate(obs_u8, _obs_dilate_kernel, dst=obs_u8)
-    obs_u8[ry0:ry1, rx0:rx1] = 0
-    obs_aa = cv2.GaussianBlur(obs_u8, (3, 3), 0.7)
-
-    # Biased alias on known/unknown boundary: blur known mask so open space
-    # feathers outward into unknown (white→grey fade, never grey→white)
-    known_aa = cv2.GaussianBlur(known_combined, (5, 5), 1.0)
-    unk_alpha = 1.0 - known_aa.astype(np.float32) / 255.0  # 0=known, 1=unknown
-    has_unk = (unk_alpha > 0.0) & (~obs_raw)
-    if np.any(has_unk):
-        val = (255.0 * (1.0 - unk_alpha[has_unk]) +
-               242.0 * unk_alpha[has_unk]).astype(np.uint8)
-        costmap[has_unk] = val[:, np.newaxis]
-
-    # Anti-aliased obstacles: alpha-blend dark grey over background
-    where_obs = obs_aa > 0
-    if np.any(where_obs):
-        alpha = obs_aa[where_obs].astype(np.float32) / 255.0
-        bg = costmap[where_obs].astype(np.float32)
-        costmap[where_obs] = (bg * (1.0 - alpha[:, np.newaxis]) +
-                              50.0 * alpha[:, np.newaxis]).astype(np.uint8)
-
-    # Distance from robot edge (pillow field)
-    _robot_inv[:] = 255
-    _robot_inv[ry0:ry1, rx0:rx1] = 0
-    robot_dist = cv2.distanceTransform(_robot_inv, cv2.DIST_L2, 5)
-
-    # Danger overlay: red→yellow at 55% opacity on solid obstacles within pillow
-    obs_in_pillow = (obs_aa >= 128) & (robot_dist <= _PILLOW_RADIUS)
-    if np.any(obs_in_pillow):
-        t = np.clip(robot_dist[obs_in_pillow] / float(_PILLOW_RADIUS), 0.0, 1.0)
-        danger = np.empty((int(t.shape[0]), 3), dtype=np.float32)
-        danger[:, 0] = 255.0
-        danger[:, 1] = t * 255.0
-        danger[:, 2] = 0.0
-        bg = costmap[obs_in_pillow].astype(np.float32)
-        costmap[obs_in_pillow] = (bg * 0.45 + danger * 0.55).astype(np.uint8)
-
-    # Body: 33w × 30h, light blue (RGB) — extends 3px more to rear
-    costmap[max(0, rcy - 15):rcy + 15, max(0, rcx - 18):rcx + 15] = (100, 160, 255)
-    # Tracks: 17w × 6h centred at (rcx+1), dark blue (RGB)
-    tx0 = max(0, rcx - 7)
-    tx1 = rcx + 10
-    costmap[max(0, rcy - 21):max(0, rcy - 15), tx0:tx1] = (30, 60, 180)
-    costmap[rcy + 15:min(h, rcy + 21), tx0:tx1] = (30, 60, 180)
-    # Caster: 6w × 3h, dark blue, rear centre — shifted 3px left
-    costmap[rcy - 1:rcy + 2, max(0, rcx - 23):max(0, rcx - 17)] = (30, 60, 180)
-
-    return costmap
 
 
 class Vision:
@@ -462,30 +403,36 @@ class Vision:
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
 
-            # Build known-area mask (union of both cameras, morph-closed to fill holes)
+            # --- Combine into ego-space (obs_combined, known_combined) ---
+            # Principle: a pixel is "known" ONLY where a camera actually measured
+            # depth.  No morphological expansion of known — blind spots (mast
+            # shadow, sensor holes) stay unobserved.
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
             td_dx = int(TD_X_OFFSET)
-            known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit(known_combined, known1, td_dx)
+
+            # RS2 known: clip to 80° forward cone before combining
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(kc_tmp, known2, fw_dx, fw_dy)
             np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
-            np.maximum(known_combined, kc_tmp, out=known_combined)
-            cv2.morphologyEx(known_combined, cv2.MORPH_CLOSE, _known_kernel,
-                             iterations=2, dst=known_combined)
 
-            # Combine obstacles (union of TD and FW cameras)
+            # Union of both cameras' known masks
+            known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            _blit(known_combined, known1, td_dx)
+            np.maximum(known_combined, kc_tmp, out=known_combined)
+
+            # Union of both cameras' obstacle masks
             obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(obs_combined, obs1, td_dx)
             obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(obs_tmp, obs2, fw_dx, fw_dy)
             np.maximum(obs_combined, obs_tmp, out=obs_combined)
 
-            # Mask observations to 80° forward cone, 2.5m range, robot excluded
+            # Clip both to valid observation area:
+            #   RS1 → edge-trimmed rectangle, RS2 → 80° cone (already clipped above)
             np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
             np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
 
-            # Robot footprint is always known-free
+            # Robot footprint is always known-free (robot physically occupies it)
             rcx = CROSSHAIR_CX + ROBOT_CX_OFF
             rcy = CROSSHAIR_CY
             rx0 = max(0, rcx - ROBOT_W // 2 - 2)
