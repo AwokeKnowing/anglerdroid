@@ -26,6 +26,7 @@ import odometry
 from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H
+from slam import PoseGraphSLAM
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -275,7 +276,7 @@ class Vision:
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
-        self._global_map = GlobalMap()
+        self._global_map = PoseGraphSLAM()
         self._obs_mask, self._fw_cone_mask = self._build_obs_mask()
         self._wheelbase = None
         self._last_capture_time = None
