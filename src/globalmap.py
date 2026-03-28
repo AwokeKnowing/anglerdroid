@@ -330,17 +330,17 @@ class GlobalMap:
 
         draw.sort(key=lambda d: d[0])
 
-        canvas = np.zeros((MAP_H, HALF, 4), dtype=np.uint8)
+        rgb = np.zeros((MAP_H, HALF, 3), dtype=np.uint8)
+        amask = np.zeros((MAP_H, HALF), dtype=np.uint8)
         for _, pts, col in draw:
-            cv2.fillConvexPoly(canvas[:, :, :3], pts, col)
-            cv2.fillConvexPoly(canvas[:, :, 3], pts, 255)
+            cv2.fillConvexPoly(rgb, pts, col)
+            cv2.fillConvexPoly(amask, pts, 255)
         for _, pts, col in draw:
-            cv2.polylines(canvas[:, :, :3], [pts], True,
+            cv2.polylines(rgb, [pts], True,
                           [max(0, c - 20) for c in col], 1, cv2.LINE_AA)
 
-        alpha = canvas[:, :, 3]
-        rows = np.any(alpha > 0, axis=1)
-        cmask = np.any(alpha > 0, axis=0)
+        rows = np.any(amask > 0, axis=1)
+        cmask = np.any(amask > 0, axis=0)
         if not rows.any():
             return np.zeros((1, 1, 4), dtype=np.uint8), 0, 0
         r0, r1 = np.where(rows)[0][[0, -1]]
@@ -348,7 +348,8 @@ class GlobalMap:
         r0, c0 = max(0, r0-2), max(0, c0-2)
         r1 = min(MAP_H-1, r1+2) + 1
         c1 = min(HALF-1, c1+2) + 1
-        return canvas[r0:r1, c0:c1].copy(), c0, r0
+        canvas = np.dstack([rgb[r0:r1, c0:c1], amask[r0:r1, c0:c1]])
+        return canvas.copy(), c0, r0
 
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
