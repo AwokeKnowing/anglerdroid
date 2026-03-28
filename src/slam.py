@@ -61,7 +61,11 @@ def _norm_angle(a):
 
 
 def _radial_descriptor(obs, cx, cy, n_rings=DESC_N_RINGS, max_r=DESC_MAX_R):
-    """Rotation-invariant descriptor: mean obstacle density per radial ring."""
+    """Rotation-invariant descriptor: mean normalised obstacle height per ring.
+
+    obs values: 0=free/unobserved, 1-100=obstacle height in cm.
+    Each ring's descriptor value = mean(obs) / 100 within the annulus.
+    """
     h, w = obs.shape
     yy, xx = np.ogrid[0:h, 0:w]
     dist_sq = (xx - cx).astype(np.float32) ** 2 + (yy - cy).astype(np.float32) ** 2
@@ -73,7 +77,7 @@ def _radial_descriptor(obs, cx, cy, n_rings=DESC_N_RINGS, max_r=DESC_MAX_R):
         mask = (dist_sq >= r0_sq) & (dist_sq < r1_sq)
         cnt = mask.sum()
         if cnt > 0:
-            desc[i] = obs[mask].sum() / (cnt * 255.0)
+            desc[i] = obs[mask].sum() / (cnt * 100.0)
     return desc
 
 
@@ -84,8 +88,8 @@ def _scan_match(obs_a, obs_b, n_angles=36, thumb_sz=THUMB_SZ):
     translation, returns the best (highest overlap) match.
     """
     sz = thumb_sz
-    a = cv2.resize(obs_a, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
-    b_full = cv2.resize(obs_b, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    a = cv2.resize(obs_a, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 100.0
+    b_full = cv2.resize(obs_b, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 100.0
 
     best_score = -1.0
     best = (0.0, 0.0, 0.0, 0.0)
@@ -451,6 +455,7 @@ class PoseGraphSLAM(SlamBackend):
 
         # Rebuild map from corrected keyframes
         self._gmap._map[:] = UNKNOWN_VAL
+        self._gmap._height_map[:] = 0
         self._gmap._ring = [None] * self._gmap._ring.__len__()
         self._gmap._ring_idx = 0
         self._gmap._count = 0
@@ -471,10 +476,13 @@ class PoseGraphSLAM(SlamBackend):
             M = GlobalMap._forward_affine(kf.x, kf.y, kf.theta,
                                           kf.cx, kf.cy, kf.px_size)
             h_obs, w_obs = obs_full.shape
+            # Encode: 0=unobserved, 1=free, 2-101=obstacle (height+1)
             ego_obs = np.zeros((h_obs, w_obs), dtype=np.uint8)
             free = (known_full > 0) & (obs_full == 0)
             ego_obs[free] = 1
-            ego_obs[obs_full > 0] = 2
+            obs_px = obs_full > 0
+            ego_obs[obs_px] = np.minimum(
+                obs_full[obs_px].astype(np.uint16) + 1, 101).astype(np.uint8)
 
             corners = np.float32([[0, 0], [w_obs, 0], [w_obs, h_obs],
                                   [0, h_obs]]).reshape(1, 4, 2)
@@ -493,11 +501,19 @@ class PoseGraphSLAM(SlamBackend):
             warped = cv2.warpAffine(ego_obs, M_roi, (roi_w, roi_h),
                                     flags=cv2.INTER_NEAREST, borderValue=0)
 
+            free_mask = warped == 1
+            obs_mask = warped >= 2
             roi_map = self._gmap._map[gr0:gr1, gc0:gc1]
             m = roi_map.astype(np.int16)
-            m[warped == 1] = np.minimum(m[warped == 1] + 64, 255)
-            m[warped == 2] = np.maximum(m[warped == 2] - 64, 0)
+            m[free_mask] = np.minimum(m[free_mask] + 64, 255)
+            m[obs_mask] = np.maximum(m[obs_mask] - 64, 0)
             roi_map[:] = m.astype(np.uint8)
+
+            # Accumulate heights (tallest wins)
+            if obs_mask.any():
+                hm_roi = self._gmap._height_map[gr0:gr1, gc0:gc1]
+                obs_h = (warped[obs_mask].astype(np.uint16) - 1).astype(np.uint8)
+                hm_roi[obs_mask] = np.maximum(hm_roi[obs_mask], obs_h)
 
         t2 = time.monotonic()
         print("slam: optimise=%.1fms  rebuild=%.1fms  max_shift=%.3fm  "
@@ -512,6 +528,7 @@ class PoseGraphSLAM(SlamBackend):
         for kf in self._keyframes:
             total += kf.approx_bytes()
         total += self._gmap._map.nbytes
+        total += self._gmap._height_map.nbytes
         total += self._gmap._out.nbytes
         total += self._desc_mat.nbytes
         total += len(self._edges) * 200  # rough edge overhead

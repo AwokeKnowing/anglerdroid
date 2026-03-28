@@ -1,10 +1,10 @@
 """vision.py – Process camera frames into atlas + obstacle map.
 Camera hardware lives in cameras.py.  Depth processing is pure numpy/cv2.
 
-Each depth camera produces a per-pixel classification:
-  FREE      — floor detected (known, no obstacle)
-  OBSTACLE  — object above floor detected
-  UNOBSERVED — no valid depth data (blind spot, behind obstacle, outside FOV)
+Each depth camera produces a per-pixel classification (2.5D height map):
+  FREE (0)       — floor detected (known, no obstacle)
+  OBSTACLE (1-100) — height above floor in centimetres (capped at 100 cm)
+  UNOBSERVED     — no valid depth data (blind spot, behind obstacle, outside FOV)
 
 RS1 (top-down camera): orthographic projection, classification by Z threshold.
 RS2 (forward camera):  pitch-rotated to bird's-eye, 2D raycasting for known mask.
@@ -102,11 +102,12 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     """RS1 (top-down camera) pointcloud → (obs, known) via orthographic projection.
 
     Classification (per pixel):
-      known=255, obs=0   → floor detected (z >= TD_FLOOR_CLIP) — free
-      known=255, obs=255 → object detected (0 < z < TD_FLOOR_CLIP) — obstacle
-      known=0            → no valid depth at this pixel — unobserved
+      known=255, obs=0      → floor detected (z >= TD_FLOOR_CLIP) — free
+      known=255, obs=1..100 → obstacle height in cm above floor — obstacle
+      known=0               → no valid depth at this pixel — unobserved
 
-    Only pixels with actual depth measurements are marked known.
+    Height = (TD_FLOOR_CLIP - z) * 100, clamped to [1, 100].
+    Multiple points at the same pixel keep the tallest (np.maximum.at).
     Returns two uint8 arrays of shape (out_h, out_w).
     """
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
@@ -130,14 +131,18 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
         ma = (ia < np.uint32(out_h)) & (ja < np.uint32(out_w))
         known[ia[ma], ja[ma]] = 255
 
-    # Obstacle mask: only points closer than floor
+    # Obstacle height: (TD_FLOOR_CLIP - z) in cm, tallest wins per pixel
     v_obs = verts[obstacle]
     if len(v_obs) > 0:
         p_obs = v_obs[:, :2] * scale + center
+        z_obs = v_obs[:, 2]
+        height_cm = np.clip(
+            ((TD_FLOOR_CLIP - z_obs) * 100).astype(np.int32),
+            1, 100).astype(np.uint8)
         with np.errstate(invalid='ignore'):
             jo, io = p_obs.astype(np.uint32).T
         mo = (io < np.uint32(out_h)) & (jo < np.uint32(out_w))
-        obs[io[mo], jo[mo]] = 255
+        np.maximum.at(obs, (io[mo], jo[mo]), height_cm[mo])
 
     return obs, known
 
@@ -151,10 +156,11 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     """RS2 (forward camera) pointcloud → (obs, known) via rotated bird's-eye.
 
     Classification (per pixel):
-      known=255, obs=0   → camera ray passed through without hitting anything — free
-      known=255, obs=255 → object detected (FW_FLOOR_CLIP < z < FW_HEIGHT_CLIP) — obstacle
-      known=0            → unobserved (behind obstacle, outside FOV, no data)
+      known=255, obs=0      → camera ray passed through without hitting anything — free
+      known=255, obs=1..100 → obstacle height in cm above floor — obstacle
+      known=0               → unobserved (behind obstacle, outside FOV, no data)
 
+    Height = (z_rotated - FW_FLOOR_CLIP) * 100, clamped to [1, 100].
     Known mask uses 2D raycasting from camera centre in the top-down plane:
     for each angular bin, a ray extends from the camera to the nearest
     obstacle (or to the farthest valid point if no obstacle).  Space behind
@@ -191,9 +197,13 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         j, i = proj.astype(np.uint32).T
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
-    # --- Obstacle mask (height-filtered + morph close) ---
+    # --- Obstacle height (height-filtered + morph close) ---
     m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
-    obs[i[m_obs], j[m_obs]] = 255
+    z_obs = v[:, 2][m_obs]
+    height_cm = np.clip(
+        ((z_obs - FW_FLOOR_CLIP) * 100).astype(np.int32),
+        1, 100).astype(np.uint8)
+    np.maximum.at(obs, (i[m_obs], j[m_obs]), height_cm)
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_before_morph", obs.copy())

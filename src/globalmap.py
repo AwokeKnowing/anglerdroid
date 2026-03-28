@@ -3,15 +3,20 @@
 960×720 pixels at 2 cm/px = 19.2 m × 14.4 m coverage.
 World frame: x-right, y-up, origin at robot's start position.
 
-Each cell stores a confidence byte (0–255):
+Confidence map (_map): each cell stores a byte (0–255):
   0   = strong obstacle evidence
   128 = unknown (initial)
   255 = strong free-space evidence
 
+Height map (_height_map): each cell stores uint8 (0–100):
+  0 = floor / no obstacle
+  1–100 = obstacle height in cm above floor (median of 3-frame consensus)
+
 Observations from the ego-frame cameras are warped into global space
 at 30 fps.  Only pixels where the last 3 consecutive frames agree
 (all free or all obstacle) are applied to the main map, preventing
-transient noise from corrupting the persistent map.
+transient noise from corrupting the persistent map.  On obstacle
+consensus, the median height of the 3 frames is stored in the height map.
 """
 
 import time
@@ -47,6 +52,7 @@ _SC = SPRITE_SZ // 2  # 96 — sprite centre
 class GlobalMap:
     def __init__(self):
         self._map = np.full((MAP_H, MAP_W), UNKNOWN_VAL, dtype=np.uint8)
+        self._height_map = np.zeros((MAP_H, MAP_W), dtype=np.uint8)
         self._ring = [None] * CONSENSUS_N  # (r0,r1,c0,c1,signed_roi) per slot
         self._ring_idx = 0
         self._count = 0
@@ -59,16 +65,22 @@ class GlobalMap:
                ego_cx, ego_cy, ego_px_size=0.01):
         """Feed one frame of ego-space observations and robot pose.
 
+        obs_ego values: 0=free, 1-100=obstacle height in cm.
+        known_ego: 255 where sensor has data, 0 elsewhere.
+
         ROI-optimised: only warp/compare/update the bounding box of the
         observation footprint in global space (~200×200 vs 960×720).
         """
         t0 = time.monotonic()
         h, w = obs_ego.shape[:2]
 
+        # Encode as: 0=unobserved, 1=free, 2-101=obstacle (height+1)
         ego_obs = np.zeros((h, w), dtype=np.uint8)
         free = (known_ego > 0) & (obs_ego == 0)
         ego_obs[free] = 1
-        ego_obs[obs_ego > 0] = 2
+        obs_px = obs_ego > 0
+        ego_obs[obs_px] = np.minimum(obs_ego[obs_px].astype(np.uint16) + 1,
+                                     101).astype(np.uint8)
 
         M_fwd = self._forward_affine(x, y, theta, ego_cx, ego_cy, ego_px_size)
         t1 = time.monotonic()
@@ -93,10 +105,11 @@ class GlobalMap:
             flags=cv2.INTER_NEAREST, borderValue=0)
         t2 = time.monotonic()
 
-        # Encode as signed: free=+1, obs=-1, unobserved=0
+        # Encode as signed int8: free=+1, obs=-(height_cm), unobserved=0
         signed = np.zeros((roi_h, roi_w), dtype=np.int8)
         signed[obs_roi == 1] = 1
-        signed[obs_roi == 2] = -1
+        obs_mask = obs_roi >= 2
+        signed[obs_mask] = (1 - obs_roi[obs_mask].astype(np.int16)).astype(np.int8)
 
         self._ring[self._ring_idx] = (r0, r1, c0, c1, signed)
         self._ring_idx = (self._ring_idx + 1) % CONSENSUS_N
@@ -122,13 +135,25 @@ class GlobalMap:
         s0, s1, s2 = slices
 
         all_free = (s0 == 1) & (s1 == 1) & (s2 == 1)
-        all_obs = (s0 == -1) & (s1 == -1) & (s2 == -1)
+        all_obs = (s0 < 0) & (s1 < 0) & (s2 < 0)
 
         roi_map = self._map[ir0:ir1, ic0:ic1]
         m = roi_map.astype(np.int16)
         m[all_free] = np.minimum(m[all_free] + EVIDENCE_UP, 255)
         m[all_obs] = np.maximum(m[all_obs] - EVIDENCE_DOWN, 0)
         roi_map[:] = m.astype(np.uint8)
+
+        # Height map: median of the 3 frames' heights where obstacle confirmed
+        roi_hm = self._height_map[ir0:ir1, ic0:ic1]
+        if all_obs.any():
+            h0 = np.abs(s0[all_obs]).astype(np.uint8)
+            h1 = np.abs(s1[all_obs]).astype(np.uint8)
+            h2 = np.abs(s2[all_obs]).astype(np.uint8)
+            roi_hm[all_obs] = np.maximum(
+                np.minimum(h0, h1),
+                np.minimum(np.maximum(h0, h1), h2))
+        if all_free.any():
+            roi_hm[all_free] = 0
         t4 = time.monotonic()
 
         self._update_times.append((t1 - t0, t2 - t1, t3 - t2, t4 - t3))
