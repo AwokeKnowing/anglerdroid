@@ -70,6 +70,11 @@ class GlobalMap:
         self._out = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
         self._3d_rays, self._3d_f = self._precompute_3d_rays()
         self._3d_wr = np.empty_like(self._3d_rays)
+        self._robot_mesh = self._build_robot_mesh()
+        spr, sx, sy = self._prerender_robot_3d_sprite()
+        self._robot_3d_spr = spr
+        self._robot_3d_x0 = sx
+        self._robot_3d_y0 = sy
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
@@ -202,6 +207,149 @@ class GlobalMap:
         rays /= np.linalg.norm(rays, axis=2, keepdims=True)
         return rays, f
 
+    # ── 3D robot mesh ────────────────────────────────────────────
+
+    @staticmethod
+    def _build_robot_mesh():
+        """Build hardcoded 3D robot mesh (origin = axle centre on ground, +X fwd).
+
+        Physical dims: 30 cm wide frame, 28 cm front-to-back, 17.13 cm wheel
+        diameter, 5 cm wheel width, 1 cm frame-wheel gap, ~90 cm mast from
+        base, 15 cm camera arm.  Seeed J4012 Orin NX, two RealSense cameras.
+
+        Returns (verts, faces, colors):
+          verts  — (N, 3) float32 in metres
+          faces  — list of int32 arrays (polygon vertex indices per face)
+          colors — (M, 3) uint8, RGB per face
+        """
+        vl, fl, cl = [], [], []
+        R = 0.0857
+
+        def _box(x0, y0, z0, x1, y1, z1, rgb):
+            n = len(vl)
+            vl.extend([[x0,y0,z0],[x1,y0,z0],[x1,y1,z0],[x0,y1,z0],
+                        [x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]])
+            for q in ([n,n+3,n+2,n+1],[n+4,n+5,n+6,n+7],
+                       [n,n+1,n+5,n+4],[n+2,n+3,n+7,n+6],
+                       [n,n+4,n+7,n+3],[n+1,n+2,n+6,n+5]):
+                fl.append(np.array(q, dtype=np.int32))
+                cl.append(rgb)
+
+        def _wheel(cx, cz, y0, y1, radius, rgb, ns=10):
+            n = len(vl)
+            ang = np.linspace(0, 2*np.pi, ns, endpoint=False)
+            for a in ang:
+                vl.append([cx+radius*np.cos(a), y0, cz+radius*np.sin(a)])
+            for a in ang:
+                vl.append([cx+radius*np.cos(a), y1, cz+radius*np.sin(a)])
+            for i in range(ns):
+                j = (i+1) % ns
+                fl.append(np.array([n+i, n+ns+i, n+ns+j, n+j], dtype=np.int32))
+                cl.append(rgb)
+            fl.append(np.arange(n, n+ns, dtype=np.int32))
+            cl.append([min(c+12, 255) for c in rgb])
+            fl.append(np.arange(n+2*ns-1, n+ns-1, -1, dtype=np.int32))
+            cl.append([min(c+12, 255) for c in rgb])
+
+        _box(-0.04, -0.15, R-0.015, 0.24, 0.15, R+0.01,
+             [45, 45, 50])                                       # base plate
+        _box(-0.04, -0.13, R+0.01,  0.10, 0.13, R+0.16,
+             [30, 30, 35])                                       # electronics box
+        _box( 0.10, -0.12, R+0.01,  0.22, 0.12, R+0.07,
+             [35, 35, 40])                                       # front nose
+        _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])       # left wheel
+        _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])       # right wheel
+        _box( 0.21, -0.015, 0.0,   0.25, 0.015, 0.04,
+             [40, 40, 45])                                       # caster
+        _box(-0.015,-0.015, R+0.16, 0.015, 0.015, 1.00,
+             [100, 105, 115])                                    # mast
+        _box( 0.015,-0.015, 0.97,   0.165, 0.015, 1.00,
+             [85, 90, 100])                                      # camera arm
+        _box( 0.10, -0.04,  1.00,   0.19,  0.04,  1.025,
+             [30, 55, 80])                                       # RS1 top-down
+        _box( 0.165,-0.03,  0.94,   0.20,  0.03,  0.97,
+             [30, 55, 80])                                       # RS2 forward
+        _box(-0.01, -0.04,  R+0.16, 0.09,  0.04,  R+0.185,
+             [40, 55, 40])                                       # Jetson NX
+
+        return (np.array(vl, dtype=np.float32), fl,
+                np.array(cl, dtype=np.uint8))
+
+    def _prerender_robot_3d_sprite(self):
+        """Pre-render 3D robot from the follow-cam angle into an RGBA sprite.
+
+        The follow-cam always sits at the same position relative to the robot
+        so the rendered appearance is constant.  We bake it once into a tight-
+        cropped RGBA patch and record its screen position in the 480×720 panel.
+
+        Returns (sprite_rgba, x0, y0) where (x0, y0) is the top-left corner
+        of the sprite in the right-panel coordinate system.
+        """
+        HALF = MAP_W // 2
+        verts, faces, colors = self._robot_mesh
+
+        cam = np.float32([-CAM_BEHIND, 0, CAM_HEIGHT])
+        tgt = np.float32([CAM_LOOK_AHEAD, 0, 0])
+        fwd = tgt - cam
+        fwd /= np.linalg.norm(fwd)
+        up = np.float32([0, 0, 1])
+        rt = np.cross(fwd, up)
+        rn = np.linalg.norm(rt)
+        rt = rt / rn if rn > 1e-6 else np.float32([1, 0, 0])
+        up_a = np.cross(rt, fwd)
+        Rm = np.stack([rt, up_a, -fwd], axis=1).astype(np.float32)
+
+        cv3 = (verts - cam) @ Rm
+        f = self._3d_f
+        ok = cv3[:, 2] < -0.01
+        scr_x = np.where(ok, cv3[:, 0]*f/(-cv3[:, 2]) + HALF*0.5, -9999)
+        scr_y = np.where(ok, -cv3[:, 1]*f/(-cv3[:, 2]) + MAP_H*0.5, -9999)
+
+        light = np.float32([0.2, -0.3, -0.9])
+        light /= np.linalg.norm(light)
+
+        draw = []
+        for i, fidx in enumerate(faces):
+            fv = cv3[fidx]
+            if (fv[:, 2] >= -0.01).any():
+                continue
+            e1, e2 = fv[1] - fv[0], fv[-1] - fv[0]
+            nrm = np.cross(e1, e2)
+            nl = np.linalg.norm(nrm)
+            if nl < 1e-8:
+                continue
+            nrm /= nl
+            if np.dot(nrm, fv.mean(axis=0)) > 0:
+                continue
+            brt = max(0.3, min(1.0, -np.dot(nrm, light)))
+            pts = np.column_stack([scr_x[fidx].astype(np.int32),
+                                   scr_y[fidx].astype(np.int32)])
+            col = np.clip(colors[i].astype(np.float32) * brt,
+                          0, 255).astype(np.uint8).tolist()
+            draw.append((fv[:, 2].mean(), pts, col))
+
+        draw.sort(key=lambda d: d[0])
+
+        canvas = np.zeros((MAP_H, HALF, 4), dtype=np.uint8)
+        for _, pts, col in draw:
+            cv2.fillConvexPoly(canvas[:, :, :3], pts, col)
+            cv2.fillConvexPoly(canvas[:, :, 3], pts, 255)
+        for _, pts, col in draw:
+            cv2.polylines(canvas[:, :, :3], [pts], True,
+                          [max(0, c - 20) for c in col], 1, cv2.LINE_AA)
+
+        alpha = canvas[:, :, 3]
+        rows = np.any(alpha > 0, axis=1)
+        cmask = np.any(alpha > 0, axis=0)
+        if not rows.any():
+            return np.zeros((1, 1, 4), dtype=np.uint8), 0, 0
+        r0, r1 = np.where(rows)[0][[0, -1]]
+        c0, c1 = np.where(cmask)[0][[0, -1]]
+        r0, c0 = max(0, r0-2), max(0, c0-2)
+        r1 = min(MAP_H-1, r1+2) + 1
+        c1 = min(HALF-1, c1+2) + 1
+        return canvas[r0:r1, c0:c1].copy(), c0, r0
+
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
         """960×720 split view: left=zoomed-out 2D map, right=3D follow-cam."""
@@ -326,22 +474,20 @@ class GlobalMap:
         fog_c = np.float32([UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY])
         out = (out.astype(np.float32) * (1.0 - fog) + fog_c * fog).astype(np.uint8)
 
-        # Robot marker projected to 3D view
-        rob_cam = R.T @ (np.float32([x, y, 0]) - cam_pos)
-        if rob_cam[2] < -0.1:
-            f = self._3d_f
-            u = int(rob_cam[0] * f / (-rob_cam[2]) + HALF * 0.5)
-            v = int(-rob_cam[1] * f / (-rob_cam[2]) + MAP_H * 0.5)
-            if 8 <= u < HALF - 8 and 8 <= v < MAP_H - 8:
-                cv2.circle(out, (u, v), 7, (255, 140, 0), -1)
-                cv2.circle(out, (u, v), 7, (200, 100, 0), 1)
-                ahead = np.float32([x + 0.3 * ct, y + 0.3 * st, 0])
-                ac = R.T @ (ahead - cam_pos)
-                if ac[2] < -0.1:
-                    tu = int(ac[0] * f / (-ac[2]) + HALF * 0.5)
-                    tv = int(-ac[1] * f / (-ac[2]) + MAP_H * 0.5)
-                    cv2.arrowedLine(out, (u, v), (tu, tv),
-                                    (255, 200, 50), 2, tipLength=0.4)
+        # Composite prerendered 3D robot sprite (fixed screen position)
+        spr = self._robot_3d_spr
+        sh, sw = spr.shape[:2]
+        sx0, sy0 = self._robot_3d_x0, self._robot_3d_y0
+        ox0, oy0 = max(0, sx0), max(0, sy0)
+        ox1, oy1 = min(HALF, sx0 + sw), min(MAP_H, sy0 + sh)
+        if ox0 < ox1 and oy0 < oy1:
+            px0, py0 = ox0 - sx0, oy0 - sy0
+            patch = spr[py0:py0 + oy1 - oy0, px0:px0 + ox1 - ox0]
+            a16 = patch[:, :, 3:4].astype(np.uint16)
+            region = out[oy0:oy1, ox0:ox1]
+            region[:] = ((region.astype(np.uint16) * (255 - a16) +
+                          patch[:, :, :3].astype(np.uint16) * a16
+                          ) >> 8).astype(np.uint8)
 
         # Trail in 3D view
         if trail_xy is not None and len(trail_xy) >= 2:
