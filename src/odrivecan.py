@@ -20,6 +20,7 @@ class ODriveAxisCAN:
     CMD_RX_SDO = 0x04
     CMD_TX_SDO = 0x05
     CMD_SET_AXIS_STATE = 0x07
+    CMD_GET_ENCODER_ESTIMATES = 0x09
     CMD_SET_INPUT_VEL = 0x0d
     CMD_SET_INPUT_TORQUE = 0x0e
     CMD_CLEAR_ERRORS = 0x18
@@ -166,6 +167,59 @@ class ODriveAxisCAN:
         v = self.get_vbus_voltage()
         level = int(100 * (v - min_v) / (max_v - min_v))
         return max(0, min(100, level))
+
+    def get_encoder_vel_fast(self):
+        """Read vel_estimate via native CAN Get_Encoder_Estimates (0x09).
+
+        ~3 ms per call (vs ~10 ms for SDO).  Caller must hold bus_lock.
+        Returns vel in turns/s, or None on failure.
+        """
+        target_id = self.node_id << 5 | self.CMD_GET_ENCODER_ESTIMATES
+        try:
+            while self.bus.recv(timeout=0) is not None:
+                pass
+            self.bus.send(can.Message(
+                arbitration_id=target_id,
+                is_remote_frame=True,
+                is_extended_id=False,
+                dlc=8))
+            deadline = time.time() + 0.004
+            while time.time() < deadline:
+                msg = self.bus.recv(timeout=0.003)
+                if (msg and msg.arbitration_id == target_id
+                        and not msg.is_remote_frame
+                        and len(msg.data) >= 8):
+                    _, vel = struct.unpack_from('<ff', msg.data)
+                    return vel
+        except can.CanOperationError:
+            pass
+        return None
+
+    def get_encoder_vel_sdo(self):
+        """Read vel_estimate via SDO (slower fallback, ~8 ms).
+
+        Caller must hold bus_lock.
+        Returns vel in turns/s, or None on failure.
+        """
+        ep_name = 'axis0.encoder_estimator.vel_estimate'
+        if ep_name not in self.endpoints:
+            return None
+        ep_id = self.endpoints[ep_name]['id']
+        try:
+            self.bus.send(can.Message(
+                arbitration_id=(self.node_id << 5 | self.CMD_RX_SDO),
+                data=struct.pack('<BHB', 0x00, ep_id, 0),
+                is_extended_id=False))
+            target_id = self.node_id << 5 | self.CMD_TX_SDO
+            deadline = time.time() + 0.008
+            while time.time() < deadline:
+                msg = self.bus.recv(timeout=0.006)
+                if msg and msg.arbitration_id == target_id and len(msg.data) >= 8:
+                    _, _, _, val = struct.unpack_from('<BHBf', msg.data)
+                    return val
+        except can.CanOperationError:
+            pass
+        return None
 
 
 # ====================== INTERACTIVE DEMO ======================

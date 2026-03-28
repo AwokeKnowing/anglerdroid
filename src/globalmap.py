@@ -19,6 +19,7 @@ transient noise from corrupting the persistent map.  On obstacle
 consensus, the median height of the 3 frames is stored in the height map.
 """
 
+import math
 import time
 import numpy as np
 import cv2
@@ -48,6 +49,13 @@ CONSENSUS_N = 3
 SPRITE_SZ = 192
 _SC = SPRITE_SZ // 2  # 96 — sprite centre
 
+# ── 3D follow-cam parameters ─────────────────────────────────────
+CAM_BEHIND = 1.5     # metres behind robot
+CAM_HEIGHT = 2.0     # metres above ground
+CAM_LOOK_AHEAD = 3.0 # metres ahead of robot (look-at target)
+CAM_FOV_DEG = 60     # vertical field of view (degrees)
+LEFT_ZOOM = 0.5      # 2D map scale (0.5 = show 2× more area)
+
 
 class GlobalMap:
     def __init__(self):
@@ -60,6 +68,8 @@ class GlobalMap:
         self._render_times = []
         self._update_times = []
         self._out = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
+        self._3d_rays, self._3d_f = self._precompute_3d_rays()
+        self._3d_wr = np.empty_like(self._3d_rays)
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
@@ -171,58 +181,184 @@ class GlobalMap:
             self._map, M_inv, (ego_w, ego_h),
             flags=cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
 
+    @staticmethod
+    def _precompute_3d_rays():
+        """Precompute camera-space ray directions for the 3D follow-cam.
+
+        Returns (rays, focal_length):
+          rays — (MAP_H, MAP_W//2, 3) float32, normalised.
+          focal_length — float, for projecting points to screen.
+        """
+        h, w = MAP_H, MAP_W // 2
+        f = h / (2.0 * math.tan(math.radians(CAM_FOV_DEG) / 2.0))
+        px, py = np.meshgrid(
+            np.arange(w, dtype=np.float32),
+            np.arange(h, dtype=np.float32))
+        rays = np.stack([
+            (px - w * 0.5) / f,
+            -(py - h * 0.5) / f,
+            -np.ones((h, w), dtype=np.float32),
+        ], axis=2)
+        rays /= np.linalg.norm(rays, axis=2, keepdims=True)
+        return rays, f
+
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """960×720 split view: left=center crop, right=4× ego zoom forward-up."""
+        """960×720 split view: left=zoomed-out 2D map, right=3D follow-cam."""
         HALF = MAP_W // 2
-        EGO_SCALE = 4.0
-        EGO_RX, EGO_RY = HALF // 2, int(MAP_H * 0.80)
-
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
         out = self._out
 
-        # --- Left panel: colorize crop, draw trail + robot ---
-        cx0 = max(0, min(rc - HALF // 2, MAP_W - HALF))
-        left_raw = self._map[:, cx0:cx0 + HALF]
-        left_g = np.full_like(left_raw, UNK_DISPLAY)
-        left_g[left_raw > FREE_THRESH] = FREE_DISPLAY
-        left_g[left_raw < OBS_THRESH] = OBS_DISPLAY
+        # --- Left panel: zoomed-out 2D map centred on robot ---
+        M_left = np.float64([
+            [LEFT_ZOOM, 0, HALF * 0.5 - rc * LEFT_ZOOM],
+            [0, LEFT_ZOOM, MAP_H * 0.5 - rr * LEFT_ZOOM],
+        ])
+        left_conf = cv2.warpAffine(
+            self._map, M_left, (HALF, MAP_H),
+            flags=cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
+        left_hm = cv2.warpAffine(
+            self._height_map, M_left, (HALF, MAP_H),
+            flags=cv2.INTER_NEAREST, borderValue=0)
+
+        left_g = np.full((MAP_H, HALF), UNK_DISPLAY, dtype=np.uint8)
+        left_g[left_conf > FREE_THRESH] = FREE_DISPLAY
+        obs_m = left_conf < OBS_THRESH
+        left_g[obs_m] = np.clip(
+            OBS_DISPLAY - (left_hm[obs_m].astype(np.int16) >> 1),
+            10, OBS_DISPLAY).astype(np.uint8)
         left = cv2.cvtColor(left_g, cv2.COLOR_GRAY2BGR)
 
         if trail_xy is not None and len(trail_xy) >= 2:
-            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE - cx0).astype(np.int32)
-            tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.int32)
-            keep = (tc >= 0) & (tc < HALF) & (tr >= 0) & (tr < MAP_H)
-            pts = np.column_stack([tc[keep], tr[keep]])
+            tc = (ORIGIN_X + trail_xy[:, 0] / PX_SIZE).astype(np.float32)
+            tr = (ORIGIN_Y - trail_xy[:, 1] / PX_SIZE).astype(np.float32)
+            tc_z = (tc * LEFT_ZOOM + M_left[0, 2]).astype(np.int32)
+            tr_z = (tr * LEFT_ZOOM + M_left[1, 2]).astype(np.int32)
+            keep = (tc_z >= 0) & (tc_z < HALF) & (tr_z >= 0) & (tr_z < MAP_H)
+            pts = np.column_stack([tc_z[keep], tr_z[keep]])
             if len(pts) >= 2:
                 cv2.polylines(left, [pts.reshape(-1, 1, 2)], False,
                               (80, 140, 255), 1, cv2.LINE_AA)
-        self._draw_robot(left, rc - cx0, rr, theta,
+
+        rob_zx = int(rc * LEFT_ZOOM + M_left[0, 2])
+        rob_zy = int(rr * LEFT_ZOOM + M_left[1, 2])
+        self._draw_robot(left, rob_zx, rob_zy, theta,
                          fwd_scale, bwd_scale, ang_scale,
-                         zoom=1.0 / EGO_SCALE)
+                         zoom=LEFT_ZOOM * 0.3)
         out[:, :HALF] = left
 
-        # --- Right panel: warp single-chan, colorize, draw native robot ---
-        ct, st = np.cos(theta), np.sin(theta)
-        inv_s = 1.0 / EGO_SCALE
-        M_ego = np.float64([
-            [ st * inv_s, -ct * inv_s,
-              rc - st * EGO_RX * inv_s + ct * EGO_RY * inv_s],
-            [ ct * inv_s,  st * inv_s,
-              rr - ct * EGO_RX * inv_s - st * EGO_RY * inv_s],
-        ])
-        ego_raw = cv2.warpAffine(
-            self._map, M_ego, (HALF, MAP_H),
-            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
-            borderValue=UNKNOWN_VAL)
-        ego_g = np.full_like(ego_raw, UNK_DISPLAY)
-        ego_g[ego_raw > FREE_THRESH] = FREE_DISPLAY
-        ego_g[ego_raw < OBS_THRESH] = OBS_DISPLAY
-        right = cv2.cvtColor(ego_g, cv2.COLOR_GRAY2BGR)
-        self._draw_robot(right, EGO_RX, EGO_RY, np.pi * 0.5,
-                         fwd_scale, bwd_scale, ang_scale)
-        out[:, HALF:] = right
+        # --- Right panel: 3D follow-cam ---
+        out[:, HALF:] = self._render_3d(x, y, theta, trail_xy)
+
+        return out
+
+    def _render_3d(self, x, y, theta, trail_xy=None):
+        """Raycasted 3D follow-cam view of the height-mapped terrain."""
+        HALF = MAP_W // 2
+
+        ct, st = math.cos(theta), math.sin(theta)
+        cam_pos = np.float32([
+            x - CAM_BEHIND * ct,
+            y - CAM_BEHIND * st,
+            CAM_HEIGHT])
+        target = np.float32([
+            x + CAM_LOOK_AHEAD * ct,
+            y + CAM_LOOK_AHEAD * st,
+            0.0])
+
+        fwd = target - cam_pos
+        fwd /= np.linalg.norm(fwd)
+        up = np.float32([0, 0, 1])
+        right = np.cross(fwd, up)
+        rn = np.linalg.norm(right)
+        if rn < 1e-6:
+            right = np.float32([1, 0, 0])
+        else:
+            right /= rn
+        up_act = np.cross(right, fwd)
+        R = np.stack([right, up_act, -fwd], axis=1).astype(np.float32)
+
+        np.matmul(self._3d_rays, R.T, out=self._3d_wr)
+        wr = self._3d_wr
+
+        denom = wr[:, :, 2].copy()
+        denom[np.abs(denom) < 1e-6] = -1e-6
+        t = -cam_pos[2] / denom
+        valid = t > 0
+
+        wx = cam_pos[0] + t * wr[:, :, 0]
+        wy = cam_pos[1] + t * wr[:, :, 1]
+        mc = (wx / PX_SIZE + ORIGIN_X).astype(np.float32)
+        mr = (ORIGIN_Y - wy / PX_SIZE).astype(np.float32)
+
+        h_s = cv2.remap(self._height_map, mc, mr,
+                        cv2.INTER_NEAREST, borderValue=0)
+
+        z_surf = h_s.astype(np.float32) * 0.01
+        t2 = np.where(h_s > 0, (z_surf - cam_pos[2]) / denom, t)
+        wx2 = cam_pos[0] + t2 * wr[:, :, 0]
+        wy2 = cam_pos[1] + t2 * wr[:, :, 1]
+        mc2 = (wx2 / PX_SIZE + ORIGIN_X).astype(np.float32)
+        mr2 = (ORIGIN_Y - wy2 / PX_SIZE).astype(np.float32)
+
+        h_f = cv2.remap(self._height_map, mc2, mr2,
+                        cv2.INTER_NEAREST, borderValue=0)
+        conf = cv2.remap(self._map, mc2, mr2,
+                         cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
+
+        # Colorize: sky / unknown / free / obstacle (RGB channel order)
+        out = np.full((MAP_H, HALF, 3), UNK_DISPLAY, dtype=np.uint8)
+        out[~valid] = [40, 40, 50]
+
+        free_m = valid & (conf > FREE_THRESH)
+        out[free_m] = [210, 220, 195]
+
+        obs_m = valid & (conf < OBS_THRESH)
+        if obs_m.any():
+            hn = h_f[obs_m].astype(np.float32) * 0.01
+            out[obs_m, 0] = np.clip(140 + 80 * hn, 0, 220).astype(np.uint8)
+            out[obs_m, 1] = np.clip(110 - 80 * hn, 0, 255).astype(np.uint8)
+            out[obs_m, 2] = np.clip(70 - 50 * hn, 0, 255).astype(np.uint8)
+
+        dist = np.abs(t2) * valid.astype(np.float32)
+        fog = np.clip(dist / 15.0, 0, 0.7)[:, :, None]
+        fog_c = np.float32([UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY])
+        out = (out.astype(np.float32) * (1.0 - fog) + fog_c * fog).astype(np.uint8)
+
+        # Robot marker projected to 3D view
+        rob_cam = R.T @ (np.float32([x, y, 0]) - cam_pos)
+        if rob_cam[2] < -0.1:
+            f = self._3d_f
+            u = int(rob_cam[0] * f / (-rob_cam[2]) + HALF * 0.5)
+            v = int(-rob_cam[1] * f / (-rob_cam[2]) + MAP_H * 0.5)
+            if 8 <= u < HALF - 8 and 8 <= v < MAP_H - 8:
+                cv2.circle(out, (u, v), 7, (255, 140, 0), -1)
+                cv2.circle(out, (u, v), 7, (200, 100, 0), 1)
+                ahead = np.float32([x + 0.3 * ct, y + 0.3 * st, 0])
+                ac = R.T @ (ahead - cam_pos)
+                if ac[2] < -0.1:
+                    tu = int(ac[0] * f / (-ac[2]) + HALF * 0.5)
+                    tv = int(-ac[1] * f / (-ac[2]) + MAP_H * 0.5)
+                    cv2.arrowedLine(out, (u, v), (tu, tv),
+                                    (255, 200, 50), 2, tipLength=0.4)
+
+        # Trail in 3D view
+        if trail_xy is not None and len(trail_xy) >= 2:
+            trail_3d = np.column_stack([
+                trail_xy, np.zeros(len(trail_xy), dtype=np.float64)])
+            tc = (trail_3d - cam_pos.astype(np.float64)) @ R.astype(np.float64)
+            in_front = tc[:, 2] < -0.1
+            if in_front.any():
+                tcf = tc[in_front]
+                f = self._3d_f
+                tu = (tcf[:, 0] * f / (-tcf[:, 2]) + HALF * 0.5).astype(np.int32)
+                tv = (-tcf[:, 1] * f / (-tcf[:, 2]) + MAP_H * 0.5).astype(np.int32)
+                keep = (tu >= 0) & (tu < HALF) & (tv >= 0) & (tv < MAP_H)
+                pts = np.column_stack([tu[keep], tv[keep]])
+                if len(pts) >= 2:
+                    cv2.polylines(out, [pts.reshape(-1, 1, 2)], False,
+                                  (80, 140, 255), 2, cv2.LINE_AA)
 
         return out
 

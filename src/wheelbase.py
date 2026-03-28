@@ -70,6 +70,7 @@ class WheelBase:
         self._init_gamepad()
         self._start_idle_watcher()
         self._start_twist_for_thread()
+        self._start_encoder_reader()
 
         vbus = 0.0
         try:
@@ -92,10 +93,17 @@ class WheelBase:
 
         print(f"   Bringing up {self.can_interface}...")
         try:
-            subprocess.check_call(["sudo", "ip", "link", "set", self.can_interface,
-                                   "up", "type", "can", "bitrate", "250000"],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["sudo", "-n", "ip", "link", "set", self.can_interface,
+                 "up", "type", "can", "bitrate", "250000"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=True)
             print(f"   {self.can_interface} brought up")
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"{self.can_interface}: sudo timed out (password prompt?). "
+                f"Run 'sudo ip link set {self.can_interface} up type can bitrate 250000' manually "
+                f"or add a passwordless sudoers rule.")
         except subprocess.CalledProcessError:
             print(f"   WARNING: Could not auto-bring up {self.can_interface}")
 
@@ -307,15 +315,78 @@ class WheelBase:
             self._twist_for_params = None
 
     def get_wheel_velocities_mps(self):
-        """Return (v_left, v_right) in m/s, positive = forward."""
+        """Return (v_left, v_right) in m/s from encoder feedback.
+
+        Reads are done by a background thread at ~30 Hz via native CAN
+        Get_Encoder_Estimates (fast) with SDO fallback.  This method just
+        returns the latest cached value — zero-cost for the caller.
+
+        Falls back to commanded velocities only if encoder thread hasn't
+        produced a reading yet (first ~100 ms after boot).
+        """
+        circ = 2.0 * 3.1415926535 * self.wheel_radius_m
+        with self._enc_lock:
+            if self._enc_ok:
+                vl_raw = self._enc_vel[0]
+                vr_raw = self._enc_vel[1]
+                vl = (-vl_raw if self.invert_left else vl_raw) * circ
+                vr = vr_raw * circ
+                return vl, vr
+        # Fallback: commanded velocity (only at startup before first read)
         sl = self._last_sent_left
         sr = self._last_sent_right
         if sl is None or sr is None:
             return 0.0, 0.0
         l_tps = -sl if self.invert_left else sl
         r_tps = sr
-        circ = 2.0 * 3.1415926535 * self.wheel_radius_m
         return l_tps * circ, r_tps * circ
+
+    # ── Encoder reader thread ────────────────────────────────────────
+
+    def _start_encoder_reader(self):
+        self._enc_vel = [0.0, 0.0]    # [left_tps, right_tps] from encoder
+        self._enc_lock = threading.Lock()
+        self._enc_ok = False
+        self._enc_native = True        # try native CAN 0x09 first
+        self._enc_native_fails = 0
+        t = threading.Thread(target=self._encoder_reader_loop, daemon=True)
+        t.start()
+
+    def _encoder_reader_loop(self):
+        while self.running:
+            vl = vr = None
+            try:
+                if self._enc_native:
+                    with self.bus_lock:
+                        vl = self.left.get_encoder_vel_fast()
+                        vr = self.right.get_encoder_vel_fast()
+                    if vl is None or vr is None:
+                        self._enc_native_fails += 1
+                        if self._enc_native_fails >= 3:
+                            self._enc_native = False
+                            print("encoder: native CAN 0x09 not supported, "
+                                  "using SDO fallback")
+                    else:
+                        self._enc_native_fails = 0
+
+                if not self._enc_native:
+                    with self.bus_lock:
+                        vl = self.left.get_encoder_vel_sdo()
+                    with self.bus_lock:
+                        vr = self.right.get_encoder_vel_sdo()
+
+                if vl is not None and vr is not None:
+                    with self._enc_lock:
+                        self._enc_vel[0] = vl
+                        self._enc_vel[1] = vr
+                        if not self._enc_ok:
+                            self._enc_ok = True
+                            mode = "native CAN" if self._enc_native else "SDO"
+                            print(f"encoder: reading actual wheel velocities "
+                                  f"({mode})")
+            except Exception:
+                pass
+            time.sleep(0.030)
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):
         """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle."""
