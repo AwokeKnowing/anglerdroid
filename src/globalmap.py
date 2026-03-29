@@ -255,9 +255,16 @@ class GlobalMap:
     def _build_robot_mesh():
         """Build hardcoded 3D robot mesh (origin = axle centre on ground, +X fwd).
 
-        Physical dims: 30 cm wide frame, 28 cm front-to-back, 17.13 cm wheel
-        diameter, 5 cm wheel width, 1 cm frame-wheel gap, ~90 cm mast from
-        base, 15 cm camera arm.  Seeed J4012 Orin NX, two RealSense cameras.
+        Body is a solid right-trapezoid prism (side profile):
+          back-top ─── slope-start (at wheel axle)
+          │                 ╲
+          │                  ╲  (~45° slope)
+          │                   ╲
+          back-bot ──────── front-bot   (5 cm off ground)
+
+        30 cm wide, 28 cm front-to-back, 17 cm height at back.
+        Wheels (17.13 cm dia, 5 cm wide) at axle where slope begins.
+        Caster at front-bottom.  Mast ~90 cm, camera arm 15 cm.
 
         Returns (verts, faces, colors):
           verts  — (N, 3) float32 in metres
@@ -293,26 +300,53 @@ class GlobalMap:
             fl.append(np.arange(n+2*ns-1, n+ns-1, -1, dtype=np.int32))
             cl.append([min(c+12, 255) for c in rgb])
 
-        _box(-0.04, -0.16, 0.015, 0.24, 0.16, R+0.01,
-             [45, 45, 50])                                       # base plate (down to near ground)
-        _box(-0.04, -0.14, R+0.01,  0.10, 0.14, R+0.16,
-             [30, 30, 35])                                       # electronics box
-        _box( 0.10, -0.13, R+0.01,  0.22, 0.13, R+0.07,
-             [35, 35, 40])                                       # front nose
-        _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])       # left wheel
-        _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])       # right wheel
-        _box( 0.21, -0.015, 0.0,   0.25, 0.015, 0.04,
-             [40, 40, 45])                                       # caster
-        _box(-0.015,-0.015, R+0.16, 0.015, 0.015, 1.00,
-             [100, 105, 115])                                    # mast
-        _box( 0.015,-0.015, 0.97,   0.165, 0.015, 1.00,
-             [85, 90, 100])                                      # camera arm
-        _box( 0.10, -0.04,  1.00,   0.19,  0.04,  1.025,
-             [30, 55, 80])                                       # RS1 top-down
-        _box( 0.165,-0.03,  0.94,   0.20,  0.03,  0.97,
-             [30, 55, 80])                                       # RS2 forward
-        _box(-0.01, -0.04,  R+0.16, 0.09,  0.04,  R+0.185,
-             [40, 55, 40])                                       # Jetson NX
+        # ── Main body: right-trapezoid prism ──
+        z_base = 0.05
+        z_top  = 0.22
+        x_back = -0.04
+        x_front = 0.24
+        x_slope = 0.0
+        y_hw = 0.16
+
+        n = len(vl)
+        vl.extend([
+            [x_front, -y_hw, z_base],   # n+0  front-bottom-near
+            [x_back,  -y_hw, z_base],   # n+1  back-bottom-near
+            [x_back,  -y_hw, z_top],    # n+2  back-top-near
+            [x_slope, -y_hw, z_top],    # n+3  slope-top-near
+            [x_front,  y_hw, z_base],   # n+4  front-bottom-far
+            [x_back,   y_hw, z_base],   # n+5  back-bottom-far
+            [x_back,   y_hw, z_top],    # n+6  back-top-far
+            [x_slope,  y_hw, z_top],    # n+7  slope-top-far
+        ])
+        body_rgb = [45, 45, 50]
+        for q in ([n,n+1,n+5,n+4],        # bottom  (normal ↓)
+                  [n+1,n+2,n+6,n+5],       # back    (normal −X)
+                  [n+2,n+3,n+7,n+6],       # top     (normal ↑)
+                  [n+3,n,n+4,n+7],         # slope   (normal ↗)
+                  [n,n+3,n+2,n+1],         # near    (normal −Y)
+                  [n+4,n+5,n+6,n+7]):      # far     (normal +Y)
+            fl.append(np.array(q, dtype=np.int32))
+            cl.append(body_rgb)
+
+        # ── Wheels ──
+        _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])
+        _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])
+        # ── Caster ──
+        _box(0.21, -0.015, 0.0, 0.25, 0.015, 0.04, [40, 40, 45])
+        # ── Mast (from body top near axle) ──
+        _box(-0.015, -0.015, z_top, 0.015, 0.015, 1.00,
+             [100, 105, 115])
+        # ── Camera arm ──
+        _box(0.015, -0.015, 0.97, 0.165, 0.015, 1.00,
+             [85, 90, 100])
+        # ── RS1 top-down cam ──
+        _box(0.10, -0.04, 1.00, 0.19, 0.04, 1.025, [30, 55, 80])
+        # ── RS2 forward cam ──
+        _box(0.165, -0.03, 0.94, 0.20, 0.03, 0.97, [30, 55, 80])
+        # ── Jetson NX on body top ──
+        _box(-0.01, -0.04, z_top, 0.09, 0.04, z_top + 0.025,
+             [40, 55, 40])
 
         return (np.array(vl, dtype=np.float32), fl,
                 np.array(cl, dtype=np.uint8))
