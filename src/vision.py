@@ -366,7 +366,7 @@ class Vision:
         # Clear robot footprint (force-set to known+free in capture loop)
         rx0 = max(0, rcx - ROBOT_W // 2 - 2)
         ry0 = max(0, rcy - ROBOT_H // 2 - 2)
-        rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
+        rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 3)
         ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
         mask[ry0:ry1, rx0:rx1] = 0
         return mask, fw_cone
@@ -512,7 +512,7 @@ class Vision:
             rcy = CROSSHAIR_CY
             rx0 = max(0, rcx - ROBOT_W // 2 - 2)
             ry0 = max(0, rcy - ROBOT_H // 2 - 2)
-            rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 2)
+            rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 3)
             ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
             obs_combined[ry0:ry1, rx0:rx1] = 0
             known_combined[ry0:ry1, rx0:rx1] = 255
