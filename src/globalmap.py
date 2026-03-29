@@ -55,6 +55,7 @@ CAM_HEIGHT = 3.0     # metres above ground
 CAM_LOOK_AHEAD = 1.0 # metres ahead of robot (look-at target)
 CAM_FOV_DEG = 60     # vertical field of view (degrees)
 LEFT_ZOOM = 0.5      # 2D map scale (0.5 = show 2× more area)
+_3D_TOPDOWN = True   # DEBUG: straight-down view to inspect robot vs obstacles
 
 
 class GlobalMap:
@@ -472,6 +473,40 @@ class GlobalMap:
         self._draw_robot(left, rob_zx, rob_zy, theta,
                          fwd_scale, bwd_scale, ang_scale,
                          zoom=LEFT_ZOOM * 0.3)
+
+        # --- DEBUG: draw ego-space mask boundaries ---
+        # ego_cx=81, ego_cy=119, ego_px=0.01  (from vision.py constants)
+        M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
+        M_comb = np.float64([
+            [LEFT_ZOOM * M_fwd[0, 0], LEFT_ZOOM * M_fwd[0, 1],
+             LEFT_ZOOM * M_fwd[0, 2] + M_left[0, 2]],
+            [LEFT_ZOOM * M_fwd[1, 0], LEFT_ZOOM * M_fwd[1, 1],
+             LEFT_ZOOM * M_fwd[1, 2] + M_left[1, 2]],
+        ])
+
+        def _ego2left(corners):
+            return cv2.transform(
+                np.float32(corners).reshape(1, -1, 2), M_comb
+            ).reshape(-1, 2).astype(np.int32)
+
+        # Robot footprint clear zone: (64,96)→(98,142) — RED
+        fp = _ego2left([(64, 96), (98, 96), (98, 142), (64, 142)])
+        cv2.polylines(left, [fp.reshape(-1, 1, 2)], True, (0, 0, 255), 1)
+        # RS1 obs_mask rectangle: (10,10)→(235,230) — GREEN
+        rs1 = _ego2left([(10, 10), (235, 10), (235, 230), (10, 230)])
+        cv2.polylines(left, [rs1.reshape(-1, 1, 2)], True, (0, 255, 0), 1)
+        # RS2 cone edges: ±40° from robot centre, 250px range — CYAN
+        cone_r = 250
+        c_fwd = _ego2left([(81, 119), (81 + cone_r, 119)])
+        c_cw = _ego2left([(81, 119),
+                          (81 + int(cone_r * math.cos(math.radians(40))),
+                           119 + int(cone_r * math.sin(math.radians(40))))])
+        c_ccw = _ego2left([(81, 119),
+                           (81 + int(cone_r * math.cos(math.radians(-40))),
+                            119 + int(cone_r * math.sin(math.radians(-40))))])
+        cv2.line(left, tuple(c_cw[0]), tuple(c_cw[1]), (255, 255, 0), 1)
+        cv2.line(left, tuple(c_ccw[0]), tuple(c_ccw[1]), (255, 255, 0), 1)
+
         out[:, :HALF] = left
 
         # --- Right panel: 3D follow-cam ---
@@ -484,25 +519,34 @@ class GlobalMap:
         HALF = MAP_W // 2
 
         ct, st = math.cos(theta), math.sin(theta)
-        cam_pos = np.float32([
-            x - CAM_BEHIND * ct,
-            y - CAM_BEHIND * st,
-            CAM_HEIGHT])
-        target = np.float32([
-            x + CAM_LOOK_AHEAD * ct,
-            y + CAM_LOOK_AHEAD * st,
-            0.0])
 
-        fwd = target - cam_pos
-        fwd /= np.linalg.norm(fwd)
-        up = np.float32([0, 0, 1])
-        right = np.cross(fwd, up)
-        rn = np.linalg.norm(right)
-        if rn < 1e-6:
-            right = np.float32([1, 0, 0])
+        if _3D_TOPDOWN:
+            cam_pos = np.float32([x, y, 8.0])
+            fwd = np.float32([0, 0, -1])
+            up = np.float32([ct, st, 0])
+            right = np.cross(fwd, up)
+            right /= max(np.linalg.norm(right), 1e-6)
+            up_act = np.cross(right, fwd)
         else:
-            right /= rn
-        up_act = np.cross(right, fwd)
+            cam_pos = np.float32([
+                x - CAM_BEHIND * ct,
+                y - CAM_BEHIND * st,
+                CAM_HEIGHT])
+            target = np.float32([
+                x + CAM_LOOK_AHEAD * ct,
+                y + CAM_LOOK_AHEAD * st,
+                0.0])
+            fwd = target - cam_pos
+            fwd /= np.linalg.norm(fwd)
+            up = np.float32([0, 0, 1])
+            right = np.cross(fwd, up)
+            rn = np.linalg.norm(right)
+            if rn < 1e-6:
+                right = np.float32([1, 0, 0])
+            else:
+                right /= rn
+            up_act = np.cross(right, fwd)
+
         R = np.stack([right, up_act, -fwd], axis=1).astype(np.float32)
 
         np.matmul(self._3d_rays, R.T, out=self._3d_wr)
