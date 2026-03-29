@@ -484,25 +484,19 @@ class GlobalMap:
         mc = (wx / PX_SIZE + ORIGIN_X).astype(np.float32)
         mr = (ORIGIN_Y - wy / PX_SIZE).astype(np.float32)
 
-        h_s = cv2.remap(self._height_map, mc, mr,
-                        cv2.INTER_NEAREST, borderValue=0)
-
-        # ── height-adjusted intersection ──
-        z_surf = h_s.astype(np.float32) * 0.01
-        t2 = np.where(h_s > 0, (z_surf - cam_pos[2]) / denom, t_gnd)
-        wx2 = cam_pos[0] + t2 * wr[:, :, 0]
-        wy2 = cam_pos[1] + t2 * wr[:, :, 1]
-        mc2 = (wx2 / PX_SIZE + ORIGIN_X).astype(np.float32)
-        mr2 = (ORIGIN_Y - wy2 / PX_SIZE).astype(np.float32)
-
-        h_f = cv2.remap(self._height_map, mc2, mr2,
-                        cv2.INTER_NEAREST, borderValue=0)
-        conf = cv2.remap(self._map, mc2, mr2,
+        # Sample confidence and height from ground-plane coords (2D map)
+        conf = cv2.remap(self._map, mc, mr,
                          cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
+        h_f = cv2.remap(self._height_map, mc, mr,
+                        cv2.INTER_NEAREST, borderValue=0)
 
         free_m = valid & (conf > FREE_THRESH)
         obs_m = valid & (conf < OBS_THRESH)
         h_float = h_f.astype(np.float32)
+
+        # Height-adjusted depth (for pillar sizing only)
+        z_surf = h_float * 0.01
+        t2 = np.where(obs_m, (z_surf - cam_pos[2]) / denom, t_gnd)
 
         # ── base coloring (FSD palette) ──
         out = np.full((MAP_H, HALF, 3), 145, dtype=np.uint8)
@@ -511,9 +505,9 @@ class GlobalMap:
 
         if obs_m.any():
             hn = h_float[obs_m]
-            out[obs_m, 0] = np.clip(185 + hn * 0.3, 155, 215).astype(np.uint8)
-            out[obs_m, 1] = np.clip(170 - hn * 0.2, 135, 195).astype(np.uint8)
-            out[obs_m, 2] = np.clip(145 - hn * 0.3, 105, 170).astype(np.uint8)
+            out[obs_m, 0] = np.clip(90 - hn * 0.5, 30, 90).astype(np.uint8)
+            out[obs_m, 1] = np.clip(75 - hn * 0.3, 25, 75).astype(np.uint8)
+            out[obs_m, 2] = np.clip(65 - hn * 0.2, 20, 65).astype(np.uint8)
 
         # ── edge lighting (height discontinuities) ──
         gx = cv2.Sobel(h_float, cv2.CV_32F, 1, 0, ksize=3)
@@ -524,9 +518,11 @@ class GlobalMap:
 
         # ── pillar extrusion (side faces) ──
         depth = np.maximum(np.abs(t2), 0.3)
+        MIN_PILLAR_PX = 3
         h_px = np.clip(
             h_float * 0.01 * self._3d_f * self._pitch_cos / depth,
             0, 60).astype(np.uint8)
+        h_px[obs_m & (h_px < MIN_PILLAR_PX)] = MIN_PILLAR_PX
         h_px[~obs_m] = 0
 
         max_ext = int(h_px.max())
@@ -547,10 +543,10 @@ class GlobalMap:
             if side_m.any():
                 ratio = dist_from_obs[side_m] / np.maximum(
                     h_px_up[side_m].astype(np.float32), 1.0)
-                brt = 0.92 - ratio * 0.38
-                out[side_m, 0] = np.clip(135 * brt, 30, 155).astype(np.uint8)
-                out[side_m, 1] = np.clip(118 * brt, 25, 140).astype(np.uint8)
-                out[side_m, 2] = np.clip(92 * brt, 15, 115).astype(np.uint8)
+                brt = 0.85 - ratio * 0.45
+                out[side_m, 0] = np.clip(70 * brt, 15, 70).astype(np.uint8)
+                out[side_m, 1] = np.clip(58 * brt, 12, 58).astype(np.uint8)
+                out[side_m, 2] = np.clip(48 * brt, 8, 48).astype(np.uint8)
 
         # ── fog ──
         dist_val = np.abs(t2) * valid.astype(np.float32)
