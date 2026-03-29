@@ -438,6 +438,21 @@ class Vision:
                 z1, k1 = depth_topdown(self._rs1.verts)
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
+            if not hasattr(self, '_k1_bbox_n'):
+                self._k1_bbox_n = 0
+            self._k1_bbox_n += 1
+            if self._k1_bbox_n <= 5:
+                nz = np.nonzero(known1)
+                if len(nz[0]) > 0:
+                    r0, r1 = int(nz[0].min()), int(nz[0].max())
+                    c0, c1 = int(nz[1].min()), int(nz[1].max())
+                    td_dx = int(TD_X_OFFSET)
+                    print("rs1_known bbox (after 180° flip): "
+                          "rows %d..%d  cols %d..%d  "
+                          "(after td_dx=%d shift: cols %d..%d)  "
+                          "total_px=%d" % (r0, r1, c0, c1,
+                                           td_dx, c0 + td_dx, c1 + td_dx,
+                                           len(nz[0])))
             _t_rs1 = time.monotonic()
 
             # RS2 forward depth → (obstacles, known) at (W,H), then CW 90°
