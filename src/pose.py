@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 
 # ── History ────────────────────────────────────────────────────────
-HISTORY_SIZE = 900
+HISTORY_SIZE = 90
 
 # ── Surface slip compensation ──────────────────────────────────────
 # Tracked vehicles on carpet: treads slide on the pile and encoders
