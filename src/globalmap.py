@@ -79,7 +79,18 @@ class GlobalMap:
         self._robot_3d_spr = spr
         self._robot_3d_x0 = sx
         self._robot_3d_y0 = sy
+        self._rows_f = np.repeat(
+            np.arange(MAP_H, dtype=np.float32)[:, None], MAP_W // 2, axis=1)
+        self._pitch_cos = math.sqrt(CAM_BEHIND**2 + CAM_LOOK_AHEAD**2) / max(
+            math.sqrt(CAM_BEHIND**2 + CAM_LOOK_AHEAD**2 + CAM_HEIGHT**2), 1e-6)
         t4 = time.monotonic()
+        # Self-test: verify map persistence
+        self._map[0, 0] = 255
+        assert self._map[0, 0] == 255, "MAP WRITE FAILED"
+        roi = self._map[0:1, 0:1]
+        roi[:] = 0
+        assert self._map[0, 0] == 0, "MAP ROI WRITE FAILED (not a view!)"
+        self._map[0, 0] = UNKNOWN_VAL  # restore
         print(f"GlobalMap: init {(t1-t0)*1e3:.0f}ms  rays {(t2-t1)*1e3:.0f}ms  "
               f"mesh {(t3-t2)*1e3:.0f}ms  sprite {(t4-t3)*1e3:.0f}ms  "
               f"robot_3d={spr.shape} at ({sx},{sy})")
@@ -96,6 +107,14 @@ class GlobalMap:
         """
         t0 = time.monotonic()
         h, w = obs_ego.shape[:2]
+
+        if self._count < 5:
+            nk = int(np.count_nonzero(known_ego))
+            no = int(np.count_nonzero(obs_ego))
+            print("gmap.update[%d]: known_px=%d obs_px=%d ego=%dx%d "
+                  "pose=(%.3f,%.3f,%.1f°) cx=%.1f cy=%.1f px=%.4f"
+                  % (self._count, nk, no, w, h,
+                     x, y, np.degrees(theta), ego_cx, ego_cy, ego_px_size))
 
         # Encode as: 0=unobserved, 1=free, 2-101=obstacle (height+1)
         ego_obs = np.zeros((h, w), dtype=np.uint8)
@@ -116,6 +135,9 @@ class GlobalMap:
         c0 = max(0, int(np.floor(gc[:, 0].min())))
         c1 = min(MAP_W, int(np.ceil(gc[:, 0].max())) + 1)
         if r1 <= r0 or c1 <= c0:
+            if self._count % 30 == 0:
+                print("gmap: observation outside map bounds! r=%d:%d c=%d:%d" %
+                      (r0, r1, c0, c1))
             return
 
         # Warp only into the ROI-sized output (shift affine origin)
@@ -149,6 +171,10 @@ class GlobalMap:
         ic0 = max(r[2] for r in rois)
         ic1 = min(r[3] for r in rois)
         if ir1 <= ir0 or ic1 <= ic0:
+            self._count += 0  # no-op but marks this path was taken
+            if self._count % 30 == 0:
+                print("gmap: EMPTY consensus intersection! ROIs: %s"
+                      % [(r[0],r[1],r[2],r[3]) for r in rois])
             return
 
         # Extract overlapping sub-regions from each ring entry
@@ -180,11 +206,19 @@ class GlobalMap:
         t4 = time.monotonic()
 
         self._update_times.append((t1 - t0, t2 - t1, t3 - t2, t4 - t3))
-        if len(self._update_times) % 100 == 0:
-            avg = np.mean(self._update_times[-100:], axis=0) * 1000
-            print("gmap update: prep=%.1fms warp=%.1fms ring=%.1fms "
-                  "consensus=%.1fms total=%.1fms  roi=%dx%d" %
-                  (*avg, sum(avg), roi_h, roi_w))
+        if len(self._update_times) % 30 == 0:
+            nfree = int(np.count_nonzero(self._map > FREE_THRESH))
+            nobs  = int(np.count_nonzero(self._map < OBS_THRESH))
+            ntot  = MAP_H * MAP_W
+            avg = np.mean(self._update_times[-30:], axis=0) * 1000
+            n_af = int(all_free.sum())
+            n_ao = int(all_obs.sum())
+            print("gmap: free=%d obs=%d unk=%d | consensus free_px=%d obs_px=%d | "
+                  "pose=(%.3f,%.3f,%.1f°) roi=%dx%d %.1fms"
+                  % (nfree, nobs, ntot - nfree - nobs,
+                     n_af, n_ao,
+                     x, y, np.degrees(theta),
+                     roi_h, roi_w, sum(avg)))
 
     def project_to_ego(self, x, y, theta,
                        ego_cx, ego_cy, ego_px_size, ego_h, ego_w):
@@ -411,7 +445,7 @@ class GlobalMap:
         return out
 
     def _render_3d(self, x, y, theta, trail_xy=None):
-        """Raycasted 3D follow-cam view of the height-mapped terrain."""
+        """3D follow-cam with heightmap terrain, pillar extrusion, and lighting."""
         HALF = MAP_W // 2
 
         ct, st = math.cos(theta), math.sin(theta)
@@ -439,21 +473,23 @@ class GlobalMap:
         np.matmul(self._3d_rays, R.T, out=self._3d_wr)
         wr = self._3d_wr
 
+        # ── ground-plane intersection ──
         denom = wr[:, :, 2].copy()
         denom[np.abs(denom) < 1e-6] = -1e-6
-        t = -cam_pos[2] / denom
-        valid = t > 0
+        t_gnd = -cam_pos[2] / denom
+        valid = t_gnd > 0
 
-        wx = cam_pos[0] + t * wr[:, :, 0]
-        wy = cam_pos[1] + t * wr[:, :, 1]
+        wx = cam_pos[0] + t_gnd * wr[:, :, 0]
+        wy = cam_pos[1] + t_gnd * wr[:, :, 1]
         mc = (wx / PX_SIZE + ORIGIN_X).astype(np.float32)
         mr = (ORIGIN_Y - wy / PX_SIZE).astype(np.float32)
 
         h_s = cv2.remap(self._height_map, mc, mr,
                         cv2.INTER_NEAREST, borderValue=0)
 
+        # ── height-adjusted intersection ──
         z_surf = h_s.astype(np.float32) * 0.01
-        t2 = np.where(h_s > 0, (z_surf - cam_pos[2]) / denom, t)
+        t2 = np.where(h_s > 0, (z_surf - cam_pos[2]) / denom, t_gnd)
         wx2 = cam_pos[0] + t2 * wr[:, :, 0]
         wy2 = cam_pos[1] + t2 * wr[:, :, 1]
         mc2 = (wx2 / PX_SIZE + ORIGIN_X).astype(np.float32)
@@ -464,26 +500,65 @@ class GlobalMap:
         conf = cv2.remap(self._map, mc2, mr2,
                          cv2.INTER_NEAREST, borderValue=UNKNOWN_VAL)
 
-        # Colorize: sky / unknown / free / obstacle (RGB channel order)
-        out = np.full((MAP_H, HALF, 3), UNK_DISPLAY, dtype=np.uint8)
-        out[~valid] = [40, 40, 50]
-
         free_m = valid & (conf > FREE_THRESH)
-        out[free_m] = [210, 220, 195]
-
         obs_m = valid & (conf < OBS_THRESH)
+        h_float = h_f.astype(np.float32)
+
+        # ── base coloring (FSD palette) ──
+        out = np.full((MAP_H, HALF, 3), 145, dtype=np.uint8)
+        out[~valid] = [32, 35, 45]
+        out[free_m] = [195, 202, 185]
+
         if obs_m.any():
-            hn = h_f[obs_m].astype(np.float32) * 0.01
-            out[obs_m, 0] = np.clip(140 + 80 * hn, 0, 220).astype(np.uint8)
-            out[obs_m, 1] = np.clip(110 - 80 * hn, 0, 255).astype(np.uint8)
-            out[obs_m, 2] = np.clip(70 - 50 * hn, 0, 255).astype(np.uint8)
+            hn = h_float[obs_m]
+            out[obs_m, 0] = np.clip(185 + hn * 0.3, 155, 215).astype(np.uint8)
+            out[obs_m, 1] = np.clip(170 - hn * 0.2, 135, 195).astype(np.uint8)
+            out[obs_m, 2] = np.clip(145 - hn * 0.3, 105, 170).astype(np.uint8)
 
-        dist = np.abs(t2) * valid.astype(np.float32)
-        fog = np.clip(dist / 15.0, 0, 0.7)[:, :, None]
-        fog_c = np.float32([UNK_DISPLAY, UNK_DISPLAY, UNK_DISPLAY])
-        out = (out.astype(np.float32) * (1.0 - fog) + fog_c * fog).astype(np.uint8)
+        # ── edge lighting (height discontinuities) ──
+        gx = cv2.Sobel(h_float, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(h_float, cv2.CV_32F, 0, 1, ksize=3)
+        edge = np.sqrt(gx * gx + gy * gy)
+        shade = np.clip(1.0 - edge * 0.08, 0.45, 1.0)[:, :, None]
+        out = (out.astype(np.float32) * shade).astype(np.uint8)
 
-        # Composite prerendered 3D robot sprite (fixed screen position)
+        # ── pillar extrusion (side faces) ──
+        depth = np.maximum(np.abs(t2), 0.3)
+        h_px = np.clip(
+            h_float * 0.01 * self._3d_f * self._pitch_cos / depth,
+            0, 60).astype(np.uint8)
+        h_px[~obs_m] = 0
+
+        max_ext = int(h_px.max())
+        if max_ext > 0:
+            k_up = np.ones((max_ext + 1, 1), dtype=np.uint8)
+            obs_up = cv2.dilate(obs_m.astype(np.uint8), k_up, anchor=(0, 0))
+
+            pos_map = np.zeros((MAP_H, HALF), dtype=np.float32)
+            pos_map[obs_m] = self._rows_f[obs_m]
+            pos_up = cv2.dilate(pos_map, k_up, anchor=(0, 0))
+            h_px_up = cv2.dilate(h_px, k_up, anchor=(0, 0))
+
+            dist_from_obs = pos_up - self._rows_f
+            side_m = ((obs_up > 0) & ~obs_m & valid
+                      & (dist_from_obs > 0)
+                      & (dist_from_obs <= h_px_up.astype(np.float32)))
+
+            if side_m.any():
+                ratio = dist_from_obs[side_m] / np.maximum(
+                    h_px_up[side_m].astype(np.float32), 1.0)
+                brt = 0.92 - ratio * 0.38
+                out[side_m, 0] = np.clip(135 * brt, 30, 155).astype(np.uint8)
+                out[side_m, 1] = np.clip(118 * brt, 25, 140).astype(np.uint8)
+                out[side_m, 2] = np.clip(92 * brt, 15, 115).astype(np.uint8)
+
+        # ── fog ──
+        dist_val = np.abs(t2) * valid.astype(np.float32)
+        fog = np.clip(dist_val / 12.0, 0, 0.75)[:, :, None]
+        out = (out.astype(np.float32) * (1.0 - fog)
+               + np.float32([145, 145, 150]) * fog).astype(np.uint8)
+
+        # ── robot sprite ──
         spr = self._robot_3d_spr
         sh, sw = spr.shape[:2]
         sx0, sy0 = self._robot_3d_x0, self._robot_3d_y0
@@ -498,7 +573,7 @@ class GlobalMap:
                           patch[:, :, :3].astype(np.uint16) * a16
                           ) >> 8).astype(np.uint8)
 
-        # Trail in 3D view
+        # ── trail ──
         if trail_xy is not None and len(trail_xy) >= 2:
             trail_3d = np.column_stack([
                 trail_xy, np.zeros(len(trail_xy), dtype=np.float64)])

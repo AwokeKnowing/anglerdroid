@@ -479,6 +479,18 @@ class Vision:
                 vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
             _t_odom = time.monotonic()
 
+            if not hasattr(self, '_odom_log_n'):
+                self._odom_log_n = 0
+            self._odom_log_n += 1
+            if self._odom_log_n % 30 == 0:
+                print("odom: vl=%.4f vr=%.4f dt=%.4f "
+                      "pose=(%.3f,%.3f,%.1f°) enc_ok=%s"
+                      % (vl, vr, dt,
+                         self._pose.x, self._pose.y,
+                         np.degrees(self._pose.theta),
+                         getattr(self._wheelbase, '_enc_ok', 'N/A')
+                         if self._wheelbase else 'no_wb'))
+
             # --- Update global occupancy map ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
