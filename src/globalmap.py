@@ -620,8 +620,14 @@ class GlobalMap:
                 return (int(sc[0] * f / (-sc[2]) + HALF * 0.5),
                         int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5))
 
-            def _draw_rect(corners, color, thickness=1):
+            def _draw_rect(corners, color, thickness=1, label=None):
                 pts = [_ego2screen(c, r) for c, r in corners]
+                if label and not hasattr(_draw_rect, '_n'):
+                    _draw_rect._n = 0
+                if label:
+                    _draw_rect._n += 1
+                    if _draw_rect._n <= 3:
+                        print("debug_rect %s: pts=%s" % (label, pts))
                 if all(p is not None for p in pts):
                     cv2.polylines(out,
                                   [np.array(pts, np.int32).reshape(-1, 1, 2)],
@@ -629,10 +635,10 @@ class GlobalMap:
 
             # Robot footprint (RED) — cols 64..98, rows 96..142
             _draw_rect([(64, 96), (98, 96), (98, 142), (64, 142)],
-                        (0, 0, 255), 2)
+                        (0, 0, 255), 2, label='footprint')
             # RS1 obs_mask rectangle (GREEN) — cols 10..235, rows 10..230
             _draw_rect([(10, 10), (235, 10), (235, 230), (10, 230)],
-                        (0, 255, 0), 1)
+                        (0, 255, 0), 3, label='rs1')
             # RS2 cone edges (CYAN)
             cone_r = 250
             a40 = math.radians(40)
