@@ -57,8 +57,11 @@ FW_ROTATION = _fw_R.astype(np.float32)
 FW_PIVOT = np.array([0.0, -1.0, 0.02], dtype=np.float32)
 FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
-FW_HEIGHT_CLIP = np.float32(1.30)   # max height in rotated frame (fixed)
+FW_HEIGHT_CLIP = np.float32(1.30)   # max obstacle height to accept (m)
 FW_FLOOR_CLIP  = np.float32(0.05)   # min height: ignore below 5cm (carpet/floor)
+FW_CAM_HEIGHT  = np.float32(0.97)   # RS2 forward camera height above floor (m)
+_fw_sin_pitch  = np.float32(abs(math.sin(_fw_pitch_rad)))  # sin(64.4°)≈0.903
+_fw_cos_pitch  = np.float32(abs(math.cos(_fw_pitch_rad)))  # cos(64.4°)≈0.431
 _fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 
 # RS2 (forward camera) extrinsic Y offset (~10cm higher than calibration).
@@ -155,16 +158,11 @@ _N_RAYS = 500
 def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     """RS2 (forward camera) pointcloud → (obs, known) via rotated bird's-eye.
 
-    Classification (per pixel):
-      known=255, obs=0      → camera ray passed through without hitting anything — free
-      known=255, obs=1..100 → obstacle height in cm above floor — obstacle
-      known=0               → unobserved (behind obstacle, outside FOV, no data)
+    Height is computed from the original camera coordinates before rotation:
+      h = FW_CAM_HEIGHT - y_cam * sin(pitch) + z_cam * cos(pitch)
+    This gives true physical height above floor regardless of rotation accuracy.
+    The rotation transform is used only for the (x,y) top-down projection.
 
-    Height = (z_rotated - FW_FLOOR_CLIP) * 100, clamped to [1, 100].
-    Known mask uses 2D raycasting from camera centre in the top-down plane:
-    for each angular bin, a ray extends from the camera to the nearest
-    obstacle (or to the farthest valid point if no obstacle).  Space behind
-    obstacles stays unknown.  The capture loop clips to an 80° cone.
     Returns two uint8 arrays of shape (out_h, out_w).
     """
     obs = np.zeros((out_h, out_w), dtype=np.uint8)
@@ -175,6 +173,13 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     v = verts.copy()
     if y_offset != 0.0:
         v[:, 1] += np.float32(y_offset)
+
+    # Physical height above floor from camera coords (before rotation).
+    # Camera: Y-down, Z-forward, mounted at FW_CAM_HEIGHT, pitch θ below horiz.
+    # h = H - y_cam·sin(θ) + z_cam·cos(θ)
+    phys_h = (FW_CAM_HEIGHT
+              - v[:, 1] * _fw_sin_pitch
+              + v[:, 2] * _fw_cos_pitch)
 
     if DEBUG_CAMERAS:
         dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
@@ -188,6 +193,7 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         dbg_raw[ri[rm], rj[rm]] = 255
         cv2.imshow("fw_raw_persp", dbg_raw)
 
+    # Rotation for top-down (x,y) position only
     v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
 
     scale = np.float32(1.0 / FW_PX_SIZE)
@@ -197,25 +203,19 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         j, i = proj.astype(np.uint32).T
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
-    # --- Obstacle height (height-filtered) ---
-    m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
-    z_obs = v[:, 2][m_obs]
-    height_cm = np.clip(
-        ((z_obs - FW_FLOOR_CLIP) * 100).astype(np.int32),
-        1, 100).astype(np.uint8)
+    # Obstacle detection using physical height from point cloud
+    m_obs = m_all & (phys_h > FW_FLOOR_CLIP) & (phys_h < FW_HEIGHT_CLIP)
+    height_cm = np.clip((phys_h[m_obs] * 100).astype(np.int32), 1, 100).astype(np.uint8)
     np.maximum.at(obs, (i[m_obs], j[m_obs]), height_cm)
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_before_morph", obs.copy())
 
-    # Morph-close on a BINARY mask only (to fill small gaps in obstacle
-    # detection), then assign minimum height to filled pixels.  This avoids
-    # dilation spreading tall heights (e.g. wall=80cm) onto short neighbors
-    # (e.g. shoe=10cm).
+    # Morphological close on binary mask only (don't spread height values)
     obs_bin = (obs > 0).astype(np.uint8)
     cv2.morphologyEx(obs_bin, cv2.MORPH_CLOSE, _fw_kernel, iterations=2,
                      dst=obs_bin)
-    obs[obs_bin & (obs == 0)] = 1  # gap-filled pixels get 1cm (minimal)
+    obs[obs_bin & (obs == 0)] = 1
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_final", obs.copy())
