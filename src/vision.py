@@ -204,8 +204,9 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         j, i = proj.astype(np.uint32).T
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
-    # Obstacle detection using physical height from point cloud
-    m_obs = m_all & (phys_h > FW_FLOOR_CLIP) & (phys_h < FW_HEIGHT_CLIP)
+    # Classification: rotated z' with calibrated thresholds (don't touch these)
+    m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
+    # Height values: physical height from camera geometry (accurate per-point)
     height_cm = np.clip((phys_h[m_obs] * 100).astype(np.int32), 1, 100).astype(np.uint8)
     np.maximum.at(obs, (i[m_obs], j[m_obs]), height_cm)
 
