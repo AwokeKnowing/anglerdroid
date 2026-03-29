@@ -170,7 +170,13 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     if len(verts) == 0:
         return obs, known
 
-    v = verts.copy()
+    # Filter out invalid depth pixels (z=0 → vertex (0,0,0)).
+    # Without this, they project to the camera centre after rotation and
+    # create false obstacles that kill the raycast known-mask.
+    valid = verts[:, 2] > np.float32(0)
+    v = verts[valid].copy()
+    if len(v) == 0:
+        return obs, known
     if y_offset != 0.0:
         v[:, 1] += np.float32(y_offset)
 
@@ -272,6 +278,23 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     known = cv2.warpPolar(
         polar_known, (out_w, out_h), center, float(max_r),
         cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
+
+    if not hasattr(depth_topdown_forward, '_diag_n'):
+        depth_topdown_forward._diag_n = 0
+    depth_topdown_forward._diag_n += 1
+    if depth_topdown_forward._diag_n <= 3 or depth_topdown_forward._diag_n % 60 == 0:
+        ep_valid = endpoint[endpoint >= 0]
+        print("fw_raycast: pts=%d obs_px=%d known_px=%d "
+              "valid_mask_px=%d polar_obs_nz=%d ep_valid=%d ep_range=[%d,%d] "
+              "center=(%.0f,%.0f)" % (
+                  len(v), int(np.count_nonzero(obs)),
+                  int(np.count_nonzero(known)),
+                  int(np.count_nonzero(valid_mask)),
+                  int(np.count_nonzero(polar_obs)),
+                  len(ep_valid),
+                  int(ep_valid.min()) if len(ep_valid) else -1,
+                  int(ep_valid.max()) if len(ep_valid) else -1,
+                  cx, cy))
 
     return obs, known
 
@@ -438,7 +461,19 @@ class Vision:
             # RS2 known: clip to 80° forward cone before combining
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(kc_tmp, known2, fw_dx, fw_dy)
-            np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
+            if not hasattr(self, '_kdiag_n'):
+                self._kdiag_n = 0
+            self._kdiag_n += 1
+            if self._kdiag_n <= 3 or self._kdiag_n % 60 == 0:
+                _k2nz = int(np.count_nonzero(known2))
+                _kcnz_pre = int(np.count_nonzero(kc_tmp))
+                np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
+                _kcnz_post = int(np.count_nonzero(kc_tmp))
+                print("fw_known: known2=%d blit=%d after_cone=%d "
+                      "fw_dx=%d fw_dy=%d" % (_k2nz, _kcnz_pre, _kcnz_post,
+                                              fw_dx, fw_dy))
+            else:
+                np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
 
             # Union of both cameras' known masks
             known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
