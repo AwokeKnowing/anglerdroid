@@ -474,39 +474,6 @@ class GlobalMap:
                          fwd_scale, bwd_scale, ang_scale,
                          zoom=LEFT_ZOOM * 0.3)
 
-        # --- DEBUG: draw ego-space mask boundaries ---
-        # ego_cx=81, ego_cy=119, ego_px=0.01  (from vision.py constants)
-        M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
-        M_comb = np.float64([
-            [LEFT_ZOOM * M_fwd[0, 0], LEFT_ZOOM * M_fwd[0, 1],
-             LEFT_ZOOM * M_fwd[0, 2] + M_left[0, 2]],
-            [LEFT_ZOOM * M_fwd[1, 0], LEFT_ZOOM * M_fwd[1, 1],
-             LEFT_ZOOM * M_fwd[1, 2] + M_left[1, 2]],
-        ])
-
-        def _ego2left(corners):
-            return cv2.transform(
-                np.float32(corners).reshape(1, -1, 2), M_comb
-            ).reshape(-1, 2).astype(np.int32)
-
-        # Robot footprint clear zone: (64,96)→(98,142) — RED
-        fp = _ego2left([(64, 96), (98, 96), (98, 142), (64, 142)])
-        cv2.polylines(left, [fp.reshape(-1, 1, 2)], True, (0, 0, 255), 1)
-        # RS1 obs_mask rectangle: (10,10)→(235,230) — GREEN
-        rs1 = _ego2left([(10, 10), (235, 10), (235, 230), (10, 230)])
-        cv2.polylines(left, [rs1.reshape(-1, 1, 2)], True, (0, 255, 0), 1)
-        # RS2 cone edges: ±40° from robot centre, 250px range — CYAN
-        cone_r = 250
-        c_fwd = _ego2left([(81, 119), (81 + cone_r, 119)])
-        c_cw = _ego2left([(81, 119),
-                          (81 + int(cone_r * math.cos(math.radians(40))),
-                           119 + int(cone_r * math.sin(math.radians(40))))])
-        c_ccw = _ego2left([(81, 119),
-                           (81 + int(cone_r * math.cos(math.radians(-40))),
-                            119 + int(cone_r * math.sin(math.radians(-40))))])
-        cv2.line(left, tuple(c_cw[0]), tuple(c_cw[1]), (255, 255, 0), 1)
-        cv2.line(left, tuple(c_ccw[0]), tuple(c_ccw[1]), (255, 255, 0), 1)
-
         out[:, :HALF] = left
 
         # --- Right panel: 3D follow-cam ---
@@ -632,20 +599,64 @@ class GlobalMap:
         out = (out.astype(np.float32) * (1.0 - fog)
                + np.float32([145, 145, 150]) * fog).astype(np.uint8)
 
-        # ── robot sprite ──
-        spr = self._robot_3d_spr
-        sh, sw = spr.shape[:2]
-        sx0, sy0 = self._robot_3d_x0, self._robot_3d_y0
-        ox0, oy0 = max(0, sx0), max(0, sy0)
-        ox1, oy1 = min(HALF, sx0 + sw), min(MAP_H, sy0 + sh)
-        if ox0 < ox1 and oy0 < oy1:
-            px0, py0 = ox0 - sx0, oy0 - sy0
-            patch = spr[py0:py0 + oy1 - oy0, px0:px0 + ox1 - ox0]
-            a16 = patch[:, :, 3:4].astype(np.uint16)
-            region = out[oy0:oy1, ox0:ox1]
-            region[:] = ((region.astype(np.uint16) * (255 - a16) +
-                          patch[:, :, :3].astype(np.uint16) * a16
-                          ) >> 8).astype(np.uint8)
+        # ── robot sprite / footprint ──
+        if _3D_TOPDOWN:
+            # In top-down mode: draw ego-space debug boundaries
+            # Project ego-space corners through world→screen
+            ECX, ECY, EPS = 81.0, 119.0, 0.01
+            f = self._3d_f
+
+            def _ego2screen(ex, ey):
+                dx_m = (ex - ECX) * EPS
+                dy_m = (ey - ECY) * EPS
+                wx = x + dx_m * ct - dy_m * st
+                wy = y + dx_m * st + dy_m * ct
+                rel = np.float32([wx, wy, 0]) - cam_pos
+                sc = rel @ R
+                if sc[2] > -0.01:
+                    return None
+                sx = int(sc[0] * f / (-sc[2]) + HALF * 0.5)
+                sy = int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5)
+                return (sx, sy)
+
+            def _draw_rect(corners, color, thickness=1):
+                pts = [_ego2screen(ex, ey) for ex, ey in corners]
+                if all(p is not None for p in pts):
+                    arr = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+                    cv2.polylines(out, [arr], True, color, thickness)
+
+            # Robot footprint (RED) — 34×46cm clear zone
+            _draw_rect([(64, 96), (98, 96), (98, 142), (64, 142)],
+                        (0, 0, 255), 2)
+            # RS1 obs_mask rectangle (GREEN) — edge-trimmed
+            _draw_rect([(10, 10), (235, 10), (235, 230), (10, 230)],
+                        (0, 255, 0), 1)
+            # RS2 cone edges (CYAN)
+            cone_r = 250
+            a40 = math.radians(40)
+            p0 = _ego2screen(81, 119)
+            p1 = _ego2screen(81 + int(cone_r * math.cos(a40)),
+                             119 + int(cone_r * math.sin(a40)))
+            p2 = _ego2screen(81 + int(cone_r * math.cos(-a40)),
+                             119 + int(cone_r * math.sin(-a40)))
+            if p0 and p1:
+                cv2.line(out, p0, p1, (255, 255, 0), 1)
+            if p0 and p2:
+                cv2.line(out, p0, p2, (255, 255, 0), 1)
+        else:
+            spr = self._robot_3d_spr
+            sh, sw = spr.shape[:2]
+            sx0, sy0 = self._robot_3d_x0, self._robot_3d_y0
+            ox0, oy0 = max(0, sx0), max(0, sy0)
+            ox1, oy1 = min(HALF, sx0 + sw), min(MAP_H, sy0 + sh)
+            if ox0 < ox1 and oy0 < oy1:
+                px0, py0 = ox0 - sx0, oy0 - sy0
+                patch = spr[py0:py0 + oy1 - oy0, px0:px0 + ox1 - ox0]
+                a16 = patch[:, :, 3:4].astype(np.uint16)
+                region = out[oy0:oy1, ox0:ox1]
+                region[:] = ((region.astype(np.uint16) * (255 - a16) +
+                              patch[:, :, :3].astype(np.uint16) * a16
+                              ) >> 8).astype(np.uint8)
 
         # ── trail ──
         if trail_xy is not None and len(trail_xy) >= 2:
