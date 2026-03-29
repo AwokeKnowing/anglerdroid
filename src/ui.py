@@ -38,9 +38,12 @@ try:
                                params=_nv_params)
     if _test:
         _jpeg_backend = 'nvimgcodec'
+        print("ui: nvimgcodec HW JPEG encoder ready")
     else:
+        print("ui: nvimgcodec encode returned empty — falling back")
         _nv_encoder = None
-except Exception:
+except Exception as _e:
+    print("ui: nvimgcodec unavailable: %s" % _e)
     _nv_encoder = None
 
 if _nv_encoder is None:
@@ -50,7 +53,9 @@ if _nv_encoder is None:
         _tj.encode(np.zeros((8, 8, 3), dtype=np.uint8),
                     quality=92, pixel_format=_TJPF_RGB)
         _jpeg_backend = 'turbojpeg'
-    except Exception:
+        print("ui: TurboJPEG SIMD encoder ready")
+    except Exception as _e2:
+        print("ui: TurboJPEG unavailable: %s" % _e2)
         _tj = None
 else:
     _tj = None
@@ -202,8 +207,17 @@ class UI:
 
     def send_atlas(self, atlas_rgb):
         """Encode full-res JPEG — same bytes go to browser and AI."""
+        t0 = time.monotonic()
+        jpeg = _jpeg_encode_rgb(atlas_rgb, quality=92)
+        dt = (time.monotonic() - t0) * 1e3
+        if not hasattr(self, '_jpeg_log_n'):
+            self._jpeg_log_n = 0
+        self._jpeg_log_n += 1
+        if self._jpeg_log_n <= 5 or self._jpeg_log_n % 100 == 0:
+            print("ui: jpeg %s  %.1fms  %dKB" % (
+                _jpeg_backend, dt, len(jpeg) // 1024))
         with self._atlas_lock:
-            self._atlas_jpeg = _jpeg_encode_rgb(atlas_rgb, quality=92)
+            self._atlas_jpeg = jpeg
 
     def get_user_text(self):
         with self._lock:
