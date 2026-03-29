@@ -50,9 +50,9 @@ SPRITE_SZ = 192
 _SC = SPRITE_SZ // 2  # 96 — sprite centre
 
 # ── 3D follow-cam parameters ─────────────────────────────────────
-CAM_BEHIND = 1.5     # metres behind robot
-CAM_HEIGHT = 2.0     # metres above ground
-CAM_LOOK_AHEAD = 3.0 # metres ahead of robot (look-at target)
+CAM_BEHIND = 2.5     # metres behind robot
+CAM_HEIGHT = 3.0     # metres above ground
+CAM_LOOK_AHEAD = 1.0 # metres ahead of robot (look-at target)
 CAM_FOV_DEG = 60     # vertical field of view (degrees)
 LEFT_ZOOM = 0.5      # 2D map scale (0.5 = show 2× more area)
 
