@@ -326,18 +326,20 @@ class WheelBase:
         Get_Encoder_Estimates (fast) with SDO fallback.  This method just
         returns the latest cached value — zero-cost for the caller.
 
-        Falls back to commanded velocities only if encoder thread hasn't
-        produced a reading yet (first ~100 ms after boot).
+        Falls back to commanded velocities if encoder reads are stale
+        (>300 ms since last successful read) or never started.
         """
         circ = 2.0 * 3.1415926535 * self.wheel_radius_m
         with self._enc_lock:
             if self._enc_ok:
-                vl_raw = self._enc_vel[0]
-                vr_raw = self._enc_vel[1]
-                vl = (-vl_raw if self.invert_left else vl_raw) * circ
-                vr = vr_raw * circ
-                return vl, vr
-        # Fallback: commanded velocity (only at startup before first read)
+                age = time.monotonic() - self._enc_last_good
+                if age < 0.3:
+                    vl_raw = self._enc_vel[0]
+                    vr_raw = self._enc_vel[1]
+                    vl = (-vl_raw if self.invert_left else vl_raw) * circ
+                    vr = vr_raw * circ
+                    return vl, vr
+        # Fallback: commanded velocity
         sl = self._last_sent_left
         sr = self._last_sent_right
         if sl is None or sr is None:
@@ -354,10 +356,13 @@ class WheelBase:
         self._enc_ok = False
         self._enc_native = True        # try native CAN 0x09 first
         self._enc_native_fails = 0
+        self._enc_consec_fails = 0     # consecutive read failures (any mode)
+        self._enc_last_good = 0.0      # time.monotonic() of last successful read
         t = threading.Thread(target=self._encoder_reader_loop, daemon=True)
         t.start()
 
     def _encoder_reader_loop(self):
+        _sdo_fail_count = 0
         while self.running:
             vl = vr = None
             try:
@@ -379,18 +384,35 @@ class WheelBase:
                         vl = self.left.get_encoder_vel_sdo()
                     with self.bus_lock:
                         vr = self.right.get_encoder_vel_sdo()
+                    if vl is None or vr is None:
+                        _sdo_fail_count += 1
+                        if _sdo_fail_count in (5, 50, 500):
+                            print("encoder: SDO read failed %d times "
+                                  "(vl=%s vr=%s)" % (_sdo_fail_count, vl, vr))
 
                 if vl is not None and vr is not None:
                     with self._enc_lock:
                         self._enc_vel[0] = vl
                         self._enc_vel[1] = vr
+                        self._enc_last_good = time.monotonic()
+                        self._enc_consec_fails = 0
                         if not self._enc_ok:
                             self._enc_ok = True
                             mode = "native CAN" if self._enc_native else "SDO"
-                            print(f"encoder: reading actual wheel velocities "
-                                  f"({mode})")
-            except Exception:
-                pass
+                            print("encoder: reading actual wheel velocities "
+                                  "(%s)" % mode)
+                    _sdo_fail_count = 0
+                else:
+                    with self._enc_lock:
+                        self._enc_consec_fails += 1
+                        if (self._enc_ok and
+                                self._enc_consec_fails >= 10):
+                            self._enc_ok = False
+                            print("encoder: reads failing, falling back to "
+                                  "commanded velocity")
+            except Exception as e:
+                if self._enc_consec_fails < 3:
+                    print("encoder: exception: %s" % e)
             time.sleep(0.030)
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):

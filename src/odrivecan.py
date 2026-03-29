@@ -206,14 +206,15 @@ class ODriveAxisCAN:
             return None
         ep_id = self.endpoints[ep_name]['id']
         try:
+            self.flush_bus()
             self.bus.send(can.Message(
                 arbitration_id=(self.node_id << 5 | self.CMD_RX_SDO),
                 data=struct.pack('<BHB', 0x00, ep_id, 0),
                 is_extended_id=False))
             target_id = self.node_id << 5 | self.CMD_TX_SDO
-            deadline = time.time() + 0.008
+            deadline = time.time() + 0.015
             while time.time() < deadline:
-                msg = self.bus.recv(timeout=0.006)
+                msg = self.bus.recv(timeout=0.012)
                 if msg and msg.arbitration_id == target_id and len(msg.data) >= 8:
                     _, _, _, val = struct.unpack_from('<BHBf', msg.data)
                     return val

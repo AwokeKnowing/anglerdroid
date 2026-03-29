@@ -483,13 +483,19 @@ class Vision:
                 self._odom_log_n = 0
             self._odom_log_n += 1
             if self._odom_log_n % 30 == 0:
+                wb = self._wheelbase
+                enc_info = 'no_wb'
+                if wb:
+                    enc_ok = getattr(wb, '_enc_ok', '?')
+                    enc_age = (time.monotonic() -
+                               getattr(wb, '_enc_last_good', 0))
+                    enc_info = 'enc=%s age=%.1fs' % (enc_ok, enc_age)
                 print("odom: vl=%.4f vr=%.4f dt=%.4f "
-                      "pose=(%.3f,%.3f,%.1f°) enc_ok=%s"
+                      "pose=(%.3f,%.3f,%.1f°) %s"
                       % (vl, vr, dt,
                          self._pose.x, self._pose.y,
                          np.degrees(self._pose.theta),
-                         getattr(self._wheelbase, '_enc_ok', 'N/A')
-                         if self._wheelbase else 'no_wb'))
+                         enc_info))
 
             # --- Update global occupancy map ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
