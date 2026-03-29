@@ -5,3 +5,4 @@ rerun-sdk
 python-can
 inputs
 websockets
+PyTurboJPEG

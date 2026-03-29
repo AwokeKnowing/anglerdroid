@@ -26,6 +26,47 @@ from typing import List, Optional
 import cv2
 import numpy as np
 
+# ── JPEG encoding: try HW GPU → TurboJPEG SIMD → cv2 fallback ──
+_jpeg_backend = 'cv2'
+
+try:
+    from nvidia import nvimgcodec as _nvic
+    _nv_encoder = _nvic.Encoder()
+    _nv_params = _nvic.EncodeParams(
+        quality_type=_nvic.QualityType.QUALITY, quality_value=92)
+    _test = _nv_encoder.encode(np.zeros((8, 8, 3), dtype=np.uint8), "jpeg",
+                               params=_nv_params)
+    if _test:
+        _jpeg_backend = 'nvimgcodec'
+    else:
+        _nv_encoder = None
+except Exception:
+    _nv_encoder = None
+
+if _nv_encoder is None:
+    try:
+        from turbojpeg import TurboJPEG as _TJ, TJPF_RGB as _TJPF_RGB
+        _tj = _TJ()
+        _tj.encode(np.zeros((8, 8, 3), dtype=np.uint8),
+                    quality=92, pixel_format=_TJPF_RGB)
+        _jpeg_backend = 'turbojpeg'
+    except Exception:
+        _tj = None
+else:
+    _tj = None
+
+
+def _jpeg_encode_rgb(rgb, quality=92):
+    """Encode RGB uint8 HWC array → JPEG bytes, fastest available backend."""
+    if _nv_encoder is not None:
+        return bytes(_nv_encoder.encode(rgb, "jpeg", params=_nv_params))
+    if _tj is not None:
+        return _tj.encode(rgb, quality=quality, pixel_format=_TJPF_RGB)
+    _, buf = cv2.imencode('.jpg', rgb[:, :, ::-1],
+                          [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes()
+
+
 try:
     from kokoro_onnx import Kokoro as _KokoroClass
     _kokoro = _KokoroClass()
@@ -150,7 +191,8 @@ class UI:
         else:
             print("ui: websockets not installed – WebSocket disabled")
         proto = "HTTPS" if self._ssl_ctx else "HTTP"
-        print("ui: %s :%d  WSS :%d" % (proto, self._http_port, self._ws_port))
+        print("ui: %s :%d  WSS :%d  jpeg=%s" % (
+            proto, self._http_port, self._ws_port, _jpeg_backend))
 
     def stop(self):
         self._running = False
@@ -160,10 +202,8 @@ class UI:
 
     def send_atlas(self, atlas_rgb):
         """Encode full-res JPEG — same bytes go to browser and AI."""
-        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
-                              [cv2.IMWRITE_JPEG_QUALITY, 92])
         with self._atlas_lock:
-            self._atlas_jpeg = buf.tobytes()
+            self._atlas_jpeg = _jpeg_encode_rgb(atlas_rgb, quality=92)
 
     def get_user_text(self):
         with self._lock:
