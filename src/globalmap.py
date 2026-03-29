@@ -161,9 +161,6 @@ class GlobalMap:
         self._ring_idx = (self._ring_idx + 1) % CONSENSUS_N
         self._count += 1
 
-        if _3D_TOPDOWN:
-            self._debug_obs_roi = (r0, r1, c0, c1, obs_roi.copy())
-
         if self._count < CONSENSUS_N:
             return
         t3 = time.monotonic()
@@ -482,15 +479,6 @@ class GlobalMap:
         # --- Right panel: 3D follow-cam ---
         out[:, HALF:] = self._render_3d(x, y, theta, trail_xy)
 
-        # Debug outlines — 2px because atlas is 2x downsampled in ui.py
-        if _3D_TOPDOWN and hasattr(self, '_debug_outlines'):
-            for corners, color in self._debug_outlines:
-                for i in range(len(corners)):
-                    x0, y0 = corners[i]
-                    x1, y1 = corners[(i + 1) % len(corners)]
-                    cv2.line(out, (x0 + HALF, y0), (x1 + HALF, y1),
-                             color, 2, cv2.LINE_8)
-
         return out
 
     def _render_3d(self, x, y, theta, trail_xy=None):
@@ -556,109 +544,71 @@ class GlobalMap:
         z_surf = h_float * 0.01
         t2 = np.where(obs_m, (z_surf - cam_pos[2]) / denom, t_gnd)
 
-        # ── base coloring (FSD palette) ──
-        out = np.full((MAP_H, HALF, 3), 145, dtype=np.uint8)
-        out[~valid] = [32, 35, 45]
-        out[free_m] = [195, 202, 185]
+        # ── coloring: global-map style for top-down debug ──
+        if _3D_TOPDOWN:
+            UNK_C = [160, 160, 160]
+            out = np.full((MAP_H, HALF, 3), UNK_C[0], dtype=np.uint8)
+            out[~valid] = [32, 35, 45]
+            out[free_m] = [255, 255, 255]
+            if obs_m.any():
+                out[obs_m] = [50, 50, 50]
+        else:
+            # FSD palette for 3D follow-cam
+            out = np.full((MAP_H, HALF, 3), 145, dtype=np.uint8)
+            out[~valid] = [32, 35, 45]
+            out[free_m] = [195, 202, 185]
 
-        if obs_m.any():
-            hn = h_float[obs_m]
-            out[obs_m, 0] = np.clip(90 - hn * 0.5, 30, 90).astype(np.uint8)
-            out[obs_m, 1] = np.clip(75 - hn * 0.3, 25, 75).astype(np.uint8)
-            out[obs_m, 2] = np.clip(65 - hn * 0.2, 20, 65).astype(np.uint8)
+            if obs_m.any():
+                hn = h_float[obs_m]
+                out[obs_m, 0] = np.clip(90 - hn * 0.5, 30, 90).astype(np.uint8)
+                out[obs_m, 1] = np.clip(75 - hn * 0.3, 25, 75).astype(np.uint8)
+                out[obs_m, 2] = np.clip(65 - hn * 0.2, 20, 65).astype(np.uint8)
 
-        # ── edge lighting (height discontinuities) ──
-        gx = cv2.Sobel(h_float, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(h_float, cv2.CV_32F, 0, 1, ksize=3)
-        edge = np.sqrt(gx * gx + gy * gy)
-        shade = np.clip(1.0 - edge * 0.08, 0.45, 1.0)[:, :, None]
-        out = (out.astype(np.float32) * shade).astype(np.uint8)
+            # ── edge lighting (height discontinuities) ──
+            gx = cv2.Sobel(h_float, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(h_float, cv2.CV_32F, 0, 1, ksize=3)
+            edge = np.sqrt(gx * gx + gy * gy)
+            shade = np.clip(1.0 - edge * 0.08, 0.45, 1.0)[:, :, None]
+            out = (out.astype(np.float32) * shade).astype(np.uint8)
 
-        # ── pillar extrusion (side faces) ──
-        # Pillar height = height map value directly (1 cm → 1 px),
-        # clamped to [5, 100] for obstacles so small ones stay visible.
-        MIN_PILLAR_CM = 5
-        h_px = np.where(obs_m,
-                        np.clip(h_float, MIN_PILLAR_CM, 100),
-                        0).astype(np.uint8)
+            # ── pillar extrusion (side faces) ──
+            MIN_PILLAR_CM = 5
+            h_px = np.where(obs_m,
+                            np.clip(h_float, MIN_PILLAR_CM, 100),
+                            0).astype(np.uint8)
 
-        max_ext = int(h_px.max())
-        if max_ext > 0:
-            k_up = np.ones((max_ext + 1, 1), dtype=np.uint8)
-            obs_up = cv2.dilate(obs_m.astype(np.uint8), k_up, anchor=(0, 0))
+            max_ext = int(h_px.max())
+            if max_ext > 0:
+                k_up = np.ones((max_ext + 1, 1), dtype=np.uint8)
+                obs_up = cv2.dilate(obs_m.astype(np.uint8), k_up, anchor=(0, 0))
 
-            pos_map = np.zeros((MAP_H, HALF), dtype=np.float32)
-            pos_map[obs_m] = self._rows_f[obs_m]
-            pos_up = cv2.dilate(pos_map, k_up, anchor=(0, 0))
-            h_px_up = cv2.dilate(h_px, k_up, anchor=(0, 0))
+                pos_map = np.zeros((MAP_H, HALF), dtype=np.float32)
+                pos_map[obs_m] = self._rows_f[obs_m]
+                pos_up = cv2.dilate(pos_map, k_up, anchor=(0, 0))
+                h_px_up = cv2.dilate(h_px, k_up, anchor=(0, 0))
 
-            dist_from_obs = pos_up - self._rows_f
-            side_m = ((obs_up > 0) & ~obs_m & valid
-                      & (dist_from_obs > 0)
-                      & (dist_from_obs <= h_px_up.astype(np.float32)))
+                dist_from_obs = pos_up - self._rows_f
+                side_m = ((obs_up > 0) & ~obs_m & valid
+                          & (dist_from_obs > 0)
+                          & (dist_from_obs <= h_px_up.astype(np.float32)))
 
-            if side_m.any():
-                ratio = dist_from_obs[side_m] / np.maximum(
-                    h_px_up[side_m].astype(np.float32), 1.0)
-                brt = 0.85 - ratio * 0.45
-                out[side_m, 0] = np.clip(70 * brt, 15, 70).astype(np.uint8)
-                out[side_m, 1] = np.clip(58 * brt, 12, 58).astype(np.uint8)
-                out[side_m, 2] = np.clip(48 * brt, 8, 48).astype(np.uint8)
+                if side_m.any():
+                    ratio = dist_from_obs[side_m] / np.maximum(
+                        h_px_up[side_m].astype(np.float32), 1.0)
+                    brt = 0.85 - ratio * 0.45
+                    out[side_m, 0] = np.clip(70 * brt, 15, 70).astype(np.uint8)
+                    out[side_m, 1] = np.clip(58 * brt, 12, 58).astype(np.uint8)
+                    out[side_m, 2] = np.clip(48 * brt, 8, 48).astype(np.uint8)
 
-        # ── fog ──
-        dist_val = np.abs(t2) * valid.astype(np.float32)
-        fog = np.clip(dist_val / 12.0, 0, 0.75)[:, :, None]
-        out = (out.astype(np.float32) * (1.0 - fog)
-               + np.float32([145, 145, 150]) * fog).astype(np.uint8)
+            # ── fog ──
+            dist_val = np.abs(t2) * valid.astype(np.float32)
+            fog = np.clip(dist_val / 12.0, 0, 0.75)[:, :, None]
+            out = (out.astype(np.float32) * (1.0 - fog)
+                   + np.float32([145, 145, 150]) * fog).astype(np.uint8)
 
         # ── robot sprite / footprint ──
-        if _3D_TOPDOWN and hasattr(self, '_debug_obs_roi'):
-            f = self._3d_f
-            M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
-
-            def _ego2scr(ex, ey):
-                gp = M_fwd @ np.float64([ex, ey, 1])
-                wx = float((gp[0] - ORIGIN_X) * PX_SIZE)
-                wy = float(-(gp[1] - ORIGIN_Y) * PX_SIZE)
-                rel = np.float32([wx, wy, 0]) - cam_pos
-                sc = rel @ R
-                return (int(sc[0] * f / (-sc[2]) + HALF * 0.5),
-                        int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5))
-
-            # Per-frame observation tint: green=free, red=obstacle
-            r0, r1, c0, c1, droi = self._debug_obs_roi
-            gr_arr, gc_arr = np.mgrid[r0:r1, c0:c1]
-            wx = (gc_arr.ravel() - ORIGIN_X).astype(np.float32) * PX_SIZE
-            wy = -(gr_arr.ravel() - ORIGIN_Y).astype(np.float32) * PX_SIZE
-            pts = np.column_stack([wx, wy, np.zeros(len(wx), np.float32)])
-            rel = pts - cam_pos[np.newaxis, :]
-            sc = rel @ R
-            good = sc[:, 2] < -0.01
-            inv_z = f / (-sc[good, 2])
-            sx = (sc[good, 0] * inv_z + HALF * 0.5).astype(np.int32)
-            sy = (-sc[good, 1] * inv_z + MAP_H * 0.5).astype(np.int32)
-            vals = droi.ravel()[good]
-            vis = (vals > 0) & (sx >= 0) & (sx < HALF) & (sy >= 0) & (sy < MAP_H)
-            sx, sy, vals = sx[vis], sy[vis], vals[vis]
-            free_m = vals == 1
-            obs_m = vals >= 2
-            cur = out[sy, sx].astype(np.int16)
-            if free_m.any():
-                cur[free_m, 1] = np.minimum(cur[free_m, 1] + 120, 255)
-            if obs_m.any():
-                cur[obs_m, 0] = np.minimum(cur[obs_m, 0] + 140, 255)
-            out[sy, sx] = cur.astype(np.uint8)
-
-            # Outlines drawn LAST — individual cv2.line for each edge
-            # Store screen coords for outlines (drawn on final atlas later)
-            self._debug_outlines = [
-                ([_ego2scr(c, r) for c, r in
-                  [(20, 74), (162, 74), (162, 162), (20, 162)]],
-                 (0, 165, 255)),
-                ([_ego2scr(c, r) for c, r in
-                  [(64, 96), (98, 96), (98, 142), (64, 142)]],
-                 (255, 255, 0)),
-            ]
+        if _3D_TOPDOWN:
+            pass  # clean top-down view, no overlays
         else:
             spr = self._robot_3d_spr
             sh, sw = spr.shape[:2]
