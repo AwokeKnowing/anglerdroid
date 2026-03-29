@@ -118,6 +118,11 @@ class SafetyGuard:
 
         self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
+        if fwd_clear < 10 and self._tick % 5 == 0:
+            print("safety: fwd_clear=%d bwd_clear=%d fwd_scale=%.2f "
+                  "scan_region=[%d:%d, %d:]"
+                  % (fwd_clear, bwd_clear, self._fwd_scale,
+                     y0, y1, MASK_X1))
 
         # ── Lateral scans: above / below robot (diagonal x-extent) ──
         lx0, lx1 = LAT_X0, LAT_X1
