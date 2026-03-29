@@ -22,6 +22,7 @@ import inputs
 import simplegamepad
 from odrivecan import ODriveAxisCAN
 from simplegamepad import SimpleGamepad, haveGamepad
+from robot_config import WHEEL_DIAMETER_CM, WHEELBASE_CM
 
 
 class WheelBase:
@@ -32,8 +33,8 @@ class WheelBase:
 
     def __init__(self,
                  can_interface: str = "can0",
-                 wheel_diameter_cm: float = 17.13,
-                 wheelbase_cm: float = 34.0,
+                 wheel_diameter_cm: float = WHEEL_DIAMETER_CM,
+                 wheelbase_cm: float = WHEELBASE_CM,
                  idle_zero_timeout_s: float = 5.0,
                  invert_left: bool = True):
         self.can_interface = can_interface

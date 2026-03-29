@@ -11,7 +11,7 @@ try:
 except ImportError:
     HAS_RS = False
 
-FRAME_W, FRAME_H = 320, 240
+from robot_config import FRAME_W, FRAME_H
 RS_DEPTH_W, RS_DEPTH_H = 848, 480
 RGB_CAP_W, RGB_CAP_H = 640, 480
 RS_DECIMATE_MAG = 3

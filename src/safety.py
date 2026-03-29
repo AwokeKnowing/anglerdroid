@@ -11,18 +11,20 @@ from collections import deque
 import numpy as np
 import cv2
 
-# ── Robot physics (from wheelbase.py / odrivecan.py) ──
-WHEEL_RADIUS_M = 0.08565
+# ── Robot physics ──
 VEL_RAMP_RATE = 3.0  # turns/s²
-DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 LATENCY_S = 0.15
 MIN_CLEARANCE_PX = 1
 BRAKE_START_PX = 30
 OBS_THRESH = 100
 
-# ── Costmap geometry (imported from vision.py) ──
-from vision import (ROBOT_W, ROBOT_H, RCX, RCY,
-                    FOOT_X0, FOOT_X1, FOOT_Y0, FOOT_Y1)
+# ── Costmap geometry ──
+from robot_config import (FRAME_W, EGO_PX_SIZE, WHEEL_RADIUS_M,
+                          ROBOT_W, ROBOT_H, RCX, RCY,
+                          FOOT_X0, FOOT_X1, FOOT_Y0, FOOT_Y1)
+
+PX_M = EGO_PX_SIZE
+DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
 
 MASK_X0 = FOOT_X0
 MASK_Y0 = FOOT_Y0
@@ -34,7 +36,7 @@ BWD_SCAN_X0 = FOOT_X0
 # collisions are caught.  half-diagonal ≈ sqrt(15²+21²) ≈ 26 px.
 _HALF_DIAG = 26
 LAT_X0 = max(0, RCX - _HALF_DIAG)
-LAT_X1 = min(320, RCX + _HALF_DIAG)
+LAT_X1 = min(FRAME_W, RCX + _HALF_DIAG)
 LAT_HARD_PX = 2    # within this → angular = 0
 LAT_SAFE_PX = 9    # above this  → full angular
 
