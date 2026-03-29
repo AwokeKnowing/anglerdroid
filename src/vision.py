@@ -197,7 +197,7 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         j, i = proj.astype(np.uint32).T
     m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
 
-    # --- Obstacle height (height-filtered + morph close) ---
+    # --- Obstacle height (height-filtered) ---
     m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
     z_obs = v[:, 2][m_obs]
     height_cm = np.clip(
@@ -208,7 +208,14 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
     if DEBUG_CAMERAS:
         cv2.imshow("fw_before_morph", obs.copy())
 
-    cv2.morphologyEx(obs, cv2.MORPH_CLOSE, _fw_kernel, iterations=2, dst=obs)
+    # Morph-close on a BINARY mask only (to fill small gaps in obstacle
+    # detection), then assign minimum height to filled pixels.  This avoids
+    # dilation spreading tall heights (e.g. wall=80cm) onto short neighbors
+    # (e.g. shoe=10cm).
+    obs_bin = (obs > 0).astype(np.uint8)
+    cv2.morphologyEx(obs_bin, cv2.MORPH_CLOSE, _fw_kernel, iterations=2,
+                     dst=obs_bin)
+    obs[obs_bin & (obs == 0)] = 1  # gap-filled pixels get 1cm (minimal)
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_final", obs.copy())
@@ -496,6 +503,19 @@ class Vision:
                          self._pose.x, self._pose.y,
                          np.degrees(self._pose.theta),
                          enc_info))
+
+            # --- Height diagnostic (every 30 frames) ---
+            if not hasattr(self, '_hdiag_n'):
+                self._hdiag_n = 0
+            self._hdiag_n += 1
+            if self._hdiag_n % 30 == 0:
+                om = obs_combined[obs_combined > 0]
+                if len(om) > 0:
+                    bins = [0, 5, 10, 20, 30, 50, 70, 100, 256]
+                    h, _ = np.histogram(om, bins)
+                    print("heights: " + " ".join(
+                        "%d-%d:%d" % (bins[i], bins[i+1]-1, h[i])
+                        for i in range(len(h))))
 
             # --- Update global occupancy map ---
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
