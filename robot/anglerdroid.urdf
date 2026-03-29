@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<robot name="anglerdroid">
+  <link name="base_link">
+    <!-- Trapezoidal body (STL mesh, origin already at axle centre) -->
+    <visual name="body">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/body.stl"/></geometry>
+      <material name="body_mat"><color rgba="0.18 0.18 0.20 1"/></material>
+    </visual>
+
+    <!-- Left wheel -->
+    <visual name="wheel_left">
+      <origin xyz="0.0000 -0.1850 0.0000" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0831" length="0.0500"/></geometry>
+      <material name="wheel_left_mat"><color rgba="0.09 0.09 0.10 1"/></material>
+    </visual>
+
+    <!-- Right wheel -->
+    <visual name="wheel_right">
+      <origin xyz="0.0000 0.1850 0.0000" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0831" length="0.0500"/></geometry>
+      <material name="wheel_right_mat"><color rgba="0.09 0.09 0.10 1"/></material>
+    </visual>
+
+    <!-- Caster -->
+    <visual name="caster">
+      <origin xyz="-0.1800 0.0000 -0.0657" rpy="0 0 0"/>
+      <geometry><box size="0.0400 0.0300 0.0400"/></geometry>
+      <material name="caster_mat"><color rgba="0.16 0.16 0.18 1"/></material>
+    </visual>
+
+    <!-- Mast -->
+    <visual name="mast">
+      <origin xyz="-0.1350 0.0000 0.5243" rpy="0 0 0"/>
+      <geometry><box size="0.0300 0.0300 0.7800"/></geometry>
+      <material name="mast_mat"><color rgba="0.40 0.42 0.45 1"/></material>
+    </visual>
+
+    <!-- Camera arm -->
+    <visual name="camera_arm">
+      <origin xyz="-0.0525 0.0000 0.8993" rpy="0 0 0"/>
+      <geometry><box size="0.1350 0.0300 0.0300"/></geometry>
+      <material name="camera_arm_mat"><color rgba="0.34 0.36 0.40 1"/></material>
+    </visual>
+
+    <!-- RS1 top-down camera -->
+    <visual name="rs1_topdown">
+      <origin xyz="-0.0050 0.0000 0.9268" rpy="0 0 0"/>
+      <geometry><box size="0.0900 0.0800 0.0250"/></geometry>
+      <material name="rs1_topdown_mat"><color rgba="0.12 0.22 0.32 1"/></material>
+    </visual>
+
+    <!-- RS2 forward camera -->
+    <visual name="rs2_forward">
+      <origin xyz="0.0325 0.0000 0.8693" rpy="0 0 0"/>
+      <geometry><box size="0.0350 0.0600 0.0300"/></geometry>
+      <material name="rs2_forward_mat"><color rgba="0.12 0.22 0.32 1"/></material>
+    </visual>
+
+    <!-- Jetson NX -->
+    <visual name="jetson_nx">
+      <origin xyz="-0.0900 0.0000 0.1468" rpy="0 0 0"/>
+      <geometry><box size="0.1000 0.0800 0.0250"/></geometry>
+      <material name="jetson_nx_mat"><color rgba="0.16 0.22 0.16 1"/></material>
+    </visual>
+
+    <!-- Base footprint (ground reference, transparent) -->
+    <visual name="footprint">
+      <origin xyz="0.0000 0.0000 -0.0847" rpy="0 0 0"/>
+      <geometry><box size="0.2800 0.4200 0.0020"/></geometry>
+      <material name="footprint_mat"><color rgba="0.5 0.5 0.5 0.2"/></material>
+    </visual>
+
+    <collision name="body_collision">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/body.stl"/></geometry>
+    </collision>
+  </link>
+</robot>
