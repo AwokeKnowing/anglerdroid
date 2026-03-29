@@ -293,11 +293,11 @@ class GlobalMap:
             fl.append(np.arange(n+2*ns-1, n+ns-1, -1, dtype=np.int32))
             cl.append([min(c+12, 255) for c in rgb])
 
-        _box(-0.04, -0.15, R-0.015, 0.24, 0.15, R+0.01,
-             [45, 45, 50])                                       # base plate
-        _box(-0.04, -0.13, R+0.01,  0.10, 0.13, R+0.16,
+        _box(-0.04, -0.16, 0.015, 0.24, 0.16, R+0.01,
+             [45, 45, 50])                                       # base plate (down to near ground)
+        _box(-0.04, -0.14, R+0.01,  0.10, 0.14, R+0.16,
              [30, 30, 35])                                       # electronics box
-        _box( 0.10, -0.12, R+0.01,  0.22, 0.12, R+0.07,
+        _box( 0.10, -0.13, R+0.01,  0.22, 0.13, R+0.07,
              [35, 35, 40])                                       # front nose
         _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])       # left wheel
         _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])       # right wheel
@@ -318,11 +318,11 @@ class GlobalMap:
                 np.array(cl, dtype=np.uint8))
 
     def _prerender_robot_3d_sprite(self):
-        """Pre-render 3D robot from a steep overhead angle into an RGBA sprite.
+        """Pre-render 3D robot from the follow-cam angle into an RGBA sprite.
 
-        Uses a steeper camera angle than the terrain follow-cam so the robot
-        appears as a clear top-down shape (like a drone view).  The small
-        perspective mismatch is not noticeable at the sprite's size.
+        The follow-cam always sits at the same position relative to the robot
+        so the rendered appearance is constant.  We bake it once into a tight-
+        cropped RGBA patch and record its screen position in the 480×720 panel.
 
         Returns (sprite_rgba, x0, y0) where (x0, y0) is the top-left corner
         of the sprite in the right-panel coordinate system.
@@ -330,47 +330,24 @@ class GlobalMap:
         HALF = MAP_W // 2
         verts, faces, colors = self._robot_mesh
 
-        # Steeper angle than terrain cam: ~62° down vs ~40° for terrain.
-        # Gives a clear top-down view of the robot body.
-        SPR_BEHIND = 1.2
-        SPR_HEIGHT = 3.5
-        SPR_LOOK_AHEAD = 0.3
-        cam = np.float32([-SPR_BEHIND, 0, SPR_HEIGHT])
-        tgt = np.float32([SPR_LOOK_AHEAD, 0, 0])
-        def _build_view(c, t):
-            d = t - c; d /= np.linalg.norm(d)
-            u = np.float32([0, 0, 1])
-            r = np.cross(d, u); rn = np.linalg.norm(r)
-            r = r / rn if rn > 1e-6 else np.float32([1, 0, 0])
-            return np.stack([r, np.cross(r, d), -d], axis=1).astype(np.float32)
+        cam = np.float32([-CAM_BEHIND, 0, CAM_HEIGHT])
+        tgt = np.float32([CAM_LOOK_AHEAD, 0, 0])
+        fwd = tgt - cam
+        fwd /= np.linalg.norm(fwd)
+        up = np.float32([0, 0, 1])
+        rt = np.cross(fwd, up)
+        rn = np.linalg.norm(rt)
+        rt = rt / rn if rn > 1e-6 else np.float32([1, 0, 0])
+        up_a = np.cross(rt, fwd)
+        Rm = np.stack([rt, up_a, -fwd], axis=1).astype(np.float32)
 
-        f = self._3d_f
-        # Where the robot origin appears in the TERRAIN follow-cam
-        cam_t = np.float32([-CAM_BEHIND, 0, CAM_HEIGHT])
-        tgt_t = np.float32([CAM_LOOK_AHEAD, 0, 0])
-        Rt = _build_view(cam_t, tgt_t)
-        org_t = (np.float32([0, 0, 0]) - cam_t) @ Rt
-        ox_t = org_t[0] * f / (-org_t[2]) + HALF * 0.5
-        oy_t = -org_t[1] * f / (-org_t[2]) + MAP_H * 0.5
-
-        # Render sprite from steep overhead camera
-        Rm = _build_view(cam, tgt)
         cv3 = (verts - cam) @ Rm
-        org_s = (np.float32([0, 0, 0]) - cam) @ Rm
-        ox_s = org_s[0] * f / (-org_s[2]) + HALF * 0.5
-        oy_s = -org_s[1] * f / (-org_s[2]) + MAP_H * 0.5
-
-        # Offset so sprite origin aligns with terrain camera's robot position
-        dx_shift = int(round(ox_t - ox_s))
-        dy_shift = int(round(oy_t - oy_s))
-
+        f = self._3d_f
         ok = cv3[:, 2] < -0.01
-        scr_x = np.where(ok, cv3[:, 0]*f/(-cv3[:, 2]) + HALF*0.5 + dx_shift,
-                          -9999).astype(np.float32)
-        scr_y = np.where(ok, -cv3[:, 1]*f/(-cv3[:, 2]) + MAP_H*0.5 + dy_shift,
-                          -9999).astype(np.float32)
+        scr_x = np.where(ok, cv3[:, 0]*f/(-cv3[:, 2]) + HALF*0.5, -9999)
+        scr_y = np.where(ok, -cv3[:, 1]*f/(-cv3[:, 2]) + MAP_H*0.5, -9999)
 
-        light = np.float32([0.2, -0.5, -0.8])
+        light = np.float32([0.2, -0.3, -0.9])
         light /= np.linalg.norm(light)
 
         draw = []
