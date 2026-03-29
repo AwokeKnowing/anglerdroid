@@ -41,6 +41,17 @@ DEBUG_CAMERAS = False
 ROBOT_W = 30        # front-back (x direction)  — locked
 ROBOT_H = 42        # side-to-side (y direction) — locked
 ROBOT_CX_OFF = -78  # x offset from crosshair center — locked
+FOOT_PAD_FWD = 5    # extra clear pixels forward (self-reflection margin)
+FOOT_PAD_BWD = 2    # extra clear pixels backward
+FOOT_PAD_LAT = 2    # extra clear pixels lateral
+
+# Derived footprint bounds in ego frame (robot center at RCX, RCY)
+RCX = CROSSHAIR_CX + ROBOT_CX_OFF   # 81
+RCY = CROSSHAIR_CY                   # 119
+FOOT_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
+FOOT_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT)
+FOOT_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
+FOOT_Y1 = min(FRAME_H, RCY + ROBOT_H // 2 + FOOT_PAD_LAT)
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(0.010)   # 1px = 10mm (orthographic, same as FW)
@@ -364,11 +375,7 @@ class Vision:
         mask[cone] = 255
 
         # Clear robot footprint (force-set to known+free in capture loop)
-        rx0 = max(0, rcx - ROBOT_W // 2 - 2)
-        ry0 = max(0, rcy - ROBOT_H // 2 - 2)
-        rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 3)
-        ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
-        mask[ry0:ry1, rx0:rx1] = 0
+        mask[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
         return mask, fw_cone
 
     def set_wheelbase(self, wb):
@@ -508,14 +515,8 @@ class Vision:
             np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
 
             # Robot footprint is always known-free (robot physically occupies it)
-            rcx = CROSSHAIR_CX + ROBOT_CX_OFF
-            rcy = CROSSHAIR_CY
-            rx0 = max(0, rcx - ROBOT_W // 2 - 2)
-            ry0 = max(0, rcy - ROBOT_H // 2 - 2)
-            rx1 = min(FRAME_W, rcx + ROBOT_W // 2 + 3)
-            ry1 = min(FRAME_H, rcy + ROBOT_H // 2 + 2)
-            obs_combined[ry0:ry1, rx0:rx1] = 0
-            known_combined[ry0:ry1, rx0:rx1] = 255
+            obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+            known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
             _t_obs = time.monotonic()
 
             # --- Odometry: visual + wheel → Kalman fused pose ---
@@ -587,7 +588,7 @@ class Vision:
             self._persistent_obs[:] = 0
             self._persistent_obs[ego_proj < 90] = 255
             self._persistent_obs[obs_combined > 0] = 255
-            self._persistent_obs[ry0:ry1, rx0:rx1] = 0
+            self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
             _t_safety = time.monotonic()

@@ -20,19 +20,15 @@ MIN_CLEARANCE_PX = 1
 BRAKE_START_PX = 30
 OBS_THRESH = 100
 
-# ── Costmap geometry (must match vision.py) ──
-PX_M = 0.010
-ROBOT_W, ROBOT_H = 30, 42
-CX_OFF = -78
-CX, CY = 159, 119
-RCX, RCY = CX + CX_OFF, CY
+# ── Costmap geometry (imported from vision.py) ──
+from vision import (ROBOT_W, ROBOT_H, RCX, RCY,
+                    FOOT_X0, FOOT_X1, FOOT_Y0, FOOT_Y1)
 
-# Robot mask boundaries (same region _build_costmap clears)
-MASK_X0 = max(0, RCX - 20)
-MASK_Y0 = max(0, RCY - ROBOT_H // 2)
-MASK_X1 = min(320, RCX + 16)
-MASK_Y1 = MASK_Y0 + ROBOT_H
-BWD_SCAN_X0 = max(0, RCX - 25)  # 5 px extra margin behind caster
+MASK_X0 = FOOT_X0
+MASK_Y0 = FOOT_Y0
+MASK_X1 = FOOT_X1
+MASK_Y1 = FOOT_Y1
+BWD_SCAN_X0 = FOOT_X0
 
 # Lateral scan covers the robot's full diagonal extent so spin-corner
 # collisions are caught.  half-diagonal ≈ sqrt(15²+21²) ≈ 26 px.

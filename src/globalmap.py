@@ -558,7 +558,7 @@ class GlobalMap:
             dy = wy - y
             fwd_d = dx * ct + dy * st
             lat_d = -dx * st + dy * ct
-            foot = valid & (fwd_d > -0.17) & (fwd_d < 0.18) & (np.abs(lat_d) < 0.23)
+            foot = valid & (fwd_d > -0.17) & (fwd_d < 0.20) & (np.abs(lat_d) < 0.23)
             out[foot] = [140, 255, 140]
         else:
             # FSD palette for 3D follow-cam
