@@ -640,12 +640,21 @@ class GlobalMap:
                 cur[obs_m, 0] = np.minimum(cur[obs_m, 0] + 140, 255)
             out[sy, sx] = cur.astype(np.uint8)
 
-            # Outlines drawn LAST — 3px white/orange on top of everything
+            # Outlines drawn LAST — individual cv2.line for each edge
+            # Draw rectangles using direct numpy pixel writes
             def _rect(corners, color):
-                pts = np.array([_ego2scr(c, r) for c, r in corners],
-                               dtype=np.int32)
-                cv2.polylines(out, [pts.reshape(-1, 1, 2)],
-                              True, color, 1, cv2.LINE_8)
+                p = [_ego2scr(c, r) for c, r in corners]
+                for i in range(len(p)):
+                    x0, y0 = p[i]
+                    x1, y1 = p[(i + 1) % len(p)]
+                    dx = abs(x1 - x0)
+                    dy = abs(y1 - y0)
+                    steps = max(dx, dy, 1)
+                    for s in range(steps + 1):
+                        px = x0 + (x1 - x0) * s // steps
+                        py = y0 + (y1 - y0) * s // steps
+                        if 0 <= px < HALF and 0 <= py < MAP_H:
+                            out[py, px] = color
 
             _rect([(10, 10), (235, 10), (235, 230), (10, 230)],
                   (0, 165, 255))          # orange: RS1 obs_mask clip
