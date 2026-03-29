@@ -345,15 +345,10 @@ class Vision:
 
         mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
-        # RS1 top-down rectangle: clip unreliable edge pixels.
-        # Measured RS1 coverage in ego frame: rows 65..171, cols 0..172
-        # (after 180° flip + td_dx=-75 shift).  Inset 10px to exclude
-        # noisy border pixels that falsely report "floor".
-        RS1_ROW0 = 75    # measured 65 + 10px margin
-        RS1_ROW1 = 161   # measured 171 - 10px margin
-        RS1_COL0 = 10    # measured 0  + 10px margin
-        RS1_COL1 = 162   # measured 172 - 10px margin
-        mask[RS1_ROW0:RS1_ROW1, RS1_COL0:RS1_COL1] = 255
+        # RS1 top-down rectangle (loose for now — tight clip pending debug).
+        TD_EDGE = 10
+        td_col_end = FRAME_W + int(TD_X_OFFSET)     # 245
+        mask[TD_EDGE:FRAME_H - TD_EDGE, TD_EDGE:td_col_end - TD_EDGE] = 255
 
         # RS2 forward 80° cone (±40°), 2.5m range, from robot center
         yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]
