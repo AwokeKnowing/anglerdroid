@@ -587,6 +587,7 @@ class Vision:
             self._persistent_obs[:] = 0
             self._persistent_obs[ego_proj < 90] = 255
             self._persistent_obs[obs_combined > 0] = 255
+            self._persistent_obs[ry0:ry1, rx0:rx1] = 0
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
             _t_safety = time.monotonic()
