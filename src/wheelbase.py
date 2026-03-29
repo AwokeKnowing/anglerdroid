@@ -73,16 +73,18 @@ class WheelBase:
         self._init_gamepad()
         self._start_idle_watcher()
         self._start_twist_for_thread()
-        self._start_encoder_reader()
 
         vbus = 0.0
         try:
-            vbus = self.left.get_vbus_voltage()
+            with self.bus_lock:
+                vbus = self.left.get_vbus_voltage()
         except Exception:
             pass
         batt = int(100 * (vbus - 30.0) / (42.0 - 30.0)) if vbus > 0 else 0
         batt = max(0, min(100, batt))
         print(f"✅ WheelBase ready (wheelbase={wheelbase_cm}cm, max_speed=50%) | Battery: {vbus:.1f}V ({batt}%)")
+
+        self._start_encoder_reader()
 
     def _bring_up_can(self):
         try:
