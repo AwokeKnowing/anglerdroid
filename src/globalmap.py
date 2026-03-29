@@ -641,16 +641,16 @@ class GlobalMap:
             out[sy, sx] = cur.astype(np.uint8)
 
             # Outlines drawn LAST — 3px white/orange on top of everything
-            def _rect(corners, color, thick=3):
+            def _rect(corners, color):
                 pts = np.array([_ego2scr(c, r) for c, r in corners],
                                dtype=np.int32)
                 cv2.polylines(out, [pts.reshape(-1, 1, 2)],
-                              True, color, thick, cv2.LINE_8)
+                              True, color, 1, cv2.LINE_8)
 
             _rect([(10, 10), (235, 10), (235, 230), (10, 230)],
-                  (0, 165, 255), 3)       # orange: RS1 obs_mask clip
+                  (0, 165, 255))          # orange: RS1 obs_mask clip
             _rect([(64, 96), (98, 96), (98, 142), (64, 142)],
-                  (255, 255, 0), 3)       # cyan: robot footprint
+                  (255, 255, 0))          # cyan: robot footprint
         else:
             spr = self._robot_3d_spr
             sh, sw = spr.shape[:2]
