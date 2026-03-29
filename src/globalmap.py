@@ -427,9 +427,90 @@ class GlobalMap:
         canvas = np.dstack([rgb[r0:r1, c0:c1], amask[r0:r1, c0:c1]])
         return canvas.copy(), c0, r0
 
+    def _render_mesh_view(self, cam_pos, look_at, up_hint, w, h, label):
+        """Render the robot mesh from an arbitrary camera into a (h, w, 3) image."""
+        verts, faces, colors = self._robot_mesh
+        fwd = look_at - cam_pos
+        fwd = fwd / np.linalg.norm(fwd)
+        rt = np.cross(fwd, up_hint)
+        rn = np.linalg.norm(rt)
+        rt = rt / rn if rn > 1e-6 else np.float32([1, 0, 0])
+        up_a = np.cross(rt, fwd)
+        Rm = np.stack([rt, up_a, -fwd], axis=1).astype(np.float32)
+        cv3 = (verts - cam_pos) @ Rm
+        f = min(w, h) * 1.3
+        ok = cv3[:, 2] < -0.01
+        scr_x = np.where(ok, cv3[:, 0] * f / (-cv3[:, 2]) + w * 0.5, -9999)
+        scr_y = np.where(ok, -cv3[:, 1] * f / (-cv3[:, 2]) + h * 0.5, -9999)
+        light = np.float32([0.2, -0.3, -0.9])
+        light /= np.linalg.norm(light)
+        draw = []
+        for i, fidx in enumerate(faces):
+            fv = cv3[fidx]
+            if (fv[:, 2] >= -0.01).any():
+                continue
+            e1, e2 = fv[1] - fv[0], fv[-1] - fv[0]
+            nrm = np.cross(e1, e2)
+            nl = np.linalg.norm(nrm)
+            if nl < 1e-8:
+                continue
+            nrm /= nl
+            if np.dot(nrm, fv.mean(axis=0)) > 0:
+                continue
+            brt = max(0.3, min(1.0, -np.dot(nrm, light)))
+            pts = np.column_stack([scr_x[fidx].astype(np.int32),
+                                   scr_y[fidx].astype(np.int32)])
+            col = np.clip(colors[i].astype(np.float32) * brt,
+                          0, 255).astype(np.uint8).tolist()
+            draw.append((fv[:, 2].mean(), pts, col))
+        draw.sort(key=lambda d: d[0])
+        img = np.full((h, w, 3), 200, dtype=np.uint8)
+        for _, pts, col in draw:
+            cv2.fillConvexPoly(img, pts, col)
+        for _, pts, col in draw:
+            cv2.polylines(img, [pts], True,
+                          [max(0, c - 20) for c in col], 1, cv2.LINE_AA)
+        cv2.putText(img, label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (0, 0, 0), 2, cv2.LINE_AA)
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), (80, 80, 80), 1)
+        return img
+
+    def _debug_mesh_views(self):
+        """Render 2×2 grid of robot mesh from 4 angles → 960×720 image."""
+        hw, hh = MAP_W // 2, MAP_H // 2
+        up_z = np.float32([0, 0, 1])
+        up_y = np.float32([0, 1, 0])
+        origin = np.float32([0.08, 0, 0.12])
+
+        side = self._render_mesh_view(
+            np.float32([0.08, -1.5, 0.15]), origin, up_z, hw, hh, "SIDE (right)")
+        top = self._render_mesh_view(
+            np.float32([0.08, 0, 2.0]), origin, np.float32([-1, 0, 0]),
+            hw, hh, "TOP")
+        back = self._render_mesh_view(
+            np.float32([-1.5, 0, 0.15]), origin, up_z, hw, hh, "BACK")
+        drone = self._render_mesh_view(
+            np.float32([-CAM_BEHIND, 0, CAM_HEIGHT]),
+            np.float32([CAM_LOOK_AHEAD, 0, 0]),
+            up_z, hw, hh, "DRONE (follow-cam)")
+
+        out = np.zeros((MAP_H, MAP_W, 3), dtype=np.uint8)
+        out[:hh, :hw] = side
+        out[:hh, hw:] = top
+        out[hh:, :hw] = back
+        out[hh:, hw:] = drone
+        return out
+
     def render(self, x, y, theta, trail_xy=None,
                fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
         """960×720 split view: left=zoomed-out 2D map, right=3D follow-cam."""
+        # DEBUG: show mesh from 4 angles — remove this block when done
+        if not hasattr(self, '_debug_mesh_done'):
+            self._debug_mesh_done = True
+            self._out[:] = self._debug_mesh_views()
+            return self._out
+        # END DEBUG
+
         HALF = MAP_W // 2
         rc = int(ORIGIN_X + x / PX_SIZE)
         rr = int(ORIGIN_Y - y / PX_SIZE)
