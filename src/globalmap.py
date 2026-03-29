@@ -601,44 +601,47 @@ class GlobalMap:
 
         # ── robot sprite / footprint ──
         if _3D_TOPDOWN:
-            # In top-down mode: draw ego-space debug boundaries
-            # Project ego-space corners through world→screen
-            ECX, ECY, EPS = 81.0, 119.0, 0.01
+            # In top-down mode: draw ego-space debug boundaries.
+            # Use the same forward affine as globalmap.update to go
+            # ego pixel → global map pixel, then project to screen
+            # via the already-computed camera matrix.
+            M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
             f = self._3d_f
 
             def _ego2screen(ex, ey):
-                dx_m = (ex - ECX) * EPS
-                dy_m = (ey - ECY) * EPS
-                wx = x + dx_m * ct + dy_m * st
-                wy = y + dx_m * st - dy_m * ct
+                gp = M_fwd @ np.float64([ex, ey, 1])
+                gc, gr = gp[0], gp[1]
+                wx = (gc - ORIGIN_X) * PX_SIZE
+                wy = -(gr - ORIGIN_Y) * PX_SIZE
                 rel = np.float32([wx, wy, 0]) - cam_pos
                 sc = rel @ R
                 if sc[2] > -0.01:
                     return None
-                sx = int(sc[0] * f / (-sc[2]) + HALF * 0.5)
-                sy = int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5)
-                return (sx, sy)
+                return (int(sc[0] * f / (-sc[2]) + HALF * 0.5),
+                        int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5))
 
             def _draw_rect(corners, color, thickness=1):
-                pts = [_ego2screen(ex, ey) for ex, ey in corners]
+                pts = [_ego2screen(c, r) for c, r in corners]
                 if all(p is not None for p in pts):
-                    arr = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
-                    cv2.polylines(out, [arr], True, color, thickness)
+                    cv2.polylines(out,
+                                  [np.array(pts, np.int32).reshape(-1, 1, 2)],
+                                  True, color, thickness)
 
-            # Robot footprint (RED) — 34×46cm clear zone
+            # Robot footprint (RED) — cols 64..98, rows 96..142
             _draw_rect([(64, 96), (98, 96), (98, 142), (64, 142)],
                         (0, 0, 255), 2)
-            # RS1 obs_mask rectangle (GREEN) — edge-trimmed
+            # RS1 obs_mask rectangle (GREEN) — cols 10..235, rows 10..230
             _draw_rect([(10, 10), (235, 10), (235, 230), (10, 230)],
                         (0, 255, 0), 1)
             # RS2 cone edges (CYAN)
             cone_r = 250
             a40 = math.radians(40)
-            p0 = _ego2screen(81, 119)
-            p1 = _ego2screen(81 + int(cone_r * math.cos(a40)),
-                             119 + int(cone_r * math.sin(a40)))
-            p2 = _ego2screen(81 + int(cone_r * math.cos(-a40)),
-                             119 + int(cone_r * math.sin(-a40)))
+            cx, cy = 81, 119
+            p0 = _ego2screen(cx, cy)
+            p1 = _ego2screen(cx + int(cone_r * math.cos(a40)),
+                             cy + int(cone_r * math.sin(a40)))
+            p2 = _ego2screen(cx + int(cone_r * math.cos(-a40)),
+                             cy + int(cone_r * math.sin(-a40)))
             if p0 and p1:
                 cv2.line(out, p0, p1, (255, 255, 0), 1)
             if p0 and p2:
