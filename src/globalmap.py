@@ -653,7 +653,7 @@ class GlobalMap:
             # Store screen coords for outlines (drawn on final atlas later)
             self._debug_outlines = [
                 ([_ego2scr(c, r) for c, r in
-                  [(12, 74), (162, 74), (162, 162), (12, 162)]],
+                  [(20, 74), (162, 74), (162, 162), (20, 162)]],
                  (0, 165, 255)),
                 ([_ego2scr(c, r) for c, r in
                   [(64, 96), (98, 96), (98, 142), (64, 142)]],
