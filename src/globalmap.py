@@ -605,46 +605,22 @@ class GlobalMap:
         # ── robot sprite / footprint ──
         if _3D_TOPDOWN and hasattr(self, '_debug_obs_roi'):
             f = self._3d_f
-            H_cam = cam_pos[2]
             M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
 
-            # Build a single ego-pixel → screen-pixel 2×3 affine.
-            # Chain: ego→global pixel (M_fwd), global pixel→world,
-            # world→camera (top-down R), camera→screen.  All linear.
-            # Global pixel (gc,gr) → world: wx=(gc-OX)*P, wy=-(gr-OY)*P
-            # Camera sc: sc0 = (wx-cx)*R00+(wy-cy)*R10
-            #            sc1 = (wx-cx)*R01+(wy-cy)*R11
-            # Screen: sx = sc0*f/H + HALF/2,  sy = -sc1*f/H + MAP_H/2
-            P = PX_SIZE
-            k = f / H_cam
-            # world→screen matrix entries
-            a_sx = P * R[0, 0] * k       # d(sx)/d(gc)
-            b_sx = -P * R[1, 0] * k      # d(sx)/d(gr) (note wy = -gr*P)
-            a_sy = -P * R[0, 1] * k      # d(sy)/d(gc) (note -sc1)
-            b_sy = P * R[1, 1] * k       # d(sy)/d(gr)
-            # offset from camera world position
-            cx_w, cy_w = cam_pos[0], cam_pos[1]
-            off_sx = (-cx_w * R[0, 0] - cy_w * R[1, 0]) * k + HALF * 0.5
-            off_sy = -(-cx_w * R[0, 1] - cy_w * R[1, 1]) * k + MAP_H * 0.5
-            # global pixel → screen: S @ [gc, gr, 1]
-            S = np.float64([[a_sx, b_sx, off_sx],
-                            [a_sy, b_sy, off_sy]])
-            # Compose: ego → screen = S @ [M_fwd; 0 0 1]
-            M3 = np.vstack([M_fwd, [0, 0, 1]])
-            S3 = np.vstack([S, [0, 0, 1]])
-            E2S = (S3 @ M3)[:2]  # 2×3 ego pixel → screen pixel
-
-            def _ego_corners_to_screen(corners):
-                """corners: list of (col, row) in ego space → screen int pts"""
-                src = np.float64(corners).reshape(1, -1, 2)
-                dst = cv2.transform(src, E2S).reshape(-1, 2)
-                return dst.astype(np.int32)
+            def _ego2scr(ex, ey):
+                gp = M_fwd @ np.float64([ex, ey, 1])
+                wx = float((gp[0] - ORIGIN_X) * PX_SIZE)
+                wy = float(-(gp[1] - ORIGIN_Y) * PX_SIZE)
+                rel = np.float32([wx, wy, 0]) - cam_pos
+                sc = rel @ R
+                return (int(sc[0] * f / (-sc[2]) + HALF * 0.5),
+                        int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5))
 
             # Per-frame observation tint: green=free, red=obstacle
             r0, r1, c0, c1, droi = self._debug_obs_roi
             gr_arr, gc_arr = np.mgrid[r0:r1, c0:c1]
-            wx = (gc_arr.ravel() - ORIGIN_X).astype(np.float32) * P
-            wy = -(gr_arr.ravel() - ORIGIN_Y).astype(np.float32) * P
+            wx = (gc_arr.ravel() - ORIGIN_X).astype(np.float32) * PX_SIZE
+            wy = -(gr_arr.ravel() - ORIGIN_Y).astype(np.float32) * PX_SIZE
             pts = np.column_stack([wx, wy, np.zeros(len(wx), np.float32)])
             rel = pts - cam_pos[np.newaxis, :]
             sc = rel @ R
@@ -664,17 +640,17 @@ class GlobalMap:
                 cur[obs_m, 0] = np.minimum(cur[obs_m, 0] + 140, 255)
             out[sy, sx] = cur.astype(np.uint8)
 
-            # Clean outlines drawn LAST on top of everything
-            # Orange: RS1 obs_mask clip boundary (cols 10..235, rows 10..230)
-            rs1_pts = _ego_corners_to_screen(
-                [(10, 10), (235, 10), (235, 230), (10, 230)])
-            cv2.polylines(out, [rs1_pts.reshape(-1, 1, 2)],
-                          True, (0, 165, 255), 2, cv2.LINE_8)
-            # Cyan: robot footprint forced-free zone
-            fp_pts = _ego_corners_to_screen(
-                [(64, 96), (98, 96), (98, 142), (64, 142)])
-            cv2.polylines(out, [fp_pts.reshape(-1, 1, 2)],
-                          True, (255, 255, 0), 2, cv2.LINE_8)
+            # Outlines drawn LAST — 3px white/orange on top of everything
+            def _rect(corners, color, thick=3):
+                pts = np.array([_ego2scr(c, r) for c, r in corners],
+                               dtype=np.int32)
+                cv2.polylines(out, [pts.reshape(-1, 1, 2)],
+                              True, color, thick, cv2.LINE_8)
+
+            _rect([(10, 10), (235, 10), (235, 230), (10, 230)],
+                  (0, 165, 255), 3)       # orange: RS1 obs_mask clip
+            _rect([(64, 96), (98, 96), (98, 142), (64, 142)],
+                  (255, 255, 0), 3)       # cyan: robot footprint
         else:
             spr = self._robot_3d_spr
             sh, sw = spr.shape[:2]
