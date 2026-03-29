@@ -329,23 +329,23 @@ class GlobalMap:
             fl.append(np.array(q, dtype=np.int32))
             cl.append(body_rgb)
 
-        # ── Wheels ──
+        # ── Wheels (at axle, x=0) ──
         _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])
         _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])
-        # ── Caster ──
-        _box(0.21, -0.015, 0.0, 0.25, 0.015, 0.04, [40, 40, 45])
-        # ── Mast (from body top near axle) ──
-        _box(-0.015, -0.015, z_top, 0.015, 0.015, 1.00,
+        # ── Caster (at back, same axis as mast base) ──
+        _box(-0.09, -0.015, 0.0, -0.05, 0.015, 0.04, [40, 40, 45])
+        # ── Mast (rises from back wall) ──
+        _box(-0.055, -0.015, z_top, -0.025, 0.015, 1.00,
              [100, 105, 115])
-        # ── Camera arm ──
-        _box(0.015, -0.015, 0.97, 0.165, 0.015, 1.00,
+        # ── Camera arm (extends forward from mast top) ──
+        _box(-0.025, -0.015, 0.97, 0.125, 0.015, 1.00,
              [85, 90, 100])
         # ── RS1 top-down cam ──
-        _box(0.10, -0.04, 1.00, 0.19, 0.04, 1.025, [30, 55, 80])
+        _box(0.06, -0.04, 1.00, 0.15, 0.04, 1.025, [30, 55, 80])
         # ── RS2 forward cam ──
-        _box(0.165, -0.03, 0.94, 0.20, 0.03, 0.97, [30, 55, 80])
-        # ── Jetson NX on body top ──
-        _box(-0.01, -0.04, z_top, 0.09, 0.04, z_top + 0.025,
+        _box(0.125, -0.03, 0.94, 0.16, 0.03, 0.97, [30, 55, 80])
+        # ── Jetson NX on body top (at back) ──
+        _box(-0.04, -0.04, z_top, 0.06, 0.04, z_top + 0.025,
              [40, 55, 40])
 
         return (np.array(vl, dtype=np.float32), fl,
