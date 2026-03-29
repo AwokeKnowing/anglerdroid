@@ -161,6 +161,9 @@ class GlobalMap:
         self._ring_idx = (self._ring_idx + 1) % CONSENSUS_N
         self._count += 1
 
+        if _3D_TOPDOWN:
+            self._debug_obs_roi = (r0, r1, c0, c1, obs_roi.copy())
+
         if self._count < CONSENSUS_N:
             return
         t3 = time.monotonic()
@@ -600,19 +603,14 @@ class GlobalMap:
                + np.float32([145, 145, 150]) * fog).astype(np.uint8)
 
         # ── robot sprite / footprint ──
-        if _3D_TOPDOWN:
-            # In top-down mode: draw ego-space debug boundaries.
-            # Use the same forward affine as globalmap.update to go
-            # ego pixel → global map pixel, then project to screen
-            # via the already-computed camera matrix.
-            M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
+        if _3D_TOPDOWN and hasattr(self, '_debug_obs_roi'):
             f = self._3d_f
+            M_fwd = self._forward_affine(x, y, theta, 81.0, 119.0, 0.01)
 
             def _ego2screen(ex, ey):
                 gp = M_fwd @ np.float64([ex, ey, 1])
-                gc, gr = gp[0], gp[1]
-                wx = (gc - ORIGIN_X) * PX_SIZE
-                wy = -(gr - ORIGIN_Y) * PX_SIZE
+                wx = (gp[0] - ORIGIN_X) * PX_SIZE
+                wy = -(gp[1] - ORIGIN_Y) * PX_SIZE
                 rel = np.float32([wx, wy, 0]) - cam_pos
                 sc = rel @ R
                 if sc[2] > -0.01:
@@ -620,38 +618,47 @@ class GlobalMap:
                 return (int(sc[0] * f / (-sc[2]) + HALF * 0.5),
                         int(-sc[1] * f / (-sc[2]) + MAP_H * 0.5))
 
-            def _draw_rect(corners, color, thickness=1, label=None):
+            # Per-frame observation tint: green=free, red=obstacle
+            r0, r1, c0, c1, droi = self._debug_obs_roi
+            gr_arr, gc_arr = np.mgrid[r0:r1, c0:c1]
+            wx = (gc_arr.ravel() - ORIGIN_X).astype(np.float32) * PX_SIZE
+            wy = -(gr_arr.ravel() - ORIGIN_Y).astype(np.float32) * PX_SIZE
+            pts = np.column_stack([wx, wy, np.zeros(len(wx), np.float32)])
+            rel = pts - cam_pos[np.newaxis, :]
+            sc = rel @ R
+            good = sc[:, 2] < -0.01
+            inv_z = f / (-sc[good, 2])
+            sx = (sc[good, 0] * inv_z + HALF * 0.5).astype(np.int32)
+            sy = (-sc[good, 1] * inv_z + MAP_H * 0.5).astype(np.int32)
+            vals = droi.ravel()[good]
+            vis = (vals > 0) & (sx >= 0) & (sx < HALF) & (sy >= 0) & (sy < MAP_H)
+            sx, sy, vals = sx[vis], sy[vis], vals[vis]
+            free_m = vals == 1
+            obs_m = vals >= 2
+            cur = out[sy, sx].astype(np.int16)
+            if free_m.any():
+                cur[free_m, 1] = np.minimum(cur[free_m, 1] + 120, 255)
+            if obs_m.any():
+                cur[obs_m, 0] = np.minimum(cur[obs_m, 0] + 140, 255)
+            out[sy, sx] = cur.astype(np.uint8)
+
+            # Crisp outlines (1px, no AA) for fixed masks
+            def _draw_outline(corners, color):
                 pts = [_ego2screen(c, r) for c, r in corners]
-                if label and not hasattr(_draw_rect, '_n'):
-                    _draw_rect._n = 0
-                if label:
-                    _draw_rect._n += 1
-                    if _draw_rect._n <= 3:
-                        print("debug_rect %s: pts=%s" % (label, pts))
                 if all(p is not None for p in pts):
                     cv2.polylines(out,
                                   [np.array(pts, np.int32).reshape(-1, 1, 2)],
-                                  True, color, thickness)
+                                  True, color, 1, cv2.LINE_4)
 
-            # Robot footprint (RED) — cols 64..98, rows 96..142
-            _draw_rect([(64, 96), (98, 96), (98, 142), (64, 142)],
-                        (0, 0, 255), 2, label='footprint')
-            # RS1 obs_mask rectangle (GREEN) — cols 10..235, rows 10..230
-            _draw_rect([(10, 10), (235, 10), (235, 230), (10, 230)],
-                        (0, 255, 0), 3, label='rs1')
-            # RS2 cone edges (CYAN)
-            cone_r = 250
-            a40 = math.radians(40)
-            cx, cy = 81, 119
-            p0 = _ego2screen(cx, cy)
-            p1 = _ego2screen(cx + int(cone_r * math.cos(a40)),
-                             cy + int(cone_r * math.sin(a40)))
-            p2 = _ego2screen(cx + int(cone_r * math.cos(-a40)),
-                             cy + int(cone_r * math.sin(-a40)))
-            if p0 and p1:
-                cv2.line(out, p0, p1, (255, 255, 0), 1)
-            if p0 and p2:
-                cv2.line(out, p0, p2, (255, 255, 0), 1)
+            # Orange: RS1 obs_mask clip boundary (cols 10..235, rows 10..230)
+            _draw_outline([(10, 10), (235, 10), (235, 230), (10, 230)],
+                          (255, 140, 0))
+            # Blue: robot footprint forced-free zone
+            rcx, rcy = 81, 119
+            rw2, rh2 = 17 + 2, 23 + 2
+            _draw_outline([(rcx - rw2, rcy - rh2), (rcx + rw2, rcy - rh2),
+                           (rcx + rw2, rcy + rh2), (rcx - rw2, rcy + rh2)],
+                          (80, 80, 255))
         else:
             spr = self._robot_3d_spr
             sh, sw = spr.shape[:2]
