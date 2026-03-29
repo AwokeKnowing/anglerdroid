@@ -609,8 +609,8 @@ class GlobalMap:
             def _ego2screen(ex, ey):
                 dx_m = (ex - ECX) * EPS
                 dy_m = (ey - ECY) * EPS
-                wx = x + dx_m * ct - dy_m * st
-                wy = y + dx_m * st + dy_m * ct
+                wx = x + dx_m * ct + dy_m * st
+                wy = y + dx_m * st - dy_m * ct
                 rel = np.float32([wx, wy, 0]) - cam_pos
                 sc = rel @ R
                 if sc[2] > -0.01:
