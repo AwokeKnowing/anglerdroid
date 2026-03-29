@@ -332,8 +332,9 @@ class GlobalMap:
         # ── Wheels (at axle, x=0) ──
         _wheel(0, R, -0.21, -0.16, R*0.97, [22, 22, 26])
         _wheel(0, R,  0.16,  0.21, R*0.97, [22, 22, 26])
-        # ── Caster (at back, beyond back wall) ──
-        _box(-0.20, -0.015, 0.0, -0.16, 0.015, 0.04, [40, 40, 45])
+        # ── Caster + strut (attached to back wall, down to ground) ──
+        _box(-0.17, -0.015, 0.0, -0.15, 0.015, z_base, [40, 40, 45])
+        _box(-0.19, -0.015, 0.0, -0.15, 0.015, 0.03, [35, 35, 40])
         # ── Mast (rises from back wall) ──
         _box(-0.165, -0.015, z_top, -0.135, 0.015, 1.00,
              [100, 105, 115])
@@ -551,13 +552,12 @@ class GlobalMap:
         out = (out.astype(np.float32) * shade).astype(np.uint8)
 
         # ── pillar extrusion (side faces) ──
-        depth = np.maximum(np.abs(t2), 0.3)
-        MIN_PILLAR_PX = 3
-        h_px = np.clip(
-            h_float * 0.01 * self._3d_f * self._pitch_cos / depth,
-            0, 60).astype(np.uint8)
-        h_px[obs_m & (h_px < MIN_PILLAR_PX)] = MIN_PILLAR_PX
-        h_px[~obs_m] = 0
+        # Pillar height = height map value directly (1 cm → 1 px),
+        # clamped to [5, 100] for obstacles so small ones stay visible.
+        MIN_PILLAR_CM = 5
+        h_px = np.where(obs_m,
+                        np.clip(h_float, MIN_PILLAR_CM, 100),
+                        0).astype(np.uint8)
 
         max_ext = int(h_px.max())
         if max_ext > 0:
