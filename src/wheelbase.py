@@ -97,19 +97,13 @@ class WheelBase:
         except Exception:
             pass
 
-        print(f"   Bringing up {self.can_interface}...")
+        print(f"   Bringing up {self.can_interface} (may ask for sudo password)...")
         try:
             subprocess.run(
-                ["sudo", "-n", "ip", "link", "set", self.can_interface,
+                ["sudo", "ip", "link", "set", self.can_interface,
                  "up", "type", "can", "bitrate", "250000"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5, check=True)
+                check=True)
             print(f"   {self.can_interface} brought up")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"{self.can_interface}: sudo timed out (password prompt?). "
-                f"Run 'sudo ip link set {self.can_interface} up type can bitrate 250000' manually "
-                f"or add a passwordless sudoers rule.")
         except subprocess.CalledProcessError:
             print(f"   WARNING: Could not auto-bring up {self.can_interface}")
 
@@ -351,6 +345,11 @@ class WheelBase:
 
     # ── Encoder reader thread ────────────────────────────────────────
 
+    @property
+    def battery_pct(self):
+        """Cached battery percentage (updated every ~5s in encoder thread)."""
+        return self._batt_pct
+
     def _start_encoder_reader(self):
         self._enc_vel = [0.0, 0.0]    # [left_tps, right_tps] from encoder
         self._enc_lock = threading.Lock()
@@ -359,6 +358,8 @@ class WheelBase:
         self._enc_native_fails = 0
         self._enc_consec_fails = 0     # consecutive read failures (any mode)
         self._enc_last_good = 0.0      # time.monotonic() of last successful read
+        self._batt_pct = -1            # unknown until first read
+        self._batt_next = 0.0          # read immediately on first loop
         t = threading.Thread(target=self._encoder_reader_loop, daemon=True)
         t.start()
 
@@ -414,6 +415,19 @@ class WheelBase:
             except Exception as e:
                 if self._enc_consec_fails < 3:
                     print("encoder: exception: %s" % e)
+
+            now = time.monotonic()
+            if now >= self._batt_next:
+                try:
+                    with self.bus_lock:
+                        v = self.left.get_vbus_voltage()
+                    if v > 0:
+                        self._batt_pct = max(0, min(100,
+                            int(100 * (v - 30.0) / (42.0 - 30.0))))
+                except Exception:
+                    pass
+                self._batt_next = now + 5.0
+
             time.sleep(0.030)
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):

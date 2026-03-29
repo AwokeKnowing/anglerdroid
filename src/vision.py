@@ -370,6 +370,32 @@ class Vision:
         """Provide wheelbase reference for wheel odometry fusion."""
         self._wheelbase = wb
 
+    def _draw_battery_bar(self, atlas):
+        """Draw a battery bar at the bottom of the camera row."""
+        wb = self._wheelbase
+        if wb is None:
+            return
+        pct = wb.battery_pct
+        if pct < 0:
+            return
+        BAR_H = 6
+        BAR_Y = CAM_ROW_H - BAR_H
+        BAR_W = ATLAS_W
+        fill_w = int(BAR_W * pct / 100)
+        if pct > 50:
+            color = (0, 200, 0)
+        elif pct > 25:
+            color = (220, 180, 0)
+        else:
+            color = (220, 40, 40)
+        atlas[BAR_Y:CAM_ROW_H, :, :] = (30, 30, 30)
+        if fill_w > 0:
+            atlas[BAR_Y:CAM_ROW_H, :fill_w] = color
+        label = "%d%%" % pct
+        cv2.putText(atlas, label, (BAR_W // 2 - 12, CAM_ROW_H - 1),
+                    cv2.FONT_HERSHEY_PLAIN, 0.7, (255, 255, 255), 1,
+                    cv2.LINE_AA)
+
     def start(self):
         if self._running:
             return
@@ -603,6 +629,7 @@ class Vision:
                 self.atlas[0:CAM_ROW_H, FRAME_W:FRAME_W * 2] = rgbd1
                 self.atlas[0:CAM_ROW_H, FRAME_W * 2:FRAME_W * 3] = rgbd2
                 self.atlas[CAM_ROW_H:ATLAS_H, 0:ATLAS_W] = gmap_render
+                self._draw_battery_bar(self.atlas)
                 self.timestamp = time.time()
             _t_end = time.monotonic()
 
