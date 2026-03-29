@@ -159,9 +159,8 @@ class UI:
     # ── main-loop interface (called from 30 fps thread) ─────────────
 
     def send_atlas(self, atlas_rgb):
-        """Encode half-res JPEG — same bytes go to browser and AI."""
-        half = cv2.resize(atlas_rgb, (480, 480), interpolation=cv2.INTER_NEAREST)
-        _, buf = cv2.imencode('.jpg', half[:, :, ::-1],
+        """Encode full-res JPEG — same bytes go to browser and AI."""
+        _, buf = cv2.imencode('.jpg', atlas_rgb[:, :, ::-1],
                               [cv2.IMWRITE_JPEG_QUALITY, 92])
         with self._atlas_lock:
             self._atlas_jpeg = buf.tobytes()
