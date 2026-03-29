@@ -65,8 +65,11 @@ class WheelBase:
         self._safety_bwd = 1.0
         self._safety_ang = 1.0
 
+        print("WheelBase: bring_up_can...")
         self._bring_up_can()
+        print("WheelBase: init_odrive...")
         self._init_odrive()
+        print("WheelBase: init_gamepad...")
         self._init_gamepad()
         self._start_idle_watcher()
         self._start_twist_for_thread()

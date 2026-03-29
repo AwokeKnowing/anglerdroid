@@ -271,6 +271,7 @@ class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
     def __init__(self, rs1_serial, rs2_serial, rgb1_device_id, headless=True):
+        print("Vision: init start")
         self.rs1_serial = rs1_serial
         self.rs2_serial = rs2_serial
         self.rgb1_device_id = rgb1_device_id

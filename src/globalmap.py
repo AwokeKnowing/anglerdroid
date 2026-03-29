@@ -59,6 +59,7 @@ LEFT_ZOOM = 0.5      # 2D map scale (0.5 = show 2× more area)
 
 class GlobalMap:
     def __init__(self):
+        t0 = time.monotonic()
         self._map = np.full((MAP_H, MAP_W), UNKNOWN_VAL, dtype=np.uint8)
         self._height_map = np.zeros((MAP_H, MAP_W), dtype=np.uint8)
         self._ring = [None] * CONSENSUS_N  # (r0,r1,c0,c1,signed_roi) per slot
@@ -68,13 +69,20 @@ class GlobalMap:
         self._render_times = []
         self._update_times = []
         self._out = np.empty((MAP_H, MAP_W, 3), dtype=np.uint8)
+        t1 = time.monotonic()
         self._3d_rays, self._3d_f = self._precompute_3d_rays()
+        t2 = time.monotonic()
         self._3d_wr = np.empty_like(self._3d_rays)
         self._robot_mesh = self._build_robot_mesh()
+        t3 = time.monotonic()
         spr, sx, sy = self._prerender_robot_3d_sprite()
         self._robot_3d_spr = spr
         self._robot_3d_x0 = sx
         self._robot_3d_y0 = sy
+        t4 = time.monotonic()
+        print(f"GlobalMap: init {(t1-t0)*1e3:.0f}ms  rays {(t2-t1)*1e3:.0f}ms  "
+              f"mesh {(t3-t2)*1e3:.0f}ms  sprite {(t4-t3)*1e3:.0f}ms  "
+              f"robot_3d={spr.shape} at ({sx},{sy})")
 
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
