@@ -552,6 +552,14 @@ class GlobalMap:
             out[free_m] = [255, 255, 255]
             if obs_m.any():
                 out[obs_m] = [50, 50, 50]
+
+            # Tint forced-free robot footprint green
+            dx = wx - x
+            dy = wy - y
+            fwd_d = dx * ct + dy * st
+            lat_d = -dx * st + dy * ct
+            foot = valid & (np.abs(fwd_d) < 0.17) & (np.abs(lat_d) < 0.23)
+            out[foot] = [140, 255, 140]
         else:
             # FSD palette for 3D follow-cam
             out = np.full((MAP_H, HALF, 3), 145, dtype=np.uint8)
