@@ -482,15 +482,14 @@ class GlobalMap:
         # --- Right panel: 3D follow-cam ---
         out[:, HALF:] = self._render_3d(x, y, theta, trail_xy)
 
-        # Debug outlines — drawn on final atlas, absolute last step
+        # Debug outlines — 2px because atlas is 2x downsampled in ui.py
         if _3D_TOPDOWN and hasattr(self, '_debug_outlines'):
             for corners, color in self._debug_outlines:
                 for i in range(len(corners)):
                     x0, y0 = corners[i]
                     x1, y1 = corners[(i + 1) % len(corners)]
-                    # Shift to right panel
                     cv2.line(out, (x0 + HALF, y0), (x1 + HALF, y1),
-                             color, 1, cv2.LINE_8)
+                             color, 2, cv2.LINE_8)
 
         return out
 
