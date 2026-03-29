@@ -482,6 +482,16 @@ class GlobalMap:
         # --- Right panel: 3D follow-cam ---
         out[:, HALF:] = self._render_3d(x, y, theta, trail_xy)
 
+        # Debug outlines — drawn on final atlas, absolute last step
+        if _3D_TOPDOWN and hasattr(self, '_debug_outlines'):
+            for corners, color in self._debug_outlines:
+                for i in range(len(corners)):
+                    x0, y0 = corners[i]
+                    x1, y1 = corners[(i + 1) % len(corners)]
+                    # Shift to right panel
+                    cv2.line(out, (x0 + HALF, y0), (x1 + HALF, y1),
+                             color, 1, cv2.LINE_8)
+
         return out
 
     def _render_3d(self, x, y, theta, trail_xy=None):
@@ -641,25 +651,15 @@ class GlobalMap:
             out[sy, sx] = cur.astype(np.uint8)
 
             # Outlines drawn LAST — individual cv2.line for each edge
-            # Draw rectangles using direct numpy pixel writes
-            def _rect(corners, color):
-                p = [_ego2scr(c, r) for c, r in corners]
-                for i in range(len(p)):
-                    x0, y0 = p[i]
-                    x1, y1 = p[(i + 1) % len(p)]
-                    dx = abs(x1 - x0)
-                    dy = abs(y1 - y0)
-                    steps = max(dx, dy, 1)
-                    for s in range(steps + 1):
-                        px = x0 + (x1 - x0) * s // steps
-                        py = y0 + (y1 - y0) * s // steps
-                        if 0 <= px < HALF and 0 <= py < MAP_H:
-                            out[py, px] = color
-
-            _rect([(10, 10), (235, 10), (235, 230), (10, 230)],
-                  (0, 165, 255))          # orange: RS1 obs_mask clip
-            _rect([(64, 96), (98, 96), (98, 142), (64, 142)],
-                  (255, 255, 0))          # cyan: robot footprint
+            # Store screen coords for outlines (drawn on final atlas later)
+            self._debug_outlines = [
+                ([_ego2scr(c, r) for c, r in
+                  [(10, 10), (235, 10), (235, 230), (10, 230)]],
+                 (0, 165, 255)),
+                ([_ego2scr(c, r) for c, r in
+                  [(64, 96), (98, 96), (98, 142), (64, 142)]],
+                 (255, 255, 0)),
+            ]
         else:
             spr = self._robot_3d_spr
             sh, sw = spr.shape[:2]
