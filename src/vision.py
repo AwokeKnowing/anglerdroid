@@ -176,10 +176,11 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
 
     # Physical height above floor from camera coords (before rotation).
     # Camera: Y-down, Z-forward, mounted at FW_CAM_HEIGHT, pitch θ below horiz.
-    # h = H - y_cam·sin(θ) + z_cam·cos(θ)
+    # Y_cam_world = (0, -sinθ, -cosθ),  Z_cam_world = (0, cosθ, -sinθ)
+    # ∴ height = H - y_cam·cos(θ) - z_cam·sin(θ)
     phys_h = (FW_CAM_HEIGHT
-              - v[:, 1] * _fw_sin_pitch
-              + v[:, 2] * _fw_cos_pitch)
+              - v[:, 1] * _fw_cos_pitch
+              - v[:, 2] * _fw_sin_pitch)
 
     if DEBUG_CAMERAS:
         dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
