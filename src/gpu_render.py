@@ -282,11 +282,13 @@ class GPURenderer:
         except Exception:
             self._ctx = moderngl.create_context(standalone=True)
 
-        # Framebuffer (RGBA colour + depth)
-        color = self._ctx.renderbuffer((self._vw, self._vh), 4)
+        # Framebuffer (texture-backed for reliable readback)
+        self._color_tex_fbo = self._ctx.texture(
+            (self._vw, self._vh), 4, dtype='f1')
         depth = self._ctx.depth_renderbuffer((self._vw, self._vh))
         self._fbo = self._ctx.framebuffer(
-            color_attachments=[color], depth_attachment=depth)
+            color_attachments=[self._color_tex_fbo],
+            depth_attachment=depth)
 
         # Map textures (preallocated, updated per-frame)
         self._tex_conf = self._ctx.texture((self._mw, self._mh), 1)
@@ -432,8 +434,14 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Readback RGBA (matches renderbuffer), strip alpha, flip Y
-        data = self._fbo.read(components=4, alignment=1)
+        # Readback via texture (more reliable than glReadPixels)
+        self._ctx.finish()
+        data = self._color_tex_fbo.read()
+        expected = self._vw * self._vh * 4
+        if not hasattr(self, '_size_logged'):
+            self._size_logged = True
+            print("gpu_render: readback %d bytes (expected %d, %dx%dx4)" % (
+                len(data), expected, self._vw, self._vh))
         raw = np.frombuffer(data, dtype=np.uint8).reshape(
             self._vh, self._vw, 4)
         self._out[:] = raw[::-1, :, :3]
