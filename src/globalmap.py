@@ -207,7 +207,7 @@ class GlobalMap:
         t4 = time.monotonic()
 
         self._update_times.append((t1 - t0, t2 - t1, t3 - t2, t4 - t3))
-        if len(self._update_times) % 30 == 0:
+        if len(self._update_times) % 90 == 0:
             nfree = int(np.count_nonzero(self._map > FREE_THRESH))
             nobs  = int(np.count_nonzero(self._map < OBS_THRESH))
             ntot  = MAP_H * MAP_W

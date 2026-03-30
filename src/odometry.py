@@ -11,7 +11,7 @@ which significantly improves match quality and outlier rejection.
 import cv2
 import numpy as np
 
-_orb = cv2.ORB_create(1000)
+_orb = cv2.ORB_create(300)
 _bf = cv2.BFMatcher(cv2.NORM_HAMMING)
 _prev_kp = None
 _prev_des = None

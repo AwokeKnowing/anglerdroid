@@ -182,12 +182,12 @@ def main():
             process_sum += process_ms
             wait_sum += wait_ms
             frame_id += 1
-            if frame_id % 30 == 0:
+            if frame_id % 90 == 0:
                 now = time.monotonic()
                 elapsed = now - last_report
-                actual_fps = 30.0 / elapsed if elapsed > 0 else 0
-                avg_process = process_sum / 30.0
-                avg_wait = wait_sum / 30.0
+                actual_fps = 90.0 / elapsed if elapsed > 0 else 0
+                avg_process = process_sum / 90.0
+                avg_wait = wait_sum / 90.0
                 process_sum = 0.0
                 wait_sum = 0.0
                 last_report = now

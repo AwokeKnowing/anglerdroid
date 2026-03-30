@@ -164,6 +164,123 @@ void main() {
 }
 """
 
+# ── Shaders for GPU depth-forward processing ─────────────────────
+
+_VERT_SCATTER_OBS = """
+#version 330
+uniform mat3  u_rot;
+uniform vec3  u_pivot;
+uniform vec3  u_trans;
+uniform float u_scale;
+uniform vec2  u_offset;
+uniform float u_cam_h;
+uniform float u_sin_p;
+uniform float u_cos_p;
+uniform float u_floor;
+uniform float u_ceil;
+uniform float u_y_off;
+uniform vec2  u_fbo_sz;
+in vec3 in_v;
+flat out float v_h;
+void main() {
+    gl_PointSize = 1.0;
+    v_h = 0.0;
+    vec3 p = in_v;
+    if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
+    p.y += u_y_off;
+    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
+    vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
+    if (r.z <= u_floor || r.z >= u_ceil) {
+        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+    }
+    float h_cm = clamp(phys_h * 100.0, 1.0, 100.0);
+    vec2 px = r.xy * u_scale + u_offset;
+    vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
+    gl_Position = vec4(ndc, h_cm / 50.0 - 1.0, 1.0);
+    v_h = h_cm;
+}
+"""
+
+_FRAG_SCATTER_OBS = """
+#version 330
+flat in float v_h;
+out vec4 fc;
+void main() { fc = vec4(v_h / 255.0, 0.0, 0.0, 1.0); }
+"""
+
+_VERT_SCATTER_RANGE = """
+#version 330
+uniform mat3  u_rot;
+uniform vec3  u_pivot;
+uniform vec3  u_trans;
+uniform float u_scale;
+uniform vec2  u_offset;
+uniform float u_y_off;
+uniform vec2  u_cam_px;
+uniform float u_max_r;
+in vec3 in_v;
+flat out float v_dist;
+void main() {
+    gl_PointSize = 1.0;
+    v_dist = 0.0;
+    vec3 p = in_v;
+    if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
+    p.y += u_y_off;
+    vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
+    vec2 px = r.xy * u_scale + u_offset;
+    vec2 d = px - u_cam_px;
+    float dist = length(d);
+    if (dist < 0.5 || dist > u_max_r) {
+        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+    }
+    float ndc_x = fract(atan(d.y, d.x) / 6.2831853 + 0.5) * 2.0 - 1.0;
+    gl_Position = vec4(ndc_x, 0.0, dist / u_max_r * 2.0 - 1.0, 1.0);
+    v_dist = dist;
+}
+"""
+
+_FRAG_SCATTER_RANGE = """
+#version 330
+flat in float v_dist;
+uniform float u_max_r;
+out vec4 fc;
+void main() { fc = vec4(v_dist / u_max_r, 0.0, 0.0, 1.0); }
+"""
+
+_VERT_FSQUAD = """
+#version 330
+in vec2 in_pos;
+void main() { gl_Position = vec4(in_pos, 0.0, 1.0); }
+"""
+
+_FRAG_RAYCAST = """
+#version 330
+uniform sampler2D u_obs;
+uniform sampler2D u_range;
+uniform vec2  u_cam;
+uniform vec2  u_size;
+uniform float u_max_r;
+out vec4 fc;
+void main() {
+    vec2 px = gl_FragCoord.xy;
+    vec2 d = px - u_cam;
+    float dist = length(d);
+    if (dist < 0.5) { fc = vec4(1.0); return; }
+    float angle = fract(atan(d.y, d.x) / 6.2831853 + 0.5);
+    float max_d = texture(u_range, vec2(angle, 0.5)).r * u_max_r;
+    if (dist > max_d + 1.5) { fc = vec4(0.0); return; }
+    vec2 dir = d / dist;
+    vec2 inv_sz = 1.0 / u_size;
+    for (float t = 1.0; t < dist; t += 1.0) {
+        vec2 s = (u_cam + dir * t) * inv_sz;
+        if (s.x >= 0.0 && s.x < 1.0 && s.y >= 0.0 && s.y < 1.0) {
+            if (texture(u_obs, s).r > 0.002) { fc = vec4(0.0); return; }
+        }
+    }
+    fc = vec4(1.0);
+}
+"""
+
 
 # ── Matrix helpers ───────────────────────────────────────────────
 
@@ -251,6 +368,37 @@ class GPURenderer:
 
         if not _HAS_MGL:
             print("gpu_render: moderngl not installed")
+
+    # ── Depth-forward configuration (call once before use) ───────
+
+    def configure_depth_forward(self, rotation, pivot, translation,
+                                 px_size, cam_height, sin_pitch, cos_pitch,
+                                 floor_clip, height_clip,
+                                 out_h, out_w, n_rays, max_ray_r):
+        self._df_rot = rotation.astype(np.float32)
+        self._df_pivot = pivot.astype(np.float32)
+        self._df_trans = translation.astype(np.float32)
+        self._df_scale = float(1.0 / px_size)
+        self._df_offset = np.float32([out_w / 2.0,
+                                      out_h / 2.0 + self._df_scale])
+        self._df_cam_h = float(cam_height)
+        self._df_sin_p = float(sin_pitch)
+        self._df_cos_p = float(cos_pitch)
+        self._df_floor = float(floor_clip)
+        self._df_ceil = float(height_clip)
+        self._df_out_h = out_h
+        self._df_out_w = out_w
+        self._df_n_rays = n_rays
+        self._df_max_r = float(max_ray_r)
+
+        cam_w = (np.dot(-self._df_pivot, self._df_rot)
+                 + self._df_pivot - self._df_trans)
+        self._df_cam_px = (cam_w[:2] * self._df_scale
+                           + self._df_offset).astype(np.float32)
+        self._df_morph_kern = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (4, 4))
+        self._df_configured = True
+        self._df_gl_ready = False
 
     # ── GL init ──────────────────────────────────────────────────
 
@@ -349,6 +497,182 @@ class GPURenderer:
             self._prog_r,
             [(vbo, '3f 3f 3f', 'in_pos', 'in_col', 'in_nrm')])
 
+    # ── Depth-forward GL init ────────────────────────────────────
+
+    def _init_depth_gl(self):
+        ctx = self._ctx
+        ow, oh = self._df_out_w, self._df_out_h
+        nr = self._df_n_rays
+
+        self._df_obs_tex = ctx.texture((ow, oh), 1)
+        self._df_obs_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_obs_depth = ctx.depth_renderbuffer((ow, oh))
+        self._df_obs_fbo = ctx.framebuffer(
+            color_attachments=[self._df_obs_tex],
+            depth_attachment=self._df_obs_depth)
+
+        self._df_range_tex = ctx.texture((nr, 1), 1)
+        self._df_range_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_range_depth = ctx.depth_renderbuffer((nr, 1))
+        self._df_range_fbo = ctx.framebuffer(
+            color_attachments=[self._df_range_tex],
+            depth_attachment=self._df_range_depth)
+
+        self._df_known_tex = ctx.texture((ow, oh), 1)
+        self._df_known_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_known_fbo = ctx.framebuffer(
+            color_attachments=[self._df_known_tex])
+
+        self._df_obs_upload_tex = ctx.texture((ow, oh), 1)
+        self._df_obs_upload_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+
+        max_pts = 320 * 240
+        self._df_vbo = ctx.buffer(reserve=max_pts * 12)
+
+        self._df_prog_obs = ctx.program(
+            vertex_shader=_VERT_SCATTER_OBS,
+            fragment_shader=_FRAG_SCATTER_OBS)
+        self._df_prog_range = ctx.program(
+            vertex_shader=_VERT_SCATTER_RANGE,
+            fragment_shader=_FRAG_SCATTER_RANGE)
+        self._df_prog_rc = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_RAYCAST)
+
+        self._df_vao_obs = ctx.vertex_array(
+            self._df_prog_obs, [(self._df_vbo, '3f', 'in_v')])
+        self._df_vao_range = ctx.vertex_array(
+            self._df_prog_range, [(self._df_vbo, '3f', 'in_v')])
+
+        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
+        fsq_buf = ctx.buffer(fsq.tobytes())
+        self._df_vao_rc = ctx.vertex_array(
+            self._df_prog_rc, [(fsq_buf, '2f', 'in_pos')])
+
+        rot, piv, trans = self._df_rot, self._df_pivot, self._df_trans
+
+        p = self._df_prog_obs
+        p['u_rot'].write(rot.tobytes())
+        p['u_pivot'].value = tuple(piv.tolist())
+        p['u_trans'].value = tuple(trans.tolist())
+        p['u_scale'].value = self._df_scale
+        p['u_offset'].value = tuple(self._df_offset.tolist())
+        p['u_cam_h'].value = self._df_cam_h
+        p['u_sin_p'].value = self._df_sin_p
+        p['u_cos_p'].value = self._df_cos_p
+        p['u_floor'].value = self._df_floor
+        p['u_ceil'].value = self._df_ceil
+        p['u_fbo_sz'].value = (float(ow), float(oh))
+
+        p = self._df_prog_range
+        p['u_rot'].write(rot.tobytes())
+        p['u_pivot'].value = tuple(piv.tolist())
+        p['u_trans'].value = tuple(trans.tolist())
+        p['u_scale'].value = self._df_scale
+        p['u_offset'].value = tuple(self._df_offset.tolist())
+        p['u_cam_px'].value = tuple(self._df_cam_px.tolist())
+        p['u_max_r'].value = self._df_max_r
+
+        p = self._df_prog_rc
+        p['u_obs'].value = 0
+        p['u_range'].value = 1
+        p['u_cam'].value = tuple(self._df_cam_px.tolist())
+        p['u_size'].value = (float(ow), float(oh))
+        p['u_max_r'].value = self._df_max_r
+
+        try:
+            ctx.enable(moderngl.PROGRAM_POINT_SIZE)
+        except Exception:
+            pass
+
+        self._df_gl_ready = True
+        self._df_n = 0
+        print("gpu_render: depth_forward ready %dx%d  %d rays  max_r=%d" % (
+            ow, oh, nr, int(self._df_max_r)))
+
+    # ── GPU depth-forward pipeline ────────────────────────────────
+
+    def depth_forward_gpu(self, verts, y_offset=0.0):
+        """Process RS2 forward depth fully on GPU: scatter + morph + raycast.
+        Returns (obs, known) as (out_h, out_w) uint8, or None on failure."""
+        if not self.available or not getattr(self, '_df_configured', False):
+            return None
+        if not self._gl_ready:
+            try:
+                self._init_gl()
+                self._gl_ready = True
+            except Exception as e:
+                print("gpu_render: init failed: %s" % e)
+                self.available = False
+                return None
+        if not getattr(self, '_df_gl_ready', False):
+            try:
+                self._init_depth_gl()
+            except Exception as e:
+                print("gpu_render: depth init failed: %s" % e)
+                import traceback; traceback.print_exc()
+                return None
+
+        t0 = time.monotonic()
+        oh, ow = self._df_out_h, self._df_out_w
+        n_pts = min(len(verts), 320 * 240)
+
+        self._df_vbo.write(
+            np.ascontiguousarray(verts[:n_pts], dtype=np.float32).tobytes())
+        self._df_prog_obs['u_y_off'].value = float(y_offset)
+        self._df_prog_range['u_y_off'].value = float(y_offset)
+
+        # Pass 1: scatter obstacles → obs FBO (max-height via depth test)
+        self._df_obs_fbo.use()
+        self._df_obs_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
+        self._ctx.enable(moderngl.DEPTH_TEST)
+        self._ctx.depth_func = '>'
+        self._df_vao_obs.render(moderngl.POINTS, vertices=n_pts)
+
+        # Pass 2: scatter max-distance per angle → range FBO
+        self._df_range_fbo.use()
+        self._df_range_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
+        self._df_vao_range.render(moderngl.POINTS, vertices=n_pts)
+        t1 = time.monotonic()
+
+        # Read back obs for CPU morph close (77 KB, fast)
+        obs_data = self._df_obs_fbo.read(components=1, alignment=1)
+        obs = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
+
+        obs_bin = (obs > 0).astype(np.uint8)
+        cv2.morphologyEx(obs_bin, cv2.MORPH_CLOSE, self._df_morph_kern,
+                         iterations=2, dst=obs_bin)
+        obs[obs_bin & (obs == 0)] = 1
+        t2 = time.monotonic()
+
+        # Upload morph-closed obs and raycast → known FBO
+        self._df_obs_upload_tex.write(obs.tobytes())
+        self._df_known_fbo.use()
+        self._df_known_fbo.clear(0.0, 0.0, 0.0, 0.0)
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        self._df_obs_upload_tex.use(location=0)
+        self._df_range_tex.use(location=1)
+        self._df_vao_rc.render(moderngl.TRIANGLE_STRIP)
+        t3 = time.monotonic()
+
+        # Read back known mask
+        known_data = self._df_known_fbo.read(components=1, alignment=1)
+        known = np.frombuffer(
+            known_data, dtype=np.uint8).reshape(oh, ow).copy()
+
+        self._ctx.depth_func = '<'
+
+        self._df_n += 1
+        t4 = time.monotonic()
+        if self._df_n <= 3 or self._df_n % 100 == 0:
+            print("gpu_depth: scatter=%.1fms morph=%.1fms "
+                  "raycast=%.1fms read=%.1fms total=%.1fms" % (
+                      (t1 - t0) * 1e3, (t2 - t1) * 1e3,
+                      (t3 - t2) * 1e3, (t4 - t3) * 1e3,
+                      (t4 - t0) * 1e3))
+
+        return obs, known
+
     # ── Per-frame render ─────────────────────────────────────────
 
     def render(self, x, y, theta, conf_map, height_map,
@@ -421,6 +745,7 @@ class GPURenderer:
         self._fbo.use()
         self._fbo.clear(0.569, 0.569, 0.588, 1.0)
         self._ctx.enable(moderngl.DEPTH_TEST)
+        self._ctx.depth_func = '<'
 
         # Terrain
         self._tex_hmap.use(location=0)
@@ -451,15 +776,14 @@ class GPURenderer:
         self._pbo_idx = 1 - self._pbo_idx
         t1 = time.monotonic()
 
-        # CPU overlays (minimap every 4th frame to save ~3ms)
+        # CPU overlays
         if not hasattr(self, '_rn'):
             self._rn = 0
         self._rn += 1
-        if self._rn % 4 == 1:
-            self._draw_minimap(self._out, x, y, theta, conf_map, height_map,
-                               fwd_scale, bwd_scale, ang_scale)
-            if trail_xy is not None and len(trail_xy) >= 2:
-                self._draw_trail(self._out, trail_xy, view, proj)
+        self._draw_minimap(self._out, x, y, theta, conf_map, height_map,
+                           fwd_scale, bwd_scale, ang_scale)
+        if trail_xy is not None and len(trail_xy) >= 2:
+            self._draw_trail(self._out, trail_xy, view, proj)
 
         t2 = time.monotonic()
         if self._rn <= 3 or self._rn % 100 == 0:

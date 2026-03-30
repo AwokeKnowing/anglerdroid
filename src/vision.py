@@ -149,9 +149,9 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     return obs, known
 
 
-_raycast_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 _polar_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3))
-_N_RAYS = 500
+_N_RAYS = 180
+_MAX_RAY_R = 300
 
 
 def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
@@ -211,9 +211,10 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
 
     # Classification: rotated z' with calibrated thresholds (don't touch these)
     m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
-    # Height values: physical height from camera geometry (accurate per-point)
     height_cm = np.clip((phys_h[m_obs] * 100).astype(np.int32), 1, 100).astype(np.uint8)
-    np.maximum.at(obs, (i[m_obs], j[m_obs]), height_cm)
+    # Sort ascending so highest value writes last (max-write via sorted scatter)
+    order = np.argsort(height_cm)
+    obs[i[m_obs][order], j[m_obs][order]] = height_cm[order]
 
     if DEBUG_CAMERAS:
         cv2.imshow("fw_before_morph", obs.copy())
@@ -228,72 +229,50 @@ def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
         cv2.imshow("fw_final", obs.copy())
 
     # --- 2D raycasting: known mask via polar line-of-sight ---
-    # Camera origin projected into the top-down pixel grid
     cam_world = (np.dot(np.float32([0, 0, 0]) - FW_PIVOT, FW_ROTATION)
                  + FW_PIVOT - FW_TRANSLATION)
     cam_px = cam_world[:2] * scale + offset
     cx, cy = float(cam_px[0]), float(cam_px[1])
-
-    max_r = int(math.sqrt(float(out_h) ** 2 + float(out_w) ** 2)) + 1
     center = (cx, cy)
 
-    # obs → polar (rows = angle bins, cols = distance from camera)
+    # Obstacle → polar (reduced resolution: 180 rays × 300 radius)
     polar_obs = cv2.warpPolar(
-        obs, (max_r, _N_RAYS), center, float(max_r),
+        obs, (_MAX_RAY_R, _N_RAYS), center, float(_MAX_RAY_R),
         cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
-    # Dilate in polar space to close sampling gaps (prevents rays leaking
-    # through thin obstacles).  Only affects ray termination, not output obs.
     cv2.dilate(polar_obs, _polar_dilate_kern, dst=polar_obs)
 
-    # Valid-point mask (dilated to fill gaps) → polar
-    valid_mask = np.zeros((out_h, out_w), dtype=np.uint8)
-    valid_mask[i[m_all], j[m_all]] = 255
-    cv2.dilate(valid_mask, _raycast_dilate_kern, dst=valid_mask)
-    polar_valid = cv2.warpPolar(
-        valid_mask, (max_r, _N_RAYS), center, float(max_r),
-        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
+    # Max valid distance per angle — computed directly from point cloud
+    # (eliminates a full warpPolar call + dilate)
+    dx = j[m_all].astype(np.float32) - np.float32(cx)
+    dy = i[m_all].astype(np.float32) - np.float32(cy)
+    dists = np.sqrt(dx * dx + dy * dy).astype(np.int32)
+    angle_idx = ((np.arctan2(dy, dx) * np.float32(_N_RAYS / (2.0 * np.pi)))
+                 .astype(np.int32) % _N_RAYS)
+    last_val_col = np.zeros(_N_RAYS, dtype=np.int32)
+    np.maximum.at(last_val_col, angle_idx, dists)
+    last_val_col = np.minimum(last_val_col, _MAX_RAY_R - 1)
 
-    # Per-angle: nearest obstacle, farthest valid point
+    # Per-angle: nearest obstacle
     has_obs_row = polar_obs > 0
     any_obs_row = has_obs_row.any(axis=1)
     first_obs_col = np.argmax(has_obs_row, axis=1)
 
-    has_val_row = polar_valid > 0
-    any_val_row = has_val_row.any(axis=1)
-    last_val_col = max_r - 1 - np.argmax(has_val_row[:, ::-1], axis=1)
+    any_val_row = last_val_col > 0
 
-    # Endpoint: nearest obstacle if any, else farthest valid, else no ray
+    # Endpoint: first obstacle if any, else farthest valid point
     endpoint = np.where(
         any_obs_row, first_obs_col,
         np.where(any_val_row, last_val_col, np.int32(-1)))
 
-    # Build polar known: cols 0..endpoint = 255 per row
-    cols = np.arange(max_r, dtype=np.int32)
+    # Build polar known mask and warp back
+    cols = np.arange(_MAX_RAY_R, dtype=np.int32)
     polar_known = np.where(
         (endpoint[:, None] >= 0) & (cols[None, :] <= endpoint[:, None]),
         np.uint8(255), np.uint8(0)).astype(np.uint8)
 
-    # Warp back to Cartesian
     known = cv2.warpPolar(
-        polar_known, (out_w, out_h), center, float(max_r),
+        polar_known, (out_w, out_h), center, float(_MAX_RAY_R),
         cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
-
-    if not hasattr(depth_topdown_forward, '_diag_n'):
-        depth_topdown_forward._diag_n = 0
-    depth_topdown_forward._diag_n += 1
-    if depth_topdown_forward._diag_n <= 3 or depth_topdown_forward._diag_n % 60 == 0:
-        ep_valid = endpoint[endpoint >= 0]
-        print("fw_raycast: pts=%d obs_px=%d known_px=%d "
-              "valid_mask_px=%d polar_obs_nz=%d ep_valid=%d ep_range=[%d,%d] "
-              "center=(%.0f,%.0f)" % (
-                  len(v), int(np.count_nonzero(obs)),
-                  int(np.count_nonzero(known)),
-                  int(np.count_nonzero(valid_mask)),
-                  int(np.count_nonzero(polar_obs)),
-                  len(ep_valid),
-                  int(ep_valid.min()) if len(ep_valid) else -1,
-                  int(ep_valid.max()) if len(ep_valid) else -1,
-                  cx, cy))
 
     return obs, known
 
@@ -329,6 +308,19 @@ class Vision:
         except Exception as e:
             print("vision: GPU renderer unavailable: %s" % e)
             self._gpu = None
+
+        if self._gpu:
+            self._gpu.configure_depth_forward(
+                rotation=FW_ROTATION, pivot=FW_PIVOT,
+                translation=FW_TRANSLATION,
+                px_size=float(FW_PX_SIZE),
+                cam_height=float(FW_CAM_HEIGHT),
+                sin_pitch=float(_fw_sin_pitch),
+                cos_pitch=float(_fw_cos_pitch),
+                floor_clip=float(FW_FLOOR_CLIP),
+                height_clip=float(FW_HEIGHT_CLIP),
+                out_h=FRAME_W, out_w=FRAME_H,
+                n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
 
         self._running = False
         self._thread = None
@@ -469,7 +461,7 @@ class Vision:
             if not hasattr(self, '_k1_bbox_n'):
                 self._k1_bbox_n = 0
             self._k1_bbox_n += 1
-            if self._k1_bbox_n <= 5:
+            if self._k1_bbox_n <= 2:
                 nz = np.nonzero(known1)
                 if len(nz[0]) > 0:
                     r0, r1 = int(nz[0].min()), int(nz[0].max())
@@ -487,9 +479,16 @@ class Vision:
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                z2, k2 = depth_topdown_forward(self._rs2.verts,
-                                               out_h=FRAME_W, out_w=FRAME_H,
-                                               y_offset=RS2_EXTRINSIC_Y)
+                _gpu_result = None
+                if self._gpu and self._gpu.available:
+                    _gpu_result = self._gpu.depth_forward_gpu(
+                        self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
+                if _gpu_result is not None:
+                    z2, k2 = _gpu_result
+                else:
+                    z2, k2 = depth_topdown_forward(self._rs2.verts,
+                                                   out_h=FRAME_W, out_w=FRAME_H,
+                                                   y_offset=RS2_EXTRINSIC_Y)
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
@@ -507,7 +506,7 @@ class Vision:
             if not hasattr(self, '_kdiag_n'):
                 self._kdiag_n = 0
             self._kdiag_n += 1
-            if self._kdiag_n <= 3 or self._kdiag_n % 60 == 0:
+            if self._kdiag_n <= 2 or self._kdiag_n % 300 == 0:
                 _k2nz = int(np.count_nonzero(known2))
                 _kcnz_pre = int(np.count_nonzero(kc_tmp))
                 np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
@@ -563,7 +562,7 @@ class Vision:
             if not hasattr(self, '_odom_log_n'):
                 self._odom_log_n = 0
             self._odom_log_n += 1
-            if self._odom_log_n % 30 == 0:
+            if self._odom_log_n % 90 == 0:
                 wb = self._wheelbase
                 enc_info = 'no_wb'
                 if wb:
@@ -582,7 +581,7 @@ class Vision:
             if not hasattr(self, '_hdiag_n'):
                 self._hdiag_n = 0
             self._hdiag_n += 1
-            if self._hdiag_n % 30 == 0:
+            if self._hdiag_n % 300 == 0:
                 om = obs_combined[obs_combined > 0]
                 if len(om) > 0:
                     bins = [0, 5, 10, 20, 30, 50, 70, 100, 256]
@@ -656,8 +655,8 @@ class Vision:
                                 _t_odom - _t_obs, _t_gmap_up - _t_odom,
                                 _t_safety - _t_gmap_up,
                                 _t_render - _t_safety, _t_end - _t_render))
-            if len(_loop_times) % 100 == 0:
-                avg = np.mean(_loop_times[-100:], axis=0) * 1000
+            if len(_loop_times) % 300 == 0:
+                avg = np.mean(_loop_times[-300:], axis=0) * 1000
                 print("capture: grab=%.1f rs1=%.1f rs2=%.1f obs=%.1f odom=%.1f "
                       "gmap_up=%.1f safety=%.1f render=%.1f blit=%.1f "
                       "TOTAL=%.1fms" % (*avg, sum(avg)))
