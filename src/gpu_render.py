@@ -28,7 +28,7 @@ FAR_CLIP = 50.0
 
 MINIMAP_SZ = 200
 MINIMAP_PAD = 8
-MINIMAP_ZOOM = 0.50
+MINIMAP_ZOOM = 1.0
 
 PX_SIZE = 0.02
 FREE_THRESH = 190
@@ -185,7 +185,10 @@ uniform float u_theta;
 out vec4 fc;
 void main() {
     vec2 local = (gl_FragCoord.xy - u_vp.xy) / u_vp.zw;
-    vec2 map_uv = (local - 0.5) / u_zoom + u_center / u_mapsz;
+    /* Rotate 90 CCW so +x (east) in map space points up on minimap */
+    vec2 off = local - 0.5;
+    vec2 rot_off = vec2(-off.y, off.x);
+    vec2 map_uv = rot_off / u_zoom + u_center / u_mapsz;
     if (map_uv.x < 0.0 || map_uv.x > 1.0 ||
         map_uv.y < 0.0 || map_uv.y > 1.0) {
         fc = vec4(0.627, 0.627, 0.627, 0.85);
@@ -212,8 +215,8 @@ void main() {
         float b_col = mix(0.0, 1.0, u_sf);
         col = vec3(r_col, g_col, b_col);
     }
-    /* Direction tick */
-    vec2 dir = vec2(cos(u_theta), -sin(u_theta));
+    /* Direction tick — rotated to match minimap orientation */
+    vec2 dir = vec2(-sin(u_theta), -cos(u_theta));
     vec2 dd = px - ctr;
     float along = dot(dd, dir);
     float perp = abs(dd.x * dir.y - dd.y * dir.x);
