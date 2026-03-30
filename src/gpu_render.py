@@ -192,9 +192,9 @@ void main() {
         fc = vec4(0.314, 0.314, 0.314, 1.0);
         return;
     }
-    /* Rotate 90 CW so +x (east/initial heading) points up on screen */
+    /* Swap axes so +x (east/initial heading) points up on screen */
     vec2 off = local - 0.5;
-    vec2 rot_off = vec2(-off.y, -off.x);
+    vec2 rot_off = vec2(off.y, off.x);
     vec2 map_uv = rot_off / u_zoom + u_center / u_mapsz;
     if (map_uv.x < 0.0 || map_uv.x > 1.0 ||
         map_uv.y < 0.0 || map_uv.y > 1.0) {
@@ -223,7 +223,7 @@ void main() {
         col = vec3(r_col, g_col, b_col);
     }
     /* Direction tick — matches rotated minimap */
-    vec2 dir = vec2(-sin(u_theta), cos(u_theta));
+    vec2 dir = vec2(-sin(u_theta), cos(u_theta));  /* map fwd (cosθ,-sinθ) → screen via inverse swap */
     vec2 dd = px - ctr;
     float along = dot(dd, dir);
     float perp = abs(dd.x * dir.y - dd.y * dir.x);
