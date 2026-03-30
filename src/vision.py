@@ -321,6 +321,7 @@ class Vision:
                 height_clip=float(FW_HEIGHT_CLIP),
                 out_h=FRAME_W, out_w=FRAME_H,
                 n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
+            self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
 
         self._running = False
         self._thread = None
@@ -540,11 +541,16 @@ class Vision:
             _t_obs = time.monotonic()
 
             # --- Odometry: visual + wheel → Kalman fused pose ---
+            vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                vis_yaw, vis_fwd, vis_conf = odometry.update(fw_gray)
-            else:
-                vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
+                _odom_result = None
+                if self._gpu and self._gpu.available:
+                    _odom_result = self._gpu.odom_gpu(fw_gray)
+                if _odom_result is not None:
+                    vis_yaw, vis_fwd, vis_conf = _odom_result
+                else:
+                    vis_yaw, vis_fwd, vis_conf = odometry.update(fw_gray)
 
             now = time.monotonic()
             dt = (now - self._last_capture_time) if self._last_capture_time else 0.0

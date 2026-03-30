@@ -281,6 +281,114 @@ void main() {
 }
 """
 
+# ── Morph close shaders ──────────────────────────────────────────
+
+_FRAG_MORPH = """
+#version 330
+uniform sampler2D u_in;
+uniform vec2 u_texel;
+uniform int u_mode;
+out vec4 fc;
+void main() {
+    vec2 uv = gl_FragCoord.xy * u_texel;
+    float v;
+    if (u_mode == 0) {
+        v = 0.0;
+        v=max(v,texture(u_in,uv+vec2( 0,-1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 1,-1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2(-1, 0)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 0, 0)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 1, 0)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 2, 0)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2(-1, 1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 0, 1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 1, 1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 2, 1)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 0, 2)*u_texel).r);
+        v=max(v,texture(u_in,uv+vec2( 1, 2)*u_texel).r);
+        fc = vec4(v > 0.002 ? 1.0 : 0.0);
+    } else {
+        v = 1.0;
+        v=min(v,texture(u_in,uv+vec2( 0,-1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 1,-1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2(-1, 0)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 0, 0)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 1, 0)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 2, 0)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2(-1, 1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 0, 1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 1, 1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 2, 1)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 0, 2)*u_texel).r);
+        v=min(v,texture(u_in,uv+vec2( 1, 2)*u_texel).r);
+        fc = vec4(v > 0.5 ? 1.0 : 0.0);
+    }
+}
+"""
+
+_FRAG_OBS_COMBINE = """
+#version 330
+uniform sampler2D u_heights;
+uniform sampler2D u_morph;
+uniform vec2 u_texel;
+out vec4 fc;
+void main() {
+    vec2 uv = gl_FragCoord.xy * u_texel;
+    float h = texture(u_heights, uv).r;
+    float m = texture(u_morph, uv).r;
+    fc = vec4(h > 0.002 ? h : (m > 0.5 ? 0.00392 : 0.0));
+}
+"""
+
+# ── GPU visual odometry shaders ──────────────────────────────────
+
+_FRAG_DOWNSAMPLE = """
+#version 330
+uniform sampler2D u_src;
+uniform vec2 u_inv_dst;
+out vec4 fc;
+void main() {
+    fc = vec4(texture(u_src, gl_FragCoord.xy * u_inv_dst).r);
+}
+"""
+
+_FRAG_SAD_SEARCH = """
+#version 330
+uniform sampler2D u_prev;
+uniform sampler2D u_curr;
+uniform float u_search;
+uniform vec2 u_ds_inv;
+uniform ivec2 u_ds_size;
+out vec4 fc;
+void main() {
+    vec2 idx = floor(gl_FragCoord.xy - 0.5);
+    vec2 offset = idx - vec2(u_search);
+    float sad = 0.0;
+    float count = 0.0;
+    for (int y = 0; y < u_ds_size.y; y++) {
+        for (int x = 0; x < u_ds_size.x; x++) {
+            vec2 puv = (vec2(x, y) + 0.5) * u_ds_inv;
+            vec2 cpx = vec2(x, y) + offset;
+            if (cpx.x >= 0.0 && cpx.x < float(u_ds_size.x) &&
+                cpx.y >= 0.0 && cpx.y < float(u_ds_size.y)) {
+                sad += abs(texture(u_prev, puv).r -
+                           texture(u_curr, (cpx+0.5)*u_ds_inv).r);
+                count += 1.0;
+            }
+        }
+    }
+    fc = vec4(count > 0.0 ? sad / count : 1.0);
+}
+"""
+
+_FRAG_TEXCOPY = """
+#version 330
+uniform sampler2D u_src;
+uniform vec2 u_inv;
+out vec4 fc;
+void main() { fc = vec4(texture(u_src, gl_FragCoord.xy * u_inv).r); }
+"""
+
 
 # ── Matrix helpers ───────────────────────────────────────────────
 
@@ -523,8 +631,15 @@ class GPURenderer:
         self._df_known_fbo = ctx.framebuffer(
             color_attachments=[self._df_known_tex])
 
-        self._df_obs_upload_tex = ctx.texture((ow, oh), 1)
-        self._df_obs_upload_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_morph_a_tex = ctx.texture((ow, oh), 1)
+        self._df_morph_a_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_morph_a_fbo = ctx.framebuffer(
+            color_attachments=[self._df_morph_a_tex])
+
+        self._df_morph_b_tex = ctx.texture((ow, oh), 1)
+        self._df_morph_b_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_morph_b_fbo = ctx.framebuffer(
+            color_attachments=[self._df_morph_b_tex])
 
         max_pts = 320 * 240
         self._df_vbo = ctx.buffer(reserve=max_pts * 12)
@@ -538,6 +653,12 @@ class GPURenderer:
         self._df_prog_rc = ctx.program(
             vertex_shader=_VERT_FSQUAD,
             fragment_shader=_FRAG_RAYCAST)
+        self._df_prog_morph = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_MORPH)
+        self._df_prog_combine = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_OBS_COMBINE)
 
         self._df_vao_obs = ctx.vertex_array(
             self._df_prog_obs, [(self._df_vbo, '3f', 'in_v')])
@@ -548,6 +669,10 @@ class GPURenderer:
         fsq_buf = ctx.buffer(fsq.tobytes())
         self._df_vao_rc = ctx.vertex_array(
             self._df_prog_rc, [(fsq_buf, '2f', 'in_pos')])
+        self._df_vao_morph = ctx.vertex_array(
+            self._df_prog_morph, [(fsq_buf, '2f', 'in_pos')])
+        self._df_vao_combine = ctx.vertex_array(
+            self._df_prog_combine, [(fsq_buf, '2f', 'in_pos')])
 
         rot, piv, trans = self._df_rot, self._df_pivot, self._df_trans
 
@@ -579,6 +704,15 @@ class GPURenderer:
         p['u_cam'].value = tuple(self._df_cam_px.tolist())
         p['u_size'].value = (float(ow), float(oh))
         p['u_max_r'].value = self._df_max_r
+
+        df_texel = (1.0 / float(ow), 1.0 / float(oh))
+        p = self._df_prog_morph
+        p['u_in'].value = 0
+        p['u_texel'].value = df_texel
+        p = self._df_prog_combine
+        p['u_heights'].value = 0
+        p['u_morph'].value = 1
+        p['u_texel'].value = df_texel
 
         try:
             ctx.enable(moderngl.PROGRAM_POINT_SIZE)
@@ -633,29 +767,40 @@ class GPURenderer:
         self._df_range_fbo.use()
         self._df_range_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
         self._df_vao_range.render(moderngl.POINTS, vertices=n_pts)
+
+        # GPU morph close: dilate×2, erode×2 (ping-pong a↔b)
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        morph_src = [self._df_obs_tex, self._df_morph_a_tex,
+                     self._df_morph_b_tex, self._df_morph_a_tex]
+        morph_dst = [self._df_morph_a_fbo, self._df_morph_b_fbo,
+                     self._df_morph_a_fbo, self._df_morph_b_fbo]
+        morph_mode = [0, 0, 1, 1]
+        for src_tex, dst_fbo, mode in zip(morph_src, morph_dst, morph_mode):
+            dst_fbo.use()
+            dst_fbo.clear(0.0, 0.0, 0.0, 0.0)
+            src_tex.use(location=0)
+            self._df_prog_morph['u_mode'].value = mode
+            self._df_vao_morph.render(moderngl.TRIANGLE_STRIP)
+
+        # Combine: original heights + morph binary → morph_a
+        self._df_morph_a_fbo.use()
+        self._df_morph_a_fbo.clear(0.0, 0.0, 0.0, 0.0)
+        self._df_obs_tex.use(location=0)
+        self._df_morph_b_tex.use(location=1)
+        self._df_vao_combine.render(moderngl.TRIANGLE_STRIP)
         t1 = time.monotonic()
 
-        # Read back obs for CPU morph close (77 KB, fast)
-        obs_data = self._df_obs_fbo.read(components=1, alignment=1)
-        obs = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
-
-        obs_bin = (obs > 0).astype(np.uint8)
-        cv2.morphologyEx(obs_bin, cv2.MORPH_CLOSE, self._df_morph_kern,
-                         iterations=2, dst=obs_bin)
-        obs[obs_bin & (obs == 0)] = 1
-        t2 = time.monotonic()
-
-        # Upload morph-closed obs and raycast → known FBO
-        self._df_obs_upload_tex.write(obs.tobytes())
+        # Raycast: combined obs + range → known
         self._df_known_fbo.use()
         self._df_known_fbo.clear(0.0, 0.0, 0.0, 0.0)
-        self._ctx.disable(moderngl.DEPTH_TEST)
-        self._df_obs_upload_tex.use(location=0)
+        self._df_morph_a_tex.use(location=0)
         self._df_range_tex.use(location=1)
         self._df_vao_rc.render(moderngl.TRIANGLE_STRIP)
-        t3 = time.monotonic()
+        t2 = time.monotonic()
 
-        # Read back known mask
+        # Read back final obs + known (two 77KB reads)
+        obs_data = self._df_morph_a_fbo.read(components=1, alignment=1)
+        obs = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
         known_data = self._df_known_fbo.read(components=1, alignment=1)
         known = np.frombuffer(
             known_data, dtype=np.uint8).reshape(oh, ow).copy()
@@ -663,15 +808,160 @@ class GPURenderer:
         self._ctx.depth_func = '<'
 
         self._df_n += 1
-        t4 = time.monotonic()
+        t3 = time.monotonic()
         if self._df_n <= 3 or self._df_n % 100 == 0:
-            print("gpu_depth: scatter=%.1fms morph=%.1fms "
-                  "raycast=%.1fms read=%.1fms total=%.1fms" % (
+            print("gpu_depth: scatter+morph=%.1fms raycast=%.1fms "
+                  "read=%.1fms total=%.1fms" % (
                       (t1 - t0) * 1e3, (t2 - t1) * 1e3,
-                      (t3 - t2) * 1e3, (t4 - t3) * 1e3,
-                      (t4 - t0) * 1e3))
+                      (t3 - t2) * 1e3, (t3 - t0) * 1e3))
 
         return obs, known
+
+    # ── GPU visual odometry ─────────────────────────────────────
+
+    def configure_odom(self, fx=307.0, ds_factor=4, search=8):
+        self._od_fx = float(fx)
+        self._od_ds = int(ds_factor)
+        self._od_search = int(search)
+        self._od_configured = True
+        self._od_gl_ready = False
+
+    def _init_odom_gl(self):
+        ctx = self._ctx
+        ds = self._od_ds
+        sw = 2 * self._od_search + 1
+        dsw, dsh = 320 // ds, 240 // ds
+
+        self._od_gray_tex = ctx.texture((320, 240), 1)
+        self._od_gray_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+
+        self._od_ds_prev_tex = ctx.texture((dsw, dsh), 1)
+        self._od_ds_prev_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._od_ds_prev_fbo = ctx.framebuffer(
+            color_attachments=[self._od_ds_prev_tex])
+
+        self._od_ds_curr_tex = ctx.texture((dsw, dsh), 1)
+        self._od_ds_curr_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._od_ds_curr_fbo = ctx.framebuffer(
+            color_attachments=[self._od_ds_curr_tex])
+
+        self._od_sad_tex = ctx.texture((sw, sw), 1, dtype='f4')
+        self._od_sad_fbo = ctx.framebuffer(
+            color_attachments=[self._od_sad_tex])
+
+        self._od_prog_ds = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_DOWNSAMPLE)
+        self._od_prog_sad = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_SAD_SEARCH)
+        self._od_prog_copy = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_TEXCOPY)
+
+        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
+        fsq_buf = ctx.buffer(fsq.tobytes())
+        self._od_vao_ds = ctx.vertex_array(
+            self._od_prog_ds, [(fsq_buf, '2f', 'in_pos')])
+        self._od_vao_sad = ctx.vertex_array(
+            self._od_prog_sad, [(fsq_buf, '2f', 'in_pos')])
+        self._od_vao_copy = ctx.vertex_array(
+            self._od_prog_copy, [(fsq_buf, '2f', 'in_pos')])
+
+        self._od_prog_ds['u_src'].value = 0
+        self._od_prog_ds['u_inv_dst'].value = (1.0 / dsw, 1.0 / dsh)
+
+        self._od_prog_sad['u_prev'].value = 0
+        self._od_prog_sad['u_curr'].value = 1
+        self._od_prog_sad['u_search'].value = float(self._od_search)
+        self._od_prog_sad['u_ds_inv'].value = (1.0 / dsw, 1.0 / dsh)
+        self._od_prog_sad['u_ds_size'].value = (dsw, dsh)
+
+        self._od_prog_copy['u_src'].value = 0
+        self._od_prog_copy['u_inv'].value = (1.0 / dsw, 1.0 / dsh)
+
+        self._od_dsw, self._od_dsh = dsw, dsh
+        self._od_sw = sw
+        self._od_has_prev = False
+        self._od_gl_ready = True
+        self._od_n = 0
+        print("gpu_render: odom ready ds=%dx%d  search=±%d" % (
+            dsw, dsh, self._od_search))
+
+    def odom_gpu(self, gray):
+        """GPU visual odometry: SAD-based yaw estimation.
+        Returns (yaw_rad, forward_m, confidence) or None."""
+        if not self.available or not getattr(self, '_od_configured', False):
+            return None
+        if not self._gl_ready:
+            return None
+        if not getattr(self, '_od_gl_ready', False):
+            try:
+                self._init_odom_gl()
+            except Exception as e:
+                print("gpu_render: odom init failed: %s" % e)
+                import traceback; traceback.print_exc()
+                return None
+
+        t0 = time.monotonic()
+
+        self._od_gray_tex.write(gray.tobytes())
+
+        self._od_ds_curr_fbo.use()
+        self._od_gray_tex.use(location=0)
+        self._od_vao_ds.render(moderngl.TRIANGLE_STRIP)
+
+        if not self._od_has_prev:
+            self._od_ds_prev_fbo.use()
+            self._od_ds_curr_tex.use(location=0)
+            self._od_vao_copy.render(moderngl.TRIANGLE_STRIP)
+            self._od_has_prev = True
+            return 0.0, 0.0, 0.0
+
+        self._od_sad_fbo.use()
+        self._od_ds_prev_tex.use(location=0)
+        self._od_ds_curr_tex.use(location=1)
+        self._od_vao_sad.render(moderngl.TRIANGLE_STRIP)
+
+        sad_data = self._od_sad_fbo.read(
+            components=1, alignment=4, dtype='f4')
+        sw = self._od_sw
+        sad = np.frombuffer(sad_data, dtype=np.float32).reshape(sw, sw).copy()
+
+        # Copy curr → prev for next frame
+        self._od_ds_prev_fbo.use()
+        self._od_ds_curr_tex.use(location=0)
+        self._od_vao_copy.render(moderngl.TRIANGLE_STRIP)
+
+        t1 = time.monotonic()
+
+        # Find minimum + sub-pixel refinement
+        sr = self._od_search
+        min_idx = np.unravel_index(np.argmin(sad), sad.shape)
+        y0, x0 = int(min_idx[0]), int(min_idx[1])
+        sub_x = float(x0 - sr)
+        sub_y = float(y0 - sr)
+        if 0 < x0 < sw - 1:
+            denom = 2.0 * sad[y0, x0] - sad[y0, x0 - 1] - sad[y0, x0 + 1]
+            if abs(denom) > 1e-8:
+                sub_x += (sad[y0, x0 - 1] - sad[y0, x0 + 1]) / (2.0 * denom)
+        if 0 < y0 < sw - 1:
+            denom = 2.0 * sad[y0, x0] - sad[y0 - 1, x0] - sad[y0 + 1, x0]
+            if abs(denom) > 1e-8:
+                sub_y += (sad[y0 - 1, x0] - sad[y0 + 1, x0]) / (2.0 * denom)
+
+        yaw = sub_x * self._od_ds / self._od_fx
+        forward = 0.0
+
+        min_sad = float(sad.min())
+        mean_sad = float(sad.mean())
+        sharpness = (mean_sad - min_sad) / (mean_sad + 1e-6)
+        confidence = min(1.0, sharpness * 2.0)
+
+        self._od_n += 1
+        if self._od_n <= 3 or self._od_n % 100 == 0:
+            print("gpu_odom: %.1fms  dx=%.2f dy=%.2f yaw=%.3f° conf=%.2f" % (
+                (t1 - t0) * 1e3, sub_x, sub_y,
+                math.degrees(yaw), confidence))
+
+        return yaw, forward, confidence
 
     # ── Per-frame render ─────────────────────────────────────────
 
