@@ -432,11 +432,11 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Readback (GL bottom-row-first → flip Y)
-        data = self._fbo.read(components=3, alignment=1)
+        # Readback RGBA (matches renderbuffer), strip alpha, flip Y
+        data = self._fbo.read(components=4, alignment=1)
         raw = np.frombuffer(data, dtype=np.uint8).reshape(
-            self._vh, self._vw, 3)
-        self._out[:] = raw[::-1]
+            self._vh, self._vw, 4)
+        self._out[:] = raw[::-1, :, :3]
         t1 = time.monotonic()
 
         # CPU overlays
