@@ -249,27 +249,19 @@ def _triangulate_robot():
 # ── Main renderer ────────────────────────────────────────────────
 
 class GPURenderer:
-    """GPU-accelerated 3D terrain view. Check .available after __init__."""
+    """GPU-accelerated 3D terrain view. Check .available after first render()."""
 
     def __init__(self, map_w, map_h, view_w, view_h):
-        self.available = False
+        self.available = _HAS_MGL
         self._mw = map_w
         self._mh = map_h
         self._vw = view_w
         self._vh = view_h
         self.topdown = False
+        self._gl_ready = False
 
         if not _HAS_MGL:
             print("gpu_render: moderngl not installed")
-            return
-
-        try:
-            self._init_gl()
-            self.available = True
-        except Exception as e:
-            print("gpu_render: init failed: %s" % e)
-            import traceback
-            traceback.print_exc()
 
     # ── GL init ──────────────────────────────────────────────────
 
@@ -369,6 +361,17 @@ class GPURenderer:
     def render(self, x, y, theta, conf_map, height_map,
                trail_xy=None, fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
         """Render full 3D view. Returns (vh, vw, 3) uint8 RGB array."""
+        if not self._gl_ready:
+            try:
+                self._init_gl()
+                self._gl_ready = True
+            except Exception as e:
+                print("gpu_render: init failed: %s" % e)
+                import traceback
+                traceback.print_exc()
+                self.available = False
+                return None
+
         t0 = time.monotonic()
 
         # Upload textures
@@ -436,26 +439,10 @@ class GPURenderer:
 
         # Readback
         self._ctx.finish()
-        data = self._fbo.read(components=3, alignment=1)
-        nbytes = len(data)
-        expect = self._vw * self._vh * 3
-        if not hasattr(self, '_diag_done'):
-            self._diag_done = True
-            d = np.frombuffer(data, dtype=np.uint8)
-            print("gpu_render: readback %d bytes (expected %d, %dx%dx3)" % (
-                nbytes, expect, self._vw, self._vh))
-            print("gpu_render: data stats: min=%d max=%d mean=%.1f std=%.1f" % (
-                d.min(), d.max(), d.mean(), d.std()))
-            print("gpu_render: first 12 bytes: %s" % list(d[:12]))
-            row2_off = self._vw * 3
-            print("gpu_render: row1 first 12:  %s" % list(d[row2_off:row2_off+12]))
-        if nbytes == expect:
-            raw = np.frombuffer(data, dtype=np.uint8).reshape(
-                self._vh, self._vw, 3)
-            cv2.flip(raw, 0, dst=self._out)
-        else:
-            self._out[:] = 128
-            print("gpu_render: WRONG readback size %d != %d" % (nbytes, expect))
+        data = self._color_tex_fbo.read()
+        raw = np.frombuffer(data, dtype=np.uint8).reshape(
+            self._vh, self._vw, 4)
+        self._out[:] = raw[::-1, :, :3]
         t1 = time.monotonic()
 
         # CPU overlays
@@ -464,11 +451,6 @@ class GPURenderer:
 
         if trail_xy is not None and len(trail_xy) >= 2:
             self._draw_trail(self._out, trail_xy, view, proj)
-
-        if not hasattr(self, '_png_saved'):
-            self._png_saved = True
-            cv2.imwrite('/tmp/gpu_frame.png', self._out[:, :, ::-1])
-            print("gpu_render: saved /tmp/gpu_frame.png for inspection")
 
         t2 = time.monotonic()
         if not hasattr(self, '_rn'):

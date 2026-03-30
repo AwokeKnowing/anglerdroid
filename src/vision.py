@@ -616,6 +616,7 @@ class Vision:
 
             # --- Render global map with trajectory + safety overlay ---
             trail = self._pose.get_world_history()
+            gmap_render = None
             if self._gpu and self._gpu.available:
                 gmap_render = self._gpu.render(
                     self._pose.x, self._pose.y, self._pose.theta,
@@ -625,7 +626,7 @@ class Vision:
                     fwd_scale=self._safety.fwd_scale,
                     bwd_scale=self._safety.bwd_scale,
                     ang_scale=self._safety.ang_scale)
-            else:
+            if gmap_render is None:
                 gmap_render = self._global_map.render(
                     self._pose.x, self._pose.y, self._pose.theta,
                     trail_xy=trail,
