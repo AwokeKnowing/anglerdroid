@@ -301,6 +301,13 @@ class GPURenderer:
         # Pre-allocated readback buffer
         self._out = np.empty((self._vh, self._vw, 3), dtype=np.uint8)
 
+        # PBO double-buffer for async readback
+        pbo_sz = self._vw * self._vh * 3
+        self._pbo = [self._ctx.buffer(reserve=pbo_sz),
+                     self._ctx.buffer(reserve=pbo_sz)]
+        self._pbo_idx = 0
+        self._pbo_ready = False
+
         t1 = time.monotonic()
         print("gpu_render: ready %dx%d  grid=%dx%d  robot=%d tris  %.0fms" % (
             self._vw, self._vh, self._gw, self._gh,
@@ -359,6 +366,13 @@ class GPURenderer:
                 return None
 
         t0 = time.monotonic()
+
+        # Collect previous frame's async readback (DMA ran during inter-frame gap)
+        if self._pbo_ready:
+            prev_pbo = self._pbo[1 - self._pbo_idx]
+            data = prev_pbo.read()
+            self._out[:] = np.frombuffer(data, dtype=np.uint8).reshape(
+                self._vh, self._vw, 3)[::-1]
 
         # Upload textures
         self._tex_conf.write(conf_map.tobytes())
@@ -423,10 +437,18 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Readback (read implicitly waits for GPU; no separate finish needed)
-        raw = self._fbo.read(components=3, alignment=1)
-        self._out[:] = np.frombuffer(raw, dtype=np.uint8).reshape(
-            self._vh, self._vw, 3)[::-1]
+        # Kick async PBO readback (returns immediately, DMA runs in background)
+        cur_pbo = self._pbo[self._pbo_idx]
+        self._fbo.read_into(cur_pbo, components=3, alignment=1)
+
+        if not self._pbo_ready:
+            # First frame only: must block synchronously
+            data = cur_pbo.read()
+            self._out[:] = np.frombuffer(data, dtype=np.uint8).reshape(
+                self._vh, self._vw, 3)[::-1]
+            self._pbo_ready = True
+
+        self._pbo_idx = 1 - self._pbo_idx
         t1 = time.monotonic()
 
         # CPU overlays (minimap every 4th frame to save ~3ms)
@@ -441,7 +463,7 @@ class GPURenderer:
 
         t2 = time.monotonic()
         if self._rn <= 3 or self._rn % 100 == 0:
-            print("gpu_render: gpu=%.1fms  overlay=%.1fms  total=%.1fms" % (
+            print("gpu_render: gpu+read=%.1fms  overlay=%.1fms  total=%.1fms" % (
                 (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3))
 
         return self._out
