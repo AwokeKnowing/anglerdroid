@@ -27,7 +27,6 @@ from robot_config import (FRAME_W, FRAME_H,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1)
 from cameras import RSCamera, WebCam, HAS_RS
-import odometry
 from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
@@ -61,7 +60,6 @@ FW_FLOOR_CLIP  = np.float32(0.05)   # min height: ignore below 5cm (carpet/floor
 FW_CAM_HEIGHT  = np.float32(0.97)   # RS2 forward camera height above floor (m)
 _fw_sin_pitch  = np.float32(abs(math.sin(_fw_pitch_rad)))  # sin(64.4°)≈0.903
 _fw_cos_pitch  = np.float32(abs(math.cos(_fw_pitch_rad)))  # cos(64.4°)≈0.431
-_fw_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
 
 # RS2 (forward camera) extrinsic Y offset (~10cm higher than calibration).
 # Camera Y-down: camera-higher = negative Y offset.
@@ -149,132 +147,9 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     return obs, known
 
 
-_polar_dilate_kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 3))
 _N_RAYS = 180
 _MAX_RAY_R = 300
 
-
-def depth_topdown_forward(verts, out_h=FRAME_H, out_w=FRAME_W, y_offset=0.0):
-    """RS2 (forward camera) pointcloud → (obs, known) via rotated bird's-eye.
-
-    Height is computed from the original camera coordinates before rotation:
-      h = FW_CAM_HEIGHT - y_cam * sin(pitch) + z_cam * cos(pitch)
-    This gives true physical height above floor regardless of rotation accuracy.
-    The rotation transform is used only for the (x,y) top-down projection.
-
-    Returns two uint8 arrays of shape (out_h, out_w).
-    """
-    obs = np.zeros((out_h, out_w), dtype=np.uint8)
-    known = np.zeros((out_h, out_w), dtype=np.uint8)
-    if len(verts) == 0:
-        return obs, known
-
-    # Filter out invalid depth pixels (z=0 → vertex (0,0,0)).
-    # Without this, they project to the camera centre after rotation and
-    # create false obstacles that kill the raycast known-mask.
-    valid = verts[:, 2] > np.float32(0)
-    v = verts[valid].copy()
-    if len(v) == 0:
-        return obs, known
-    if y_offset != 0.0:
-        v[:, 1] += np.float32(y_offset)
-
-    # Physical height above floor from camera coords (before rotation).
-    # Camera: Y-down, Z-forward, mounted at FW_CAM_HEIGHT, pitch θ below horiz.
-    # Y_cam_world = (0, -sinθ, -cosθ),  Z_cam_world = (0, cosθ, -sinθ)
-    # ∴ height = H - y_cam·cos(θ) - z_cam·sin(θ)
-    phys_h = (FW_CAM_HEIGHT
-              - v[:, 1] * _fw_cos_pitch
-              - v[:, 2] * _fw_sin_pitch)
-
-    if DEBUG_CAMERAS:
-        dbg_raw = np.zeros((out_h, out_w), dtype=np.uint8)
-        vr = v.copy()
-        vr[:, 2] += np.float32(1.0)
-        asp = np.float32(out_h) / np.float32(out_w)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            rp = vr[:, :2] / vr[:, 2:3] * np.float32([out_w * asp, out_h]) + np.float32([out_w * 0.5, out_h * 0.5])
-        rj, ri = rp.astype(np.uint32).T
-        rm = (ri < np.uint32(out_h)) & (rj < np.uint32(out_w))
-        dbg_raw[ri[rm], rj[rm]] = 255
-        cv2.imshow("fw_raw_persp", dbg_raw)
-
-    # Rotation for top-down (x,y) position only
-    v = np.dot(v - FW_PIVOT, FW_ROTATION) + FW_PIVOT - FW_TRANSLATION
-
-    scale = np.float32(1.0 / FW_PX_SIZE)
-    offset = np.float32([out_w / 2.0, out_h / 2.0 + 1.0 * scale])
-    proj = v[:, :2] * scale + offset
-    with np.errstate(invalid='ignore'):
-        j, i = proj.astype(np.uint32).T
-    m_all = (i < np.uint32(out_h)) & (j < np.uint32(out_w))
-
-    # Classification: rotated z' with calibrated thresholds (don't touch these)
-    m_obs = m_all & (v[:, 2] > FW_FLOOR_CLIP) & (v[:, 2] < FW_HEIGHT_CLIP)
-    height_cm = np.clip((phys_h[m_obs] * 100).astype(np.int32), 1, 100).astype(np.uint8)
-    # Sort ascending so highest value writes last (max-write via sorted scatter)
-    order = np.argsort(height_cm)
-    obs[i[m_obs][order], j[m_obs][order]] = height_cm[order]
-
-    if DEBUG_CAMERAS:
-        cv2.imshow("fw_before_morph", obs.copy())
-
-    # Morphological close on binary mask only (don't spread height values)
-    obs_bin = (obs > 0).astype(np.uint8)
-    cv2.morphologyEx(obs_bin, cv2.MORPH_CLOSE, _fw_kernel, iterations=2,
-                     dst=obs_bin)
-    obs[obs_bin & (obs == 0)] = 1
-
-    if DEBUG_CAMERAS:
-        cv2.imshow("fw_final", obs.copy())
-
-    # --- 2D raycasting: known mask via polar line-of-sight ---
-    cam_world = (np.dot(np.float32([0, 0, 0]) - FW_PIVOT, FW_ROTATION)
-                 + FW_PIVOT - FW_TRANSLATION)
-    cam_px = cam_world[:2] * scale + offset
-    cx, cy = float(cam_px[0]), float(cam_px[1])
-    center = (cx, cy)
-
-    # Obstacle → polar (reduced resolution: 180 rays × 300 radius)
-    polar_obs = cv2.warpPolar(
-        obs, (_MAX_RAY_R, _N_RAYS), center, float(_MAX_RAY_R),
-        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST)
-    cv2.dilate(polar_obs, _polar_dilate_kern, dst=polar_obs)
-
-    # Max valid distance per angle — computed directly from point cloud
-    # (eliminates a full warpPolar call + dilate)
-    dx = j[m_all].astype(np.float32) - np.float32(cx)
-    dy = i[m_all].astype(np.float32) - np.float32(cy)
-    dists = np.sqrt(dx * dx + dy * dy).astype(np.int32)
-    angle_idx = ((np.arctan2(dy, dx) * np.float32(_N_RAYS / (2.0 * np.pi)))
-                 .astype(np.int32) % _N_RAYS)
-    last_val_col = np.zeros(_N_RAYS, dtype=np.int32)
-    np.maximum.at(last_val_col, angle_idx, dists)
-    last_val_col = np.minimum(last_val_col, _MAX_RAY_R - 1)
-
-    # Per-angle: nearest obstacle
-    has_obs_row = polar_obs > 0
-    any_obs_row = has_obs_row.any(axis=1)
-    first_obs_col = np.argmax(has_obs_row, axis=1)
-
-    any_val_row = last_val_col > 0
-
-    # Endpoint: first obstacle if any, else farthest valid point
-    endpoint = np.where(
-        any_obs_row, first_obs_col,
-        np.where(any_val_row, last_val_col, np.int32(-1)))
-
-    # Build polar known mask and warp back
-    cols = np.arange(_MAX_RAY_R, dtype=np.int32)
-    polar_known = np.where(
-        (endpoint[:, None] >= 0) & (cols[None, :] <= endpoint[:, None]),
-        np.uint8(255), np.uint8(0)).astype(np.uint8)
-
-    known = cv2.warpPolar(
-        polar_known, (out_w, out_h), center, float(_MAX_RAY_R),
-        cv2.WARP_POLAR_LINEAR | cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP)
-
-    return obs, known
 
 
 class Vision:
@@ -302,28 +177,22 @@ class Vision:
         self._wheelbase = None
         self._last_capture_time = None
 
-        try:
-            from gpu_render import GPURenderer
-            self._gpu = GPURenderer(MAP_W, MAP_H, ATLAS_W, MAP_H)
-        except Exception as e:
-            print("vision: GPU renderer unavailable: %s" % e)
-            self._gpu = None
-
-        if self._gpu:
-            self._gpu.configure_depth_forward(
-                rotation=FW_ROTATION, pivot=FW_PIVOT,
-                translation=FW_TRANSLATION,
-                px_size=float(FW_PX_SIZE),
-                cam_height=float(FW_CAM_HEIGHT),
-                sin_pitch=float(_fw_sin_pitch),
-                cos_pitch=float(_fw_cos_pitch),
-                floor_clip=float(FW_FLOOR_CLIP),
-                height_clip=float(FW_HEIGHT_CLIP),
-                out_h=FRAME_W, out_w=FRAME_H,
-                n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
-            self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
-            self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
-                                     ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
+        from gpu_render import GPURenderer
+        self._gpu = GPURenderer(MAP_W, MAP_H, ATLAS_W, ATLAS_H)
+        self._gpu.configure_depth_forward(
+            rotation=FW_ROTATION, pivot=FW_PIVOT,
+            translation=FW_TRANSLATION,
+            px_size=float(FW_PX_SIZE),
+            cam_height=float(FW_CAM_HEIGHT),
+            sin_pitch=float(_fw_sin_pitch),
+            cos_pitch=float(_fw_cos_pitch),
+            floor_clip=float(FW_FLOOR_CLIP),
+            height_clip=float(FW_HEIGHT_CLIP),
+            out_h=FRAME_W, out_w=FRAME_H,
+            n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
+        self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
+        self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
+                                 ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
 
         self._running = False
         self._thread = None
@@ -372,27 +241,6 @@ class Vision:
         """Provide wheelbase reference for wheel odometry fusion."""
         self._wheelbase = wb
 
-    def _draw_battery_bar(self, atlas):
-        """Draw a battery bar at the bottom of the camera row."""
-        wb = self._wheelbase
-        if wb is None:
-            return
-        pct = wb.battery_pct
-        if pct < 0:
-            return
-        BAR_H = 6
-        BAR_Y = CAM_ROW_H - BAR_H
-        BAR_W = ATLAS_W
-        fill_w = int(BAR_W * pct / 100)
-        if pct > 50:
-            color = (0, 200, 0)
-        elif pct > 25:
-            color = (220, 180, 0)
-        else:
-            color = (220, 40, 40)
-        atlas[BAR_Y:CAM_ROW_H, :, :] = (30, 30, 30)
-        if fill_w > 0:
-            atlas[BAR_Y:CAM_ROW_H, :fill_w] = color
         label = "%d%%" % pct
         cv2.putText(atlas, label, (BAR_W // 2 - 12, CAM_ROW_H - 1),
                     cv2.FONT_HERSHEY_PLAIN, 0.7, (255, 255, 255), 1,
@@ -482,16 +330,10 @@ class Vision:
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                _gpu_result = None
-                if self._gpu and self._gpu.available:
-                    _gpu_result = self._gpu.depth_forward_gpu(
-                        self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
+                _gpu_result = self._gpu.depth_forward_gpu(
+                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
                 if _gpu_result is not None:
                     z2, k2 = _gpu_result
-                else:
-                    z2, k2 = depth_topdown_forward(self._rs2.verts,
-                                                   out_h=FRAME_W, out_w=FRAME_H,
-                                                   y_offset=RS2_EXTRINSIC_Y)
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
@@ -546,13 +388,9 @@ class Vision:
             vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
             if self._rs2 and self._rs2.ok:
                 fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                _odom_result = None
-                if self._gpu and self._gpu.available:
-                    _odom_result = self._gpu.odom_gpu(fw_gray)
+                _odom_result = self._gpu.odom_gpu(fw_gray)
                 if _odom_result is not None:
                     vis_yaw, vis_fwd, vis_conf = _odom_result
-                else:
-                    vis_yaw, vis_fwd, vis_conf = odometry.update(fw_gray)
 
             now = time.monotonic()
             dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
@@ -602,88 +440,68 @@ class Vision:
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
 
-            _gpu_gmap_ok = False
-            if self._gpu and self._gpu.available:
-                _gpu_gmap_ok = self._gpu.gmap_update_gpu(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE))
-                if _gpu_gmap_ok:
-                    self._global_map.keyframe_check(
-                        obs_combined, known_combined,
-                        cap_x, cap_y, cap_theta,
-                        rcx_f, rcy_f, float(TD_PX_SIZE))
-            if not _gpu_gmap_ok:
-                self._global_map.update(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE))
+            self._gpu.gmap_update_gpu(
+                obs_combined, known_combined,
+                cap_x, cap_y, cap_theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE))
+            self._global_map.keyframe_check(
+                obs_combined, known_combined,
+                cap_x, cap_y, cap_theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE))
             _t_gmap_up = time.monotonic()
 
-            ego_proj = None
-            if _gpu_gmap_ok:
-                ego_proj = self._gpu.gmap_project_gpu(
-                    self._pose.x, self._pose.y, self._pose.theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
-            if ego_proj is None:
-                ego_proj = self._global_map.project_to_ego(
-                    self._pose.x, self._pose.y, self._pose.theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+            ego_proj = self._gpu.gmap_project_gpu(
+                self._pose.x, self._pose.y, self._pose.theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
             self._persistent_obs[:] = 0
-            self._persistent_obs[ego_proj < 90] = 255
+            if ego_proj is not None:
+                self._persistent_obs[ego_proj < 90] = 255
             self._persistent_obs[obs_combined > 0] = 255
             self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
             _t_safety = time.monotonic()
 
-            # --- Render global map with trajectory + safety overlay ---
+            # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
             trail = self._pose.get_world_history()
-            gmap_render = None
-            if self._gpu and self._gpu.available:
-                gmap_render = self._gpu.render(
-                    self._pose.x, self._pose.y, self._pose.theta,
-                    self._global_map.confidence_map,
-                    self._global_map.height_map,
-                    trail_xy=trail,
-                    fwd_scale=self._safety.fwd_scale,
-                    bwd_scale=self._safety.bwd_scale,
-                    ang_scale=self._safety.ang_scale)
-            if gmap_render is None:
-                gmap_render = self._global_map.render(
-                    self._pose.x, self._pose.y, self._pose.theta,
-                    trail_xy=trail,
-                    fwd_scale=self._safety.fwd_scale,
-                    bwd_scale=self._safety.bwd_scale,
-                    ang_scale=self._safety.ang_scale)
-            _t_render = time.monotonic()
-
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
             rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
+
+            bat_frac = 0.0
+            if self._wheelbase:
+                pct = self._wheelbase.battery_pct
+                bat_frac = max(0.0, min(1.0, pct / 100.0)) if pct >= 0 else 0.0
+
+            atlas = self._gpu.render(
+                self._pose.x, self._pose.y, self._pose.theta,
+                cameras=[rgb1, rgbd1, rgbd2],
+                trail_xy=trail,
+                fwd_scale=self._safety.fwd_scale,
+                bwd_scale=self._safety.bwd_scale,
+                ang_scale=self._safety.ang_scale,
+                battery_frac=bat_frac)
 
             with self._lock:
                 self.frames[0][:] = rgb1
                 self.frames[1][:] = rgbd1
                 self.frames[2][:] = rgbd2
-                self.atlas[0:CAM_ROW_H, 0:FRAME_W] = rgb1
-                self.atlas[0:CAM_ROW_H, FRAME_W:FRAME_W * 2] = rgbd1
-                self.atlas[0:CAM_ROW_H, FRAME_W * 2:FRAME_W * 3] = rgbd2
-                self.atlas[CAM_ROW_H:ATLAS_H, 0:ATLAS_W] = gmap_render
-                self._draw_battery_bar(self.atlas)
+                if atlas is not None:
+                    self.atlas[:] = atlas
                 self.timestamp = time.time()
-            _t_end = time.monotonic()
+            _t_render = time.monotonic()
+            _t_end = _t_render
 
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
                                 _t_depth - _t_rs1, _t_obs - _t_depth,
                                 _t_odom - _t_obs, _t_gmap_up - _t_odom,
                                 _t_safety - _t_gmap_up,
-                                _t_render - _t_safety, _t_end - _t_render))
+                                _t_end - _t_safety))
             if len(_loop_times) % 300 == 0:
                 avg = np.mean(_loop_times[-300:], axis=0) * 1000
                 print("capture: grab=%.1f rs1=%.1f rs2=%.1f obs=%.1f odom=%.1f "
-                      "gmap_up=%.1f safety=%.1f render=%.1f blit=%.1f "
+                      "gmap=%.1f safety=%.1f render=%.1f "
                       "TOTAL=%.1fms" % (*avg, sum(avg)))
 
     def stop(self):

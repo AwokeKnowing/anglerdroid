@@ -1,17 +1,13 @@
 """gpu_render.py – GPU-accelerated 3D terrain renderer (ModernGL + EGL).
 
-Renders the global occupancy/height map as a displacement-mapped mesh
-with a follow-cam, robot mesh, and CPU minimap overlay.
-Designed for headless Jetson Orin NX operation.
-
-Falls back gracefully if moderngl/EGL is unavailable — the caller
-should check .available and use the software renderer in globalmap.py.
+Renders the full atlas: 3D displacement-mapped terrain with follow-cam,
+robot mesh, minimap, camera feeds, battery bar, and trail.
+GPU-only pipeline — no CPU fallback.  Designed for Jetson Orin NX.
 """
 
 import math
 import time
 import numpy as np
-import cv2
 
 try:
     import moderngl
@@ -37,7 +33,6 @@ MINIMAP_ZOOM = 0.25
 PX_SIZE = 0.02
 FREE_THRESH = 190
 OBS_THRESH = 90
-UNK_DISPLAY = 160
 
 # ── Shaders ──────────────────────────────────────────────────────
 
@@ -161,6 +156,112 @@ void main() {
     vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
     float nl = max(dot(normalize(v_nrm), -ld), 0.0);
     fc = vec4(v_col * (0.35 + 0.65 * nl), 1.0);
+}
+"""
+
+# ── Shaders for atlas overlays (cameras, minimap, battery, trail) ─
+
+_FRAG_CAMERA = """
+#version 330
+uniform sampler2D u_tex;
+uniform vec4 u_vp;
+out vec4 fc;
+void main() {
+    vec2 local = (gl_FragCoord.xy - u_vp.xy) / u_vp.zw;
+    fc = texture(u_tex, vec2(local.x, 1.0 - local.y));
+}
+"""
+
+_FRAG_MINIMAP = """
+#version 330
+uniform sampler2D u_conf;
+uniform sampler2D u_hmap;
+uniform vec4 u_vp;
+uniform vec2 u_center;
+uniform float u_zoom;
+uniform vec2 u_mapsz;
+uniform float u_sf;
+uniform float u_theta;
+out vec4 fc;
+void main() {
+    vec2 local = (gl_FragCoord.xy - u_vp.xy) / u_vp.zw;
+    vec2 map_uv = (local - 0.5) / u_zoom + u_center / u_mapsz;
+    if (map_uv.x < 0.0 || map_uv.x > 1.0 ||
+        map_uv.y < 0.0 || map_uv.y > 1.0) {
+        fc = vec4(0.627, 0.627, 0.627, 0.85);
+        return;
+    }
+    float c = texture(u_conf, map_uv).r * 255.0;
+    vec3 col;
+    if (c > 190.0) {
+        col = vec3(1.0);
+    } else if (c < 90.0) {
+        float h = texture(u_hmap, map_uv).r * 255.0;
+        float g = clamp((64.0 - h * 0.5) / 255.0, 0.04, 0.25);
+        col = vec3(g);
+    } else {
+        col = vec3(0.627);
+    }
+    /* Robot dot at center */
+    vec2 px = local * u_vp.zw;
+    vec2 ctr = u_vp.zw * 0.5;
+    float d = length(px - ctr);
+    if (d < 4.0) {
+        float r_col = mix(1.0, 0.0, u_sf);
+        float g_col = mix(0.0, 0.78, u_sf);
+        float b_col = mix(0.0, 1.0, u_sf);
+        col = vec3(r_col, g_col, b_col);
+    }
+    /* Direction tick */
+    vec2 dir = vec2(cos(u_theta), -sin(u_theta));
+    vec2 dd = px - ctr;
+    float along = dot(dd, dir);
+    float perp = abs(dd.x * dir.y - dd.y * dir.x);
+    if (along > 3.0 && along < 8.0 && perp < 1.5) {
+        float r_col = mix(1.0, 0.0, u_sf);
+        float g_col = mix(0.0, 0.78, u_sf);
+        col = vec3(r_col, g_col, 1.0);
+    }
+    /* Border */
+    if (local.x < 1.0/u_vp.z || local.x > 1.0 - 1.0/u_vp.z ||
+        local.y < 1.0/u_vp.w || local.y > 1.0 - 1.0/u_vp.w) {
+        col = vec3(0.314);
+    }
+    fc = vec4(col, 0.85);
+}
+"""
+
+_FRAG_BATTERY = """
+#version 330
+uniform vec4 u_vp;
+uniform float u_frac;
+out vec4 fc;
+void main() {
+    vec2 local = (gl_FragCoord.xy - u_vp.xy) / u_vp.zw;
+    float fill = step(local.x, u_frac);
+    vec3 bg = vec3(0.118);
+    vec3 col;
+    if (u_frac > 0.50) col = vec3(0.0, 0.78, 0.0);
+    else if (u_frac > 0.25) col = vec3(0.86, 0.7, 0.0);
+    else col = vec3(0.86, 0.16, 0.16);
+    fc = vec4(mix(bg, col, fill), 1.0);
+}
+"""
+
+_VERT_TRAIL = """
+#version 330
+uniform mat4 u_mvp;
+in vec3 in_pos;
+void main() {
+    gl_Position = u_mvp * vec4(in_pos, 1.0);
+}
+"""
+
+_FRAG_TRAIL = """
+#version 330
+out vec4 fc;
+void main() {
+    fc = vec4(0.314, 0.549, 1.0, 1.0);
 }
 """
 
@@ -518,19 +619,28 @@ def _triangulate_robot():
 # ── Main renderer ────────────────────────────────────────────────
 
 class GPURenderer:
-    """GPU-accelerated 3D terrain view. Check .available after first render()."""
+    """GPU-accelerated full-atlas renderer (3D terrain + cameras + HUD).
 
-    def __init__(self, map_w, map_h, view_w, view_h):
-        self.available = _HAS_MGL
+    atlas_w × atlas_h = full output size (e.g. 960×960).
+    map_w × map_h = occupancy grid size (e.g. 960×720).
+    The 3D terrain occupies the lower map_h rows; cameras fill the top.
+    """
+
+    CAM_H = 240
+    CAM_W = 320
+    BAR_H = 6
+
+    def __init__(self, map_w, map_h, atlas_w, atlas_h):
+        if not _HAS_MGL:
+            raise RuntimeError("moderngl not installed — GPU required")
+        self.available = True
         self._mw = map_w
         self._mh = map_h
-        self._vw = view_w
-        self._vh = view_h
+        self._vw = atlas_w
+        self._vh = atlas_h
+        self._view3d_h = map_h
         self.topdown = False
         self._gl_ready = False
-
-        if not _HAS_MGL:
-            print("gpu_render: moderngl not installed")
 
     # ── Depth-forward configuration (call once before use) ───────
 
@@ -558,8 +668,6 @@ class GPURenderer:
                  + self._df_pivot - self._df_trans)
         self._df_cam_px = (cam_w[:2] * self._df_scale
                            + self._df_offset).astype(np.float32)
-        self._df_morph_kern = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (4, 4))
         self._df_configured = True
         self._df_gl_ready = False
 
@@ -567,29 +675,17 @@ class GPURenderer:
 
     def _init_gl(self):
         t0 = time.monotonic()
+        ctx = self._create_context()
 
-        try:
-            self._ctx = moderngl.create_context(
-                standalone=True, backend='egl')
-        except Exception:
-            self._ctx = moderngl.create_context(standalone=True)
-
-        # Framebuffer (texture-backed for reliable readback)
-        self._color_tex_fbo = self._ctx.texture(
-            (self._vw, self._vh), 4)
-        depth = self._ctx.depth_renderbuffer((self._vw, self._vh))
-        self._fbo = self._ctx.framebuffer(
+        # Main FBO at full atlas size
+        self._color_tex_fbo = ctx.texture((self._vw, self._vh), 4)
+        depth = ctx.depth_renderbuffer((self._vw, self._vh))
+        self._fbo = ctx.framebuffer(
             color_attachments=[self._color_tex_fbo],
             depth_attachment=depth)
 
-        # Map textures (preallocated, updated per-frame)
-        self._tex_conf = self._ctx.texture((self._mw, self._mh), 1)
-        self._tex_hmap = self._ctx.texture((self._mw, self._mh), 1)
-        self._tex_conf.filter = (moderngl.NEAREST, moderngl.NEAREST)
-        self._tex_hmap.filter = (moderngl.LINEAR, moderngl.LINEAR)
-
         # Terrain shader
-        self._prog_t = self._ctx.program(
+        self._prog_t = ctx.program(
             vertex_shader=_VERT_TERRAIN, fragment_shader=_FRAG_TERRAIN)
         self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
         self._prog_t['u_origin'].value = (
@@ -601,28 +697,80 @@ class GPURenderer:
         self._prog_t['u_hmap'].value = 0
         self._prog_t['u_conf'].value = 1
         self._prog_t['u_topdown'].value = 0
-
         self._build_terrain()
 
         # Robot shader + mesh
-        self._prog_r = self._ctx.program(
+        self._prog_r = ctx.program(
             vertex_shader=_VERT_ROBOT, fragment_shader=_FRAG_ROBOT)
         self._build_robot()
+
+        # Fullscreen-quad VBO (shared by all overlay shaders)
+        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
+        self._fsq_vbo = ctx.buffer(fsq.tobytes())
+
+        # Camera feed textures (3 cameras, uploaded each frame)
+        self._cam_textures = [
+            ctx.texture((self.CAM_W, self.CAM_H), 3) for _ in range(3)]
+        for t in self._cam_textures:
+            t.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._prog_cam = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_CAMERA)
+        self._vao_cam = ctx.vertex_array(
+            self._prog_cam, [(self._fsq_vbo, '2f', 'in_pos')])
+
+        # Minimap shader
+        self._prog_mm = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_MINIMAP)
+        self._vao_mm = ctx.vertex_array(
+            self._prog_mm, [(self._fsq_vbo, '2f', 'in_pos')])
+
+        # Battery bar shader
+        self._prog_bat = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BATTERY)
+        self._vao_bat = ctx.vertex_array(
+            self._prog_bat, [(self._fsq_vbo, '2f', 'in_pos')])
+
+        # Trail line shader
+        self._prog_trail = ctx.program(
+            vertex_shader=_VERT_TRAIL, fragment_shader=_FRAG_TRAIL)
+        self._trail_vbo = ctx.buffer(reserve=300 * 3 * 4)
+        self._vao_trail = ctx.vertex_array(
+            self._prog_trail, [(self._trail_vbo, '3f', 'in_pos')])
 
         # Pre-allocated readback buffer
         self._out = np.empty((self._vh, self._vw, 3), dtype=np.uint8)
 
         # PBO double-buffer for async readback
         pbo_sz = self._vw * self._vh * 3
-        self._pbo = [self._ctx.buffer(reserve=pbo_sz),
-                     self._ctx.buffer(reserve=pbo_sz)]
+        self._pbo = [ctx.buffer(reserve=pbo_sz),
+                     ctx.buffer(reserve=pbo_sz)]
         self._pbo_idx = 0
         self._pbo_ready = False
+
+        # Initialize gmap GL if already configured
+        if getattr(self, '_gm_configured', False) and not getattr(self, '_gm_gl_ready', False):
+            self._init_gmap_gl()
+
+        # Initialize depth GL if already configured
+        if getattr(self, '_df_configured', False) and not getattr(self, '_df_gl_ready', False):
+            self._init_depth_gl()
+
+        # Initialize odom GL if already configured
+        if getattr(self, '_od_configured', False) and not getattr(self, '_od_gl_ready', False):
+            self._init_odom_gl()
 
         t1 = time.monotonic()
         print("gpu_render: ready %dx%d  grid=%dx%d  robot=%d tris  %.0fms" % (
             self._vw, self._vh, self._gw, self._gh,
             self._robot_ntris, (t1 - t0) * 1e3))
+
+    def _create_context(self):
+        try:
+            self._ctx = moderngl.create_context(
+                standalone=True, backend='egl')
+        except Exception:
+            self._ctx = moderngl.create_context(standalone=True)
+        return self._ctx
 
     def _build_terrain(self):
         gw = self._mw // GRID_DIV
@@ -720,8 +868,7 @@ class GPURenderer:
         self._df_vao_range = ctx.vertex_array(
             self._df_prog_range, [(self._df_vbo, '3f', 'in_v')])
 
-        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
-        fsq_buf = ctx.buffer(fsq.tobytes())
+        fsq_buf = self._fsq_vbo
         self._df_vao_rc = ctx.vertex_array(
             self._df_prog_rc, [(fsq_buf, '2f', 'in_pos')])
         self._df_vao_morph = ctx.vertex_array(
@@ -911,8 +1058,7 @@ class GPURenderer:
         self._od_prog_copy = ctx.program(
             vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_TEXCOPY)
 
-        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
-        fsq_buf = ctx.buffer(fsq.tobytes())
+        fsq_buf = self._fsq_vbo
         self._od_vao_ds = ctx.vertex_array(
             self._od_prog_ds, [(fsq_buf, '2f', 'in_pos')])
         self._od_vao_sad = ctx.vertex_array(
@@ -1063,8 +1209,7 @@ class GPURenderer:
         self._gm_ego_tex = ctx.texture((ew, eh), 1)
         self._gm_ego_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
 
-        quad = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
-        qbuf = ctx.buffer(quad.tobytes())
+        fsq = self._fsq_vbo
 
         self._gm_prog_up = ctx.program(
             vertex_shader=_VERT_FSQUAD,
@@ -1076,7 +1221,7 @@ class GPURenderer:
         self._gm_prog_up['u_ego_inv'].value = (1.0 / ew, 1.0 / eh)
         self._gm_prog_up['u_step'].value = self._gm_step
         self._gm_vao_up = ctx.vertex_array(
-            self._gm_prog_up, [(qbuf, '2f', 'in_pos')])
+            self._gm_prog_up, [(fsq, '2f', 'in_pos')])
 
         self._gm_proj_tex = ctx.texture((ew, eh), 1)
         self._gm_proj_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
@@ -1090,12 +1235,9 @@ class GPURenderer:
         self._gm_prog_pj['u_map_inv'].value = (1.0 / mw, 1.0 / mh)
         self._gm_prog_pj['u_unknown'].value = 128.0 / 255.0
         self._gm_vao_pj = ctx.vertex_array(
-            self._gm_prog_pj, [(qbuf, '2f', 'in_pos')])
+            self._gm_prog_pj, [(fsq, '2f', 'in_pos')])
 
         self._gm_n = 0
-        self._gm_cpu_conf = np.full((mh, mw), 128, dtype=np.uint8)
-        self._gm_cpu_hmap = np.zeros((mh, mw), dtype=np.uint8)
-
         self._gm_gl_ready = True
         print("gpu_render: gmap ready %dx%d  step=%d" % (
             mw, mh, int(self._gm_step * 255)))
@@ -1167,15 +1309,11 @@ class GPURenderer:
         self._gm_n += 1
         t1 = time.monotonic()
 
-        if self._gm_n % 90 == 0:
+        if self._gm_n % 300 == 0:
             data = self._gm_conf[self._gm_idx].read()
-            self._gm_cpu_conf[:] = np.frombuffer(
-                data, dtype=np.uint8).reshape(self._gm_mh, self._gm_mw)
-            data = self._gm_hmap[self._gm_idx].read()
-            self._gm_cpu_hmap[:] = np.frombuffer(
-                data, dtype=np.uint8).reshape(self._gm_mh, self._gm_mw)
-            nfree = int(np.count_nonzero(self._gm_cpu_conf > 190))
-            nobs = int(np.count_nonzero(self._gm_cpu_conf < 90))
+            cmap = np.frombuffer(data, dtype=np.uint8)
+            nfree = int(np.count_nonzero(cmap > 190))
+            nobs = int(np.count_nonzero(cmap < 90))
             ntot = self._gm_mw * self._gm_mh
             print("gpu_gmap: free=%d obs=%d unk=%d | "
                   "pose=(%.3f,%.3f,%.1f°) %.1fms"
@@ -1218,9 +1356,10 @@ class GPURenderer:
 
     # ── Per-frame render ─────────────────────────────────────────
 
-    def render(self, x, y, theta, conf_map, height_map,
-               trail_xy=None, fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """Render full 3D view. Returns (vh, vw, 3) uint8 RGB array."""
+    def render(self, x, y, theta, cameras=None,
+               trail_xy=None, fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0,
+               battery_frac=0.0):
+        """Render the full atlas (3D + cameras + HUD). Returns (vh, vw, 3) uint8."""
         if not self._gl_ready:
             try:
                 self._init_gl()
@@ -1234,27 +1373,29 @@ class GPURenderer:
 
         t0 = time.monotonic()
 
-        # Collect previous frame's async readback (DMA ran during inter-frame gap)
         if self._pbo_ready:
             prev_pbo = self._pbo[1 - self._pbo_idx]
             data = prev_pbo.read()
             self._out[:] = np.frombuffer(data, dtype=np.uint8).reshape(
                 self._vh, self._vw, 3)[::-1]
 
-        # Upload map textures only when GPU gmap pipeline is not active
-        if not getattr(self, '_gm_gl_ready', False):
-            self._tex_conf.write(conf_map.tobytes())
-            self._tex_hmap.write(height_map.tobytes())
-
+        ctx = self._ctx
+        v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
 
-        # Camera: GL coords (X=east, Y=up, Z = -world_y)
+        # ── 3D terrain + robot (lower v3h pixels of FBO) ──
+        self._fbo.use()
+        self._fbo.clear(0.569, 0.569, 0.588, 1.0)
+        ctx.viewport = (0, 0, self._vw, v3h)
+        ctx.enable(moderngl.DEPTH_TEST)
+        ctx.depth_func = '<'
+
+        aspect = self._vw / v3h
         if self.topdown:
             cam = np.float32([x, 15.0, -y])
             tgt = np.float32([x, 0.0, -y])
             up = np.float32([ct, 0, -st])
             half_ext = 6.0
-            aspect = self._vw / self._vh
             view = _look_at(cam, tgt, up)
             proj = _ortho(-half_ext * aspect, half_ext * aspect,
                           -half_ext, half_ext, 0.1, 100.0)
@@ -1270,13 +1411,11 @@ class GPURenderer:
                 -(y + CAM_LOOK_AHEAD * st)])
             up = np.float32([0, 1, 0])
             view = _look_at(cam, tgt, up)
-            proj = _perspective(CAM_FOV_DEG,
-                                self._vw / self._vh, NEAR_CLIP, FAR_CLIP)
+            proj = _perspective(CAM_FOV_DEG, aspect, NEAR_CLIP, FAR_CLIP)
             self._prog_t['u_topdown'].value = 0
 
         mvp = proj @ view
 
-        # Robot model: local +X fwd, +Y left, +Z up → GL
         R0 = np.float32([[1, 0, 0], [0, 0, 1], [0, -1, 0]])
         Ry = np.float32([[ct, 0, st], [0, 1, 0], [-st, 0, ct]])
         R_robot = Ry @ R0
@@ -1285,24 +1424,12 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
-        # ── Draw ──
-        self._fbo.use()
-        self._fbo.clear(0.569, 0.569, 0.588, 1.0)
-        self._ctx.enable(moderngl.DEPTH_TEST)
-        self._ctx.depth_func = '<'
-
-        # Terrain
-        if getattr(self, '_gm_gl_ready', False):
-            self._gm_hmap[self._gm_idx].use(location=0)
-            self._gm_conf[self._gm_idx].use(location=1)
-        else:
-            self._tex_hmap.use(location=0)
-            self._tex_conf.use(location=1)
+        self._gm_hmap[self._gm_idx].use(location=0)
+        self._gm_conf[self._gm_idx].use(location=1)
         self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
         self._prog_t['u_cam'].value = tuple(cam.tolist())
         self._vao_t.render()
 
-        # Robot
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(
                 mvp_robot.T.astype(np.float32).tobytes())
@@ -1310,117 +1437,95 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Kick async PBO readback (returns immediately, DMA runs in background)
+        # ── Trail (GL lines in 3D viewport) ──
+        if trail_xy is not None and len(trail_xy) >= 2:
+            self._render_trail(trail_xy, mvp)
+
+        # ── Switch to 2D overlay mode (full atlas viewport, no depth) ──
+        ctx.viewport = (0, 0, self._vw, self._vh)
+        ctx.disable(moderngl.DEPTH_TEST)
+        ctx.enable(moderngl.BLEND)
+        ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
+
+        # ── Minimap (overlaid on 3D view, upper-left of 3D area) ──
+        mm_x0 = MINIMAP_PAD
+        mm_y0 = v3h - MINIMAP_PAD - MINIMAP_SZ
+        ctx.viewport = (mm_x0, mm_y0, MINIMAP_SZ, MINIMAP_SZ)
+        self._gm_conf[self._gm_idx].use(location=0)
+        self._gm_hmap[self._gm_idx].use(location=1)
+        mm = self._prog_mm
+        mm['u_conf'].value = 0
+        mm['u_hmap'].value = 1
+        mm['u_vp'].value = (float(mm_x0), float(mm_y0),
+                            float(MINIMAP_SZ), float(MINIMAP_SZ))
+        map_cx = float(self._mw) / 2.0 + x / PX_SIZE
+        map_cy = float(self._mh) / 2.0 - y / PX_SIZE
+        mm['u_center'].value = (map_cx, map_cy)
+        mm['u_zoom'].value = MINIMAP_ZOOM
+        mm['u_mapsz'].value = (float(self._mw), float(self._mh))
+        sf = min(fwd_scale, bwd_scale, ang_scale)
+        mm['u_sf'].value = sf
+        mm['u_theta'].value = float(theta)
+        self._vao_mm.render(moderngl.TRIANGLE_STRIP)
+
+        # ── Camera feeds (top strip of atlas) ──
+        ctx.disable(moderngl.BLEND)
+        cam_y0_gl = self._vh - self.CAM_H
+        if cameras is not None:
+            for i, img in enumerate(cameras):
+                if img is None:
+                    continue
+                self._cam_textures[i].write(img.tobytes())
+                self._cam_textures[i].use(location=0)
+                vp_x = i * self.CAM_W
+                ctx.viewport = (vp_x, cam_y0_gl, self.CAM_W, self.CAM_H)
+                self._prog_cam['u_tex'].value = 0
+                self._prog_cam['u_vp'].value = (
+                    float(vp_x), float(cam_y0_gl),
+                    float(self.CAM_W), float(self.CAM_H))
+                self._vao_cam.render(moderngl.TRIANGLE_STRIP)
+
+        # ── Battery bar (bottom of camera strip) ──
+        bar_y_gl = cam_y0_gl
+        ctx.viewport = (0, bar_y_gl, self._vw, self.BAR_H)
+        self._prog_bat['u_vp'].value = (0.0, float(bar_y_gl),
+                                         float(self._vw), float(self.BAR_H))
+        self._prog_bat['u_frac'].value = float(battery_frac)
+        self._vao_bat.render(moderngl.TRIANGLE_STRIP)
+
+        # ── Async PBO readback ──
+        ctx.viewport = (0, 0, self._vw, self._vh)
+        ctx.disable(moderngl.BLEND)
         cur_pbo = self._pbo[self._pbo_idx]
         self._fbo.read_into(cur_pbo, components=3, alignment=1)
 
         if not self._pbo_ready:
-            # First frame only: must block synchronously
             data = cur_pbo.read()
             self._out[:] = np.frombuffer(data, dtype=np.uint8).reshape(
                 self._vh, self._vw, 3)[::-1]
             self._pbo_ready = True
 
         self._pbo_idx = 1 - self._pbo_idx
-        t1 = time.monotonic()
 
-        # CPU overlays
         if not hasattr(self, '_rn'):
             self._rn = 0
         self._rn += 1
-        if getattr(self, '_gm_gl_ready', False):
-            mm_conf = self._gm_cpu_conf
-            mm_hmap = self._gm_cpu_hmap
-        else:
-            mm_conf = conf_map
-            mm_hmap = height_map
-        self._draw_minimap(self._out, x, y, theta, mm_conf, mm_hmap,
-                           fwd_scale, bwd_scale, ang_scale)
-        if trail_xy is not None and len(trail_xy) >= 2:
-            self._draw_trail(self._out, trail_xy, view, proj)
-
-        t2 = time.monotonic()
         if self._rn <= 3 or self._rn % 100 == 0:
-            print("gpu_render: gpu+read=%.1fms  overlay=%.1fms  total=%.1fms" % (
-                (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3))
+            print("gpu_render: %.1fms" % ((time.monotonic() - t0) * 1e3))
 
         return self._out
 
-    # ── CPU minimap ──────────────────────────────────────────────
-
-    def _draw_minimap(self, out, x, y, theta, conf, hmap,
-                      fwd_scale, bwd_scale, ang_scale):
-        rc = int(self._mw // 2 + x / PX_SIZE)
-        rr = int(self._mh // 2 - y / PX_SIZE)
-
-        M = np.float64([
-            [MINIMAP_ZOOM, 0, MINIMAP_SZ / 2 - rc * MINIMAP_ZOOM],
-            [0, MINIMAP_ZOOM, MINIMAP_SZ / 2 - rr * MINIMAP_ZOOM],
-        ])
-        mini_conf = cv2.warpAffine(
-            conf, M, (MINIMAP_SZ, MINIMAP_SZ),
-            flags=cv2.INTER_NEAREST, borderValue=128)
-
-        rgb = np.full((MINIMAP_SZ, MINIMAP_SZ, 3), UNK_DISPLAY, dtype=np.uint8)
-        rgb[mini_conf > FREE_THRESH] = [255, 255, 255]
-        obs = mini_conf < OBS_THRESH
-        if obs.any():
-            mini_hm = cv2.warpAffine(
-                hmap, M, (MINIMAP_SZ, MINIMAP_SZ),
-                flags=cv2.INTER_NEAREST, borderValue=0)
-            g = np.clip(64 - (mini_hm[obs].astype(np.int16) >> 1),
-                        10, 64).astype(np.uint8)
-            rgb[obs] = np.stack([g, g, g], axis=1)
-
-        # Robot dot (color reflects safety throttle)
-        sf = min(fwd_scale, bwd_scale, ang_scale)
-        dot_col = (int(255 * (1 - sf)), int(200 * sf), int(255 * sf))
-        cx, cy = MINIMAP_SZ // 2, MINIMAP_SZ // 2
-        cv2.circle(rgb, (cx, cy), 3, dot_col, -1)
-
-        # Direction tick
-        dx = int(6 * math.cos(theta))
-        dy = int(-6 * math.sin(theta))
-        cv2.line(rgb, (cx, cy), (cx + dx, cy + dy), dot_col, 1)
-
-        cv2.rectangle(rgb, (0, 0), (MINIMAP_SZ - 1, MINIMAP_SZ - 1),
-                       (80, 80, 80), 1)
-
-        y0, x0 = MINIMAP_PAD, MINIMAP_PAD
-        y1, x1 = y0 + MINIMAP_SZ, x0 + MINIMAP_SZ
-        if y1 <= out.shape[0] and x1 <= out.shape[1]:
-            region = out[y0:y1, x0:x1]
-            np.multiply(region, 0.15, out=region, casting='unsafe')
-            np.add(region, (rgb * 0.85).astype(np.uint8),
-                   out=region, casting='unsafe')
-
-    # ── CPU trail ────────────────────────────────────────────────
-
-    def _draw_trail(self, out, trail_xy, view, proj):
-        n = len(trail_xy)
-        pts_gl = np.empty((n, 4), dtype=np.float32)
-        pts_gl[:, 0] = trail_xy[:, 0]
-        pts_gl[:, 1] = 0.0
-        pts_gl[:, 2] = -trail_xy[:, 1]
-        pts_gl[:, 3] = 1.0
-
-        mvp = proj @ view
-        clip = (mvp @ pts_gl.T).T
-        w = clip[:, 3]
-        ok = w > 0.1
-        if not ok.any():
-            return
-
-        ndc_x = clip[ok, 0] / w[ok]
-        ndc_y = clip[ok, 1] / w[ok]
-        sx = ((ndc_x + 1) * 0.5 * self._vw).astype(np.int32)
-        sy = ((1 - ndc_y) * 0.5 * self._vh).astype(np.int32)
-
-        keep = (sx >= 0) & (sx < self._vw) & (sy >= 0) & (sy < self._vh)
-        pts = np.column_stack([sx[keep], sy[keep]])
-        if len(pts) >= 2:
-            cv2.polylines(out, [pts.reshape(-1, 1, 2)], False,
-                          (80, 140, 255), 2, cv2.LINE_AA)
+    def _render_trail(self, trail_xy, mvp):
+        """Render trail as GL line strip in the 3D viewport."""
+        n = min(len(trail_xy), 300)
+        pts = np.empty((n, 3), dtype=np.float32)
+        pts[:, 0] = trail_xy[-n:, 0]
+        pts[:, 1] = 0.02
+        pts[:, 2] = -trail_xy[-n:, 1]
+        self._trail_vbo.orphan(n * 3 * 4)
+        self._trail_vbo.write(pts.tobytes())
+        self._prog_trail['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
+        self._vao_trail.render(moderngl.LINE_STRIP, vertices=n)
 
     # ── Cleanup ──────────────────────────────────────────────────
 

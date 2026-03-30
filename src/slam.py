@@ -15,7 +15,6 @@ API so it can be dropped in wherever GlobalMap was used.
 
 import math
 import time
-from abc import ABC, abstractmethod
 
 import cv2
 import numpy as np
@@ -240,28 +239,7 @@ class Keyframe:
 
 # ── Abstract backend ────────────────────────────────────────────────
 
-class SlamBackend(ABC):
-    """Drop-in replacement for GlobalMap with SLAM capabilities."""
-
-    @abstractmethod
-    def update(self, obs_ego, known_ego, x, y, theta,
-               ego_cx, ego_cy, ego_px_size=0.01):
-        """Feed one ego-space observation frame + pose."""
-
-    @abstractmethod
-    def render(self, x, y, theta, trail_xy=None,
-               fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        """Render the map for display (960×720)."""
-
-    @abstractmethod
-    def project_to_ego(self, x, y, theta,
-                       ego_cx, ego_cy, ego_px_size, ego_h, ego_w):
-        """Project global map to ego space for safety."""
-
-
-# ── Concrete implementation ─────────────────────────────────────────
-
-class PoseGraphSLAM(SlamBackend):
+class PoseGraphSLAM:
     """Lightweight 2D pose-graph SLAM with in-memory keyframes."""
 
     def __init__(self):
@@ -280,43 +258,12 @@ class PoseGraphSLAM(SlamBackend):
 
     # ── SlamBackend interface ───────────────────────────────────────
 
-    def update(self, obs_ego, known_ego, x, y, theta,
-               ego_cx, ego_cy, ego_px_size=0.01):
-        self._gmap.update(obs_ego, known_ego, x, y, theta,
-                          ego_cx, ego_cy, ego_px_size)
-        self._check_keyframe(obs_ego, known_ego, x, y, theta,
-                             ego_cx, ego_cy, ego_px_size)
-
     def keyframe_check(self, obs_ego, known_ego, x, y, theta,
                        ego_cx, ego_cy, ego_px_size=0.01):
-        """Check keyframing without CPU map update (GPU gmap path)."""
-        self._check_keyframe(obs_ego, known_ego, x, y, theta,
-                             ego_cx, ego_cy, ego_px_size)
-
-    def _check_keyframe(self, obs_ego, known_ego, x, y, theta,
-                        ego_cx, ego_cy, ego_px_size):
+        """Check keyframing (GPU handles the actual map update)."""
         if self._should_keyframe(x, y, theta):
             self._create_keyframe(obs_ego, known_ego, x, y, theta,
                                   ego_cx, ego_cy, ego_px_size)
-
-    def render(self, x, y, theta, trail_xy=None,
-               fwd_scale=1.0, bwd_scale=1.0, ang_scale=1.0):
-        return self._gmap.render(x, y, theta, trail_xy,
-                                 fwd_scale, bwd_scale, ang_scale)
-
-    def project_to_ego(self, x, y, theta,
-                       ego_cx, ego_cy, ego_px_size, ego_h, ego_w):
-        return self._gmap.project_to_ego(x, y, theta,
-                                         ego_cx, ego_cy, ego_px_size,
-                                         ego_h, ego_w)
-
-    @property
-    def confidence_map(self):
-        return self._gmap._map
-
-    @property
-    def height_map(self):
-        return self._gmap._height_map
 
     # ── Keyframe management ─────────────────────────────────────────
 
