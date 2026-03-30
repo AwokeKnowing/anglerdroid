@@ -1,4 +1,4 @@
-"""globalmap.py – World-frame 2D occupancy grid with 3-frame consensus gating.
+"""globalmap.py – World-frame 2D occupancy grid with per-frame evidence.
 
 960×720 pixels at 2 cm/px = 19.2 m × 14.4 m coverage.
 World frame: x-right, y-up, origin at robot's start position.
@@ -10,13 +10,13 @@ Confidence map (_map): each cell stores a byte (0–255):
 
 Height map (_height_map): each cell stores uint8 (0–100):
   0 = floor / no obstacle
-  1–100 = obstacle height in cm above floor (median of 3-frame consensus)
+  1–100 = obstacle height in cm above floor
 
-Observations from the ego-frame cameras are warped into global space
-at 30 fps.  Only pixels where the last 3 consecutive frames agree
-(all free or all obstacle) are applied to the main map, preventing
-transient noise from corrupting the persistent map.  On obstacle
-consensus, the median height of the 3 frames is stored in the height map.
+Each frame's observations are warped into global space and applied
+directly as small evidence increments (+/- EVIDENCE_STEP).  Three
+consistent frames are needed to flip a cell from unknown, providing
+the same noise rejection as the old 3-frame consensus but with
+simpler code and 30 Hz map updates instead of 10 Hz.
 """
 
 import math
@@ -38,13 +38,9 @@ UNK_DISPLAY = 160
 FREE_THRESH = 190
 OBS_THRESH = 90
 
-# One consensus (3 agreeing frames at 30fps = 100ms) should be enough
-# to flip a cell.  128 takes unknown→free or unknown→obstacle in a
-# single consensus; free↔obstacle requires 2 (200ms hysteresis).
-EVIDENCE_UP = 128
-EVIDENCE_DOWN = 128
-
-CONSENSUS_N = 3
+# Per-frame evidence step.  3 frames to flip unknown (128) → free (255)
+# or unknown → obstacle (0).  free↔obstacle requires ~6 frames (200ms).
+EVIDENCE_STEP = 50
 
 SPRITE_SZ = 192
 _SC = SPRITE_SZ // 2  # 96 — sprite centre
@@ -63,8 +59,6 @@ class GlobalMap:
         t0 = time.monotonic()
         self._map = np.full((MAP_H, MAP_W), UNKNOWN_VAL, dtype=np.uint8)
         self._height_map = np.zeros((MAP_H, MAP_W), dtype=np.uint8)
-        self._ring = [None] * CONSENSUS_N  # (r0,r1,c0,c1,signed_roi) per slot
-        self._ring_idx = 0
         self._count = 0
         self._spr_rgba, self._spr_lab = self._make_sprite()
         self._render_times = []
@@ -96,6 +90,14 @@ class GlobalMap:
               f"mesh {(t3-t2)*1e3:.0f}ms  sprite {(t4-t3)*1e3:.0f}ms  "
               f"robot_3d={spr.shape} at ({sx},{sy})")
 
+    @property
+    def confidence_map(self):
+        return self._map
+
+    @property
+    def height_map(self):
+        return self._height_map
+
     def update(self, obs_ego, known_ego, x, y, theta,
                ego_cx, ego_cy, ego_px_size=0.01):
         """Feed one frame of ego-space observations and robot pose.
@@ -103,8 +105,10 @@ class GlobalMap:
         obs_ego values: 0=free, 1-100=obstacle height in cm.
         known_ego: 255 where sensor has data, 0 elsewhere.
 
-        ROI-optimised: only warp/compare/update the bounding box of the
-        observation footprint in global space (~200×200 vs 960×720).
+        Per-frame evidence: free pixels nudge the confidence up by
+        EVIDENCE_STEP, obstacle pixels nudge it down.  Three consistent
+        frames flip a cell from unknown — same noise rejection as the
+        old 3-frame consensus, at 30 Hz update rate.
         """
         t0 = time.monotonic()
         h, w = obs_ego.shape[:2]
@@ -117,7 +121,6 @@ class GlobalMap:
                   % (self._count, nk, no, w, h,
                      x, y, np.degrees(theta), ego_cx, ego_cy, ego_px_size))
 
-        # Encode as: 0=unobserved, 1=free, 2-101=obstacle (height+1)
         ego_obs = np.zeros((h, w), dtype=np.uint8)
         free = (known_ego > 0) & (obs_ego == 0)
         ego_obs[free] = 1
@@ -126,9 +129,7 @@ class GlobalMap:
                                      101).astype(np.uint8)
 
         M_fwd = self._forward_affine(x, y, theta, ego_cx, ego_cy, ego_px_size)
-        t1 = time.monotonic()
 
-        # Compute ROI: transform ego corners → global pixel bounds
         corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(1, 4, 2)
         gc = cv2.transform(corners, M_fwd).reshape(-1, 2)
         r0 = max(0, int(np.floor(gc[:, 1].min())))
@@ -139,9 +140,9 @@ class GlobalMap:
             if self._count % 30 == 0:
                 print("gmap: observation outside map bounds! r=%d:%d c=%d:%d" %
                       (r0, r1, c0, c1))
+            self._count += 1
             return
 
-        # Warp only into the ROI-sized output (shift affine origin)
         M_roi = M_fwd.copy()
         M_roi[0, 2] -= c0
         M_roi[1, 2] -= r0
@@ -149,77 +150,39 @@ class GlobalMap:
         obs_roi = cv2.warpAffine(
             ego_obs, M_roi, (roi_w, roi_h),
             flags=cv2.INTER_NEAREST, borderValue=0)
-        t2 = time.monotonic()
 
-        # Encode as signed int8: free=+1, obs=-(height_cm), unobserved=0
-        signed = np.zeros((roi_h, roi_w), dtype=np.int8)
-        signed[obs_roi == 1] = 1
-        obs_mask = obs_roi >= 2
-        signed[obs_mask] = (1 - obs_roi[obs_mask].astype(np.int16)).astype(np.int8)
+        roi_free = obs_roi == 1
+        roi_obs = obs_roi >= 2
 
-        self._ring[self._ring_idx] = (r0, r1, c0, c1, signed)
-        self._ring_idx = (self._ring_idx + 1) % CONSENSUS_N
-        self._count += 1
-
-        if self._count < CONSENSUS_N:
-            return
-        t3 = time.monotonic()
-
-        # Consensus within intersection of all 3 ROIs
-        rois = self._ring
-        ir0 = max(r[0] for r in rois)
-        ir1 = min(r[1] for r in rois)
-        ic0 = max(r[2] for r in rois)
-        ic1 = min(r[3] for r in rois)
-        if ir1 <= ir0 or ic1 <= ic0:
-            self._count += 0  # no-op but marks this path was taken
-            if self._count % 30 == 0:
-                print("gmap: EMPTY consensus intersection! ROIs: %s"
-                      % [(r[0],r[1],r[2],r[3]) for r in rois])
-            return
-
-        # Extract overlapping sub-regions from each ring entry
-        slices = []
-        for br0, br1, bc0, bc1, s in rois:
-            slices.append(s[ir0 - br0:ir1 - br0, ic0 - bc0:ic1 - bc0])
-        s0, s1, s2 = slices
-
-        all_free = (s0 == 1) & (s1 == 1) & (s2 == 1)
-        all_obs = (s0 < 0) & (s1 < 0) & (s2 < 0)
-
-        roi_map = self._map[ir0:ir1, ic0:ic1]
+        roi_map = self._map[r0:r1, c0:c1]
         m = roi_map.astype(np.int16)
-        m[all_free] = np.minimum(m[all_free] + EVIDENCE_UP, 255)
-        m[all_obs] = np.maximum(m[all_obs] - EVIDENCE_DOWN, 0)
+        m[roi_free] = np.minimum(m[roi_free] + EVIDENCE_STEP, 255)
+        m[roi_obs] = np.maximum(m[roi_obs] - EVIDENCE_STEP, 0)
         roi_map[:] = m.astype(np.uint8)
 
-        # Height map: median of the 3 frames' heights where obstacle confirmed
-        roi_hm = self._height_map[ir0:ir1, ic0:ic1]
-        if all_obs.any():
-            h0 = np.abs(s0[all_obs]).astype(np.uint8)
-            h1 = np.abs(s1[all_obs]).astype(np.uint8)
-            h2 = np.abs(s2[all_obs]).astype(np.uint8)
-            roi_hm[all_obs] = np.maximum(
-                np.minimum(h0, h1),
-                np.minimum(np.maximum(h0, h1), h2))
-        if all_free.any():
-            roi_hm[all_free] = 0
-        t4 = time.monotonic()
+        roi_hm = self._height_map[r0:r1, c0:c1]
+        if roi_obs.any():
+            roi_hm[roi_obs] = (obs_roi[roi_obs] - 1).astype(np.uint8)
+        if roi_free.any():
+            roi_hm[roi_free] = 0
 
-        self._update_times.append((t1 - t0, t2 - t1, t3 - t2, t4 - t3))
+        self._count += 1
+        t1 = time.monotonic()
+
+        self._update_times.append(t1 - t0)
         if len(self._update_times) % 90 == 0:
             nfree = int(np.count_nonzero(self._map > FREE_THRESH))
             nobs  = int(np.count_nonzero(self._map < OBS_THRESH))
             ntot  = MAP_H * MAP_W
-            avg = np.mean(self._update_times[-30:], axis=0) * 1000
-            n_af = int(all_free.sum())
-            n_ao = int(all_obs.sum())
-            print("gmap: free=%d obs=%d unk=%d | consensus free_px=%d obs_px=%d | "
+            avg_ms = np.mean(self._update_times[-30:]) * 1000
+            n_af = int(roi_free.sum())
+            n_ao = int(roi_obs.sum())
+            print("gmap: free=%d obs=%d unk=%d | free_px=%d obs_px=%d | "
                   "pose=(%.3f,%.3f,%.1f°) roi=%dx%d %.1fms"
                   % (nfree, nobs, ntot - nfree - nobs,
                      n_af, n_ao,
                      x, y, np.degrees(theta),
-                     roi_h, roi_w, sum(avg)))
+                     roi_h, roi_w, avg_ms))
 
     def project_to_ego(self, x, y, theta,
                        ego_cx, ego_cy, ego_px_size, ego_h, ego_w):

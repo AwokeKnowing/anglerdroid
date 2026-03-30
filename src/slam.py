@@ -284,7 +284,17 @@ class PoseGraphSLAM(SlamBackend):
                ego_cx, ego_cy, ego_px_size=0.01):
         self._gmap.update(obs_ego, known_ego, x, y, theta,
                           ego_cx, ego_cy, ego_px_size)
+        self._check_keyframe(obs_ego, known_ego, x, y, theta,
+                             ego_cx, ego_cy, ego_px_size)
 
+    def keyframe_check(self, obs_ego, known_ego, x, y, theta,
+                       ego_cx, ego_cy, ego_px_size=0.01):
+        """Check keyframing without CPU map update (GPU gmap path)."""
+        self._check_keyframe(obs_ego, known_ego, x, y, theta,
+                             ego_cx, ego_cy, ego_px_size)
+
+    def _check_keyframe(self, obs_ego, known_ego, x, y, theta,
+                        ego_cx, ego_cy, ego_px_size):
         if self._should_keyframe(x, y, theta):
             self._create_keyframe(obs_ego, known_ego, x, y, theta,
                                   ego_cx, ego_cy, ego_px_size)
@@ -464,8 +474,6 @@ class PoseGraphSLAM(SlamBackend):
         # Rebuild map from corrected keyframes
         self._gmap._map[:] = UNKNOWN_VAL
         self._gmap._height_map[:] = 0
-        self._gmap._ring = [None] * self._gmap._ring.__len__()
-        self._gmap._ring_idx = 0
         self._gmap._count = 0
 
         for kf in self._keyframes:

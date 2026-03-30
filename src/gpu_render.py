@@ -389,6 +389,61 @@ out vec4 fc;
 void main() { fc = vec4(texture(u_src, gl_FragCoord.xy * u_inv).r); }
 """
 
+# ── Global-map evidence-update shader (MRT: conf + hmap) ────────
+
+_FRAG_GMAP_UPDATE = """
+#version 330
+uniform sampler2D u_conf;
+uniform sampler2D u_hmap;
+uniform sampler2D u_ego;
+uniform mat3 u_inv;
+uniform vec2 u_map_inv;
+uniform vec2 u_ego_inv;
+uniform float u_step;
+
+layout(location = 0) out vec4 out_conf;
+layout(location = 1) out vec4 out_hmap;
+
+void main() {
+    vec2 gp = gl_FragCoord.xy;
+    vec2 guv = gp * u_map_inv;
+    float conf = texture(u_conf, guv).r;
+    float h    = texture(u_hmap, guv).r;
+
+    vec3 ep = u_inv * vec3(gp, 1.0);
+    vec2 euv = ep.xy * u_ego_inv;
+
+    if (euv.x > 0.0 && euv.x < 1.0 && euv.y > 0.0 && euv.y < 1.0) {
+        float obs_i = floor(texture(u_ego, euv).r * 255.0 + 0.5);
+        if (obs_i == 1.0) {
+            conf = min(conf + u_step, 1.0);
+            h = 0.0;
+        } else if (obs_i >= 2.0) {
+            conf = max(conf - u_step, 0.0);
+            h = (obs_i - 1.0) / 255.0;
+        }
+    }
+    out_conf = vec4(conf);
+    out_hmap = vec4(h);
+}
+"""
+
+_FRAG_GMAP_PROJECT = """
+#version 330
+uniform sampler2D u_conf;
+uniform mat3 u_fwd;
+uniform vec2 u_map_inv;
+uniform float u_unknown;
+out vec4 fc;
+void main() {
+    vec3 gp = u_fwd * vec3(gl_FragCoord.xy, 1.0);
+    vec2 guv = gp.xy * u_map_inv;
+    if (guv.x >= 0.0 && guv.x <= 1.0 && guv.y >= 0.0 && guv.y <= 1.0)
+        fc = vec4(texture(u_conf, guv).r);
+    else
+        fc = vec4(u_unknown);
+}
+"""
 
 # ── Matrix helpers ───────────────────────────────────────────────
 
@@ -963,6 +1018,204 @@ class GPURenderer:
 
         return yaw, forward, confidence
 
+    # ── GPU global-map evidence update ───────────────────────────
+
+    def configure_gmap(self, map_w, map_h, ego_w, ego_h,
+                       origin_x, origin_y, px_size, evidence_step=50):
+        self._gm_mw = int(map_w)
+        self._gm_mh = int(map_h)
+        self._gm_ew = int(ego_w)
+        self._gm_eh = int(ego_h)
+        self._gm_ox = float(origin_x)
+        self._gm_oy = float(origin_y)
+        self._gm_px = float(px_size)
+        self._gm_step = float(evidence_step) / 255.0
+        self._gm_configured = True
+        self._gm_gl_ready = False
+
+    def _init_gmap_gl(self):
+        ctx = self._ctx
+        mw, mh = self._gm_mw, self._gm_mh
+        ew, eh = self._gm_ew, self._gm_eh
+
+        init_conf = np.full(mw * mh, 128, dtype=np.uint8)
+        init_hmap = np.zeros(mw * mh, dtype=np.uint8)
+
+        self._gm_conf = [ctx.texture((mw, mh), 1),
+                         ctx.texture((mw, mh), 1)]
+        self._gm_hmap = [ctx.texture((mw, mh), 1),
+                         ctx.texture((mw, mh), 1)]
+        for t in self._gm_conf:
+            t.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            t.write(init_conf.tobytes())
+        for t in self._gm_hmap:
+            t.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            t.write(init_hmap.tobytes())
+
+        self._gm_fbo = [
+            ctx.framebuffer(color_attachments=[self._gm_conf[0],
+                                               self._gm_hmap[0]]),
+            ctx.framebuffer(color_attachments=[self._gm_conf[1],
+                                               self._gm_hmap[1]]),
+        ]
+        self._gm_idx = 0
+
+        self._gm_ego_tex = ctx.texture((ew, eh), 1)
+        self._gm_ego_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+
+        quad = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
+        qbuf = ctx.buffer(quad.tobytes())
+
+        self._gm_prog_up = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_GMAP_UPDATE)
+        self._gm_prog_up['u_conf'].value = 0
+        self._gm_prog_up['u_hmap'].value = 1
+        self._gm_prog_up['u_ego'].value = 2
+        self._gm_prog_up['u_map_inv'].value = (1.0 / mw, 1.0 / mh)
+        self._gm_prog_up['u_ego_inv'].value = (1.0 / ew, 1.0 / eh)
+        self._gm_prog_up['u_step'].value = self._gm_step
+        self._gm_vao_up = ctx.vertex_array(
+            self._gm_prog_up, [(qbuf, '2f', 'in_pos')])
+
+        self._gm_proj_tex = ctx.texture((ew, eh), 1)
+        self._gm_proj_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._gm_proj_fbo = ctx.framebuffer(
+            color_attachments=[self._gm_proj_tex])
+
+        self._gm_prog_pj = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_GMAP_PROJECT)
+        self._gm_prog_pj['u_conf'].value = 0
+        self._gm_prog_pj['u_map_inv'].value = (1.0 / mw, 1.0 / mh)
+        self._gm_prog_pj['u_unknown'].value = 128.0 / 255.0
+        self._gm_vao_pj = ctx.vertex_array(
+            self._gm_prog_pj, [(qbuf, '2f', 'in_pos')])
+
+        self._gm_n = 0
+        self._gm_cpu_conf = np.full((mh, mw), 128, dtype=np.uint8)
+        self._gm_cpu_hmap = np.zeros((mh, mw), dtype=np.uint8)
+
+        self._gm_gl_ready = True
+        print("gpu_render: gmap ready %dx%d  step=%d" % (
+            mw, mh, int(self._gm_step * 255)))
+
+    def _gmap_affine_inv(self, x, y, theta, cx, cy, ego_px):
+        """Global pixel → ego pixel affine (3×3, row-major)."""
+        ct, st = math.cos(theta), math.sin(theta)
+        r = self._gm_px / ego_px
+        gx = self._gm_ox + x / self._gm_px
+        gy = self._gm_oy - y / self._gm_px
+        return np.float32([
+            [ r * ct, -r * st, cx - r * ct * gx + r * st * gy],
+            [ r * st,  r * ct, cy - r * st * gx - r * ct * gy],
+            [0, 0, 1]])
+
+    def _gmap_affine_fwd(self, x, y, theta, cx, cy, ego_px):
+        """Ego pixel → global pixel affine (3×3, row-major)."""
+        ct, st = math.cos(theta), math.sin(theta)
+        s = ego_px / self._gm_px
+        return np.float32([
+            [ s * ct,  s * st,
+              self._gm_ox + x / self._gm_px - cx * s * ct - cy * s * st],
+            [-s * st,  s * ct,
+              self._gm_oy - y / self._gm_px + cx * s * st - cy * s * ct],
+            [0, 0, 1]])
+
+    def gmap_update_gpu(self, obs_ego, known_ego, x, y, theta,
+                        cx, cy, ego_px):
+        """GPU evidence update. Returns True on success."""
+        if not getattr(self, '_gm_configured', False):
+            return False
+        if not self._gl_ready:
+            return False
+        if not self._gm_gl_ready:
+            try:
+                self._init_gmap_gl()
+            except Exception as e:
+                print("gpu_render: gmap init failed: %s" % e)
+                import traceback; traceback.print_exc()
+                return False
+
+        t0 = time.monotonic()
+
+        h, w = obs_ego.shape[:2]
+        ego_enc = np.zeros((h, w), dtype=np.uint8)
+        free = (known_ego > 0) & (obs_ego == 0)
+        ego_enc[free] = 1
+        obs_px = obs_ego > 0
+        ego_enc[obs_px] = np.minimum(
+            obs_ego[obs_px].astype(np.uint16) + 1, 101).astype(np.uint8)
+
+        self._gm_ego_tex.write(ego_enc.tobytes())
+
+        M_inv = self._gmap_affine_inv(x, y, theta, cx, cy, ego_px)
+
+        read_idx = self._gm_idx
+        write_idx = 1 - read_idx
+
+        self._gm_conf[read_idx].use(location=0)
+        self._gm_hmap[read_idx].use(location=1)
+        self._gm_ego_tex.use(location=2)
+        self._gm_prog_up['u_inv'].write(M_inv.T.tobytes())
+
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        self._gm_fbo[write_idx].use()
+        self._gm_vao_up.render(moderngl.TRIANGLE_STRIP)
+
+        self._gm_idx = write_idx
+        self._gm_n += 1
+        t1 = time.monotonic()
+
+        if self._gm_n % 90 == 0:
+            data = self._gm_conf[self._gm_idx].read()
+            self._gm_cpu_conf[:] = np.frombuffer(
+                data, dtype=np.uint8).reshape(self._gm_mh, self._gm_mw)
+            data = self._gm_hmap[self._gm_idx].read()
+            self._gm_cpu_hmap[:] = np.frombuffer(
+                data, dtype=np.uint8).reshape(self._gm_mh, self._gm_mw)
+            nfree = int(np.count_nonzero(self._gm_cpu_conf > 190))
+            nobs = int(np.count_nonzero(self._gm_cpu_conf < 90))
+            ntot = self._gm_mw * self._gm_mh
+            print("gpu_gmap: free=%d obs=%d unk=%d | "
+                  "pose=(%.3f,%.3f,%.1f°) %.1fms"
+                  % (nfree, nobs, ntot - nfree - nobs,
+                     x, y, math.degrees(theta), (t1 - t0) * 1e3))
+
+        if self._gm_n <= 3 or self._gm_n % 300 == 0:
+            print("gpu_gmap: update %.1fms" % ((t1 - t0) * 1e3))
+
+        return True
+
+    def gmap_project_gpu(self, x, y, theta, cx, cy, ego_px, eh, ew):
+        """Project global conf map to ego space on GPU. Returns uint8 (eh, ew)."""
+        if not self._gm_gl_ready:
+            return None
+
+        M_fwd = self._gmap_affine_fwd(x, y, theta, cx, cy, ego_px)
+
+        self._gm_conf[self._gm_idx].use(location=0)
+        self._gm_prog_pj['u_fwd'].write(M_fwd.T.tobytes())
+
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        self._gm_proj_fbo.use()
+        self._gm_vao_pj.render(moderngl.TRIANGLE_STRIP)
+
+        data = self._gm_proj_fbo.read(components=1, alignment=1)
+        return np.frombuffer(data, dtype=np.uint8).reshape(eh, ew).copy()
+
+    def gmap_reset(self):
+        """Reset GPU map textures to unknown (for SLAM rebuild)."""
+        if not self._gm_gl_ready:
+            return
+        init_conf = np.full(self._gm_mw * self._gm_mh, 128, dtype=np.uint8)
+        init_hmap = np.zeros(self._gm_mw * self._gm_mh, dtype=np.uint8)
+        for t in self._gm_conf:
+            t.write(init_conf.tobytes())
+        for t in self._gm_hmap:
+            t.write(init_hmap.tobytes())
+        self._gm_n = 0
+
     # ── Per-frame render ─────────────────────────────────────────
 
     def render(self, x, y, theta, conf_map, height_map,
@@ -988,9 +1241,10 @@ class GPURenderer:
             self._out[:] = np.frombuffer(data, dtype=np.uint8).reshape(
                 self._vh, self._vw, 3)[::-1]
 
-        # Upload textures
-        self._tex_conf.write(conf_map.tobytes())
-        self._tex_hmap.write(height_map.tobytes())
+        # Upload map textures only when GPU gmap pipeline is not active
+        if not getattr(self, '_gm_gl_ready', False):
+            self._tex_conf.write(conf_map.tobytes())
+            self._tex_hmap.write(height_map.tobytes())
 
         ct, st = math.cos(theta), math.sin(theta)
 
@@ -1038,8 +1292,12 @@ class GPURenderer:
         self._ctx.depth_func = '<'
 
         # Terrain
-        self._tex_hmap.use(location=0)
-        self._tex_conf.use(location=1)
+        if getattr(self, '_gm_gl_ready', False):
+            self._gm_hmap[self._gm_idx].use(location=0)
+            self._gm_conf[self._gm_idx].use(location=1)
+        else:
+            self._tex_hmap.use(location=0)
+            self._tex_conf.use(location=1)
         self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
         self._prog_t['u_cam'].value = tuple(cam.tolist())
         self._vao_t.render()
@@ -1070,7 +1328,13 @@ class GPURenderer:
         if not hasattr(self, '_rn'):
             self._rn = 0
         self._rn += 1
-        self._draw_minimap(self._out, x, y, theta, conf_map, height_map,
+        if getattr(self, '_gm_gl_ready', False):
+            mm_conf = self._gm_cpu_conf
+            mm_hmap = self._gm_cpu_hmap
+        else:
+            mm_conf = conf_map
+            mm_hmap = height_map
+        self._draw_minimap(self._out, x, y, theta, mm_conf, mm_hmap,
                            fwd_scale, bwd_scale, ang_scale)
         if trail_xy is not None and len(trail_xy) >= 2:
             self._draw_trail(self._out, trail_xy, view, proj)

@@ -30,7 +30,7 @@ from cameras import RSCamera, WebCam, HAS_RS
 import odometry
 from safety import SafetyGuard
 from pose import PoseEstimator
-from globalmap import GlobalMap, MAP_W, MAP_H
+from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
 from slam import PoseGraphSLAM
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -322,6 +322,8 @@ class Vision:
                 out_h=FRAME_W, out_w=FRAME_H,
                 n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
             self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
+            self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
+                                     ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
 
         self._running = False
         self._thread = None
@@ -600,16 +602,33 @@ class Vision:
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
 
-            self._global_map.update(
-                obs_combined, known_combined,
-                cap_x, cap_y, cap_theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE))
+            _gpu_gmap_ok = False
+            if self._gpu and self._gpu.available:
+                _gpu_gmap_ok = self._gpu.gmap_update_gpu(
+                    obs_combined, known_combined,
+                    cap_x, cap_y, cap_theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE))
+                if _gpu_gmap_ok:
+                    self._global_map.keyframe_check(
+                        obs_combined, known_combined,
+                        cap_x, cap_y, cap_theta,
+                        rcx_f, rcy_f, float(TD_PX_SIZE))
+            if not _gpu_gmap_ok:
+                self._global_map.update(
+                    obs_combined, known_combined,
+                    cap_x, cap_y, cap_theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE))
             _t_gmap_up = time.monotonic()
 
-            # Project global map to ego space for costmap/safety.
-            ego_proj = self._global_map.project_to_ego(
-                self._pose.x, self._pose.y, self._pose.theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+            ego_proj = None
+            if _gpu_gmap_ok:
+                ego_proj = self._gpu.gmap_project_gpu(
+                    self._pose.x, self._pose.y, self._pose.theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+            if ego_proj is None:
+                ego_proj = self._global_map.project_to_ego(
+                    self._pose.x, self._pose.y, self._pose.theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
             self._persistent_obs[:] = 0
             self._persistent_obs[ego_proj < 90] = 255
