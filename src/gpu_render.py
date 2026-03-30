@@ -20,7 +20,7 @@ except ImportError:
     _HAS_MGL = False
 
 # ── Configuration ────────────────────────────────────────────────
-GRID_DIV = 4           # map pixels per terrain grid vertex
+GRID_DIV = 8           # map pixels per terrain grid vertex
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -57,7 +57,6 @@ in vec2 in_uv;
 out vec2 v_uv;
 out float v_hcm;
 out vec3 v_w;
-out vec3 v_n;
 
 void main() {
     v_uv = in_uv;
@@ -71,16 +70,6 @@ void main() {
         (in_uv.y * u_mapsz.y - u_origin.y) * u_px);
     v_w = w;
     gl_Position = u_mvp * vec4(w, 1.0);
-
-    float tx = 1.0 / u_mapsz.x;
-    float ty = 1.0 / u_mapsz.y;
-    float hl = texture(u_hmap, in_uv + vec2(-tx, 0)).r * 255.0 * u_hscale;
-    float hr = texture(u_hmap, in_uv + vec2( tx, 0)).r * 255.0 * u_hscale;
-    float hd = texture(u_hmap, in_uv + vec2(0,  ty)).r * 255.0 * u_hscale;
-    float hu = texture(u_hmap, in_uv + vec2(0, -ty)).r * 255.0 * u_hscale;
-    float dhdx = (hr - hl) / (2.0 * u_px);
-    float dhdz = (hd - hu) / (2.0 * u_px);
-    v_n = normalize(vec3(-dhdx, 1.0, -dhdz));
 }
 """
 
@@ -95,7 +84,6 @@ uniform int u_topdown;
 in vec2 v_uv;
 in float v_hcm;
 in vec3 v_w;
-in vec3 v_n;
 
 out vec4 fc;
 
@@ -128,8 +116,9 @@ void main() {
         col = vec3(0.569);
     }
 
+    vec3 n = normalize(cross(dFdx(v_w), dFdy(v_w)));
     vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
-    float nl = max(dot(normalize(v_n), -ld), 0.0);
+    float nl = max(dot(n, -ld), 0.0);
     col *= (0.4 + 0.6 * nl);
 
     float d = length(v_w - u_cam);
@@ -328,16 +317,13 @@ class GPURenderer:
         verts = np.column_stack([uu.ravel(), vv.ravel()])
 
         stride = gw + 1
-        idx = np.empty(gw * gh * 6, dtype=np.int32)
-        k = 0
-        for r in range(gh):
-            for c in range(gw):
-                tl = r * stride + c
-                tr = tl + 1
-                bl = tl + stride
-                br = bl + 1
-                idx[k:k + 6] = [tl, bl, tr, tr, bl, br]
-                k += 6
+        rows = np.arange(gh, dtype=np.int32)[:, None]
+        cols = np.arange(gw, dtype=np.int32)[None, :]
+        tl = (rows * stride + cols).ravel()
+        tr = tl + 1
+        bl = tl + stride
+        br = bl + 1
+        idx = np.column_stack([tl, bl, tr, tr, bl, br]).ravel()
 
         vbo = self._ctx.buffer(verts.tobytes())
         ibo = self._ctx.buffer(idx.tobytes())
@@ -437,25 +423,23 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Readback
-        self._ctx.finish()
-        data = self._color_tex_fbo.read()
-        raw = np.frombuffer(data, dtype=np.uint8).reshape(
-            self._vh, self._vw, 4)
-        self._out[:] = raw[::-1, :, :3]
+        # Readback (read implicitly waits for GPU; no separate finish needed)
+        raw = self._fbo.read(components=3, alignment=1)
+        self._out[:] = np.frombuffer(raw, dtype=np.uint8).reshape(
+            self._vh, self._vw, 3)[::-1]
         t1 = time.monotonic()
 
-        # CPU overlays
-        self._draw_minimap(self._out, x, y, theta, conf_map, height_map,
-                           fwd_scale, bwd_scale, ang_scale)
-
-        if trail_xy is not None and len(trail_xy) >= 2:
-            self._draw_trail(self._out, trail_xy, view, proj)
-
-        t2 = time.monotonic()
+        # CPU overlays (minimap every 4th frame to save ~3ms)
         if not hasattr(self, '_rn'):
             self._rn = 0
         self._rn += 1
+        if self._rn % 4 == 1:
+            self._draw_minimap(self._out, x, y, theta, conf_map, height_map,
+                               fwd_scale, bwd_scale, ang_scale)
+            if trail_xy is not None and len(trail_xy) >= 2:
+                self._draw_trail(self._out, trail_xy, view, proj)
+
+        t2 = time.monotonic()
         if self._rn <= 3 or self._rn % 100 == 0:
             print("gpu_render: gpu=%.1fms  overlay=%.1fms  total=%.1fms" % (
                 (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3))
