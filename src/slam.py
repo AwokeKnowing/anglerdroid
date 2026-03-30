@@ -421,7 +421,6 @@ class PoseGraphSLAM:
         # Rebuild map from corrected keyframes
         self._gmap._map[:] = UNKNOWN_VAL
         self._gmap._height_map[:] = 0
-        self._gmap._count = 0
 
         for kf in self._keyframes:
             if kf.obs_roi is None:
@@ -492,7 +491,6 @@ class PoseGraphSLAM:
             total += kf.approx_bytes()
         total += self._gmap._map.nbytes
         total += self._gmap._height_map.nbytes
-        total += self._gmap._out.nbytes
         total += self._desc_mat.nbytes
         total += len(self._edges) * 200  # rough edge overhead
         return total
