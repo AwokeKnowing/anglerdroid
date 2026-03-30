@@ -185,9 +185,16 @@ uniform float u_theta;
 out vec4 fc;
 void main() {
     vec2 local = (gl_FragCoord.xy - u_vp.xy) / u_vp.zw;
-    /* Rotate 90 CCW so +x (east) in map space points up on minimap */
+    /* Border — 2px, fully opaque, drawn first */
+    float bw = 2.0 / u_vp.z;
+    if (local.x < bw || local.x > 1.0 - bw ||
+        local.y < bw || local.y > 1.0 - bw) {
+        fc = vec4(0.314, 0.314, 0.314, 1.0);
+        return;
+    }
+    /* Rotate 90 CW so +x (east/initial heading) points up on screen */
     vec2 off = local - 0.5;
-    vec2 rot_off = vec2(-off.y, off.x);
+    vec2 rot_off = vec2(off.y, -off.x);
     vec2 map_uv = rot_off / u_zoom + u_center / u_mapsz;
     if (map_uv.x < 0.0 || map_uv.x > 1.0 ||
         map_uv.y < 0.0 || map_uv.y > 1.0) {
@@ -215,8 +222,8 @@ void main() {
         float b_col = mix(0.0, 1.0, u_sf);
         col = vec3(r_col, g_col, b_col);
     }
-    /* Direction tick — rotated to match minimap orientation */
-    vec2 dir = vec2(-sin(u_theta), -cos(u_theta));
+    /* Direction tick — matches rotated minimap */
+    vec2 dir = vec2(sin(u_theta), cos(u_theta));
     vec2 dd = px - ctr;
     float along = dot(dd, dir);
     float perp = abs(dd.x * dir.y - dd.y * dir.x);
@@ -224,11 +231,6 @@ void main() {
         float r_col = mix(1.0, 0.0, u_sf);
         float g_col = mix(0.0, 0.78, u_sf);
         col = vec3(r_col, g_col, 1.0);
-    }
-    /* Border */
-    if (local.x < 1.0/u_vp.z || local.x > 1.0 - 1.0/u_vp.z ||
-        local.y < 1.0/u_vp.w || local.y > 1.0 - 1.0/u_vp.w) {
-        col = vec3(0.314);
     }
     fc = vec4(col, 0.85);
 }
