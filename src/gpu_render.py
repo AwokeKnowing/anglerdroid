@@ -284,7 +284,7 @@ class GPURenderer:
 
         # Framebuffer (texture-backed for reliable readback)
         self._color_tex_fbo = self._ctx.texture(
-            (self._vw, self._vh), 4, dtype='f1')
+            (self._vw, self._vh), 4)
         depth = self._ctx.depth_renderbuffer((self._vw, self._vh))
         self._fbo = self._ctx.framebuffer(
             color_attachments=[self._color_tex_fbo],
@@ -434,7 +434,7 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # Readback via texture (more reliable than glReadPixels)
+        # Readback via texture
         self._ctx.finish()
         data = self._color_tex_fbo.read()
         expected = self._vw * self._vh * 4
