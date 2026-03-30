@@ -114,12 +114,28 @@ def _ensure_self_signed_cert():
         return
     os.makedirs(_CERT_DIR, exist_ok=True)
     try:
+        import socket
+        hostname = socket.gethostname()
+        local_ip = ''
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+        san_entries = 'DNS:localhost,DNS:%s' % hostname
+        if local_ip:
+            san_entries += ',IP:%s' % local_ip
+        san_entries += ',IP:127.0.0.1'
         subprocess.run([
             'openssl', 'req', '-x509', '-newkey', 'rsa:2048',
             '-keyout', _KEY_FILE, '-out', _CERT_FILE,
-            '-days', '365', '-nodes', '-subj', '/CN=anglerdroid',
+            '-days', '365', '-nodes',
+            '-subj', '/CN=%s' % hostname,
+            '-addext', 'subjectAltName=%s' % san_entries,
         ], check=True, capture_output=True)
-        print("ui: generated self-signed cert in %s" % _CERT_DIR)
+        print("ui: generated self-signed cert for %s (%s)" % (hostname, local_ip))
     except Exception as e:
         print("ui: WARNING: could not generate cert (%s) — mic may not work over LAN" % e)
 
