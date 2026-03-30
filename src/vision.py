@@ -323,6 +323,13 @@ class Vision:
         self._wheelbase = None
         self._last_capture_time = None
 
+        try:
+            from gpu_render import GPURenderer
+            self._gpu = GPURenderer(MAP_W, MAP_H, ATLAS_W, MAP_H)
+        except Exception as e:
+            print("vision: GPU renderer unavailable: %s" % e)
+            self._gpu = None
+
         self._running = False
         self._thread = None
         self._rs1 = None
@@ -609,12 +616,22 @@ class Vision:
 
             # --- Render global map with trajectory + safety overlay ---
             trail = self._pose.get_world_history()
-            gmap_render = self._global_map.render(
-                self._pose.x, self._pose.y, self._pose.theta,
-                trail_xy=trail,
-                fwd_scale=self._safety.fwd_scale,
-                bwd_scale=self._safety.bwd_scale,
-                ang_scale=self._safety.ang_scale)
+            if self._gpu and self._gpu.available:
+                gmap_render = self._gpu.render(
+                    self._pose.x, self._pose.y, self._pose.theta,
+                    self._global_map.confidence_map,
+                    self._global_map.height_map,
+                    trail_xy=trail,
+                    fwd_scale=self._safety.fwd_scale,
+                    bwd_scale=self._safety.bwd_scale,
+                    ang_scale=self._safety.ang_scale)
+            else:
+                gmap_render = self._global_map.render(
+                    self._pose.x, self._pose.y, self._pose.theta,
+                    trail_xy=trail,
+                    fwd_scale=self._safety.fwd_scale,
+                    bwd_scale=self._safety.bwd_scale,
+                    ang_scale=self._safety.ang_scale)
             _t_render = time.monotonic()
 
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black

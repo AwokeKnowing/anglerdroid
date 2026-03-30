@@ -300,6 +300,14 @@ class PoseGraphSLAM(SlamBackend):
                                          ego_cx, ego_cy, ego_px_size,
                                          ego_h, ego_w)
 
+    @property
+    def confidence_map(self):
+        return self._gmap._map
+
+    @property
+    def height_map(self):
+        return self._gmap._height_map
+
     # ── Keyframe management ─────────────────────────────────────────
 
     def _should_keyframe(self, x, y, theta):

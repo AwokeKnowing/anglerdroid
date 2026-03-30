@@ -6,3 +6,4 @@ python-can
 inputs
 websockets
 PyTurboJPEG
+moderngl
