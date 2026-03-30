@@ -241,11 +241,6 @@ class Vision:
         """Provide wheelbase reference for wheel odometry fusion."""
         self._wheelbase = wb
 
-        label = "%d%%" % pct
-        cv2.putText(atlas, label, (BAR_W // 2 - 12, CAM_ROW_H - 1),
-                    cv2.FONT_HERSHEY_PLAIN, 0.7, (255, 255, 255), 1,
-                    cv2.LINE_AA)
-
     def start(self):
         if self._running:
             return
