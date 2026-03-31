@@ -475,16 +475,24 @@ class Vision:
                 ang_scale=self._safety.ang_scale,
                 battery_frac=bat_frac)
 
-            # DEBUG: draw raw scatter FBO (color-coded) onto atlas bottom-right
+            # DEBUG: draw two overlays — raw scatter (right) and final known2 (left)
             if atlas is not None and _raw_scatter is not None:
-                dbg = np.rot90(_raw_scatter, k=-1)  # same rotation as obs2
+                # Right overlay: raw scatter (green=floor, red=obs)
+                dbg = np.rot90(_raw_scatter, k=-1)
                 dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
-                dbg_rgb[dbg == 1] = [0, 255, 0]        # floor → green
-                dbg_rgb[dbg >= 2] = [255, 0, 0]        # obstacles → red
+                dbg_rgb[dbg == 1] = [0, 255, 0]
+                dbg_rgb[dbg >= 2] = [255, 0, 0]
                 dh, dw = dbg_rgb.shape[:2]
                 ay = ATLAS_H - dh
                 ax = ATLAS_W - dw
                 atlas[ay:ay+dh, ax:ax+dw] = dbg_rgb
+
+                # Left overlay: final known2 after readback (white=known, black=unknown)
+                dbg2 = np.zeros((known2.shape[0], known2.shape[1], 3), dtype=np.uint8)
+                dbg2[known2 > 0] = [255, 255, 255]
+                dbg2[obs2 > 0] = [255, 0, 0]
+                d2h, d2w = dbg2.shape[:2]
+                atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
 
             with self._lock:
                 self.frames[0][:] = rgb1
