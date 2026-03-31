@@ -7,7 +7,7 @@ Each depth camera produces a per-pixel classification (2.5D height map):
   UNOBSERVED     — no valid depth data (blind spot, behind obstacle, outside FOV)
 
 RS1 (top-down camera): orthographic projection, classification by Z threshold.
-RS2 (forward camera):  pitch-rotated to bird's-eye, 2D raycasting for known mask.
+RS2 (forward camera):  pitch-rotated to bird's-eye, floor-as-free for known mask.
 Both are combined, masked to their respective FOVs, and fed to the global map.
 
 Atlas layout (960×960):
@@ -147,9 +147,6 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     return obs, known
 
 
-_N_RAYS = 180
-_MAX_RAY_R = 300
-
 
 
 class Vision:
@@ -188,8 +185,7 @@ class Vision:
             cos_pitch=float(_fw_cos_pitch),
             floor_clip=float(FW_FLOOR_CLIP),
             height_clip=float(FW_HEIGHT_CLIP),
-            out_h=FRAME_W, out_w=FRAME_H,
-            n_rays=_N_RAYS, max_ray_r=_MAX_RAY_R)
+            out_h=FRAME_W, out_w=FRAME_H)
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
@@ -207,8 +203,8 @@ class Vision:
         Returns (combined_mask, fw_cone_mask):
           combined_mask — RS1 rectangle ∪ RS2 80° cone, robot excluded.
           fw_cone_mask — RS2 80° cone only (used to clip RS2 known before
-                         combining with RS1 known, preventing the raycasted
-                         known area from leaking into the RS1 rectangle).
+                         combining with RS1 known, limiting the known area
+                         to the camera's actual FOV).
         """
         rcx = CROSSHAIR_CX + ROBOT_CX_OFF          # 81 — robot center column
         rcy = CROSSHAIR_CY                          # 119 — robot center row
