@@ -294,18 +294,14 @@ void main() {
     vec3 p = in_v;
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
-    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
-    bool is_floor = (phys_h >= -0.05 && phys_h <= u_floor);
-    bool in_obs_range = (r.z > u_floor && r.z < u_ceil);
     float enc;
-    if (is_floor) {
-        enc = 1.0;
-        gl_PointSize = 3.0;
-    } else if (in_obs_range) {
+    if (r.z > u_floor && r.z < u_ceil) {
+        float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
         enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
     } else {
-        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+        enc = 1.0;
+        gl_PointSize = 3.0;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
