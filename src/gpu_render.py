@@ -1,7 +1,7 @@
-"""gpu_render.py – GPU-accelerated 3D terrain renderer (ModernGL + EGL).
+"""gpu_render.py – GPU-accelerated 3D voxel terrain renderer (ModernGL + EGL).
 
-Renders the full atlas: 3D displacement-mapped terrain with follow-cam,
-robot mesh, minimap, camera feeds, battery bar, and trail.
+Renders the full atlas: 3D voxel-column terrain with screen-space AO,
+follow-cam, robot mesh, minimap, camera feeds, battery bar, and trail.
 GPU-only pipeline — no CPU fallback.  Designed for Jetson Orin NX.
 """
 
@@ -17,6 +17,7 @@ except ImportError:
 
 # ── Configuration ────────────────────────────────────────────────
 GRID_DIV = 4           # map pixels per terrain grid vertex
+VOXEL_SHRINK = 0.92    # column scale relative to cell (gap = 1 - shrink)
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -25,6 +26,8 @@ CAM_FOV_DEG = 60       # vertical FOV
 FOG_DIST = 12.0
 NEAR_CLIP = 0.1
 FAR_CLIP = 50.0
+SSAO_RADIUS = 3.0      # sample radius in pixels
+SSAO_INTENSITY = 0.6   # darkening strength
 
 MINIMAP_SZ = 200
 MINIMAP_PAD = 8
@@ -36,89 +39,103 @@ OBS_THRESH = 90
 
 # ── Shaders ──────────────────────────────────────────────────────
 
-_VERT_TERRAIN = """
+_VERT_VOXEL = """
 #version 330
 
-uniform mat4 u_mvp;
+uniform mat4  u_mvp;
 uniform sampler2D u_hmap;
-uniform vec2 u_mapsz;
-uniform vec2 u_origin;
+uniform sampler2D u_conf;
+uniform vec2  u_origin;
 uniform float u_px;
 uniform float u_hscale;
 uniform float u_hmin;
+uniform ivec2 u_grid;
+uniform int   u_gdiv;
+uniform float u_shrink;
+uniform int   u_topdown;
 
-in vec2 in_uv;
+in vec3 in_pos;
+in vec3 in_nrm;
 
-out vec2 v_uv;
-out float v_hcm;
+out vec3 v_col;
+out vec3 v_nrm;
 out vec3 v_w;
 
 void main() {
-    v_uv = in_uv;
-    float raw = texture(u_hmap, in_uv).r * 255.0;
-    v_hcm = raw > 0.5 ? max(raw, u_hmin) : 0.0;
-    float hm = v_hcm * u_hscale;
+    int ix = gl_InstanceID % u_grid.x;
+    int iy = gl_InstanceID / u_grid.x;
 
-    vec3 w = vec3(
-        (in_uv.x * u_mapsz.x - u_origin.x) * u_px,
-        hm,
-        (in_uv.y * u_mapsz.y - u_origin.y) * u_px);
-    v_w = w;
-    gl_Position = u_mvp * vec4(w, 1.0);
+    vec2 uv = (vec2(float(ix), float(iy)) + 0.5) / vec2(u_grid);
+    float raw_h = texture(u_hmap, uv).r * 255.0;
+    float conf  = texture(u_conf, uv).r * 255.0;
+
+    float h_cm = raw_h > 0.5 ? max(raw_h, u_hmin) : 0.0;
+    float h_m  = h_cm * u_hscale;
+
+    vec3 col;
+    float pillar_h;
+
+    if (conf > 190.0) {
+        col = u_topdown == 1 ? vec3(1.0) : vec3(0.765, 0.792, 0.725);
+        pillar_h = 0.008;
+    } else if (conf < 90.0) {
+        if (u_topdown == 1) {
+            float i = clamp(h_cm / 100.0, 0.05, 1.0);
+            col = vec3(i * 0.9, i * 0.75, i * 0.5);
+        } else {
+            col = vec3(
+                clamp((90.0 - h_cm * 0.5) / 255.0, 0.12, 0.35),
+                clamp((75.0 - h_cm * 0.3) / 255.0, 0.10, 0.29),
+                clamp((65.0 - h_cm * 0.2) / 255.0, 0.08, 0.25));
+        }
+        pillar_h = max(h_m, 0.03);
+    } else {
+        col = u_topdown == 1 ? vec3(0.627) : vec3(0.569);
+        pillar_h = 0.004;
+    }
+
+    float cell_m = float(u_gdiv) * u_px;
+    float cx = (float(ix) * float(u_gdiv) + float(u_gdiv) * 0.5 - u_origin.x) * u_px;
+    float cz = (float(iy) * float(u_gdiv) + float(u_gdiv) * 0.5 - u_origin.y) * u_px;
+
+    vec3 p = in_pos;
+    p.xz *= cell_m * u_shrink;
+    p.y = (p.y + 0.5) * pillar_h;
+    p.x += cx;
+    p.z += cz;
+
+    v_col = col;
+    v_nrm = in_nrm;
+    v_w   = p;
+    gl_Position = u_mvp * vec4(p, 1.0);
 }
 """
 
-_FRAG_TERRAIN = """
+_FRAG_VOXEL = """
 #version 330
 
-uniform sampler2D u_conf;
-uniform vec3 u_cam;
+uniform vec3  u_cam;
 uniform float u_fogfar;
-uniform int u_topdown;
+uniform int   u_topdown;
 
-in vec2 v_uv;
-in float v_hcm;
+in vec3 v_col;
+in vec3 v_nrm;
 in vec3 v_w;
 
 out vec4 fc;
 
 void main() {
-    float c = texture(u_conf, v_uv).r * 255.0;
-    vec3 col;
+    vec3 col = v_col;
 
-    if (u_topdown == 1) {
-        if (c > 190.0) {
-            col = vec3(1.0);
-        } else if (c < 90.0) {
-            float i = clamp(v_hcm / 100.0, 0.05, 1.0);
-            col = vec3(i * 0.9, i * 0.75, i * 0.5);
-        } else {
-            col = vec3(0.627);
-        }
-        fc = vec4(col, 1.0);
-        return;
+    if (u_topdown == 0) {
+        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
+        float nl = max(dot(v_nrm, -ld), 0.0);
+        col *= (0.35 + 0.65 * nl);
+
+        float d = length(v_w - u_cam);
+        float fog = clamp(d / u_fogfar, 0.0, 0.75);
+        col = mix(col, vec3(0.569, 0.569, 0.588), fog);
     }
-
-    if (c > 190.0) {
-        col = vec3(0.765, 0.792, 0.725);
-    } else if (c < 90.0) {
-        float h = v_hcm;
-        col = vec3(
-            clamp((90.0 - h * 0.5) / 255.0, 0.12, 0.35),
-            clamp((75.0 - h * 0.3) / 255.0, 0.10, 0.29),
-            clamp((65.0 - h * 0.2) / 255.0, 0.08, 0.25));
-    } else {
-        col = vec3(0.569);
-    }
-
-    vec3 n = normalize(cross(dFdx(v_w), dFdy(v_w)));
-    vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
-    float nl = max(dot(n, -ld), 0.0);
-    col *= (0.4 + 0.6 * nl);
-
-    float d = length(v_w - u_cam);
-    float fog = clamp(d / u_fogfar, 0.0, 0.75);
-    col = mix(col, vec3(0.569, 0.569, 0.588), fog);
 
     fc = vec4(col, 1.0);
 }
@@ -267,6 +284,71 @@ _FRAG_TRAIL = """
 out vec4 fc;
 void main() {
     fc = vec4(0.314, 0.549, 1.0, 1.0);
+}
+"""
+
+# ── SSAO post-process shaders ────────────────────────────────────
+
+_VERT_SSAO = """
+#version 330
+in vec2 in_pos;
+out vec2 v_uv;
+void main() {
+    gl_Position = vec4(in_pos, 0.0, 1.0);
+    v_uv = in_pos * 0.5 + 0.5;
+}
+"""
+
+_FRAG_SSAO = """
+#version 330
+
+uniform sampler2D u_scene;
+uniform sampler2D u_depth;
+uniform vec2  u_texel;
+uniform float u_near;
+uniform float u_far;
+uniform float u_radius;
+uniform float u_intensity;
+
+in vec2 v_uv;
+out vec4 fc;
+
+float linearize(float d) {
+    return u_near * u_far / (u_far - d * (u_far - u_near));
+}
+
+const int N = 8;
+const vec2 kernel[8] = vec2[](
+    vec2(-0.7071, -0.7071), vec2( 0.7071, -0.7071),
+    vec2(-0.7071,  0.7071), vec2( 0.7071,  0.7071),
+    vec2(-1.0,  0.0),       vec2( 1.0,  0.0),
+    vec2( 0.0, -1.0),       vec2( 0.0,  1.0)
+);
+
+void main() {
+    vec3 scene = texture(u_scene, v_uv).rgb;
+    float d = texture(u_depth, v_uv).r;
+
+    if (d >= 0.999 || u_intensity <= 0.0) {
+        fc = vec4(scene, 1.0);
+        return;
+    }
+
+    float depth = linearize(d);
+    float occ = 0.0;
+
+    for (int i = 0; i < N; i++) {
+        vec2 off = kernel[i] * u_radius * u_texel;
+        float sd = linearize(texture(u_depth, v_uv + off).r);
+        float diff = depth - sd;
+        if (diff > 0.005)
+            occ += smoothstep(0.0, 0.3, diff);
+    }
+
+    float ao = 1.0 - (occ / float(N)) * u_intensity;
+    ao = clamp(ao, 0.25, 1.0);
+
+    fc = vec4(scene * ao, 1.0);
 }
 """
 
@@ -532,6 +614,30 @@ def _ortho(left, right, bottom, top, near, far):
     return m
 
 
+# ── Voxel cube geometry ──────────────────────────────────────────
+
+def _make_cube_data():
+    """Unit cube [-0.5, 0.5]^3 with per-face normals (24 verts, 36 indices)."""
+    P = 0.5
+    faces = [
+        ([(-P, P,-P), ( P, P,-P), ( P, P, P), (-P, P, P)], ( 0, 1, 0)),  # top
+        ([(-P,-P, P), ( P,-P, P), ( P,-P,-P), (-P,-P,-P)], ( 0,-1, 0)),  # bottom
+        ([(-P,-P, P), (-P, P, P), ( P, P, P), ( P,-P, P)], ( 0, 0, 1)),  # front
+        ([( P,-P,-P), ( P, P,-P), (-P, P,-P), (-P,-P,-P)], ( 0, 0,-1)),  # back
+        ([( P,-P, P), ( P, P, P), ( P, P,-P), ( P,-P,-P)], ( 1, 0, 0)),  # right
+        ([(-P,-P,-P), (-P, P,-P), (-P, P, P), (-P,-P, P)], (-1, 0, 0)),  # left
+    ]
+    verts = []
+    idx = []
+    for fi, (fv, n) in enumerate(faces):
+        base = fi * 4
+        for v in fv:
+            verts.append((*v, *n))
+        idx.extend([base, base+1, base+2, base, base+2, base+3])
+    return (np.array(verts, dtype=np.float32),
+            np.array(idx, dtype=np.int32))
+
+
 # ── Robot mesh triangulation ─────────────────────────────────────
 
 def _triangulate_robot():
@@ -560,11 +666,11 @@ def _triangulate_robot():
 # ── Main renderer ────────────────────────────────────────────────
 
 class GPURenderer:
-    """GPU-accelerated full-atlas renderer (3D terrain + cameras + HUD).
+    """GPU-accelerated full-atlas renderer (3D voxel terrain + SSAO + HUD).
 
     atlas_w × atlas_h = full output size (e.g. 960×960).
     map_w × map_h = occupancy grid size (e.g. 960×720).
-    The 3D terrain occupies the lower map_h rows; cameras fill the top.
+    The 3D voxel terrain occupies the lower map_h rows; cameras fill the top.
     """
 
     CAM_H = 240
@@ -618,10 +724,24 @@ class GPURenderer:
             color_attachments=[self._color_tex_fbo],
             depth_attachment=depth)
 
-        # Terrain shader
+        # Scene FBO for SSAO pipeline (3D viewport only)
+        sw, sh = self._vw, self._view3d_h
+        self._scene_color_tex = ctx.texture((sw, sh), 4)
+        self._scene_color_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._scene_depth_tex = ctx.depth_texture((sw, sh))
+        self._scene_depth_tex.compare_func = ''
+        self._scene_fbo = ctx.framebuffer(
+            color_attachments=[self._scene_color_tex],
+            depth_attachment=self._scene_depth_tex)
+
+        # Voxel terrain shader
+        gw = self._mw // GRID_DIV
+        gh = self._mh // GRID_DIV
+        self._gw, self._gh = gw, gh
+        self._terrain_instances = gw * gh
+
         self._prog_t = ctx.program(
-            vertex_shader=_VERT_TERRAIN, fragment_shader=_FRAG_TERRAIN)
-        self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
+            vertex_shader=_VERT_VOXEL, fragment_shader=_FRAG_VOXEL)
         self._prog_t['u_origin'].value = (
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
@@ -631,6 +751,9 @@ class GPURenderer:
         self._prog_t['u_hmap'].value = 0
         self._prog_t['u_conf'].value = 1
         self._prog_t['u_topdown'].value = 0
+        self._prog_t['u_grid'].value = (gw, gh)
+        self._prog_t['u_gdiv'].value = GRID_DIV
+        self._prog_t['u_shrink'].value = VOXEL_SHRINK
         self._build_terrain()
 
         # Robot shader + mesh
@@ -671,6 +794,19 @@ class GPURenderer:
         self._vao_trail = ctx.vertex_array(
             self._prog_trail, [(self._trail_vbo, '3f', 'in_pos')])
 
+        # SSAO post-process shader
+        self._prog_ssao = ctx.program(
+            vertex_shader=_VERT_SSAO, fragment_shader=_FRAG_SSAO)
+        self._prog_ssao['u_scene'].value = 0
+        self._prog_ssao['u_depth'].value = 1
+        self._prog_ssao['u_texel'].value = (1.0 / sw, 1.0 / sh)
+        self._prog_ssao['u_near'].value = NEAR_CLIP
+        self._prog_ssao['u_far'].value = FAR_CLIP
+        self._prog_ssao['u_radius'].value = SSAO_RADIUS
+        self._prog_ssao['u_intensity'].value = SSAO_INTENSITY
+        self._vao_ssao = ctx.vertex_array(
+            self._prog_ssao, [(self._fsq_vbo, '2f', 'in_pos')])
+
         # Pre-allocated readback buffer
         self._out = np.empty((self._vh, self._vw, 3), dtype=np.uint8)
 
@@ -707,28 +843,11 @@ class GPURenderer:
         return self._ctx
 
     def _build_terrain(self):
-        gw = self._mw // GRID_DIV
-        gh = self._mh // GRID_DIV
-        self._gw, self._gh = gw, gh
-
-        u = np.linspace(0, 1, gw + 1, dtype=np.float32)
-        v = np.linspace(0, 1, gh + 1, dtype=np.float32)
-        uu, vv = np.meshgrid(u, v)
-        verts = np.column_stack([uu.ravel(), vv.ravel()])
-
-        stride = gw + 1
-        rows = np.arange(gh, dtype=np.int32)[:, None]
-        cols = np.arange(gw, dtype=np.int32)[None, :]
-        tl = (rows * stride + cols).ravel()
-        tr = tl + 1
-        bl = tl + stride
-        br = bl + 1
-        idx = np.column_stack([tl, bl, tr, tr, bl, br]).ravel()
-
-        vbo = self._ctx.buffer(verts.tobytes())
-        ibo = self._ctx.buffer(idx.tobytes())
+        cube_verts, cube_idx = _make_cube_data()
+        vbo = self._ctx.buffer(cube_verts.tobytes())
+        ibo = self._ctx.buffer(cube_idx.tobytes())
         self._vao_t = self._ctx.vertex_array(
-            self._prog_t, [(vbo, '2f', 'in_uv')],
+            self._prog_t, [(vbo, '3f 3f', 'in_pos', 'in_nrm')],
             index_buffer=ibo, index_element_size=4)
 
     def _build_robot(self):
@@ -1269,9 +1388,9 @@ class GPURenderer:
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
 
-        # ── 3D terrain + robot (lower v3h pixels of FBO) ──
-        self._fbo.use()
-        self._fbo.clear(0.569, 0.569, 0.588, 1.0)
+        # ── 3D scene → scene FBO (for SSAO) ──
+        self._scene_fbo.use()
+        self._scene_fbo.clear(0.569, 0.569, 0.588, 1.0)
         ctx.viewport = (0, 0, self._vw, v3h)
         ctx.enable(moderngl.DEPTH_TEST)
         ctx.depth_func = '<'
@@ -1314,7 +1433,7 @@ class GPURenderer:
         self._gm_conf[self._gm_idx].use(location=1)
         self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
         self._prog_t['u_cam'].value = tuple(cam.tolist())
-        self._vao_t.render()
+        self._vao_t.render(instances=self._terrain_instances)
 
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(
@@ -1323,13 +1442,22 @@ class GPURenderer:
                 R_robot.T.astype(np.float32).tobytes())
             self._vao_r.render()
 
-        # ── Trail (GL lines in 3D viewport) ──
         if trail_xy is not None and len(trail_xy) >= 2:
             self._render_trail(trail_xy, mvp)
 
+        # ── SSAO composite → main FBO ──
+        self._fbo.use()
+        self._fbo.clear(0.569, 0.569, 0.588, 1.0)
+        ctx.viewport = (0, 0, self._vw, v3h)
+        ctx.disable(moderngl.DEPTH_TEST)
+        self._scene_color_tex.use(location=0)
+        self._scene_depth_tex.use(location=1)
+        self._prog_ssao['u_intensity'].value = (
+            0.0 if self.topdown else SSAO_INTENSITY)
+        self._vao_ssao.render(moderngl.TRIANGLE_STRIP)
+
         # ── Switch to 2D overlay mode (full atlas viewport, no depth) ──
         ctx.viewport = (0, 0, self._vw, self._vh)
-        ctx.disable(moderngl.DEPTH_TEST)
         ctx.enable(moderngl.BLEND)
         ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA)
 
