@@ -295,19 +295,18 @@ void main() {
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
-    if (phys_h < -0.05 || phys_h >= u_ceil) {
-        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
-    }
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
-    vec2 px = r.xy * u_scale + u_offset;
-    vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
     float enc;
-    if (phys_h <= u_floor) {
+    if (r.z > u_floor && r.z < u_ceil) {
+        enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
+    } else if (phys_h >= -0.05 && phys_h <= u_floor) {
         enc = 1.0;
         gl_PointSize = 3.0;
     } else {
-        enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
+        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
     }
+    vec2 px = r.xy * u_scale + u_offset;
+    vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
     gl_Position = vec4(ndc, enc / 52.0 - 1.0, 1.0);
     v_h = enc;
 }
