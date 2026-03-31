@@ -28,6 +28,7 @@ NEAR_CLIP = 0.1
 FAR_CLIP = 50.0
 SSAO_RADIUS = 3.0      # sample radius in pixels
 SSAO_INTENSITY = 0.6   # darkening strength
+PROX_RADIUS = 0.8      # safety proximity visualisation radius (m)
 
 MINIMAP_SZ = 200
 MINIMAP_PAD = 8
@@ -74,10 +75,12 @@ void main() {
 
     vec3 col;
     float pillar_h;
+    float shrk;
 
     if (conf > 190.0) {
-        col = u_topdown == 1 ? vec3(1.0) : vec3(0.765, 0.792, 0.725);
-        pillar_h = 0.008;
+        col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
+        pillar_h = 0.001;
+        shrk = 1.0;
     } else if (conf < 90.0) {
         if (u_topdown == 1) {
             float i = clamp(h_cm / 100.0, 0.05, 1.0);
@@ -89,9 +92,24 @@ void main() {
                 clamp((65.0 - h_cm * 0.2) / 255.0, 0.08, 0.25));
         }
         pillar_h = max(h_m, 0.03);
+        shrk = u_shrink;
     } else {
-        col = u_topdown == 1 ? vec3(0.627) : vec3(0.569);
-        pillar_h = 0.004;
+        vec2 ustep = 1.0 / vec2(u_grid);
+        float cn = texture(u_conf, clamp(uv + vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
+        float cs = texture(u_conf, clamp(uv - vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
+        float ce = texture(u_conf, clamp(uv + vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
+        float cw = texture(u_conf, clamp(uv - vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
+        bool border = (cn > 190.0 || cn < 90.0) ||
+                      (cs > 190.0 || cs < 90.0) ||
+                      (ce > 190.0 || ce < 90.0) ||
+                      (cw > 190.0 || cw < 90.0);
+        if (!border) {
+            gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
+            return;
+        }
+        col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
+        pillar_h = 0.001;
+        shrk = 1.0;
     }
 
     float cell_m = float(u_gdiv) * u_px;
@@ -99,7 +117,7 @@ void main() {
     float cz = (float(iy) * float(u_gdiv) + float(u_gdiv) * 0.5 - u_origin.y) * u_px;
 
     vec3 p = in_pos;
-    p.xz *= cell_m * u_shrink;
+    p.xz *= cell_m * shrk;
     p.y = (p.y + 0.5) * pillar_h;
     p.x += cx;
     p.z += cz;
@@ -134,7 +152,7 @@ void main() {
 
         float d = length(v_w - u_cam);
         float fog = clamp(d / u_fogfar, 0.0, 0.75);
-        col = mix(col, vec3(0.569, 0.569, 0.588), fog);
+        col = mix(col, vec3(0.0), fog);
     }
 
     fc = vec4(col, 1.0);
@@ -310,6 +328,14 @@ uniform float u_far;
 uniform float u_radius;
 uniform float u_intensity;
 
+uniform mat4  u_inv_vp;
+uniform vec3  u_robot_pos;
+uniform float u_heading;
+uniform float u_fwd_scale;
+uniform float u_bwd_scale;
+uniform float u_ang_scale;
+uniform float u_prox_radius;
+
 in vec2 v_uv;
 out vec4 fc;
 
@@ -329,26 +355,60 @@ void main() {
     vec3 scene = texture(u_scene, v_uv).rgb;
     float d = texture(u_depth, v_uv).r;
 
-    if (d >= 0.999 || u_intensity <= 0.0) {
+    if (d >= 0.999) {
         fc = vec4(scene, 1.0);
         return;
     }
 
-    float depth = linearize(d);
-    float occ = 0.0;
+    /* ── SSAO ── */
+    float ao = 1.0;
+    if (u_intensity > 0.0) {
+        float depth = linearize(d);
+        float occ = 0.0;
+        for (int i = 0; i < N; i++) {
+            vec2 off = kernel[i] * u_radius * u_texel;
+            float sd = linearize(texture(u_depth, v_uv + off).r);
+            float diff = depth - sd;
+            if (diff > 0.005)
+                occ += smoothstep(0.0, 0.3, diff);
+        }
+        ao = clamp(1.0 - (occ / float(N)) * u_intensity, 0.25, 1.0);
+    }
+    vec3 col = scene * ao;
 
-    for (int i = 0; i < N; i++) {
-        vec2 off = kernel[i] * u_radius * u_texel;
-        float sd = linearize(texture(u_depth, v_uv + off).r);
-        float diff = depth - sd;
-        if (diff > 0.005)
-            occ += smoothstep(0.0, 0.3, diff);
+    /* ── Proximity / throttle visualisation ── */
+    if (u_prox_radius > 0.0) {
+        vec4 ndc = vec4(v_uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+        vec4 wp = u_inv_vp * ndc;
+        wp /= wp.w;
+
+        vec2 delta = wp.xz - u_robot_pos.xz;
+        float dist = length(delta);
+
+        if (dist < u_prox_radius && dist > 0.06) {
+            float ct = cos(u_heading);
+            float st = sin(u_heading);
+            float fwd = delta.x * ct - delta.z * st;
+            float lat = -delta.x * st - delta.z * ct;
+
+            float scale;
+            if (abs(fwd) > abs(lat))
+                scale = fwd > 0.0 ? u_fwd_scale : u_bwd_scale;
+            else
+                scale = u_ang_scale;
+
+            float throttle = 1.0 - scale;
+            if (throttle > 0.05) {
+                float prox = 1.0 - dist / u_prox_radius;
+                float alpha = throttle * prox * 0.55;
+                vec3 warn = mix(vec3(1.0, 1.0, 0.0),
+                                vec3(1.0, 0.0, 0.0), throttle);
+                col = mix(col, warn, alpha);
+            }
+        }
     }
 
-    float ao = 1.0 - (occ / float(N)) * u_intensity;
-    ao = clamp(ao, 0.25, 1.0);
-
-    fc = vec4(scene * ao, 1.0);
+    fc = vec4(col, 1.0);
 }
 """
 
@@ -794,7 +854,7 @@ class GPURenderer:
         self._vao_trail = ctx.vertex_array(
             self._prog_trail, [(self._trail_vbo, '3f', 'in_pos')])
 
-        # SSAO post-process shader
+        # SSAO + proximity post-process shader
         self._prog_ssao = ctx.program(
             vertex_shader=_VERT_SSAO, fragment_shader=_FRAG_SSAO)
         self._prog_ssao['u_scene'].value = 0
@@ -804,6 +864,7 @@ class GPURenderer:
         self._prog_ssao['u_far'].value = FAR_CLIP
         self._prog_ssao['u_radius'].value = SSAO_RADIUS
         self._prog_ssao['u_intensity'].value = SSAO_INTENSITY
+        self._prog_ssao['u_prox_radius'].value = PROX_RADIUS
         self._vao_ssao = ctx.vertex_array(
             self._prog_ssao, [(self._fsq_vbo, '2f', 'in_pos')])
 
@@ -1390,7 +1451,7 @@ class GPURenderer:
 
         # ── 3D scene → scene FBO (for SSAO) ──
         self._scene_fbo.use()
-        self._scene_fbo.clear(0.569, 0.569, 0.588, 1.0)
+        self._scene_fbo.clear(0.0, 0.0, 0.0, 1.0)
         ctx.viewport = (0, 0, self._vw, v3h)
         ctx.enable(moderngl.DEPTH_TEST)
         ctx.depth_func = '<'
@@ -1445,15 +1506,23 @@ class GPURenderer:
         if trail_xy is not None and len(trail_xy) >= 2:
             self._render_trail(trail_xy, mvp)
 
-        # ── SSAO composite → main FBO ──
+        # ── SSAO + proximity composite → main FBO ──
         self._fbo.use()
-        self._fbo.clear(0.569, 0.569, 0.588, 1.0)
+        self._fbo.clear(0.0, 0.0, 0.0, 1.0)
         ctx.viewport = (0, 0, self._vw, v3h)
         ctx.disable(moderngl.DEPTH_TEST)
         self._scene_color_tex.use(location=0)
         self._scene_depth_tex.use(location=1)
-        self._prog_ssao['u_intensity'].value = (
+        ssao = self._prog_ssao
+        ssao['u_intensity'].value = (
             0.0 if self.topdown else SSAO_INTENSITY)
+        inv_vp = np.linalg.inv(mvp).T.astype(np.float32)
+        ssao['u_inv_vp'].write(inv_vp.tobytes())
+        ssao['u_robot_pos'].value = (float(x), 0.0, float(-y))
+        ssao['u_heading'].value = float(theta)
+        ssao['u_fwd_scale'].value = float(fwd_scale)
+        ssao['u_bwd_scale'].value = float(bwd_scale)
+        ssao['u_ang_scale'].value = float(ang_scale)
         self._vao_ssao.render(moderngl.TRIANGLE_STRIP)
 
         # ── Switch to 2D overlay mode (full atlas viewport, no depth) ──
