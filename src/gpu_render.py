@@ -388,8 +388,8 @@ void main() {
         if (dist < u_prox_radius && dist > 0.06) {
             float ct = cos(u_heading);
             float st = sin(u_heading);
-            float fwd = delta.x * ct - delta.z * st;
-            float lat = -delta.x * st - delta.z * ct;
+            float fwd = delta.x * ct - delta.y * st;
+            float lat = -delta.x * st - delta.y * ct;
 
             float scale;
             if (abs(fwd) > abs(lat))
