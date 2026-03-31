@@ -7,7 +7,7 @@ Each depth camera produces a per-pixel classification (2.5D height map):
   UNOBSERVED     — no valid depth data (blind spot, behind obstacle, outside FOV)
 
 RS1 (top-down camera): orthographic projection, classification by Z threshold.
-RS2 (forward camera):  pitch-rotated to bird's-eye, floor-as-free for known mask.
+RS2 (forward camera):  pitch-rotated to bird's-eye, floor-as-free scatter + raycast known mask.
 Both are combined, masked to their respective FOVs, and fed to the global map.
 
 Atlas layout (960×960):
@@ -317,14 +317,15 @@ class Vision:
                                            len(nz[0])))
             _t_rs1 = time.monotonic()
 
-            # RS2 forward depth → (obstacles, known) at (W,H), then CW 90°
+            # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+            _raw_scatter = None
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                 _gpu_result = self._gpu.depth_forward_gpu(
                     self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
                 if _gpu_result is not None:
-                    z2, k2 = _gpu_result
+                    z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
@@ -473,6 +474,17 @@ class Vision:
                 bwd_scale=self._safety.bwd_scale,
                 ang_scale=self._safety.ang_scale,
                 battery_frac=bat_frac)
+
+            # DEBUG: draw raw scatter FBO (color-coded) onto atlas bottom-right
+            if atlas is not None and _raw_scatter is not None:
+                dbg = np.rot90(_raw_scatter, k=-1)  # same rotation as obs2
+                dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
+                dbg_rgb[dbg == 1] = [0, 255, 0]        # floor → green
+                dbg_rgb[dbg >= 2] = [255, 0, 0]        # obstacles → red
+                dh, dw = dbg_rgb.shape[:2]
+                ay = ATLAS_H - dh
+                ax = ATLAS_W - dw
+                atlas[ay:ay+dh, ax:ax+dw] = dbg_rgb
 
             with self._lock:
                 self.frames[0][:] = rgb1

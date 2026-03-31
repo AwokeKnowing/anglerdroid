@@ -818,22 +818,15 @@ class GPURenderer:
 
         self._df_gl_ready = True
         self._df_n = 0
-        print("gpu_render: depth_forward ready %dx%d (floor-as-free, no raycast)"
+        print("gpu_render: depth_forward ready %dx%d (floor-as-free)"
               % (ow, oh))
 
     # ── GPU depth-forward pipeline ────────────────────────────────
 
     def depth_forward_gpu(self, verts, y_offset=0.0):
         """Process RS2 forward depth on GPU: scatter (floor=free) + morph.
-        Returns (obs, known) as (out_h, out_w) uint8, or None on failure.
-
-        Encoding in the scatter texture:
-          0   = no data (unobserved)
-          1   = floor / free
-          2-101 = obstacle height 1-100 cm
-
-        Returned obs: 0=free, 1-100=obstacle height.
-        Returned known: 255 where any data exists, 0 otherwise.
+        Returns (obs, known, raw_scatter) — raw_scatter is the uint8 FBO
+        readback BEFORE morph (for debug display).
         """
         if not self.available or not getattr(self, '_df_configured', False):
             return None
@@ -861,22 +854,24 @@ class GPURenderer:
             np.ascontiguousarray(verts[:n_pts], dtype=np.float32).tobytes())
         self._df_prog_obs['u_y_off'].value = float(y_offset)
 
-        # Pass 1: scatter all valid points → obs FBO (max-encode via depth test)
+        # Scatter all valid points → obs FBO (max-encode via depth test)
         self._df_obs_fbo.use()
         self._df_obs_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
         self._ctx.enable(moderngl.DEPTH_TEST)
         self._ctx.depth_func = '>'
         self._df_vao_obs.render(moderngl.POINTS, vertices=n_pts)
 
-        # Diagnostic: check scatter output before morph
+        # Read raw scatter for debug visualization
+        raw_scat_data = self._df_obs_fbo.read(components=1, alignment=1)
+        raw_scatter = np.frombuffer(raw_scat_data, dtype=np.uint8).reshape(oh, ow)
+
         if self._df_n <= 2:
-            _scat_data = self._df_obs_fbo.read(components=1, alignment=1)
-            _scat = np.frombuffer(_scat_data, dtype=np.uint8).reshape(oh, ow)
-            print("gpu_depth SCATTER RAW: floor(==1)=%d obs(>=2)=%d empty(==0)=%d total=%d" % (
-                int(np.count_nonzero(_scat == 1)),
-                int(np.count_nonzero(_scat >= 2)),
-                int(np.count_nonzero(_scat == 0)),
-                _scat.size))
+            print("gpu_depth SCATTER RAW: floor(==1)=%d obs(>=2)=%d "
+                  "empty(==0)=%d total=%d" % (
+                      int(np.count_nonzero(raw_scatter == 1)),
+                      int(np.count_nonzero(raw_scatter >= 2)),
+                      int(np.count_nonzero(raw_scatter == 0)),
+                      raw_scatter.size))
 
         # GPU morph close on obstacles only: dilate×2, erode×2 (ping-pong)
         self._ctx.disable(moderngl.DEPTH_TEST)
@@ -919,7 +914,7 @@ class GPURenderer:
                       (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3,
                       n_floor, n_obs, n_empty))
 
-        return obs, known
+        return obs, known, raw_scatter
 
     # ── GPU visual odometry ─────────────────────────────────────
 
