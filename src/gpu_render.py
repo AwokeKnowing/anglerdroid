@@ -16,7 +16,7 @@ except ImportError:
     _HAS_MGL = False
 
 # ── Configuration ────────────────────────────────────────────────
-GRID_DIV = 8           # map pixels per terrain grid vertex
+GRID_DIV = 4           # map pixels per terrain grid vertex
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
