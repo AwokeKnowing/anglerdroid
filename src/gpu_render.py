@@ -87,9 +87,9 @@ void main() {
             col = vec3(i * 0.9, i * 0.75, i * 0.5);
         } else {
             col = vec3(
-                clamp((90.0 - h_cm * 0.5) / 255.0, 0.12, 0.35),
-                clamp((75.0 - h_cm * 0.3) / 255.0, 0.10, 0.29),
-                clamp((65.0 - h_cm * 0.2) / 255.0, 0.08, 0.25));
+                clamp((140.0 - h_cm * 0.5) / 255.0, 0.20, 0.55),
+                clamp((120.0 - h_cm * 0.3) / 255.0, 0.18, 0.47),
+                clamp((100.0 - h_cm * 0.2) / 255.0, 0.15, 0.40));
         }
         pillar_h = max(h_m, 0.03);
         shrk = u_shrink;
@@ -604,7 +604,8 @@ void main() {
             h = 0.0;
         } else if (obs_i >= 2.0) {
             conf = max(conf - u_step, 0.0);
-            h = (obs_i - 1.0) / 255.0;
+            float new_h = (obs_i - 1.0) / 255.0;
+            h = max(h, new_h);
         }
     }
     out_conf = vec4(conf);
