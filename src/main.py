@@ -101,6 +101,9 @@ def main():
                 rr.set_time_seconds("capture", ts)
                 rr.log("vision/atlas", rr.Image(atlas))
 
+            # Propagate debug flags from UI to vision
+            vis.debug_depth = u.debug_flags.get("depth", False)
+
             # Safety override — directional scaling (fwd / bwd / angular independent)
             if wb is not None:
                 wb.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,

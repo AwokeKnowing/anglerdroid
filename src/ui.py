@@ -194,6 +194,7 @@ class UI:
         self._last_activity = time.time()
         self._last_gemini_send = 0.0
         self._agent_state = ""
+        self.debug_flags = {"depth": False}
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -413,6 +414,15 @@ class UI:
 
                 elif t == "stop_ai":
                     self._stop_gemini()
+
+                elif t == "debug_toggle":
+                    key = data.get("key", "")
+                    if key in self.debug_flags:
+                        self.debug_flags[key] = not self.debug_flags[key]
+                        await ws.send(json.dumps({
+                            "type": "debug_state",
+                            "flags": self.debug_flags,
+                        }))
 
         except websockets.ConnectionClosed:
             pass

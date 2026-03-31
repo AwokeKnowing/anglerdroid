@@ -165,6 +165,7 @@ class Vision:
         ]
         self.atlas = np.zeros((ATLAS_H, ATLAS_W, 3), dtype=np.uint8)
         self.timestamp = 0.0
+        self.debug_depth = False
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
@@ -321,9 +322,10 @@ class Vision:
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             _raw_scatter = None
+            _dbg = self.debug_depth
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                 _gpu_result = self._gpu.depth_forward_gpu(
-                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y)
+                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
                 if _gpu_result is not None:
                     z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
@@ -432,18 +434,6 @@ class Vision:
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
 
-            if not hasattr(self, '_ego_diag_n'):
-                self._ego_diag_n = 0
-            self._ego_diag_n += 1
-            if self._ego_diag_n <= 3 or self._ego_diag_n % 300 == 0:
-                _n_known = int(np.count_nonzero(known_combined))
-                _n_obs = int(np.count_nonzero(obs_combined))
-                _n_free = int(np.count_nonzero(
-                    (known_combined > 0) & (obs_combined == 0)))
-                print("ego_combined: known=%d obs=%d free=%d (of %d)" % (
-                    _n_known, _n_obs, _n_free,
-                    known_combined.size))
-
             self._gpu.gmap_update_gpu(
                 obs_combined, known_combined,
                 cap_x, cap_y, cap_theta,
@@ -487,19 +477,16 @@ class Vision:
                 ang_scale=self._safety.ang_scale,
                 battery_frac=bat_frac)
 
-            # DEBUG: draw two overlays — raw scatter (right) and known_combined (left)
-            if atlas is not None and _raw_scatter is not None:
-                # Right overlay: raw scatter (green=floor, red=obs)
-                dbg = np.rot90(_raw_scatter, k=-1)
-                dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
-                dbg_rgb[dbg == 1] = [0, 255, 0]
-                dbg_rgb[dbg >= 2] = [255, 0, 0]
-                dh, dw = dbg_rgb.shape[:2]
-                ay = ATLAS_H - dh
-                ax = ATLAS_W - dw
-                atlas[ay:ay+dh, ax:ax+dw] = dbg_rgb
+            # Debug overlays — gated by debug_depth flag
+            if _dbg and atlas is not None:
+                if _raw_scatter is not None:
+                    dbg = np.rot90(_raw_scatter, k=-1)
+                    dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
+                    dbg_rgb[dbg == 1] = [0, 255, 0]
+                    dbg_rgb[dbg >= 2] = [255, 0, 0]
+                    dh, dw = dbg_rgb.shape[:2]
+                    atlas[ATLAS_H - dh:ATLAS_H, ATLAS_W - dw:ATLAS_W] = dbg_rgb
 
-                # Left overlay: known_combined (green=free, red=obs, black=unknown)
                 dbg2 = np.zeros((known_combined.shape[0], known_combined.shape[1], 3), dtype=np.uint8)
                 dbg2[(known_combined > 0) & (obs_combined == 0)] = [0, 255, 0]
                 dbg2[obs_combined > 0] = [255, 0, 0]

@@ -101,6 +101,12 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <button class="btn-secondary" onclick="navStop()" style="background:#433;font-size:.7rem">■ Stop</button>
       </div>
       <div id="nav-status" style="font-size:.7rem;color:#666;margin-top:2px"></div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid #333">
+        <span style="font-size:.75rem;color:#888">Debug:</span>
+        <label style="font-size:.75rem;margin-left:6px;cursor:pointer">
+          <input type="checkbox" id="dbg-depth" onchange="toggleDebug('depth')"> Depth scatter
+        </label>
+      </div>
     </div>
     <div class="tab-bar">
       <button class="tab-btn active" onclick="switchTab('chat')">Chat</button>
@@ -153,6 +159,11 @@ function connect() {
     else if (d.type === 'chat') addChat(d.sender, d.text);
     else if (d.type === 'atlas') document.getElementById('atlas').src = 'data:image/jpeg;base64,' + d.image;
     else if (d.type === 'tts_audio') playTtsAudio(d.audio);
+    else if (d.type === 'debug_state') {
+      const f = d.flags || {};
+      const el = document.getElementById('dbg-depth');
+      if (el) el.checked = !!f.depth;
+    }
     else if (d.type === 'ai_status') {
       aiActive = d.active;
       document.getElementById('ai-btn').textContent = aiActive ? '⏹ Stop AI' : '🤖 Launch AI';
@@ -244,6 +255,10 @@ function navCmd(deg) {
 function navStop() {
   if (ws) ws.send(JSON.stringify({type: 'nav_stop'}));
   document.getElementById('nav-status').textContent = 'Nav: stopped';
+}
+
+function toggleDebug(key) {
+  if (ws) ws.send(JSON.stringify({type: 'debug_toggle', key: key}));
 }
 
 function toggleAI() {

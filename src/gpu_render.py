@@ -823,10 +823,9 @@ class GPURenderer:
 
     # ── GPU depth-forward pipeline ────────────────────────────────
 
-    def depth_forward_gpu(self, verts, y_offset=0.0):
+    def depth_forward_gpu(self, verts, y_offset=0.0, debug=False):
         """Process RS2 forward depth on GPU: scatter (floor=free) + morph.
-        Returns (obs, known, raw_scatter) — raw_scatter is the uint8 FBO
-        readback BEFORE morph (for debug display).
+        Returns (obs, known, raw_scatter) — raw_scatter is None unless debug=True.
         """
         if not self.available or not getattr(self, '_df_configured', False):
             return None
@@ -861,17 +860,10 @@ class GPURenderer:
         self._ctx.depth_func = '>'
         self._df_vao_obs.render(moderngl.POINTS, vertices=n_pts)
 
-        # Read raw scatter for debug visualization
-        raw_scat_data = self._df_obs_fbo.read(components=1, alignment=1)
-        raw_scatter = np.frombuffer(raw_scat_data, dtype=np.uint8).reshape(oh, ow)
-
-        if self._df_n <= 2:
-            print("gpu_depth SCATTER RAW: floor(==1)=%d obs(>=2)=%d "
-                  "empty(==0)=%d total=%d" % (
-                      int(np.count_nonzero(raw_scatter == 1)),
-                      int(np.count_nonzero(raw_scatter >= 2)),
-                      int(np.count_nonzero(raw_scatter == 0)),
-                      raw_scatter.size))
+        raw_scatter = None
+        if debug:
+            raw_scat_data = self._df_obs_fbo.read(components=1, alignment=1)
+            raw_scatter = np.frombuffer(raw_scat_data, dtype=np.uint8).reshape(oh, ow)
 
         # GPU morph close on obstacles only: dilate×2, erode×2 (ping-pong)
         self._ctx.disable(moderngl.DEPTH_TEST)
@@ -1206,7 +1198,7 @@ class GPURenderer:
         self._gm_n += 1
         t1 = time.monotonic()
 
-        if self._gm_n % 300 == 0:
+        if self._gm_n <= 3 or self._gm_n % 300 == 0:
             data = self._gm_conf[self._gm_idx].read()
             cmap = np.frombuffer(data, dtype=np.uint8)
             nfree = int(np.count_nonzero(cmap > 190))
@@ -1216,9 +1208,6 @@ class GPURenderer:
                   "pose=(%.3f,%.3f,%.1f°) %.1fms"
                   % (nfree, nobs, ntot - nfree - nobs,
                      x, y, math.degrees(theta), (t1 - t0) * 1e3))
-
-        if self._gm_n <= 3 or self._gm_n % 300 == 0:
-            print("gpu_gmap: update %.1fms" % ((t1 - t0) * 1e3))
 
         return True
 
