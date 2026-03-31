@@ -871,6 +871,16 @@ class GPURenderer:
         self._ctx.depth_func = '>'
         self._df_vao_obs.render(moderngl.POINTS, vertices=n_pts)
 
+        # Diagnostic: check scatter output before morph
+        if self._df_n <= 2:
+            _scat_data = self._df_obs_fbo.read(components=1, alignment=1)
+            _scat = np.frombuffer(_scat_data, dtype=np.uint8).reshape(oh, ow)
+            print("gpu_depth SCATTER RAW: floor(==1)=%d obs(>=2)=%d empty(==0)=%d total=%d" % (
+                int(np.count_nonzero(_scat == 1)),
+                int(np.count_nonzero(_scat >= 2)),
+                int(np.count_nonzero(_scat == 0)),
+                _scat.size))
+
         # GPU morph close on obstacles only: dilate×2, erode×2 (ping-pong)
         self._ctx.disable(moderngl.DEPTH_TEST)
         morph_src = [self._df_obs_tex, self._df_morph_a_tex,
@@ -904,9 +914,13 @@ class GPURenderer:
         self._df_n += 1
         t2 = time.monotonic()
         if self._df_n <= 3 or self._df_n % 100 == 0:
+            n_empty = int(np.count_nonzero(raw == 0))
+            n_floor = int(np.count_nonzero(raw == 1))
+            n_obs = int(np.count_nonzero(raw >= 2))
             print("gpu_depth: scatter+morph=%.1fms read+decode=%.1fms "
-                  "total=%.1fms" % (
-                      (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3))
+                  "total=%.1fms  floor=%d obs=%d empty=%d" % (
+                      (t1 - t0) * 1e3, (t2 - t1) * 1e3, (t2 - t0) * 1e3,
+                      n_floor, n_obs, n_empty))
 
         return obs, known
 
