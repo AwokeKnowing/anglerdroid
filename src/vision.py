@@ -432,6 +432,18 @@ class Vision:
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
 
+            if not hasattr(self, '_ego_diag_n'):
+                self._ego_diag_n = 0
+            self._ego_diag_n += 1
+            if self._ego_diag_n <= 3 or self._ego_diag_n % 300 == 0:
+                _n_known = int(np.count_nonzero(known_combined))
+                _n_obs = int(np.count_nonzero(obs_combined))
+                _n_free = int(np.count_nonzero(
+                    (known_combined > 0) & (obs_combined == 0)))
+                print("ego_combined: known=%d obs=%d free=%d (of %d)" % (
+                    _n_known, _n_obs, _n_free,
+                    known_combined.size))
+
             self._gpu.gmap_update_gpu(
                 obs_combined, known_combined,
                 cap_x, cap_y, cap_theta,
@@ -475,7 +487,7 @@ class Vision:
                 ang_scale=self._safety.ang_scale,
                 battery_frac=bat_frac)
 
-            # DEBUG: draw two overlays — raw scatter (right) and final known2 (left)
+            # DEBUG: draw two overlays — raw scatter (right) and known_combined (left)
             if atlas is not None and _raw_scatter is not None:
                 # Right overlay: raw scatter (green=floor, red=obs)
                 dbg = np.rot90(_raw_scatter, k=-1)
@@ -487,10 +499,10 @@ class Vision:
                 ax = ATLAS_W - dw
                 atlas[ay:ay+dh, ax:ax+dw] = dbg_rgb
 
-                # Left overlay: final known2 after readback (white=known, black=unknown)
-                dbg2 = np.zeros((known2.shape[0], known2.shape[1], 3), dtype=np.uint8)
-                dbg2[known2 > 0] = [255, 255, 255]
-                dbg2[obs2 > 0] = [255, 0, 0]
+                # Left overlay: known_combined (green=free, red=obs, black=unknown)
+                dbg2 = np.zeros((known_combined.shape[0], known_combined.shape[1], 3), dtype=np.uint8)
+                dbg2[(known_combined > 0) & (obs_combined == 0)] = [0, 255, 0]
+                dbg2[obs_combined > 0] = [255, 0, 0]
                 d2h, d2w = dbg2.shape[:2]
                 atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
 
