@@ -296,12 +296,13 @@ void main() {
     p.y += u_y_off;
     float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
+    bool is_floor = (phys_h >= -0.05 && phys_h <= u_floor);
+    bool in_obs_range = (r.z > u_floor && r.z < u_ceil);
     float enc;
-    if (phys_h >= -0.05 && phys_h <= u_floor) {
+    if (is_floor) {
         enc = 1.0;
         gl_PointSize = 3.0;
-    } else if (phys_h > u_floor && phys_h < u_ceil
-               && r.z > u_floor && r.z < u_ceil) {
+    } else if (in_obs_range) {
         enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
     } else {
         gl_Position = vec4(2.0,2.0,0.0,1.0); return;
