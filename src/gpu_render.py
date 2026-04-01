@@ -21,8 +21,8 @@ GRID_DIV = 4           # map pixels per terrain grid vertex
 N_BLOB_LAYERS = 16     # horizontal slices through obstacle height
 BLOB_SLICE_H = 0.04    # 4 cm per layer (total 64 cm)
 BLOB_DILATE = 1        # max-dilate radius in grid cells (capsule shape)
-BLOB_SIGMA = 0.7       # Gaussian edge-softening sigma in grid cells
-BLOB_THRESH = 3.0      # height threshold (cm) to cut Gaussian tail
+BLOB_SIGMA = 0.4       # Gaussian edge-softening sigma in grid cells
+BLOB_THRESH = 5.0      # height threshold (cm) to cut Gaussian tail
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
