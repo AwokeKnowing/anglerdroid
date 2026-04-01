@@ -47,24 +47,32 @@ _VERT_BLOB = """
 #version 330
 
 uniform mat4  u_mvp;
+uniform sampler2D u_blob;
 uniform vec2  u_mapsz;
 uniform vec2  u_origin;
 uniform float u_px;
-uniform float u_slice_h;
+uniform float u_cell_m;
 uniform int   u_topdown;
 
 in vec2 in_uv;
 
-flat out int v_layer;
 out vec2 v_uv;
 out vec3 v_w;
+out vec3 v_nrm;
 
 void main() {
-    v_layer = gl_InstanceID;
     v_uv = in_uv;
 
-    float y = (u_topdown == 1) ? 0.0 : float(gl_InstanceID) * u_slice_h;
+    float h = textureLod(u_blob, in_uv, 0.0).r * 255.0 * 0.01;
 
+    vec2 ts = 1.0 / vec2(textureSize(u_blob, 0));
+    float hL = textureLod(u_blob, in_uv - vec2(ts.x, 0), 0.0).r * 255.0 * 0.01;
+    float hR = textureLod(u_blob, in_uv + vec2(ts.x, 0), 0.0).r * 255.0 * 0.01;
+    float hD = textureLod(u_blob, in_uv - vec2(0, ts.y), 0.0).r * 255.0 * 0.01;
+    float hU = textureLod(u_blob, in_uv + vec2(0, ts.y), 0.0).r * 255.0 * 0.01;
+    v_nrm = normalize(vec3(hL - hR, 2.0 * u_cell_m, hD - hU));
+
+    float y = u_topdown == 1 ? 0.0 : h;
     vec3 w = vec3(
         (in_uv.x * u_mapsz.x - u_origin.x) * u_px,
         y,
@@ -85,47 +93,48 @@ uniform int   u_topdown;
 uniform float u_slice_cm;
 uniform vec2  u_cell_uv;
 
-flat in int v_layer;
 in vec2 v_uv;
 in vec3 v_w;
+in vec3 v_nrm;
 
 out vec4 fc;
 
 void main() {
-    if (u_topdown == 1 && v_layer > 0) discard;
-
     float blob_h = texture(u_blob, v_uv).r * 255.0;
+    float conf   = texture(u_conf, v_uv).r * 255.0;
+
     vec3 col;
 
-    if (v_layer == 0) {
-        float conf = texture(u_conf, v_uv).r * 255.0;
+    if (blob_h > 0.5) {
+        col = u_topdown == 1 ? vec3(0.50) : vec3(0.55);
 
-        if (blob_h > 0.5) {
-            col = u_topdown == 1 ? vec3(0.50) : vec3(0.55);
-        } else if (conf > 190.0) {
-            col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
-        } else if (conf < 90.0) {
-            col = vec3(0.55);
-        } else {
-            float cn = texture(u_conf, clamp(v_uv + vec2(0.0, u_cell_uv.y), 0.0, 1.0)).r * 255.0;
-            float cs = texture(u_conf, clamp(v_uv - vec2(0.0, u_cell_uv.y), 0.0, 1.0)).r * 255.0;
-            float ce = texture(u_conf, clamp(v_uv + vec2(u_cell_uv.x, 0.0), 0.0, 1.0)).r * 255.0;
-            float cw = texture(u_conf, clamp(v_uv - vec2(u_cell_uv.x, 0.0), 0.0, 1.0)).r * 255.0;
-            bool border = (cn > 190.0 || cn < 90.0) ||
-                          (cs > 190.0 || cs < 90.0) ||
-                          (ce > 190.0 || ce < 90.0) ||
-                          (cw > 190.0 || cw < 90.0);
-            if (!border) discard;
-            col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
+        if (u_slice_cm > 0.0 && u_topdown == 0) {
+            float mod_h = mod(blob_h, u_slice_cm);
+            if (mod_h > u_slice_cm - 0.5) discard;
         }
+    } else if (conf > 190.0) {
+        col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
+    } else if (conf < 90.0) {
+        col = vec3(0.55);
     } else {
-        float layer_h = float(v_layer) * u_slice_cm;
-        if (blob_h < layer_h + 0.5) discard;
-        float shade = 0.55 - float(v_layer) * 0.012;
-        col = vec3(clamp(shade, 0.25, 0.55));
+        float cn = texture(u_conf, clamp(v_uv + vec2(0.0, u_cell_uv.y), 0.0, 1.0)).r * 255.0;
+        float cs = texture(u_conf, clamp(v_uv - vec2(0.0, u_cell_uv.y), 0.0, 1.0)).r * 255.0;
+        float ce = texture(u_conf, clamp(v_uv + vec2(u_cell_uv.x, 0.0), 0.0, 1.0)).r * 255.0;
+        float cw = texture(u_conf, clamp(v_uv - vec2(u_cell_uv.x, 0.0), 0.0, 1.0)).r * 255.0;
+        bool border = (cn > 190.0 || cn < 90.0) ||
+                      (cs > 190.0 || cs < 90.0) ||
+                      (ce > 190.0 || ce < 90.0) ||
+                      (cw > 190.0 || cw < 90.0);
+        if (!border) discard;
+        col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
     }
 
     if (u_topdown == 0) {
+        vec3 n = normalize(v_nrm);
+        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
+        float nl = max(dot(n, -ld), 0.0);
+        col *= (0.35 + 0.65 * nl);
+
         float d = length(v_w - u_cam);
         float fog = clamp(d / u_fogfar, 0.0, 0.75);
         col = mix(col, vec3(0.0), fog);
@@ -826,7 +835,7 @@ class GPURenderer:
         self._prog_t['u_origin'].value = (
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
-        self._prog_t['u_slice_h'].value = BLOB_SLICE_H
+        self._prog_t['u_cell_m'].value = float(GRID_DIV) * PX_SIZE
         self._prog_t['u_fogfar'].value = FOG_DIST
         self._prog_t['u_blob'].value = 0
         self._prog_t['u_conf'].value = 1
@@ -966,7 +975,7 @@ class GPURenderer:
         self._vao_t = self._ctx.vertex_array(
             self._prog_t, [(vbo, '2f', 'in_uv')],
             index_buffer=ibo, index_element_size=4)
-        self._terrain_instances = N_BLOB_LAYERS + 1
+        self._terrain_instances = 1
 
     def _build_robot(self):
         data = _triangulate_robot()
