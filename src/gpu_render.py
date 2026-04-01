@@ -20,7 +20,8 @@ GRID_DIV = 4           # map pixels per terrain grid vertex
 
 N_BLOB_LAYERS = 16     # horizontal slices through obstacle height
 BLOB_SLICE_H = 0.04    # 4 cm per layer (total 64 cm)
-BLOB_SIGMA = 1.5       # Gaussian softening sigma in grid cells
+BLOB_SIGMA = 1.0       # Gaussian softening sigma in grid cells
+BLOB_THRESH = 3.0      # height threshold (cm) to cut blur spread
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -52,6 +53,7 @@ uniform vec2  u_mapsz;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform float u_cell_m;
+uniform float u_thresh;
 uniform int   u_topdown;
 
 in vec2 in_uv;
@@ -63,13 +65,18 @@ out vec3 v_nrm;
 void main() {
     v_uv = in_uv;
 
-    float h = textureLod(u_blob, in_uv, 0.0).r * 255.0 * 0.01;
+    float raw = textureLod(u_blob, in_uv, 0.0).r * 255.0;
+    float h = raw > u_thresh ? raw * 0.01 : 0.0;
 
     vec2 ts = 1.0 / vec2(textureSize(u_blob, 0));
-    float hL = textureLod(u_blob, in_uv - vec2(ts.x, 0), 0.0).r * 255.0 * 0.01;
-    float hR = textureLod(u_blob, in_uv + vec2(ts.x, 0), 0.0).r * 255.0 * 0.01;
-    float hD = textureLod(u_blob, in_uv - vec2(0, ts.y), 0.0).r * 255.0 * 0.01;
-    float hU = textureLod(u_blob, in_uv + vec2(0, ts.y), 0.0).r * 255.0 * 0.01;
+    float rL = textureLod(u_blob, in_uv - vec2(ts.x, 0), 0.0).r * 255.0;
+    float rR = textureLod(u_blob, in_uv + vec2(ts.x, 0), 0.0).r * 255.0;
+    float rD = textureLod(u_blob, in_uv - vec2(0, ts.y), 0.0).r * 255.0;
+    float rU = textureLod(u_blob, in_uv + vec2(0, ts.y), 0.0).r * 255.0;
+    float hL = rL > u_thresh ? rL * 0.01 : 0.0;
+    float hR = rR > u_thresh ? rR * 0.01 : 0.0;
+    float hD = rD > u_thresh ? rD * 0.01 : 0.0;
+    float hU = rU > u_thresh ? rU * 0.01 : 0.0;
     v_nrm = normalize(vec3(hL - hR, 2.0 * u_cell_m, hD - hU));
 
     float y = u_topdown == 1 ? 0.0 : h;
@@ -105,7 +112,7 @@ void main() {
 
     vec3 col;
 
-    if (blob_h > 0.5) {
+    if (blob_h > 2.0) {
         col = u_topdown == 1 ? vec3(0.50) : vec3(0.55);
 
         if (u_slice_cm > 0.0 && u_topdown == 0) {
@@ -413,31 +420,20 @@ out vec4 fc;
 
 void main() {
     vec2 uv = gl_FragCoord.xy * u_out_texel;
-
-    if (u_mode <= 1) {
-        float m = 0.0;
-        for (int i = -3; i <= 3; i++) {
-            vec2 s = clamp(uv + u_step * float(i), 0.0, 1.0);
-            float h = texture(u_in, s).r;
-            if (u_mode == 0) {
-                float c = texture(u_conf, s).r;
-                if (c < 0.353) m = max(m, h);
-            } else {
-                m = max(m, h);
-            }
+    float sum = 0.0;
+    float wt  = 0.0;
+    for (int i = -3; i <= 3; i++) {
+        float w = exp(-0.5 * float(i*i) / (u_sigma * u_sigma));
+        vec2 s = clamp(uv + u_step * float(i), 0.0, 1.0);
+        float h = texture(u_in, s).r;
+        if (u_mode == 0) {
+            float c = texture(u_conf, s).r;
+            if (c >= 0.353) h = 0.0;
         }
-        fc = vec4(m);
-    } else {
-        float sum = 0.0;
-        float wt = 0.0;
-        for (int i = -3; i <= 3; i++) {
-            float w = exp(-0.5 * float(i*i) / (u_sigma * u_sigma));
-            vec2 s = clamp(uv + u_step * float(i), 0.0, 1.0);
-            sum += texture(u_in, s).r * w;
-            wt += w;
-        }
-        fc = vec4(sum / wt);
+        sum += h * w;
+        wt  += w;
     }
+    fc = vec4(sum / wt);
 }
 """
 
@@ -836,6 +832,7 @@ class GPURenderer:
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
         self._prog_t['u_cell_m'].value = float(GRID_DIV) * PX_SIZE
+        self._prog_t['u_thresh'].value = BLOB_THRESH
         self._prog_t['u_fogfar'].value = FOG_DIST
         self._prog_t['u_blob'].value = 0
         self._prog_t['u_conf'].value = 1
@@ -1489,47 +1486,31 @@ class GPURenderer:
     # ── Per-frame render ─────────────────────────────────────────
 
     def _update_blob(self):
-        """4-pass blob blur: max-dilate H/V then Gaussian H/V."""
+        """2-pass Gaussian blur: H (with conf gate) then V."""
         if not getattr(self, '_gm_gl_ready', False):
             return
         ctx = self._ctx
         bw, bh = self._blob_gw, self._blob_gh
         ot = (1.0 / bw, 1.0 / bh)
-        h_step = (ot[0], 0.0)
-        v_step = (0.0, ot[1])
 
         ctx.disable(moderngl.DEPTH_TEST)
         p = self._prog_bblur
         p['u_out_texel'].value = ot
 
-        # Pass 1: max-dilate H  (heightmap + conf → blob_a)
+        # Pass 1: Gaussian H with conf gate (heightmap → blob_a)
         self._blob_fbo_a.use()
         ctx.viewport = (0, 0, bw, bh)
         self._gm_hmap[self._gm_idx].use(location=0)
         self._gm_conf[self._gm_idx].use(location=1)
-        p['u_step'].value = h_step
+        p['u_step'].value = (ot[0], 0.0)
         p['u_mode'].value = 0
         self._vao_bblur.render(moderngl.TRIANGLE_STRIP)
 
-        # Pass 2: max-dilate V  (blob_a → blob_b)
+        # Pass 2: Gaussian V (blob_a → blob_b)
         self._blob_fbo_b.use()
         self._blob_a.use(location=0)
-        p['u_step'].value = v_step
+        p['u_step'].value = (0.0, ot[1])
         p['u_mode'].value = 1
-        self._vao_bblur.render(moderngl.TRIANGLE_STRIP)
-
-        # Pass 3: Gaussian H  (blob_b → blob_a)
-        self._blob_fbo_a.use()
-        self._blob_b.use(location=0)
-        p['u_step'].value = h_step
-        p['u_mode'].value = 2
-        self._vao_bblur.render(moderngl.TRIANGLE_STRIP)
-
-        # Pass 4: Gaussian V  (blob_a → blob_b)
-        self._blob_fbo_b.use()
-        self._blob_a.use(location=0)
-        p['u_step'].value = v_step
-        p['u_mode'].value = 2
         self._vao_bblur.render(moderngl.TRIANGLE_STRIP)
 
         self._blob_b.build_mipmaps()
