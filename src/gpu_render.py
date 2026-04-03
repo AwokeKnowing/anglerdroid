@@ -16,7 +16,10 @@ except ImportError:
     _HAS_MGL = False
 
 # ── Configuration ────────────────────────────────────────────────
-GRID_DIV = 2           # map pixels per terrain cell (2 = 4cm cells)
+GRID_DIV = 1           # map pixels per mesh vertex (1 = 2cm mesh)
+BLOB_DIV = 2           # map pixels per blob cell (2 = 4cm blur)
+BLOB_SIGMA = 0.5       # Gaussian blur sigma in blob cells
+BLOB_THRESH = 3.0      # height threshold in cm (removes blur tail)
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -43,97 +46,70 @@ _VERT_TERRAIN = """
 #version 330
 
 uniform mat4  u_mvp;
-uniform sampler2D u_hmap;
+uniform sampler2D u_blob;
 uniform sampler2D u_conf;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform float u_hscale;
-uniform float u_hmin;
+uniform float u_thresh;
 uniform ivec2 u_grid;
 uniform int   u_gdiv;
 uniform int   u_topdown;
 
-in vec3 in_pos;
-in vec3 in_nrm;
+in vec2 in_uv;
 
 out vec3 v_col;
 out vec3 v_nrm;
 out vec3 v_w;
+out vec2 v_uv;
 
 void main() {
-    int ix = gl_InstanceID % u_grid.x;
-    int iy = gl_InstanceID / u_grid.x;
+    float raw_h = texture(u_blob, in_uv).r * 255.0;
+    float conf  = texture(u_conf, in_uv).r * 255.0;
 
-    vec2 uv = (vec2(float(ix), float(iy)) + 0.5) / vec2(u_grid);
-    float raw_h = texture(u_hmap, uv).r * 255.0;
-    float conf  = texture(u_conf, uv).r * 255.0;
-
-    float h_cm = raw_h > 0.5 ? max(raw_h, u_hmin) : 0.0;
+    float h_cm = raw_h > u_thresh ? raw_h : 0.0;
     float h_m  = h_cm * u_hscale;
 
-    vec3 col;
-    float pillar_h;
+    float mw = float(u_grid.x * u_gdiv);
+    float mh = float(u_grid.y * u_gdiv);
+    float wx = (in_uv.x * mw - u_origin.x) * u_px;
+    float wz = (in_uv.y * mh - u_origin.y) * u_px;
 
+    vec3 p = vec3(wx, h_m, wz);
+
+    vec2 ts = 1.0 / vec2(u_grid);
+    float hL = texture(u_blob, in_uv - vec2(ts.x, 0)).r * 255.0;
+    float hR = texture(u_blob, in_uv + vec2(ts.x, 0)).r * 255.0;
+    float hD = texture(u_blob, in_uv - vec2(0, ts.y)).r * 255.0;
+    float hU = texture(u_blob, in_uv + vec2(0, ts.y)).r * 255.0;
+    hL = hL > u_thresh ? hL : 0.0;
+    hR = hR > u_thresh ? hR : 0.0;
+    hD = hD > u_thresh ? hD : 0.0;
+    hU = hU > u_thresh ? hU : 0.0;
+
+    float cell_m = float(u_gdiv) * u_px;
+    float dx = (hR - hL) * u_hscale / (2.0 * cell_m);
+    float dz = (hU - hD) * u_hscale / (2.0 * cell_m);
+    vec3 nrm = normalize(vec3(-dx, 1.0, -dz));
+
+    vec3 col;
     if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
-        pillar_h = 0.001;
     } else if (conf < 90.0) {
         if (u_topdown == 1) {
-            float i = clamp(h_cm / 100.0, 0.05, 1.0);
+            float i = clamp(raw_h / 100.0, 0.05, 1.0);
             col = vec3(i * 0.9, i * 0.75, i * 0.5);
         } else {
             col = vec3(0.55);
         }
-        pillar_h = max(h_m, 0.03);
     } else {
-        vec2 ustep = 1.0 / vec2(u_grid);
-        float cn = texture(u_conf, clamp(uv + vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
-        float cs = texture(u_conf, clamp(uv - vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
-        float ce = texture(u_conf, clamp(uv + vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
-        float cw = texture(u_conf, clamp(uv - vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
-        bool border = (cn > 190.0 || cn < 90.0) ||
-                      (cs > 190.0 || cs < 90.0) ||
-                      (ce > 190.0 || ce < 90.0) ||
-                      (cw > 190.0 || cw < 90.0);
-        if (!border) {
-            gl_Position = vec4(2.0, 2.0, 0.0, 1.0);
-            return;
-        }
         col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
-        pillar_h = 0.001;
-    }
-
-    float cell_m = float(u_gdiv) * u_px;
-    float cx = (float(ix) * float(u_gdiv) + float(u_gdiv) * 0.5 - u_origin.x) * u_px;
-    float cz = (float(iy) * float(u_gdiv) + float(u_gdiv) * 0.5 - u_origin.y) * u_px;
-
-    vec3 p = in_pos;
-    p.xz *= cell_m;
-    p.y = (p.y + 0.5) * pillar_h;
-    p.x += cx;
-    p.z += cz;
-
-    // Smooth 2D boundary normals for obstacle side faces
-    vec3 nrm = in_nrm;
-    if (conf < 90.0 && abs(in_nrm.y) < 0.5) {
-        vec2 ustep = 1.0 / vec2(u_grid);
-        float cE = texture(u_conf, clamp(uv + vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
-        float cW = texture(u_conf, clamp(uv - vec2(ustep.x, 0), 0.0, 1.0)).r * 255.0;
-        float cN = texture(u_conf, clamp(uv + vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
-        float cS = texture(u_conf, clamp(uv - vec2(0, ustep.y), 0.0, 1.0)).r * 255.0;
-        float fE = cE > 90.0 ? 1.0 : 0.0;
-        float fW = cW > 90.0 ? 1.0 : 0.0;
-        float fN = cN > 90.0 ? 1.0 : 0.0;
-        float fS = cS > 90.0 ? 1.0 : 0.0;
-        vec2 grad = vec2(fE - fW, fN - fS);
-        float gl = length(grad);
-        if (gl > 0.01)
-            nrm = vec3(grad.x / gl, 0.0, grad.y / gl);
     }
 
     v_col = col;
     v_nrm = nrm;
     v_w   = p;
+    v_uv  = in_uv;
     gl_Position = u_mvp * vec4(p, 1.0);
 }
 """
@@ -141,6 +117,7 @@ void main() {
 _FRAG_TERRAIN = """
 #version 330
 
+uniform sampler2D u_conf;
 uniform vec3  u_cam;
 uniform float u_fogfar;
 uniform int   u_topdown;
@@ -148,10 +125,26 @@ uniform int   u_topdown;
 in vec3 v_col;
 in vec3 v_nrm;
 in vec3 v_w;
+in vec2 v_uv;
 
 out vec4 fc;
 
 void main() {
+    float conf = texture(u_conf, v_uv).r * 255.0;
+
+    if (conf >= 90.0 && conf <= 190.0) {
+        vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
+        float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
+        float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
+        float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
+        float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
+        bool border = (cn > 190.0 || cn < 90.0) ||
+                      (cs > 190.0 || cs < 90.0) ||
+                      (ce > 190.0 || ce < 90.0) ||
+                      (cw > 190.0 || cw < 90.0);
+        if (!border) discard;
+    }
+
     vec3 col = v_col;
 
     if (u_topdown == 0) {
@@ -165,6 +158,52 @@ void main() {
     }
 
     fc = vec4(col, 1.0);
+}
+"""
+
+_FRAG_BLOB_BLUR = """
+#version 330
+
+uniform sampler2D u_in;
+uniform sampler2D u_conf;
+uniform vec2 u_texel;
+uniform int u_mode;
+uniform float u_sigma;
+
+out vec4 fc;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy * u_texel;
+    float v;
+
+    if (u_mode == 0) {
+        float c = texture(u_conf, uv).r * 255.0;
+        float h = c < 90.0 ? texture(u_in, uv).r * 255.0 : 0.0;
+        vec2 uvL = uv - vec2(u_texel.x, 0);
+        vec2 uvR = uv + vec2(u_texel.x, 0);
+        float cL = texture(u_conf, uvL).r * 255.0;
+        float cR = texture(u_conf, uvR).r * 255.0;
+        float hL = cL < 90.0 ? texture(u_in, uvL).r * 255.0 : 0.0;
+        float hR = cR < 90.0 ? texture(u_in, uvR).r * 255.0 : 0.0;
+        v = max(h, max(hL, hR));
+    } else if (u_mode == 1) {
+        float h  = texture(u_in, uv).r * 255.0;
+        float hU = texture(u_in, uv - vec2(0, u_texel.y)).r * 255.0;
+        float hD = texture(u_in, uv + vec2(0, u_texel.y)).r * 255.0;
+        v = max(h, max(hU, hD));
+    } else {
+        vec2 dir = u_mode == 2 ? vec2(u_texel.x, 0) : vec2(0, u_texel.y);
+        float sum = 0.0, wt = 0.0;
+        for (int i = -2; i <= 2; i++) {
+            float g = exp(-0.5 * float(i*i) / (u_sigma * u_sigma));
+            float s = texture(u_in, uv + float(i) * dir).r * 255.0;
+            sum += s * g;
+            wt += g;
+        }
+        v = sum / wt;
+    }
+
+    fc = vec4(v / 255.0);
 }
 """
 
@@ -708,6 +747,25 @@ def _make_cube_data():
             np.array(idx, dtype=np.int32))
 
 
+def _make_grid_data(gw, gh):
+    """UV grid mesh for displacement terrain. Returns (float32 verts, int32 indices)."""
+    nvx, nvy = gw + 1, gh + 1
+    u = np.linspace(0, 1, nvx, dtype=np.float32)
+    v = np.linspace(0, 1, nvy, dtype=np.float32)
+    uu, vv = np.meshgrid(u, v)
+    verts = np.stack([uu.ravel(), vv.ravel()], axis=-1)
+
+    iy, ix = np.meshgrid(
+        np.arange(gh, dtype=np.int32),
+        np.arange(gw, dtype=np.int32), indexing='ij')
+    i0 = (iy * nvx + ix).ravel()
+    i1 = i0 + 1
+    i2 = i0 + nvx
+    i3 = i2 + 1
+    indices = np.column_stack([i0, i2, i1, i1, i2, i3]).ravel()
+    return verts, indices
+
+
 # ── Robot mesh triangulation ─────────────────────────────────────
 
 def _triangulate_robot():
@@ -804,7 +862,32 @@ class GPURenderer:
             color_attachments=[self._scene_color_tex],
             depth_attachment=self._scene_depth_tex)
 
-        # Voxel terrain shader (instanced cubes with smooth boundary normals)
+        # Fullscreen-quad VBO (shared by all overlay / blur shaders)
+        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
+        self._fsq_vbo = ctx.buffer(fsq.tobytes())
+
+        # Blob textures for smooth heightmap (at BLOB_DIV resolution)
+        bw = self._mw // BLOB_DIV
+        bh = self._mh // BLOB_DIV
+        self._blob_a_tex = ctx.texture((bw, bh), 1)
+        self._blob_a_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._blob_a_fbo = ctx.framebuffer(
+            color_attachments=[self._blob_a_tex])
+        self._blob_b_tex = ctx.texture((bw, bh), 1)
+        self._blob_b_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._blob_b_fbo = ctx.framebuffer(
+            color_attachments=[self._blob_b_tex])
+
+        self._prog_bblur = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BLOB_BLUR)
+        self._prog_bblur['u_in'].value = 0
+        self._prog_bblur['u_conf'].value = 1
+        self._prog_bblur['u_texel'].value = (1.0 / bw, 1.0 / bh)
+        self._prog_bblur['u_sigma'].value = BLOB_SIGMA
+        self._vao_bblur = ctx.vertex_array(
+            self._prog_bblur, [(self._fsq_vbo, '2f', 'in_pos')])
+
+        # Displacement terrain shader (smooth surface over blob heightmap)
         gw = self._mw // GRID_DIV
         gh = self._mh // GRID_DIV
 
@@ -814,18 +897,14 @@ class GPURenderer:
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
         self._prog_t['u_hscale'].value = 0.01
-        self._prog_t['u_hmin'].value = 5.0
+        self._prog_t['u_thresh'].value = BLOB_THRESH
         self._prog_t['u_fogfar'].value = FOG_DIST
-        self._prog_t['u_hmap'].value = 0
+        self._prog_t['u_blob'].value = 0
         self._prog_t['u_conf'].value = 1
         self._prog_t['u_topdown'].value = 0
         self._prog_t['u_grid'].value = (gw, gh)
         self._prog_t['u_gdiv'].value = GRID_DIV
         self._build_terrain()
-
-        # Fullscreen-quad VBO (shared by all overlay shaders)
-        fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
-        self._fsq_vbo = ctx.buffer(fsq.tobytes())
 
         # Robot shader + mesh
         self._prog_r = ctx.program(
@@ -898,9 +977,11 @@ class GPURenderer:
             self._init_odom_gl()
 
         t1 = time.monotonic()
-        print("gpu_render: ready %dx%d  grid=%dx%d  robot=%d tris  %.0fms" % (
-            self._vw, self._vh, self._gw, self._gh,
-            self._robot_ntris, (t1 - t0) * 1e3))
+        bw = self._mw // BLOB_DIV
+        bh = self._mh // BLOB_DIV
+        print("gpu_render: ready %dx%d  mesh=%dx%d  blob=%dx%d  robot=%d tris  %.0fms"
+              % (self._vw, self._vh, self._gw, self._gh, bw, bh,
+                 self._robot_ntris, (t1 - t0) * 1e3))
 
     def _create_context(self):
         try:
@@ -915,13 +996,12 @@ class GPURenderer:
         gh = self._mh // GRID_DIV
         self._gw, self._gh = gw, gh
 
-        cube_verts, cube_idx = _make_cube_data()
-        vbo = self._ctx.buffer(cube_verts.tobytes())
-        ibo = self._ctx.buffer(cube_idx.tobytes())
+        verts, idx = _make_grid_data(gw, gh)
+        vbo = self._ctx.buffer(verts.tobytes())
+        ibo = self._ctx.buffer(idx.tobytes())
         self._vao_t = self._ctx.vertex_array(
-            self._prog_t, [(vbo, '3f 3f', 'in_pos', 'in_nrm')],
+            self._prog_t, [(vbo, '2f', 'in_uv')],
             index_buffer=ibo, index_element_size=4)
-        self._terrain_instances = gw * gh
 
     def _build_robot(self):
         data = _triangulate_robot()
@@ -1432,6 +1512,30 @@ class GPURenderer:
             t.write(init_hmap.tobytes())
         self._gm_n = 0
 
+    # ── Blob smooth pass ────────────────────────────────────────
+
+    def _update_blob(self):
+        """4-pass blur: max-dilate H/V then Gaussian H/V → self._blob_b_tex."""
+        if not getattr(self, '_gm_gl_ready', False):
+            return
+        hmap = self._gm_hmap[self._gm_idx]
+        conf = self._gm_conf[self._gm_idx]
+
+        passes = [
+            (hmap, self._blob_a_fbo, 0),
+            (self._blob_a_tex, self._blob_b_fbo, 1),
+            (self._blob_b_tex, self._blob_a_fbo, 2),
+            (self._blob_a_tex, self._blob_b_fbo, 3),
+        ]
+
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        for src_tex, dst_fbo, mode in passes:
+            dst_fbo.use()
+            src_tex.use(location=0)
+            conf.use(location=1)
+            self._prog_bblur['u_mode'].value = mode
+            self._vao_bblur.render(moderngl.TRIANGLE_STRIP)
+
     # ── Per-frame render ─────────────────────────────────────────
 
     def render(self, x, y, theta, cameras=None,
@@ -1460,6 +1564,9 @@ class GPURenderer:
         ctx = self._ctx
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
+
+        # ── Pre-compute blob heightmap (runs in blob FBOs) ──
+        self._update_blob()
 
         # ── 3D scene → scene FBO (for SSAO) ──
         self._scene_fbo.use()
@@ -1502,11 +1609,11 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
-        self._gm_hmap[self._gm_idx].use(location=0)
+        self._blob_b_tex.use(location=0)
         self._gm_conf[self._gm_idx].use(location=1)
         self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
         self._prog_t['u_cam'].value = tuple(cam.tolist())
-        self._vao_t.render(instances=self._terrain_instances)
+        self._vao_t.render()
 
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(
