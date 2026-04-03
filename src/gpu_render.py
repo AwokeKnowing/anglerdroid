@@ -483,7 +483,12 @@ void main() {
     float enc;
     if (r.z > u_floor && r.z < u_ceil) {
         float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
-        enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
+        if (phys_h > 0.03) {
+            enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
+        } else {
+            enc = 1.0;
+            gl_PointSize = 3.0;
+        }
     } else {
         enc = 1.0;
         gl_PointSize = 3.0;
