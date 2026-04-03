@@ -67,7 +67,7 @@ void main() {
     float raw_h = texture(u_blob, in_uv).r * 255.0;
     float conf  = texture(u_conf, in_uv).r * 255.0;
 
-    float h_cm = raw_h > u_thresh ? raw_h : 0.0;
+    float h_cm = raw_h > u_thresh ? 10.0 : 0.0;
     float h_m  = h_cm * u_hscale;
 
     float mw = float(u_grid.x * u_gdiv);
@@ -82,10 +82,10 @@ void main() {
     float hR = texture(u_blob, in_uv + vec2(ts.x, 0)).r * 255.0;
     float hD = texture(u_blob, in_uv - vec2(0, ts.y)).r * 255.0;
     float hU = texture(u_blob, in_uv + vec2(0, ts.y)).r * 255.0;
-    hL = hL > u_thresh ? hL : 0.0;
-    hR = hR > u_thresh ? hR : 0.0;
-    hD = hD > u_thresh ? hD : 0.0;
-    hU = hU > u_thresh ? hU : 0.0;
+    hL = hL > u_thresh ? 10.0 : 0.0;
+    hR = hR > u_thresh ? 10.0 : 0.0;
+    hD = hD > u_thresh ? 10.0 : 0.0;
+    hU = hU > u_thresh ? 10.0 : 0.0;
 
     float cell_m = float(u_gdiv) * u_px;
     float dx = (hR - hL) * u_hscale / (2.0 * cell_m);
@@ -631,7 +631,8 @@ uniform sampler2D u_ego;
 uniform mat3 u_inv;
 uniform vec2 u_map_inv;
 uniform vec2 u_ego_inv;
-uniform float u_step;
+uniform float u_step_free;
+uniform float u_step_obs;
 
 layout(location = 0) out vec4 out_conf;
 layout(location = 1) out vec4 out_hmap;
@@ -648,10 +649,10 @@ void main() {
     if (euv.x > 0.0 && euv.x < 1.0 && euv.y > 0.0 && euv.y < 1.0) {
         float obs_i = floor(texture(u_ego, euv).r * 255.0 + 0.5);
         if (obs_i == 1.0) {
-            conf = min(conf + u_step, 1.0);
+            conf = min(conf + u_step_free, 1.0);
             h = 0.0;
         } else if (obs_i >= 2.0) {
-            conf = max(conf - u_step, 0.0);
+            conf = max(conf - u_step_obs, 0.0);
             float new_h = (obs_i - 1.0) / 255.0;
             h = max(h, new_h);
         }
@@ -1328,7 +1329,8 @@ class GPURenderer:
     # ── GPU global-map evidence update ───────────────────────────
 
     def configure_gmap(self, map_w, map_h, ego_w, ego_h,
-                       origin_x, origin_y, px_size, evidence_step=50):
+                       origin_x, origin_y, px_size,
+                       step_free=60, step_obs=25):
         self._gm_mw = int(map_w)
         self._gm_mh = int(map_h)
         self._gm_ew = int(ego_w)
@@ -1336,7 +1338,8 @@ class GPURenderer:
         self._gm_ox = float(origin_x)
         self._gm_oy = float(origin_y)
         self._gm_px = float(px_size)
-        self._gm_step = float(evidence_step) / 255.0
+        self._gm_step_free = float(step_free) / 255.0
+        self._gm_step_obs = float(step_obs) / 255.0
         self._gm_configured = True
         self._gm_gl_ready = False
 
@@ -1380,7 +1383,8 @@ class GPURenderer:
         self._gm_prog_up['u_ego'].value = 2
         self._gm_prog_up['u_map_inv'].value = (1.0 / mw, 1.0 / mh)
         self._gm_prog_up['u_ego_inv'].value = (1.0 / ew, 1.0 / eh)
-        self._gm_prog_up['u_step'].value = self._gm_step
+        self._gm_prog_up['u_step_free'].value = self._gm_step_free
+        self._gm_prog_up['u_step_obs'].value = self._gm_step_obs
         self._gm_vao_up = ctx.vertex_array(
             self._gm_prog_up, [(fsq, '2f', 'in_pos')])
 
@@ -1400,8 +1404,9 @@ class GPURenderer:
 
         self._gm_n = 0
         self._gm_gl_ready = True
-        print("gpu_render: gmap ready %dx%d  step=%d" % (
-            mw, mh, int(self._gm_step * 255)))
+        print("gpu_render: gmap ready %dx%d  step_free=%d step_obs=%d" % (
+            mw, mh, int(self._gm_step_free * 255),
+            int(self._gm_step_obs * 255)))
 
     def _gmap_affine_inv(self, x, y, theta, cx, cy, ego_px):
         """Global pixel → ego pixel affine (3×3, row-major)."""
