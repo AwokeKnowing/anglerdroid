@@ -93,15 +93,10 @@ void main() {
     vec3 nrm = normalize(vec3(-dx, 1.0, -dz));
 
     vec3 col;
-    if (conf > 190.0) {
+    if (h_cm > 0.0) {
+        col = u_topdown == 1 ? vec3(0.55, 0.45, 0.3) : vec3(0.55);
+    } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
-    } else if (conf < 90.0) {
-        if (u_topdown == 1) {
-            float i = clamp(raw_h / 100.0, 0.05, 1.0);
-            col = vec3(i * 0.9, i * 0.75, i * 0.5);
-        } else {
-            col = vec3(0.55);
-        }
     } else {
         col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
     }

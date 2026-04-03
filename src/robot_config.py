@@ -19,7 +19,7 @@ ROBOT_H = 42                  # side-to-side (y direction)
 ROBOT_CX_OFF = -78            # x offset from crosshair center
 
 FOOT_PAD_FWD = 5              # extra clear pixels forward (self-reflection margin)
-FOOT_PAD_BWD = 7              # extra clear pixels backward (self-observation margin)
+FOOT_PAD_BWD = 10             # extra clear pixels backward (self-observation margin)
 FOOT_PAD_LAT = 2              # extra clear pixels lateral
 
 # Derived: robot center in ego frame
