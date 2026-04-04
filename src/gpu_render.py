@@ -90,27 +90,22 @@ uniform sampler2D u_conf;
 uniform vec3  u_cam;
 uniform float u_fogfar;
 uniform int   u_topdown;
-uniform float u_px;
 
 in vec3 v_w;
 in vec2 v_uv;
 
 out vec4 fc;
 
-float obs_h(vec2 uv) {
-    return (texture(u_conf, uv).r * 255.0 < 90.0) ? 0.10 : 0.0;
-}
-
 void main() {
     float conf = texture(u_conf, v_uv).r * 255.0;
 
     // Unknown interior: discard unless bordering known cells
     if (conf >= 90.0 && conf <= 190.0) {
-        vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
-        float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
-        float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
-        float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
-        float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
+        vec2 ts1 = 1.0 / vec2(textureSize(u_conf, 0));
+        float cn = texture(u_conf, v_uv + vec2(0, ts1.y)).r * 255.0;
+        float cs = texture(u_conf, v_uv - vec2(0, ts1.y)).r * 255.0;
+        float ce = texture(u_conf, v_uv + vec2(ts1.x, 0)).r * 255.0;
+        float cw = texture(u_conf, v_uv - vec2(ts1.x, 0)).r * 255.0;
         bool border = (cn > 190.0 || cn < 90.0) ||
                       (cs > 190.0 || cs < 90.0) ||
                       (ce > 190.0 || ce < 90.0) ||
@@ -118,27 +113,39 @@ void main() {
         if (!border) discard;
     }
 
-    // Sobel for wall direction (3-texel spacing), fixed steepness
-    vec2 ts = 3.0 / vec2(textureSize(u_conf, 0));
-    float h00 = obs_h(v_uv + vec2(-ts.x, -ts.y));
-    float h10 = obs_h(v_uv + vec2(  0.0, -ts.y));
-    float h20 = obs_h(v_uv + vec2( ts.x, -ts.y));
-    float h01 = obs_h(v_uv + vec2(-ts.x,   0.0));
-    float h21 = obs_h(v_uv + vec2( ts.x,   0.0));
-    float h02 = obs_h(v_uv + vec2(-ts.x,  ts.y));
-    float h12 = obs_h(v_uv + vec2(  0.0,  ts.y));
-    float h22 = obs_h(v_uv + vec2( ts.x,  ts.y));
-    float gx = -h00 + h20 - 2.0*h01 + 2.0*h21 - h02 + h22;
-    float gz = -h00 - 2.0*h10 - h20 + h02 + 2.0*h12 + h22;
-    float glen = length(vec2(gx, gz));
-    float wall = smoothstep(0.02, 0.08, glen);
-    vec3 wall_dir = vec3(-gx, 0.0, -gz) / max(glen, 0.001);
-    vec3 nrm = normalize(mix(vec3(0.0, 1.0, 0.0),
-                              wall_dir + vec3(0.0, 0.15, 0.0), wall));
-
+    // Obstacle classification (color) — with 1-texel hole fill
     bool is_obs = (conf < 90.0);
-    if (!is_obs && h01 > 0.01 && h21 > 0.01 && h10 > 0.01 && h12 > 0.01)
-        is_obs = true;
+    if (!is_obs) {
+        vec2 ts1 = 1.0 / vec2(textureSize(u_conf, 0));
+        float cN = texture(u_conf, v_uv + vec2(0, ts1.y)).r * 255.0;
+        float cS = texture(u_conf, v_uv - vec2(0, ts1.y)).r * 255.0;
+        float cE = texture(u_conf, v_uv + vec2(ts1.x, 0)).r * 255.0;
+        float cW = texture(u_conf, v_uv - vec2(ts1.x, 0)).r * 255.0;
+        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
+            is_obs = true;
+    }
+
+    // Normal: flat (0,1,0) everywhere EXCEPT wall ramp faces
+    vec3 nrm = vec3(0.0, 1.0, 0.0);
+    float h = v_w.y;
+    if (h > 0.005 && h < 0.095) {
+        // Wall ramp — Sobel on RAW conf (continuous) for smooth direction
+        vec2 ts = 3.0 / vec2(textureSize(u_conf, 0));
+        float c00 = texture(u_conf, v_uv + vec2(-ts.x, -ts.y)).r;
+        float c10 = texture(u_conf, v_uv + vec2(  0.0, -ts.y)).r;
+        float c20 = texture(u_conf, v_uv + vec2( ts.x, -ts.y)).r;
+        float c01 = texture(u_conf, v_uv + vec2(-ts.x,   0.0)).r;
+        float c21 = texture(u_conf, v_uv + vec2( ts.x,   0.0)).r;
+        float c02 = texture(u_conf, v_uv + vec2(-ts.x,  ts.y)).r;
+        float c12 = texture(u_conf, v_uv + vec2(  0.0,  ts.y)).r;
+        float c22 = texture(u_conf, v_uv + vec2( ts.x,  ts.y)).r;
+        float gx = -c00 + c20 - 2.0*c01 + 2.0*c21 - c02 + c22;
+        float gz = -c00 - 2.0*c10 - c20 + c02 + 2.0*c12 + c22;
+        float glen = length(vec2(gx, gz));
+        if (glen > 0.001) {
+            nrm = normalize(vec3(gx / glen, 0.15, gz / glen));
+        }
+    }
 
     vec3 col;
     if (is_obs) {
