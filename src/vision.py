@@ -245,7 +245,7 @@ class Vision:
         We only trust "known + no obstacle = free" within this range.
         Obstacle *detection* still uses the full cone.
         """
-        FREE_RANGE_PX = 150   # 1.5m at 1cm/px
+        FREE_RANGE_PX = 120   # 1.2m at 1cm/px
         rcx = CROSSHAIR_CX + ROBOT_CX_OFF
         rcy = CROSSHAIR_CY
         yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]
@@ -320,28 +320,34 @@ class Vision:
 
         if not hasattr(self, '_pitch_cal_deltas'):
             self._pitch_cal_deltas = []
+            self._pitch_cal_hoffsets = []
         self._pitch_cal_deltas.append(delta)
+        self._pitch_cal_hoffsets.append(h_off)
 
         if len(self._pitch_cal_deltas) < 20:
             return
 
         med_delta = float(np.median(self._pitch_cal_deltas))
+        med_hoff = float(np.median(self._pitch_cal_hoffsets))
         err_deg = math.degrees(med_delta)
 
         print("pitch_cal: error=%.3f° h_offset=%.1fcm (%d samples, %d pts/frame)" % (
-            err_deg, h_off * 100, len(self._pitch_cal_deltas), len(fp)))
+            err_deg, med_hoff * 100, len(self._pitch_cal_deltas), len(fp)))
 
-        if abs(med_delta) > math.radians(0.05):
-            new_pitch = _fw_pitch_rad + med_delta
-            new_sin = float(abs(math.sin(new_pitch)))
-            new_cos = float(abs(math.cos(new_pitch)))
+        new_pitch = _fw_pitch_rad + med_delta
+        new_sin = float(abs(math.sin(new_pitch)))
+        new_cos = float(abs(math.cos(new_pitch)))
+        new_cam_h = float(FW_CAM_HEIGHT) - med_hoff
+
+        if abs(med_delta) > math.radians(0.05) or abs(med_hoff) > 0.005:
             print("pitch_cal: correcting pitch %.2f° → %.2f° "
-                  "(sin %.4f→%.4f, cos %.4f→%.4f)" % (
+                  "(sin %.4f→%.4f, cos %.4f→%.4f) cam_h %.3f→%.3f" % (
                   FW_PITCH_DEG, FW_PITCH_DEG + err_deg,
-                  sin_p, new_sin, cos_p, new_cos))
-            self._gpu.update_pitch_params(new_sin, new_cos)
+                  sin_p, new_sin, cos_p, new_cos,
+                  float(FW_CAM_HEIGHT), new_cam_h))
+            self._gpu.update_pitch_params(new_sin, new_cos, cam_h=new_cam_h)
         else:
-            print("pitch_cal: pitch within tolerance (%.3f°)" % err_deg)
+            print("pitch_cal: within tolerance (%.3f° / %.1fcm)" % (err_deg, med_hoff * 100))
 
         self._pitch_cal_done = True
 

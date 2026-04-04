@@ -449,18 +449,21 @@ void main() {
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
+    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     float enc;
-    if (r.z > u_floor && r.z < u_ceil) {
-        float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
+    if (phys_h > u_floor && phys_h < u_ceil) {
         if (phys_h > 0.03) {
             enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
         } else {
             enc = 1.0;
             gl_PointSize = 3.0;
         }
-    } else {
+    } else if (phys_h <= u_floor) {
         enc = 1.0;
         gl_PointSize = 3.0;
+    } else {
+        gl_Position = vec4(2.0,2.0,0.0,1.0);
+        return;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
