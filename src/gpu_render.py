@@ -16,7 +16,8 @@ except ImportError:
     _HAS_MGL = False
 
 # ── Configuration ────────────────────────────────────────────────
-GRID_DIV = 1           # map pixels per mesh vertex (1 = 2cm mesh)
+GRID_DIV = 1           # map pixels per mesh vertex (for gmap uniforms)
+MESH_MULT = 2          # mesh vertices per map pixel (2× oversample → smooth boundaries)
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -43,11 +44,12 @@ _VERT_TERRAIN = """
 #version 330
 
 uniform mat4  u_mvp;
+uniform sampler2D u_mask;
 uniform sampler2D u_conf;
 uniform vec2  u_origin;
 uniform float u_px;
+uniform vec2  u_mapsz;
 uniform ivec2 u_grid;
-uniform int   u_gdiv;
 uniform int   u_topdown;
 
 in vec2 in_uv;
@@ -59,43 +61,34 @@ out vec2 v_uv;
 
 void main() {
     vec2 ts = 1.0 / vec2(u_grid);
-    float c = texture(u_conf, in_uv).r * 255.0;
 
-    /* 3x3 binary obstacle mask (LINEAR conf gives sub-texel boundary) */
-    float s00 = texture(u_conf, in_uv + vec2(-ts.x, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s10 = texture(u_conf, in_uv + vec2(   0.0, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s20 = texture(u_conf, in_uv + vec2( ts.x, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s01 = texture(u_conf, in_uv + vec2(-ts.x,   0.0)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s11 = c < 90.0 ? 1.0 : 0.0;
-    float s21 = texture(u_conf, in_uv + vec2( ts.x,   0.0)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s02 = texture(u_conf, in_uv + vec2(-ts.x,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s12 = texture(u_conf, in_uv + vec2(   0.0,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
-    float s22 = texture(u_conf, in_uv + vec2( ts.x,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float m  = texture(u_mask, in_uv).r;
+    float mL = texture(u_mask, in_uv - vec2(ts.x, 0)).r;
+    float mR = texture(u_mask, in_uv + vec2(ts.x, 0)).r;
+    float mD = texture(u_mask, in_uv - vec2(0, ts.y)).r;
+    float mU = texture(u_mask, in_uv + vec2(0, ts.y)).r;
 
-    float avg = (s00+s10+s20 + s01+s11+s21 + s02+s12+s22) / 9.0;
-    float h_cm = smoothstep(0.1, 0.55, avg) * 10.0;
+    float h_cm = smoothstep(0.3, 0.7, m) * 10.0;
     float h_m  = h_cm * 0.01;
 
-    float mw = float(u_grid.x * u_gdiv);
-    float mh = float(u_grid.y * u_gdiv);
-    float wx = (in_uv.x * mw - u_origin.x) * u_px;
-    float wz = (in_uv.y * mh - u_origin.y) * u_px;
+    float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
+    float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
     vec3 p = vec3(wx, h_m, wz);
 
-    /* Normals from column/row averages through same smoothstep */
-    float hL = smoothstep(0.1, 0.55, (s00 + s01 + s02) / 3.0) * 10.0;
-    float hR = smoothstep(0.1, 0.55, (s20 + s21 + s22) / 3.0) * 10.0;
-    float hD = smoothstep(0.1, 0.55, (s00 + s10 + s20) / 3.0) * 10.0;
-    float hU = smoothstep(0.1, 0.55, (s02 + s12 + s22) / 3.0) * 10.0;
-    float cell_m = float(u_gdiv) * u_px;
+    float hL = smoothstep(0.3, 0.7, mL) * 10.0;
+    float hR = smoothstep(0.3, 0.7, mR) * 10.0;
+    float hD = smoothstep(0.3, 0.7, mD) * 10.0;
+    float hU = smoothstep(0.3, 0.7, mU) * 10.0;
+    float cell_m = u_mapsz.x / float(u_grid.x) * u_px;
     float dx = (hR - hL) * 0.01 / (2.0 * cell_m);
     float dz = (hU - hD) * 0.01 / (2.0 * cell_m);
     vec3 nrm = normalize(vec3(-dx, 1.0, -dz));
 
+    float conf = texture(u_conf, in_uv).r * 255.0;
     vec3 col;
     if (h_cm > 0.5) {
         col = u_topdown == 1 ? vec3(0.55, 0.45, 0.3) : vec3(0.55);
-    } else if (c > 190.0) {
+    } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
         col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
@@ -125,19 +118,20 @@ in vec2 v_uv;
 out vec4 fc;
 
 void main() {
-    float conf = texture(u_conf, v_uv).r * 255.0;
-
-    if (conf >= 90.0 && conf <= 190.0) {
-        vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
-        float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
-        float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
-        float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
-        float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
-        bool border = (cn > 190.0 || cn < 90.0) ||
-                      (cs > 190.0 || cs < 90.0) ||
-                      (ce > 190.0 || ce < 90.0) ||
-                      (cw > 190.0 || cw < 90.0);
-        if (!border) discard;
+    if (v_w.y < 0.005) {
+        float conf = texture(u_conf, v_uv).r * 255.0;
+        if (conf >= 90.0 && conf <= 190.0) {
+            vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
+            float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
+            float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
+            float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
+            float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
+            bool border = (cn > 190.0 || cn < 90.0) ||
+                          (cs > 190.0 || cs < 90.0) ||
+                          (ce > 190.0 || ce < 90.0) ||
+                          (cw > 190.0 || cw < 90.0);
+            if (!border) discard;
+        }
     }
 
     vec3 col = v_col;
@@ -466,6 +460,16 @@ _VERT_FSQUAD = """
 #version 330
 in vec2 in_pos;
 void main() { gl_Position = vec4(in_pos, 0.0, 1.0); }
+"""
+
+_FRAG_BINARIZE = """
+#version 330
+uniform sampler2D u_conf;
+out vec4 fc;
+void main() {
+    float conf = texelFetch(u_conf, ivec2(gl_FragCoord.xy), 0).r * 255.0;
+    fc = vec4(conf < 90.0 ? 1.0 : 0.0);
+}
 """
 
 # ── Morph close shaders ──────────────────────────────────────────
@@ -822,9 +826,19 @@ class GPURenderer:
         fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
         self._fsq_vbo = ctx.buffer(fsq.tobytes())
 
-        # Terrain shader (binary 10cm curb extrusion from confidence map)
-        gw = self._mw // GRID_DIV
-        gh = self._mh // GRID_DIV
+        # Binary obstacle mask (binarize conf → 0/1, LINEAR for smooth upsample)
+        self._mask_tex = ctx.texture((self._mw, self._mh), 1)
+        self._mask_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._mask_fbo = ctx.framebuffer(color_attachments=[self._mask_tex])
+        self._prog_bin = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BINARIZE)
+        self._prog_bin['u_conf'].value = 0
+        self._vao_bin = ctx.vertex_array(
+            self._prog_bin, [(self._fsq_vbo, '2f', 'in_pos')])
+
+        # Terrain shader (smooth 10cm curb extrusion via oversampled binary mask)
+        gw = self._mw * MESH_MULT
+        gh = self._mh * MESH_MULT
 
         self._prog_t = ctx.program(
             vertex_shader=_VERT_TERRAIN, fragment_shader=_FRAG_TERRAIN)
@@ -832,10 +846,11 @@ class GPURenderer:
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
         self._prog_t['u_fogfar'].value = FOG_DIST
-        self._prog_t['u_conf'].value = 0
+        self._prog_t['u_mask'].value = 0
+        self._prog_t['u_conf'].value = 1
         self._prog_t['u_topdown'].value = 0
+        self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
         self._prog_t['u_grid'].value = (gw, gh)
-        self._prog_t['u_gdiv'].value = GRID_DIV
         self._build_terrain()
 
         # Robot shader + mesh
@@ -909,8 +924,9 @@ class GPURenderer:
             self._init_odom_gl()
 
         t1 = time.monotonic()
-        print("gpu_render: ready %dx%d  mesh=%dx%d  robot=%d tris  %.0fms"
-              % (self._vw, self._vh, self._gw, self._gh,
+        print("gpu_render: ready %dx%d  map=%dx%d  mesh=%dx%d (%dx)  robot=%d tris  %.0fms"
+              % (self._vw, self._vh, self._mw, self._mh,
+                 self._gw, self._gh, MESH_MULT,
                  self._robot_ntris, (t1 - t0) * 1e3))
 
     def _create_context(self):
@@ -922,8 +938,8 @@ class GPURenderer:
         return self._ctx
 
     def _build_terrain(self):
-        gw = self._mw // GRID_DIV
-        gh = self._mh // GRID_DIV
+        gw = self._mw * MESH_MULT
+        gh = self._mh * MESH_MULT
         self._gw, self._gh = gw, gh
 
         verts, idx = _make_grid_data(gw, gh)
@@ -1285,7 +1301,7 @@ class GPURenderer:
         self._gm_hmap = [ctx.texture((mw, mh), 1),
                          ctx.texture((mw, mh), 1)]
         for t in self._gm_conf:
-            t.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            t.filter = (moderngl.NEAREST, moderngl.NEAREST)
             t.write(init_conf.tobytes())
         for t in self._gm_hmap:
             t.filter = (moderngl.LINEAR, moderngl.LINEAR)
@@ -1446,6 +1462,18 @@ class GPURenderer:
             t.write(init_hmap.tobytes())
         self._gm_n = 0
 
+    # ── Binary obstacle mask ─────────────────────────────────────
+
+    def _update_mask(self):
+        """Binarize conf → obstacle mask (LINEAR texture for smooth sampling)."""
+        if not getattr(self, '_gm_gl_ready', False):
+            return
+        self._mask_fbo.use()
+        self._ctx.viewport = (0, 0, self._mw, self._mh)
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        self._gm_conf[self._gm_idx].use(location=0)
+        self._vao_bin.render(moderngl.TRIANGLE_STRIP)
+
     # ── Per-frame render ─────────────────────────────────────────
 
     def render(self, x, y, theta, cameras=None,
@@ -1474,6 +1502,9 @@ class GPURenderer:
         ctx = self._ctx
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
+
+        # ── Binarize conf → smooth obstacle mask ──
+        self._update_mask()
 
         # ── 3D scene → scene FBO (for SSAO) ──
         self._scene_fbo.use()
@@ -1516,7 +1547,8 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
-        self._gm_conf[self._gm_idx].use(location=0)
+        self._mask_tex.use(location=0)
+        self._gm_conf[self._gm_idx].use(location=1)
         self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
         self._prog_t['u_cam'].value = tuple(cam.tolist())
         self._vao_t.render()
