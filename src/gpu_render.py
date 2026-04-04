@@ -53,12 +53,9 @@ uniform sampler2D u_conf;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform vec2  u_mapsz;
-uniform int   u_topdown;
 
 in vec2 in_uv;
 
-out vec3 v_col;
-out vec3 v_nrm;
 out vec3 v_w;
 out vec2 v_uv;
 
@@ -67,20 +64,22 @@ void main() {
     float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
     float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
 
-    vec3 col;
-    if (conf < 90.0) {
-        col = u_topdown == 1 ? vec3(0.65, 0.55, 0.4) : vec3(0.65);
-    } else if (conf > 190.0) {
-        col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
-    } else {
-        col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
+    float h = (conf < 90.0) ? 0.10 : 0.0;
+
+    // Volume-preserving hole fill: if all 4 cardinal neighbors are obstacle, fill
+    if (h < 0.01) {
+        vec2 ts = 1.0 / u_mapsz;
+        float cN = texture(u_conf, in_uv + vec2(0.0, ts.y)).r * 255.0;
+        float cS = texture(u_conf, in_uv - vec2(0.0, ts.y)).r * 255.0;
+        float cE = texture(u_conf, in_uv + vec2(ts.x, 0.0)).r * 255.0;
+        float cW = texture(u_conf, in_uv - vec2(ts.x, 0.0)).r * 255.0;
+        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
+            h = 0.10;
     }
 
-    v_col = col;
-    v_nrm = vec3(0.0, 1.0, 0.0);
-    v_w   = vec3(wx, 0.0, wz);
-    v_uv  = in_uv;
-    gl_Position = u_mvp * vec4(wx, 0.0, wz, 1.0);
+    v_w  = vec3(wx, h, wz);
+    v_uv = in_uv;
+    gl_Position = u_mvp * vec4(wx, h, wz, 1.0);
 }
 """
 
@@ -91,16 +90,21 @@ uniform sampler2D u_conf;
 uniform vec3  u_cam;
 uniform float u_fogfar;
 uniform int   u_topdown;
+uniform float u_px;
 
-in vec3 v_col;
-in vec3 v_nrm;
 in vec3 v_w;
 in vec2 v_uv;
 
 out vec4 fc;
 
+float obs_h(vec2 uv) {
+    return (texture(u_conf, uv).r * 255.0 < 90.0) ? 0.10 : 0.0;
+}
+
 void main() {
     float conf = texture(u_conf, v_uv).r * 255.0;
+
+    // Unknown interior: discard unless bordering known cells
     if (conf >= 90.0 && conf <= 190.0) {
         vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
         float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
@@ -114,11 +118,30 @@ void main() {
         if (!border) discard;
     }
 
-    vec3 col = v_col;
+    // Per-pixel normal from height gradient (bump map)
+    vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
+    float hL = obs_h(v_uv - vec2(ts.x, 0.0));
+    float hR = obs_h(v_uv + vec2(ts.x, 0.0));
+    float hD = obs_h(v_uv - vec2(0.0, ts.y));
+    float hU = obs_h(v_uv + vec2(0.0, ts.y));
+    vec3 nrm = normalize(vec3(hL - hR, 2.0 * u_px, hD - hU));
+
+    bool is_obs = (conf < 90.0);
+    if (!is_obs && hL > 0.01 && hR > 0.01 && hD > 0.01 && hU > 0.01)
+        is_obs = true;
+
+    vec3 col;
+    if (is_obs) {
+        col = vec3(0.65);
+    } else if (conf > 190.0) {
+        col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
+    } else {
+        col = u_topdown == 1 ? vec3(0.65, 0.55, 0.4) : vec3(0.25);
+    }
 
     if (u_topdown == 0) {
         vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
-        float nl = max(dot(v_nrm, -ld), 0.0);
+        float nl = max(dot(nrm, -ld), 0.0);
         col *= (0.35 + 0.65 * nl);
 
         float d = length(v_w - u_cam);
@@ -1809,10 +1832,6 @@ class GPURenderer:
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
 
-        # ── Binarize conf → mask, trace contours for walls ──
-        self._update_mask()
-        self._trace_obstacles()
-
         # ── 3D scene → scene FBO (for SSAO) ──
         self._scene_fbo.use()
         self._scene_fbo.clear(0.0, 0.0, 0.0, 1.0)
@@ -1859,20 +1878,6 @@ class GPURenderer:
         self._prog_t['u_mvp'].write(mvp_bytes)
         self._prog_t['u_cam'].value = tuple(cam.tolist())
         self._vao_t.render()
-
-        if self._obs_nidx > 0:
-            self._prog_obs['u_mvp'].write(mvp_bytes)
-            self._prog_obs['u_cam'].value = tuple(cam.tolist())
-            self._prog_obs['u_topdown'].value = (
-                1 if self.topdown else 0)
-            self._vao_obs.render(vertices=self._obs_nidx)
-
-        # Obstacle caps: mask texture on terrain grid at OBS_H
-        self._mask_tex.use(location=2)
-        self._prog_cap['u_mvp'].write(mvp_bytes)
-        self._prog_cap['u_cam'].value = tuple(cam.tolist())
-        self._prog_cap['u_topdown'].value = (1 if self.topdown else 0)
-        self._vao_cap.render()
 
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(
