@@ -348,6 +348,7 @@ class Vision:
             self._gpu.update_pitch_params(new_sin, new_cos, cam_h=new_cam_h)
         else:
             print("pitch_cal: within tolerance (%.3f° / %.1fcm)" % (err_deg, med_hoff * 100))
+            self._gpu.enable_obs_detection()
 
         self._pitch_cal_done = True
 

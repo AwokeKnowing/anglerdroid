@@ -439,6 +439,7 @@ uniform float u_cos_p;
 uniform float u_floor;
 uniform float u_ceil;
 uniform float u_y_off;
+uniform float u_obs_en;
 uniform vec2  u_fbo_sz;
 in vec3 in_v;
 flat out float v_h;
@@ -451,7 +452,7 @@ void main() {
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
     float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     float enc;
-    if (r.z > u_floor && phys_h > 0.05 && phys_h < u_ceil) {
+    if (u_obs_en > 0.5 && r.z > u_floor && phys_h > 0.05 && phys_h < u_ceil) {
         enc = clamp(phys_h * 100.0, 5.0, 100.0) + 1.0;
     } else {
         enc = 1.0;
@@ -1189,6 +1190,7 @@ class GPURenderer:
         p['u_cos_p'].value = self._df_cos_p
         p['u_floor'].value = self._df_floor
         p['u_ceil'].value = self._df_ceil
+        p['u_obs_en'].value = 0.0
         p['u_fbo_sz'].value = (float(ow), float(oh))
 
         df_texel = (1.0 / float(ow), 1.0 / float(oh))
@@ -1225,8 +1227,14 @@ class GPURenderer:
             p['u_sin_p'].value = self._df_sin_p
             p['u_cos_p'].value = self._df_cos_p
             p['u_rot'].write(self._df_rot.tobytes())
+            p['u_obs_en'].value = 1.0
             if cam_h is not None:
                 p['u_cam_h'].value = self._df_cam_h
+
+    def enable_obs_detection(self):
+        """Enable obstacle detection after pitch calibration completes."""
+        if getattr(self, '_df_gl_ready', False):
+            self._df_prog_obs['u_obs_en'].value = 1.0
 
     # ── GPU depth-forward pipeline ────────────────────────────────
 
