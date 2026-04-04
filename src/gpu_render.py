@@ -451,11 +451,11 @@ void main() {
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
     float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     float enc;
-    if (r.z > u_floor && phys_h > 0.03 && phys_h < u_ceil) {
-        enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
+    if (r.z > u_floor && phys_h > 0.05 && phys_h < u_ceil) {
+        enc = clamp(phys_h * 100.0, 5.0, 100.0) + 1.0;
     } else {
         enc = 1.0;
-        if (phys_h <= 0.03) gl_PointSize = 2.0;
+        if (phys_h <= 0.05) gl_PointSize = 2.0;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
