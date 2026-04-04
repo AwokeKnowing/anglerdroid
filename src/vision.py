@@ -245,7 +245,7 @@ class Vision:
         We only trust "known + no obstacle = free" within this range.
         Obstacle *detection* still uses the full cone.
         """
-        FREE_RANGE_PX = 120   # 1.2m at 1cm/px
+        FREE_RANGE_PX = 200   # 2.0m at 1cm/px
         rcx = CROSSHAIR_CX + ROBOT_CX_OFF
         rcy = CROSSHAIR_CY
         yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]

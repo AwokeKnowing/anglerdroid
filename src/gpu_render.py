@@ -823,22 +823,6 @@ def _build_obs_mesh(contours, ox, oy, px):
         all_i.append(widx)
         voff += 2 * n
 
-        # Cap vertices (up normal, separate for hard edge at top)
-        cap_ring = np.column_stack([wx, hv, wz, z0, one, z0, gv, gv, gv])
-        cx, cz = float(np.mean(wx)), float(np.mean(wz))
-        centroid = np.float32([[cx, h, cz, 0, 1, 0, g, g, g]])
-        all_v.append(cap_ring)
-        all_v.append(centroid)
-
-        cap_base = voff
-        cent_idx = cap_base + n
-        cidx = np.empty(n * 3, dtype=np.int32)
-        cidx[0::3] = cent_idx
-        cidx[1::3] = cap_base + j
-        cidx[2::3] = cap_base + jn
-        all_i.append(cidx)
-        voff = cent_idx + 1
-
     if not all_v:
         return np.empty((0, 9), dtype=np.float32), np.empty(0, dtype=np.int32)
     return np.concatenate(all_v), np.concatenate(all_i)
