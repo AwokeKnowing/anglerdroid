@@ -69,7 +69,7 @@ void main() {
 
     vec3 col;
     if (conf < 90.0) {
-        col = u_topdown == 1 ? vec3(0.55, 0.45, 0.3) : vec3(0.55);
+        col = u_topdown == 1 ? vec3(0.65, 0.55, 0.4) : vec3(0.65);
     } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
@@ -746,26 +746,36 @@ def _make_grid_data(gw, gh):
     return verts, indices
 
 
-def _chaikin_smooth(pts, iters=3):
-    """Chaikin corner-cutting subdivision on a closed polyline. (N,2) → (N*2^iters, 2)."""
+def _interp_subdiv(pts, iters=3):
+    """4-point interpolating subdivision on closed polyline.
+
+    Unlike Chaikin (approximating), this passes through the original control
+    points so the curve encloses all original obstacle pixels.
+    """
     for _ in range(iters):
-        nxt = np.roll(pts, -1, axis=0)
-        q = 0.75 * pts + 0.25 * nxt
-        r = 0.25 * pts + 0.75 * nxt
-        pts = np.empty((2 * len(q), 2), dtype=np.float32)
-        pts[0::2] = q
-        pts[1::2] = r
+        n = len(pts)
+        pm1 = np.roll(pts, 1, axis=0)
+        p1 = np.roll(pts, -1, axis=0)
+        p2 = np.roll(pts, -2, axis=0)
+        mid = 0.5 * (pts + p1) + (1.0 / 16.0) * (pts + p1 - pm1 - p2)
+        out = np.empty((2 * n, 2), dtype=np.float32)
+        out[0::2] = pts
+        out[1::2] = mid
+        pts = out
     return pts
 
 
-def _build_obs_walls(contours, ox, oy, px):
-    """Build extruded wall mesh from smoothed contours.
+OBS_H = 0.10
+OBS_COLOR = 0.65
+
+
+def _build_obs_mesh(contours, ox, oy, px):
+    """Build extruded wall + top-cap mesh from smoothed contours.
 
     Returns (verts_f32, indices_i32) where verts are (N, 9): pos xyz, nrm xyz, col rgb.
-    Walls only — the flat floor mesh provides the top cap.
     """
-    h = 0.10
-    g = 0.55
+    h = OBS_H
+    g = OBS_COLOR
     all_v = []
     all_i = []
     voff = 0
@@ -792,22 +802,41 @@ def _build_obs_walls(contours, ox, oy, px):
         z0 = np.zeros(n, dtype=np.float32)
         gv = np.full(n, g, dtype=np.float32)
         hv = np.full(n, h, dtype=np.float32)
+        one = np.ones(n, dtype=np.float32)
 
-        top = np.column_stack([wx, hv, wz, vnx, z0, vnz, gv, gv, gv])
-        bot = np.column_stack([wx, z0, wz, vnx, z0, vnz, gv, gv, gv])
-        verts = np.empty((2 * n, 9), dtype=np.float32)
-        verts[0::2] = top
-        verts[1::2] = bot
-        all_v.append(verts)
+        # Wall vertices (side normals)
+        top_w = np.column_stack([wx, hv, wz, vnx, z0, vnz, gv, gv, gv])
+        bot_w = np.column_stack([wx, z0, wz, vnx, z0, vnz, gv, gv, gv])
+        wall = np.empty((2 * n, 9), dtype=np.float32)
+        wall[0::2] = top_w
+        wall[1::2] = bot_w
+        all_v.append(wall)
 
-        idx = np.empty(n * 6, dtype=np.int32)
+        # Wall indices
+        widx = np.empty(n * 6, dtype=np.int32)
         j = np.arange(n, dtype=np.int32)
         jn = (j + 1) % n
-        t, b, tn, bn = voff + 2 * j, voff + 2 * j + 1, voff + 2 * jn, voff + 2 * jn + 1
-        idx[0::6] = t;  idx[1::6] = b;  idx[2::6] = bn
-        idx[3::6] = t;  idx[4::6] = bn; idx[5::6] = tn
-        all_i.append(idx)
+        t, b, tn, bn = voff + 2*j, voff + 2*j+1, voff + 2*jn, voff + 2*jn+1
+        widx[0::6] = t;  widx[1::6] = b;  widx[2::6] = bn
+        widx[3::6] = t;  widx[4::6] = bn; widx[5::6] = tn
+        all_i.append(widx)
         voff += 2 * n
+
+        # Cap vertices (up normal, separate for hard edge at top)
+        cap_ring = np.column_stack([wx, hv, wz, z0, one, z0, gv, gv, gv])
+        cx, cz = float(np.mean(wx)), float(np.mean(wz))
+        centroid = np.float32([[cx, h, cz, 0, 1, 0, g, g, g]])
+        all_v.append(cap_ring)
+        all_v.append(centroid)
+
+        cap_base = voff
+        cent_idx = cap_base + n
+        cidx = np.empty(n * 3, dtype=np.int32)
+        cidx[0::3] = cent_idx
+        cidx[1::3] = cap_base + j
+        cidx[2::3] = cap_base + jn
+        all_i.append(cidx)
+        voff = cent_idx + 1
 
     if not all_v:
         return np.empty((0, 9), dtype=np.float32), np.empty(0, dtype=np.int32)
@@ -1573,7 +1602,7 @@ class GPURenderer:
         self._vao_bin.render(moderngl.TRIANGLE_STRIP)
 
     def _trace_obstacles(self):
-        """Read binary mask from GPU, trace contours, smooth, build wall mesh."""
+        """Read binary mask from GPU, trace contours, smooth, build capped mesh."""
         if not _HAS_CV2 or not getattr(self, '_gm_gl_ready', False):
             self._obs_nidx = 0
             return
@@ -1581,6 +1610,16 @@ class GPURenderer:
         data = self._mask_fbo.read(components=1, alignment=1)
         mask = np.frombuffer(data, dtype=np.uint8).reshape(self._mh, self._mw)
 
+        # Morph close (dilate then erode) to merge nearby blobs and fill cracks
+        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kern)
+
+        # Fill interior holes: draw filled external contours back onto mask
+        fill_cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(mask, fill_cnts, -1, 255, cv2.FILLED)
+
+        # Trace the cleaned-up external contours
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
 
@@ -1592,7 +1631,7 @@ class GPURenderer:
             pts = approx.reshape(-1, 2).astype(np.float32)
             if len(pts) < 3:
                 continue
-            pts = _chaikin_smooth(pts, iters=3)
+            pts = _interp_subdiv(pts, iters=3)
             smoothed.append(pts)
 
         if not smoothed:
@@ -1601,7 +1640,7 @@ class GPURenderer:
 
         ox = float(self._mw) / 2.0
         oy = float(self._mh) / 2.0
-        verts, idx = _build_obs_walls(smoothed, ox, oy, PX_SIZE)
+        verts, idx = _build_obs_mesh(smoothed, ox, oy, PX_SIZE)
 
         if len(idx) == 0:
             self._obs_nidx = 0
