@@ -58,36 +58,44 @@ out vec3 v_w;
 out vec2 v_uv;
 
 void main() {
-    float conf = texture(u_conf, in_uv).r * 255.0;
-    float h_cm = conf < 90.0 ? 10.0 : 0.0;
+    vec2 ts = 1.0 / vec2(u_grid);
+    float c = texture(u_conf, in_uv).r * 255.0;
+
+    /* 3x3 binary obstacle mask (LINEAR conf gives sub-texel boundary) */
+    float s00 = texture(u_conf, in_uv + vec2(-ts.x, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s10 = texture(u_conf, in_uv + vec2(   0.0, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s20 = texture(u_conf, in_uv + vec2( ts.x, -ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s01 = texture(u_conf, in_uv + vec2(-ts.x,   0.0)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s11 = c < 90.0 ? 1.0 : 0.0;
+    float s21 = texture(u_conf, in_uv + vec2( ts.x,   0.0)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s02 = texture(u_conf, in_uv + vec2(-ts.x,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s12 = texture(u_conf, in_uv + vec2(   0.0,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+    float s22 = texture(u_conf, in_uv + vec2( ts.x,  ts.y)).r * 255.0 < 90.0 ? 1.0 : 0.0;
+
+    float avg = (s00+s10+s20 + s01+s11+s21 + s02+s12+s22) / 9.0;
+    float h_cm = smoothstep(0.1, 0.55, avg) * 10.0;
     float h_m  = h_cm * 0.01;
 
     float mw = float(u_grid.x * u_gdiv);
     float mh = float(u_grid.y * u_gdiv);
     float wx = (in_uv.x * mw - u_origin.x) * u_px;
     float wz = (in_uv.y * mh - u_origin.y) * u_px;
-
     vec3 p = vec3(wx, h_m, wz);
 
-    vec2 ts = 1.0 / vec2(u_grid);
-    float cL = texture(u_conf, in_uv - vec2(ts.x, 0)).r * 255.0;
-    float cR = texture(u_conf, in_uv + vec2(ts.x, 0)).r * 255.0;
-    float cD = texture(u_conf, in_uv - vec2(0, ts.y)).r * 255.0;
-    float cU = texture(u_conf, in_uv + vec2(0, ts.y)).r * 255.0;
-
+    /* Normals from column/row averages through same smoothstep */
+    float hL = smoothstep(0.1, 0.55, (s00 + s01 + s02) / 3.0) * 10.0;
+    float hR = smoothstep(0.1, 0.55, (s20 + s21 + s22) / 3.0) * 10.0;
+    float hD = smoothstep(0.1, 0.55, (s00 + s10 + s20) / 3.0) * 10.0;
+    float hU = smoothstep(0.1, 0.55, (s02 + s12 + s22) / 3.0) * 10.0;
     float cell_m = float(u_gdiv) * u_px;
-    float hL = cL < 90.0 ? 10.0 : 0.0;
-    float hR = cR < 90.0 ? 10.0 : 0.0;
-    float hD = cD < 90.0 ? 10.0 : 0.0;
-    float hU = cU < 90.0 ? 10.0 : 0.0;
     float dx = (hR - hL) * 0.01 / (2.0 * cell_m);
     float dz = (hU - hD) * 0.01 / (2.0 * cell_m);
     vec3 nrm = normalize(vec3(-dx, 1.0, -dz));
 
     vec3 col;
-    if (h_cm > 0.0) {
+    if (h_cm > 0.5) {
         col = u_topdown == 1 ? vec3(0.55, 0.45, 0.3) : vec3(0.55);
-    } else if (conf > 190.0) {
+    } else if (c > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
         col = u_topdown == 1 ? vec3(0.4) : vec3(0.25);
