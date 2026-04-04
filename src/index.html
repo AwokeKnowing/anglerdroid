@@ -106,6 +106,7 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
         <label style="font-size:.75rem;margin-left:6px;cursor:pointer">
           <input type="checkbox" id="dbg-depth" onchange="toggleDebug('depth')"> Depth scatter
         </label>
+        <button style="margin-left:10px;font-size:.7rem;padding:2px 8px;background:#456;color:#fff;border:1px solid #678;border-radius:3px;cursor:pointer" onclick="requestCalibrate()">Calibrate</button>
       </div>
     </div>
     <div class="tab-bar">
@@ -259,6 +260,9 @@ function navStop() {
 
 function toggleDebug(key) {
   if (ws) ws.send(JSON.stringify({type: 'debug_toggle', key: key}));
+}
+function requestCalibrate() {
+  if (ws) ws.send(JSON.stringify({type: 'calibrate'}));
 }
 
 function toggleAI() {

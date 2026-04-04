@@ -166,6 +166,8 @@ class Vision:
         self.atlas = np.zeros((ATLAS_H, ATLAS_W, 3), dtype=np.uint8)
         self.timestamp = 0.0
         self.debug_depth = False
+        self._pitch_cal_request = False
+        self._pitch_cal_done = False
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
@@ -289,6 +291,81 @@ class Vision:
         self._thread.start()
         print("vision: capture thread started")
 
+    def _render_side_view(self):
+        """Render a side-view cross-section showing height vs forward distance.
+
+        Plots RS1 (cyan) and RS2 (yellow) depth points from the side so you
+        can see if the floor planes align.  200x150 px, placed upper-right of 3D area.
+        """
+        W, H = 200, 150
+        sv = np.zeros((H, W, 3), dtype=np.uint8)
+        sv[:] = 20
+
+        max_d = 2.5
+        h_lo, h_hi = -0.15, 0.35
+
+        def to_px(fwd, height):
+            px = int(fwd / max_d * (W - 1))
+            py = int((1.0 - (height - h_lo) / (h_hi - h_lo)) * (H - 1))
+            return px, py
+
+        # Floor line (y=0)
+        _, y0 = to_px(0, 0.0)
+        if 0 <= y0 < H:
+            sv[y0, :] = [60, 60, 60]
+
+        # 5cm obstacle threshold
+        _, yt = to_px(0, 0.05)
+        if 0 <= yt < H:
+            sv[yt, :] = [0, 50, 80]
+
+        sin_p = self._gpu._df_sin_p if hasattr(self._gpu, '_df_sin_p') else float(_fw_sin_pitch)
+        cos_p = self._gpu._df_cos_p if hasattr(self._gpu, '_df_cos_p') else float(_fw_cos_pitch)
+        cam_h = self._gpu._df_cam_h if hasattr(self._gpu, '_df_cam_h') else float(FW_CAM_HEIGHT)
+
+        # RS1 top-down points (cyan)
+        if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
+            pts = self._rs1.verts.reshape(-1, 3)
+            valid = pts[:, 2] > 0
+            pts = pts[valid]
+            if len(pts) > 0:
+                step = max(1, len(pts) // 2000)
+                pts = pts[::step]
+                td_height = float(TD_FLOOR_CLIP) - pts[:, 2]
+                fwd = -pts[:, 1]
+                for i in range(len(pts)):
+                    px, py = to_px(float(fwd[i]), float(td_height[i]))
+                    if 0 <= px < W and 0 <= py < H:
+                        sv[py, px] = [200, 200, 0]
+
+        # RS2 forward points (yellow-green)
+        if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
+            pts = self._rs2.verts.reshape(-1, 3)
+            valid = pts[:, 2] > 0.1
+            pts = pts[valid]
+            if len(pts) > 0:
+                step = max(1, len(pts) // 2000)
+                pts = pts[::step]
+                phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
+                fwd_d = pts[:, 2] * float(_fw_cos_pitch) - pts[:, 1] * float(_fw_sin_pitch)
+                for i in range(len(pts)):
+                    px, py = to_px(float(fwd_d[i]), float(phys_h[i]))
+                    if 0 <= px < W and 0 <= py < H:
+                        sv[py, px] = [0, 200, 100]
+
+        # Border
+        sv[0, :] = sv[-1, :] = sv[:, 0] = sv[:, -1] = [80, 80, 80]
+
+        return sv
+
+    def request_calibration(self):
+        """Trigger pitch calibration from the UI. Resets state for a fresh 20-frame run."""
+        self._pitch_cal_deltas = []
+        self._pitch_cal_hoffsets = []
+        self._pitch_cal_done = False
+        self._pitch_cal_request = True
+        print("pitch_cal: calibration requested — collecting 20 frames")
+
     def _calibrate_rs2_pitch(self, verts):
         """Estimate RS2 pitch error by fitting a plane to floor points.
 
@@ -352,6 +429,7 @@ class Vision:
             print("pitch_cal: within tolerance (%.3f° / %.1fcm)" % (err_deg, med_hoff * 100))
 
         self._pitch_cal_done = True
+        self._pitch_cal_request = False
 
     def _stub_loop(self):
         interval = 1.0 / TARGET_FPS
@@ -409,13 +487,12 @@ class Vision:
             _raw_scatter = None
             _dbg = self.debug_depth
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                if not getattr(self, '_pitch_cal_done', False):
+                if getattr(self, '_pitch_cal_request', False):
                     self._calibrate_rs2_pitch(self._rs2.verts)
-                if getattr(self, '_pitch_cal_done', False):
-                    _gpu_result = self._gpu.depth_forward_gpu(
-                        self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
-                    if _gpu_result is not None:
-                        z2, k2, _raw_scatter = _gpu_result
+                _gpu_result = self._gpu.depth_forward_gpu(
+                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                if _gpu_result is not None:
+                    z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
@@ -581,6 +658,11 @@ class Vision:
                 dbg2[obs_combined > 0] = [255, 0, 0]
                 d2h, d2w = dbg2.shape[:2]
                 atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
+
+                # Side-view cross-section (upper-right of 3D area)
+                sv = self._render_side_view()
+                svh, svw = sv.shape[:2]
+                atlas[FRAME_H:FRAME_H + svh, ATLAS_W - svw:ATLAS_W] = sv
 
             with self._lock:
                 self.frames[0][:] = rgb1

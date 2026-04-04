@@ -195,6 +195,7 @@ class UI:
         self._last_gemini_send = 0.0
         self._agent_state = ""
         self.debug_flags = {"depth": False}
+        self.calibrate_requested = False
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -414,6 +415,11 @@ class UI:
 
                 elif t == "stop_ai":
                     self._stop_gemini()
+
+                elif t == "calibrate":
+                    self.calibrate_requested = True
+                    self._broadcast({"type": "chat", "sender": "sys",
+                                     "text": "Pitch calibration started (20 frames)"})
 
                 elif t == "debug_toggle":
                     key = data.get("key", "")

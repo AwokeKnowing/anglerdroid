@@ -103,6 +103,9 @@ def main():
 
             # Propagate debug flags from UI to vision
             vis.debug_depth = u.debug_flags.get("depth", False)
+            if u.calibrate_requested:
+                u.calibrate_requested = False
+                vis.request_calibration()
 
             # Safety override — directional scaling (fwd / bwd / angular independent)
             if wb is not None:
