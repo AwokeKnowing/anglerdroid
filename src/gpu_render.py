@@ -1139,7 +1139,6 @@ class GPURenderer:
         p['u_cam_h'].value = self._df_cam_h
         p['u_sin_p'].value = self._df_sin_p
         p['u_cos_p'].value = self._df_cos_p
-        p['u_floor'].value = self._df_floor
         p['u_ceil'].value = self._df_ceil
         p['u_fbo_sz'].value = (float(ow), float(oh))
 
