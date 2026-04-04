@@ -1517,7 +1517,7 @@ class GPURenderer:
             [0, 0, 1]])
 
     def gmap_update_gpu(self, obs_ego, known_ego, x, y, theta,
-                        cx, cy, ego_px):
+                        cx, cy, ego_px, free_range_mask=None):
         """GPU evidence update. Returns True on success."""
         if not getattr(self, '_gm_configured', False):
             return False
@@ -1536,6 +1536,8 @@ class GPURenderer:
         h, w = obs_ego.shape[:2]
         ego_enc = np.zeros((h, w), dtype=np.uint8)
         free = (known_ego > 0) & (obs_ego == 0)
+        if free_range_mask is not None:
+            free &= (free_range_mask > 0)
         ego_enc[free] = 1
         obs_px = obs_ego > 0
         ego_enc[obs_px] = np.minimum(

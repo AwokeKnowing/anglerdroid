@@ -172,6 +172,7 @@ class Vision:
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._global_map = PoseGraphSLAM()
         self._obs_mask, self._fw_cone_mask = self._build_obs_mask()
+        self._free_range_mask = self._build_free_range_mask()
         self._wheelbase = None
         self._last_capture_time = None
 
@@ -233,6 +234,26 @@ class Vision:
         # Clear robot footprint (force-set to known+free in capture loop)
         mask[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
         return mask, fw_cone
+
+    @staticmethod
+    def _build_free_range_mask():
+        """Range-limited mask for free evidence.
+
+        At distance, small pose errors cause ego→global misalignment.
+        Floor pixels adjacent to an obstacle leak into its global cells,
+        generating spurious "free" evidence that erodes obstacles.
+        We only trust "known + no obstacle = free" within this range.
+        Obstacle *detection* still uses the full cone.
+        """
+        FREE_RANGE_PX = 150   # 1.5m at 1cm/px
+        rcx = CROSSHAIR_CX + ROBOT_CX_OFF
+        rcy = CROSSHAIR_CY
+        yy, xx = np.mgrid[0:FRAME_H, 0:FRAME_W]
+        dd = np.sqrt((xx - rcx).astype(np.float32)**2 +
+                     (yy - rcy).astype(np.float32)**2)
+        mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        mask[dd <= FREE_RANGE_PX] = 255
+        return mask
 
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""
@@ -301,7 +322,7 @@ class Vision:
             self._pitch_cal_deltas = []
         self._pitch_cal_deltas.append(delta)
 
-        if len(self._pitch_cal_deltas) < 5:
+        if len(self._pitch_cal_deltas) < 20:
             return
 
         med_delta = float(np.median(self._pitch_cal_deltas))
@@ -495,7 +516,8 @@ class Vision:
             self._gpu.gmap_update_gpu(
                 obs_combined, known_combined,
                 cap_x, cap_y, cap_theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE))
+                rcx_f, rcy_f, float(TD_PX_SIZE),
+                free_range_mask=self._free_range_mask)
             self._global_map.keyframe_check(
                 obs_combined, known_combined,
                 cap_x, cap_y, cap_theta,
