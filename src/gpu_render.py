@@ -449,18 +449,13 @@ void main() {
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
+    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     float enc;
-    if (r.z > u_floor && r.z < u_ceil) {
-        float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
-        if (phys_h > 0.03) {
-            enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
-        } else {
-            enc = 1.0;
-            gl_PointSize = 2.0;
-        }
+    if (r.z > u_floor && phys_h > 0.03 && phys_h < u_ceil) {
+        enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
     } else {
         enc = 1.0;
-        gl_PointSize = 2.0;
+        if (phys_h <= 0.03) gl_PointSize = 2.0;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
@@ -784,7 +779,7 @@ def _ear_clip(pts):
     sa = float(np.sum(pts[:-1, 0] * pts[1:, 1] - pts[1:, 0] * pts[:-1, 1]))
     sa += float(pts[-1, 0] * pts[0, 1] - pts[0, 0] * pts[-1, 1])
     idx = list(range(n))
-    if sa > 0:
+    if sa < 0:
         idx.reverse()
 
     tris = []
