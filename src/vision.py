@@ -268,6 +268,62 @@ class Vision:
         self._thread.start()
         print("vision: capture thread started")
 
+    def _calibrate_rs2_pitch(self, verts):
+        """Estimate RS2 pitch error by fitting a plane to floor points.
+
+        If the pitch is off by δ radians, floor points show residual height
+        proportional to depth: phys_h ≈ δ * (y·sin_p − z·cos_p).
+        We regress that to find δ, then auto-correct sin_p/cos_p.
+        """
+        pts = verts.reshape(-1, 3)
+        valid = (pts[:, 2] > 0.3) & (pts[:, 2] < 3.0)
+        pts = pts[valid]
+        if len(pts) < 200:
+            return
+
+        sin_p, cos_p = float(_fw_sin_pitch), float(_fw_cos_pitch)
+        cam_h = float(FW_CAM_HEIGHT)
+
+        phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
+        floor = np.abs(phys_h) < 0.05
+        fp = pts[floor]
+        fh = phys_h[floor]
+
+        if len(fp) < 50:
+            return
+
+        f = fp[:, 1] * sin_p - fp[:, 2] * cos_p
+        A = np.column_stack([f, np.ones(len(f))])
+        result = np.linalg.lstsq(A, fh, rcond=None)
+        delta, h_off = result[0]
+
+        if not hasattr(self, '_pitch_cal_deltas'):
+            self._pitch_cal_deltas = []
+        self._pitch_cal_deltas.append(delta)
+
+        if len(self._pitch_cal_deltas) < 5:
+            return
+
+        med_delta = float(np.median(self._pitch_cal_deltas))
+        err_deg = math.degrees(med_delta)
+
+        print("pitch_cal: error=%.3f° h_offset=%.1fcm (%d samples, %d pts/frame)" % (
+            err_deg, h_off * 100, len(self._pitch_cal_deltas), len(fp)))
+
+        if abs(med_delta) > math.radians(0.05):
+            new_pitch = _fw_pitch_rad + med_delta
+            new_sin = float(abs(math.sin(new_pitch)))
+            new_cos = float(abs(math.cos(new_pitch)))
+            print("pitch_cal: correcting pitch %.2f° → %.2f° "
+                  "(sin %.4f→%.4f, cos %.4f→%.4f)" % (
+                  FW_PITCH_DEG, FW_PITCH_DEG + err_deg,
+                  sin_p, new_sin, cos_p, new_cos))
+            self._gpu.update_pitch_params(new_sin, new_cos)
+        else:
+            print("pitch_cal: pitch within tolerance (%.3f°)" % err_deg)
+
+        self._pitch_cal_done = True
+
     def _stub_loop(self):
         interval = 1.0 / TARGET_FPS
         while self._running:
@@ -324,6 +380,8 @@ class Vision:
             _raw_scatter = None
             _dbg = self.debug_depth
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
+                if not getattr(self, '_pitch_cal_done', False):
+                    self._calibrate_rs2_pitch(self._rs2.verts)
                 _gpu_result = self._gpu.depth_forward_gpu(
                     self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
                 if _gpu_result is not None:

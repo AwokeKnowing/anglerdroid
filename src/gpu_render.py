@@ -1167,6 +1167,19 @@ class GPURenderer:
         print("gpu_render: depth_forward ready %dx%d (floor-as-free)"
               % (ow, oh))
 
+    def update_pitch_params(self, sin_p, cos_p, cam_h=None):
+        """Hot-update the RS2 pitch calibration without full reinit."""
+        self._df_sin_p = float(sin_p)
+        self._df_cos_p = float(cos_p)
+        if cam_h is not None:
+            self._df_cam_h = float(cam_h)
+        if getattr(self, '_df_gl_ready', False):
+            p = self._df_prog_obs
+            p['u_sin_p'].value = self._df_sin_p
+            p['u_cos_p'].value = self._df_cos_p
+            if cam_h is not None:
+                p['u_cam_h'].value = self._df_cam_h
+
     # ── GPU depth-forward pipeline ────────────────────────────────
 
     def depth_forward_gpu(self, verts, y_offset=0.0, debug=False):
