@@ -15,9 +15,14 @@ try:
 except ImportError:
     _HAS_MGL = False
 
+try:
+    import cv2
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
+
 # ── Configuration ────────────────────────────────────────────────
 GRID_DIV = 1           # map pixels per mesh vertex (for gmap uniforms)
-MESH_MULT = 2          # mesh vertices per map pixel (2× oversample → smooth boundaries)
 
 CAM_BEHIND = 2.5       # m behind robot
 CAM_HEIGHT = 3.0       # m above ground
@@ -44,12 +49,10 @@ _VERT_TERRAIN = """
 #version 330
 
 uniform mat4  u_mvp;
-uniform sampler2D u_mask;
 uniform sampler2D u_conf;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform vec2  u_mapsz;
-uniform ivec2 u_grid;
 uniform int   u_topdown;
 
 in vec2 in_uv;
@@ -60,33 +63,12 @@ out vec3 v_w;
 out vec2 v_uv;
 
 void main() {
-    vec2 ts = 1.0 / vec2(u_grid);
-
-    float m  = texture(u_mask, in_uv).r;
-    float mL = texture(u_mask, in_uv - vec2(ts.x, 0)).r;
-    float mR = texture(u_mask, in_uv + vec2(ts.x, 0)).r;
-    float mD = texture(u_mask, in_uv - vec2(0, ts.y)).r;
-    float mU = texture(u_mask, in_uv + vec2(0, ts.y)).r;
-
-    float h_cm = smoothstep(0.3, 0.7, m) * 10.0;
-    float h_m  = h_cm * 0.01;
-
+    float conf = texture(u_conf, in_uv).r * 255.0;
     float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
     float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
-    vec3 p = vec3(wx, h_m, wz);
 
-    float hL = smoothstep(0.3, 0.7, mL) * 10.0;
-    float hR = smoothstep(0.3, 0.7, mR) * 10.0;
-    float hD = smoothstep(0.3, 0.7, mD) * 10.0;
-    float hU = smoothstep(0.3, 0.7, mU) * 10.0;
-    float cell_m = u_mapsz.x / float(u_grid.x) * u_px;
-    float dx = (hR - hL) * 0.01 / (2.0 * cell_m);
-    float dz = (hU - hD) * 0.01 / (2.0 * cell_m);
-    vec3 nrm = normalize(vec3(-dx, 1.0, -dz));
-
-    float conf = texture(u_conf, in_uv).r * 255.0;
     vec3 col;
-    if (h_cm > 0.5) {
+    if (conf < 90.0) {
         col = u_topdown == 1 ? vec3(0.55, 0.45, 0.3) : vec3(0.55);
     } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
@@ -95,10 +77,10 @@ void main() {
     }
 
     v_col = col;
-    v_nrm = nrm;
-    v_w   = p;
+    v_nrm = vec3(0.0, 1.0, 0.0);
+    v_w   = vec3(wx, 0.0, wz);
     v_uv  = in_uv;
-    gl_Position = u_mvp * vec4(p, 1.0);
+    gl_Position = u_mvp * vec4(wx, 0.0, wz, 1.0);
 }
 """
 
@@ -118,20 +100,18 @@ in vec2 v_uv;
 out vec4 fc;
 
 void main() {
-    if (v_w.y < 0.005) {
-        float conf = texture(u_conf, v_uv).r * 255.0;
-        if (conf >= 90.0 && conf <= 190.0) {
-            vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
-            float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
-            float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
-            float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
-            float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
-            bool border = (cn > 190.0 || cn < 90.0) ||
-                          (cs > 190.0 || cs < 90.0) ||
-                          (ce > 190.0 || ce < 90.0) ||
-                          (cw > 190.0 || cw < 90.0);
-            if (!border) discard;
-        }
+    float conf = texture(u_conf, v_uv).r * 255.0;
+    if (conf >= 90.0 && conf <= 190.0) {
+        vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
+        float cn = texture(u_conf, v_uv + vec2(0, ts.y)).r * 255.0;
+        float cs = texture(u_conf, v_uv - vec2(0, ts.y)).r * 255.0;
+        float ce = texture(u_conf, v_uv + vec2(ts.x, 0)).r * 255.0;
+        float cw = texture(u_conf, v_uv - vec2(ts.x, 0)).r * 255.0;
+        bool border = (cn > 190.0 || cn < 90.0) ||
+                      (cs > 190.0 || cs < 90.0) ||
+                      (ce > 190.0 || ce < 90.0) ||
+                      (cw > 190.0 || cw < 90.0);
+        if (!border) discard;
     }
 
     vec3 col = v_col;
@@ -146,6 +126,46 @@ void main() {
         col = mix(col, vec3(0.0), fog);
     }
 
+    fc = vec4(col, 1.0);
+}
+"""
+
+_VERT_OBS_MESH = """
+#version 330
+uniform mat4 u_mvp;
+in vec3 in_pos;
+in vec3 in_nrm;
+in vec3 in_col;
+out vec3 v_col;
+out vec3 v_nrm;
+out vec3 v_w;
+void main() {
+    v_col = in_col;
+    v_nrm = in_nrm;
+    v_w = in_pos;
+    gl_Position = u_mvp * vec4(in_pos, 1.0);
+}
+"""
+
+_FRAG_OBS_MESH = """
+#version 330
+uniform vec3 u_cam;
+uniform float u_fogfar;
+uniform int u_topdown;
+in vec3 v_col;
+in vec3 v_nrm;
+in vec3 v_w;
+out vec4 fc;
+void main() {
+    vec3 col = v_col;
+    if (u_topdown == 0) {
+        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
+        float nl = max(dot(v_nrm, -ld), 0.0);
+        col *= (0.35 + 0.65 * nl);
+        float d = length(v_w - u_cam);
+        float fog = clamp(d / u_fogfar, 0.0, 0.75);
+        col = mix(col, vec3(0.0), fog);
+    }
     fc = vec4(col, 1.0);
 }
 """
@@ -726,6 +746,74 @@ def _make_grid_data(gw, gh):
     return verts, indices
 
 
+def _chaikin_smooth(pts, iters=3):
+    """Chaikin corner-cutting subdivision on a closed polyline. (N,2) → (N*2^iters, 2)."""
+    for _ in range(iters):
+        nxt = np.roll(pts, -1, axis=0)
+        q = 0.75 * pts + 0.25 * nxt
+        r = 0.25 * pts + 0.75 * nxt
+        pts = np.empty((2 * len(q), 2), dtype=np.float32)
+        pts[0::2] = q
+        pts[1::2] = r
+    return pts
+
+
+def _build_obs_walls(contours, ox, oy, px):
+    """Build extruded wall mesh from smoothed contours.
+
+    Returns (verts_f32, indices_i32) where verts are (N, 9): pos xyz, nrm xyz, col rgb.
+    Walls only — the flat floor mesh provides the top cap.
+    """
+    h = 0.10
+    g = 0.55
+    all_v = []
+    all_i = []
+    voff = 0
+
+    for pts in contours:
+        n = len(pts)
+        if n < 3:
+            continue
+        wx = (pts[:, 0] - ox) * px
+        wz = (pts[:, 1] - oy) * px
+
+        dx = np.roll(wx, -1) - wx
+        dz = np.roll(wz, -1) - wz
+        elen = np.maximum(np.sqrt(dx * dx + dz * dz), 1e-6)
+        enx = dz / elen
+        enz = -dx / elen
+
+        vnx = 0.5 * (enx + np.roll(enx, 1))
+        vnz = 0.5 * (enz + np.roll(enz, 1))
+        vnl = np.maximum(np.sqrt(vnx * vnx + vnz * vnz), 1e-6)
+        vnx /= vnl
+        vnz /= vnl
+
+        z0 = np.zeros(n, dtype=np.float32)
+        gv = np.full(n, g, dtype=np.float32)
+        hv = np.full(n, h, dtype=np.float32)
+
+        top = np.column_stack([wx, hv, wz, vnx, z0, vnz, gv, gv, gv])
+        bot = np.column_stack([wx, z0, wz, vnx, z0, vnz, gv, gv, gv])
+        verts = np.empty((2 * n, 9), dtype=np.float32)
+        verts[0::2] = top
+        verts[1::2] = bot
+        all_v.append(verts)
+
+        idx = np.empty(n * 6, dtype=np.int32)
+        j = np.arange(n, dtype=np.int32)
+        jn = (j + 1) % n
+        t, b, tn, bn = voff + 2 * j, voff + 2 * j + 1, voff + 2 * jn, voff + 2 * jn + 1
+        idx[0::6] = t;  idx[1::6] = b;  idx[2::6] = bn
+        idx[3::6] = t;  idx[4::6] = bn; idx[5::6] = tn
+        all_i.append(idx)
+        voff += 2 * n
+
+    if not all_v:
+        return np.empty((0, 9), dtype=np.float32), np.empty(0, dtype=np.int32)
+    return np.concatenate(all_v), np.concatenate(all_i)
+
+
 # ── Robot mesh triangulation ─────────────────────────────────────
 
 def _triangulate_robot():
@@ -826,9 +914,9 @@ class GPURenderer:
         fsq = np.float32([-1, -1, 1, -1, -1, 1, 1, 1])
         self._fsq_vbo = ctx.buffer(fsq.tobytes())
 
-        # Binary obstacle mask (binarize conf → 0/1, LINEAR for smooth upsample)
+        # Binary obstacle mask (binarize conf → 0/1 for CPU contour tracing)
         self._mask_tex = ctx.texture((self._mw, self._mh), 1)
-        self._mask_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._mask_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
         self._mask_fbo = ctx.framebuffer(color_attachments=[self._mask_tex])
         self._prog_bin = ctx.program(
             vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BINARIZE)
@@ -836,22 +924,32 @@ class GPURenderer:
         self._vao_bin = ctx.vertex_array(
             self._prog_bin, [(self._fsq_vbo, '2f', 'in_pos')])
 
-        # Terrain shader (smooth 10cm curb extrusion via oversampled binary mask)
-        gw = self._mw * MESH_MULT
-        gh = self._mh * MESH_MULT
-
+        # Flat floor terrain (obstacles drawn as separate extruded contour mesh)
         self._prog_t = ctx.program(
             vertex_shader=_VERT_TERRAIN, fragment_shader=_FRAG_TERRAIN)
         self._prog_t['u_origin'].value = (
             float(self._mw // 2), float(self._mh // 2))
         self._prog_t['u_px'].value = PX_SIZE
         self._prog_t['u_fogfar'].value = FOG_DIST
-        self._prog_t['u_mask'].value = 0
-        self._prog_t['u_conf'].value = 1
+        self._prog_t['u_conf'].value = 0
         self._prog_t['u_topdown'].value = 0
         self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
-        self._prog_t['u_grid'].value = (gw, gh)
         self._build_terrain()
+
+        # Obstacle wall mesh (extruded smooth contours, rebuilt per frame)
+        self._prog_obs = ctx.program(
+            vertex_shader=_VERT_OBS_MESH, fragment_shader=_FRAG_OBS_MESH)
+        self._prog_obs['u_fogfar'].value = FOG_DIST
+        self._prog_obs['u_topdown'].value = 0
+        max_obs_verts = 200000
+        max_obs_idx = 600000
+        self._obs_vbo = ctx.buffer(reserve=max_obs_verts * 9 * 4)
+        self._obs_ibo = ctx.buffer(reserve=max_obs_idx * 4)
+        self._vao_obs = ctx.vertex_array(
+            self._prog_obs,
+            [(self._obs_vbo, '3f 3f 3f', 'in_pos', 'in_nrm', 'in_col')],
+            index_buffer=self._obs_ibo, index_element_size=4)
+        self._obs_nidx = 0
 
         # Robot shader + mesh
         self._prog_r = ctx.program(
@@ -924,9 +1022,9 @@ class GPURenderer:
             self._init_odom_gl()
 
         t1 = time.monotonic()
-        print("gpu_render: ready %dx%d  map=%dx%d  mesh=%dx%d (%dx)  robot=%d tris  %.0fms"
+        print("gpu_render: ready %dx%d  map=%dx%d  floor=%dx%d  robot=%d tris  %.0fms"
               % (self._vw, self._vh, self._mw, self._mh,
-                 self._gw, self._gh, MESH_MULT,
+                 self._gw, self._gh,
                  self._robot_ntris, (t1 - t0) * 1e3))
 
     def _create_context(self):
@@ -938,8 +1036,8 @@ class GPURenderer:
         return self._ctx
 
     def _build_terrain(self):
-        gw = self._mw * MESH_MULT
-        gh = self._mh * MESH_MULT
+        gw = self._mw // GRID_DIV
+        gh = self._mh // GRID_DIV
         self._gw, self._gh = gw, gh
 
         verts, idx = _make_grid_data(gw, gh)
@@ -1462,10 +1560,10 @@ class GPURenderer:
             t.write(init_hmap.tobytes())
         self._gm_n = 0
 
-    # ── Binary obstacle mask ─────────────────────────────────────
+    # ── Obstacle contour tracing ─────────────────────────────────
 
     def _update_mask(self):
-        """Binarize conf → obstacle mask (LINEAR texture for smooth sampling)."""
+        """Binarize conf → obstacle mask texture (for CPU contour readback)."""
         if not getattr(self, '_gm_gl_ready', False):
             return
         self._mask_fbo.use()
@@ -1473,6 +1571,51 @@ class GPURenderer:
         self._ctx.disable(moderngl.DEPTH_TEST)
         self._gm_conf[self._gm_idx].use(location=0)
         self._vao_bin.render(moderngl.TRIANGLE_STRIP)
+
+    def _trace_obstacles(self):
+        """Read binary mask from GPU, trace contours, smooth, build wall mesh."""
+        if not _HAS_CV2 or not getattr(self, '_gm_gl_ready', False):
+            self._obs_nidx = 0
+            return
+
+        data = self._mask_fbo.read(components=1, alignment=1)
+        mask = np.frombuffer(data, dtype=np.uint8).reshape(self._mh, self._mw)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+
+        smoothed = []
+        for cnt in contours:
+            if cv2.contourArea(cnt) < 4:
+                continue
+            approx = cv2.approxPolyDP(cnt, 1.5, True)
+            pts = approx.reshape(-1, 2).astype(np.float32)
+            if len(pts) < 3:
+                continue
+            pts = _chaikin_smooth(pts, iters=3)
+            smoothed.append(pts)
+
+        if not smoothed:
+            self._obs_nidx = 0
+            return
+
+        ox = float(self._mw) / 2.0
+        oy = float(self._mh) / 2.0
+        verts, idx = _build_obs_walls(smoothed, ox, oy, PX_SIZE)
+
+        if len(idx) == 0:
+            self._obs_nidx = 0
+            return
+
+        vb = verts.tobytes()
+        ib = idx.tobytes()
+        if len(vb) > self._obs_vbo.size:
+            self._obs_vbo.orphan(len(vb))
+        if len(ib) > self._obs_ibo.size:
+            self._obs_ibo.orphan(len(ib))
+        self._obs_vbo.write(vb)
+        self._obs_ibo.write(ib)
+        self._obs_nidx = len(idx)
 
     # ── Per-frame render ─────────────────────────────────────────
 
@@ -1503,8 +1646,9 @@ class GPURenderer:
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
 
-        # ── Binarize conf → smooth obstacle mask ──
+        # ── Binarize conf → mask, then trace contours on CPU ──
         self._update_mask()
+        self._trace_obstacles()
 
         # ── 3D scene → scene FBO (for SSAO) ──
         self._scene_fbo.use()
@@ -1547,11 +1691,18 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
-        self._mask_tex.use(location=0)
-        self._gm_conf[self._gm_idx].use(location=1)
-        self._prog_t['u_mvp'].write(mvp.T.astype(np.float32).tobytes())
+        self._gm_conf[self._gm_idx].use(location=0)
+        mvp_bytes = mvp.T.astype(np.float32).tobytes()
+        self._prog_t['u_mvp'].write(mvp_bytes)
         self._prog_t['u_cam'].value = tuple(cam.tolist())
         self._vao_t.render()
+
+        if self._obs_nidx > 0:
+            self._prog_obs['u_mvp'].write(mvp_bytes)
+            self._prog_obs['u_cam'].value = tuple(cam.tolist())
+            self._prog_obs['u_topdown'].value = (
+                1 if self.topdown else 0)
+            self._vao_obs.render(vertices=self._obs_nidx)
 
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(
