@@ -456,11 +456,11 @@ void main() {
             enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
         } else {
             enc = 1.0;
-            gl_PointSize = 3.0;
+            gl_PointSize = 2.0;
         }
     } else {
         enc = 1.0;
-        gl_PointSize = 3.0;
+        gl_PointSize = 2.0;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
@@ -770,6 +770,62 @@ OBS_H = 0.10
 OBS_COLOR = 0.65
 
 
+def _ear_clip(pts):
+    """Ear-clipping triangulation for a 2D simple polygon.
+
+    Returns index array (M*3,) into pts. Handles concave shapes correctly.
+    """
+    n = len(pts)
+    if n < 3:
+        return np.empty(0, dtype=np.int32)
+    if n == 3:
+        return np.array([0, 1, 2], dtype=np.int32)
+
+    sa = float(np.sum(pts[:-1, 0] * pts[1:, 1] - pts[1:, 0] * pts[:-1, 1]))
+    sa += float(pts[-1, 0] * pts[0, 1] - pts[0, 0] * pts[-1, 1])
+    idx = list(range(n))
+    if sa > 0:
+        idx.reverse()
+
+    tris = []
+    stall = 0
+    while len(idx) > 2:
+        if stall > len(idx):
+            break
+        ni = len(idx)
+        clipped = False
+        for i in range(ni):
+            ip = (i - 1) % ni
+            inn = (i + 1) % ni
+            ai, bi, ci = idx[ip], idx[i], idx[inn]
+            a, b, c = pts[ai], pts[bi], pts[ci]
+
+            cross = (b[0]-a[0])*(c[1]-a[1]) - (b[1]-a[1])*(c[0]-a[0])
+            if cross <= 1e-8:
+                continue
+
+            others = np.array([idx[j] for j in range(ni)
+                               if j != ip and j != i and j != inn])
+            if len(others) > 0:
+                op = pts[others]
+                d1 = (op[:, 0]-a[0])*(b[1]-a[1]) - (op[:, 1]-a[1])*(b[0]-a[0])
+                d2 = (op[:, 0]-b[0])*(c[1]-b[1]) - (op[:, 1]-b[1])*(c[0]-b[0])
+                d3 = (op[:, 0]-c[0])*(a[1]-c[1]) - (op[:, 1]-c[1])*(a[0]-c[0])
+                if np.any((d1 >= 0) & (d2 >= 0) & (d3 >= 0)):
+                    continue
+
+            tris.extend([ai, bi, ci])
+            idx.pop(i)
+            clipped = True
+            stall = 0
+            break
+
+        if not clipped:
+            stall += 1
+
+    return np.array(tris, dtype=np.int32) if tris else np.empty(0, dtype=np.int32)
+
+
 def _build_obs_mesh(contours, ox, oy, px):
     """Build extruded wall + top-cap mesh from smoothed contours.
 
@@ -822,6 +878,14 @@ def _build_obs_mesh(contours, ox, oy, px):
         widx[3::6] = t;  widx[4::6] = bn; widx[5::6] = tn
         all_i.append(widx)
         voff += 2 * n
+
+        # Cap (ear-clipping on 2D contour, up-facing normals)
+        cap_tris = _ear_clip(pts)
+        if len(cap_tris) > 0:
+            cap_ring = np.column_stack([wx, hv, wz, z0, one, z0, gv, gv, gv])
+            all_v.append(cap_ring)
+            all_i.append(cap_tris + voff)
+            voff += n
 
     if not all_v:
         return np.empty((0, 9), dtype=np.float32), np.empty(0, dtype=np.int32)
