@@ -449,10 +449,15 @@ void main() {
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
-    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
     float enc;
-    if (phys_h > 0.03 && phys_h < u_ceil) {
-        enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
+    if (r.z > u_floor && r.z < u_ceil) {
+        float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
+        if (phys_h > 0.03) {
+            enc = clamp(phys_h * 100.0, 3.0, 100.0) + 1.0;
+        } else {
+            enc = 1.0;
+            gl_PointSize = 3.0;
+        }
     } else {
         enc = 1.0;
         gl_PointSize = 3.0;
@@ -1139,6 +1144,7 @@ class GPURenderer:
         p['u_cam_h'].value = self._df_cam_h
         p['u_sin_p'].value = self._df_sin_p
         p['u_cos_p'].value = self._df_cos_p
+        p['u_floor'].value = self._df_floor
         p['u_ceil'].value = self._df_ceil
         p['u_fbo_sz'].value = (float(ow), float(oh))
 
@@ -1162,15 +1168,20 @@ class GPURenderer:
               % (ow, oh))
 
     def update_pitch_params(self, sin_p, cos_p, cam_h=None):
-        """Hot-update the RS2 pitch calibration without full reinit."""
+        """Hot-update the RS2 pitch calibration including rotation matrix."""
+        import cv2 as _cv2
         self._df_sin_p = float(sin_p)
         self._df_cos_p = float(cos_p)
         if cam_h is not None:
             self._df_cam_h = float(cam_h)
+        pitch = -math.asin(float(sin_p))
+        rot, _ = _cv2.Rodrigues(np.float64([pitch, 0, 0]))
+        self._df_rot = rot.astype(np.float32)
         if getattr(self, '_df_gl_ready', False):
             p = self._df_prog_obs
             p['u_sin_p'].value = self._df_sin_p
             p['u_cos_p'].value = self._df_cos_p
+            p['u_rot'].write(self._df_rot.tobytes())
             if cam_h is not None:
                 p['u_cam_h'].value = self._df_cam_h
 
