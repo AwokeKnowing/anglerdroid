@@ -338,7 +338,8 @@ class Vision:
                     if 0 <= px < W and 0 <= py < H:
                         sv[py, px] = [200, 200, 0]
 
-        # RS2 forward points (yellow-green)
+        # RS2 forward points: green = floor (phys_h < 5cm), red = obstacle
+        # X-axis = optical depth (camera z), Y-axis = phys_h
         if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
             pts = self._rs2.verts.reshape(-1, 3)
             valid = pts[:, 2] > 0.1
@@ -347,11 +348,14 @@ class Vision:
                 step = max(1, len(pts) // 2000)
                 pts = pts[::step]
                 phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
-                fwd_d = pts[:, 2] * float(_fw_cos_pitch) - pts[:, 1] * float(_fw_sin_pitch)
                 for i in range(len(pts)):
-                    px, py = to_px(float(fwd_d[i]), float(phys_h[i]))
+                    px, py = to_px(float(pts[i, 2]), float(phys_h[i]))
                     if 0 <= px < W and 0 <= py < H:
-                        sv[py, px] = [0, 200, 100]
+                        h = float(phys_h[i])
+                        if h < 0.05:
+                            sv[py, px] = [0, 200, 100]
+                        else:
+                            sv[py, px] = [200, 60, 60]
 
         # Border
         sv[0, :] = sv[-1, :] = sv[:, 0] = sv[:, -1] = [80, 80, 80]

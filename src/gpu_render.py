@@ -436,31 +436,31 @@ uniform vec2  u_offset;
 uniform float u_cam_h;
 uniform float u_sin_p;
 uniform float u_cos_p;
+uniform float u_floor;
 uniform float u_ceil;
 uniform float u_y_off;
 uniform vec2  u_fbo_sz;
 in vec3 in_v;
 flat out float v_h;
 void main() {
-    v_h = 0.0;
     gl_PointSize = 1.0;
+    v_h = 0.0;
     vec3 p = in_v;
     if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
-
-    // Physical height above floor (metres). Calibrated sin_p/cos_p/cam_h
-    // guarantee phys_h ≈ 0 for floor regardless of depth.
-    float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
-
-    float enc = 1.0;
-    if (phys_h > 0.05 && phys_h < u_ceil) {
-        enc = clamp(phys_h * 100.0, 5.0, 100.0) + 1.0;
-    } else {
-        gl_PointSize = 2.0;
+    if (r.z < -0.02 || r.z >= u_ceil) {
+        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
     }
     vec2 px = r.xy * u_scale + u_offset;
     vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
+    float enc;
+    if (r.z <= u_floor) {
+        enc = 1.0;
+    } else {
+        float phys_h = u_cam_h - p.y * u_cos_p - p.z * u_sin_p;
+        enc = clamp(phys_h * 100.0, 1.0, 100.0) + 1.0;
+    }
     gl_Position = vec4(ndc, enc / 52.0 - 1.0, 1.0);
     v_h = enc;
 }
@@ -1189,6 +1189,7 @@ class GPURenderer:
         p['u_cam_h'].value = self._df_cam_h
         p['u_sin_p'].value = self._df_sin_p
         p['u_cos_p'].value = self._df_cos_p
+        p['u_floor'].value = self._df_floor
         p['u_ceil'].value = self._df_ceil
         p['u_fbo_sz'].value = (float(ow), float(oh))
 
