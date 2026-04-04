@@ -292,12 +292,14 @@ class Vision:
     def _calibrate_rs2_pitch(self, verts):
         """Estimate RS2 pitch error by fitting a plane to floor points.
 
-        If the pitch is off by δ radians, floor points show residual height
-        proportional to depth: phys_h ≈ δ * (y·sin_p − z·cos_p).
-        We regress that to find δ, then auto-correct sin_p/cos_p.
+        Uses a centered region (|x| < 20cm, depth 0.5–1.5m) for best
+        depth accuracy.  Regresses phys_h = δ·f + h_off to find pitch
+        error δ and height offset h_off.
         """
         pts = verts.reshape(-1, 3)
-        valid = (pts[:, 2] > 0.3) & (pts[:, 2] < 3.0)
+        # Centered square: moderate depth, near optical axis
+        valid = ((pts[:, 2] > 0.5) & (pts[:, 2] < 1.5) &
+                 (np.abs(pts[:, 0]) < 0.20))
         pts = pts[valid]
         if len(pts) < 200:
             return
@@ -306,7 +308,7 @@ class Vision:
         cam_h = float(FW_CAM_HEIGHT)
 
         phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
-        floor = np.abs(phys_h) < 0.05
+        floor = np.abs(phys_h) < 0.08
         fp = pts[floor]
         fh = phys_h[floor]
 
@@ -348,7 +350,6 @@ class Vision:
             self._gpu.update_pitch_params(new_sin, new_cos, cam_h=new_cam_h)
         else:
             print("pitch_cal: within tolerance (%.3f° / %.1fcm)" % (err_deg, med_hoff * 100))
-            self._gpu.enable_obs_detection()
 
         self._pitch_cal_done = True
 
@@ -410,10 +411,11 @@ class Vision:
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                 if not getattr(self, '_pitch_cal_done', False):
                     self._calibrate_rs2_pitch(self._rs2.verts)
-                _gpu_result = self._gpu.depth_forward_gpu(
-                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
-                if _gpu_result is not None:
-                    z2, k2, _raw_scatter = _gpu_result
+                if getattr(self, '_pitch_cal_done', False):
+                    _gpu_result = self._gpu.depth_forward_gpu(
+                        self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                    if _gpu_result is not None:
+                        z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
