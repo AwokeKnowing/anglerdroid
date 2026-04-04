@@ -346,10 +346,25 @@ class Vision:
             pts = pts[valid]
             if len(pts) > 0:
                 step = max(1, len(pts) // 2000)
-                pts = pts[::step]
-                phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
-                for i in range(len(pts)):
-                    px, py = to_px(float(pts[i, 2]), float(phys_h[i]))
+                sampled = pts[::step]
+                phys_h = cam_h - sampled[:, 1] * cos_p - sampled[:, 2] * sin_p
+
+                if not hasattr(self, '_sv_diag_n'):
+                    self._sv_diag_n = 0
+                self._sv_diag_n += 1
+                if self._sv_diag_n <= 3 or self._sv_diag_n % 300 == 0:
+                    print("side_view: sin_p=%.4f cos_p=%.4f cam_h=%.3f  "
+                          "y=[%.3f,%.3f] z=[%.3f,%.3f]  "
+                          "phys_h: min=%.3f median=%.3f max=%.3f  "
+                          "floor(<%dcm)=%d/%d" % (
+                              sin_p, cos_p, cam_h,
+                              float(sampled[:, 1].min()), float(sampled[:, 1].max()),
+                              float(sampled[:, 2].min()), float(sampled[:, 2].max()),
+                              float(phys_h.min()), float(np.median(phys_h)), float(phys_h.max()),
+                              5, int(np.sum(phys_h < 0.05)), len(phys_h)))
+
+                for i in range(len(sampled)):
+                    px, py = to_px(float(sampled[i, 2]), float(phys_h[i]))
                     if 0 <= px < W and 0 <= py < H:
                         h = float(phys_h[i])
                         if h < 0.05:
@@ -373,27 +388,41 @@ class Vision:
     def _calibrate_rs2_pitch(self, verts):
         """Estimate RS2 pitch error by fitting a plane to floor points.
 
-        Uses a centered region (|x| < 20cm, depth 0.5–1.5m) for best
-        depth accuracy.  Regresses phys_h = δ·f + h_off to find pitch
-        error δ and height offset h_off.
+        Uses a percentile-based floor finder that works even when the
+        default pitch parameters are far off.  Takes the lowest 20% of
+        phys_h values in depth bins as floor, then regresses to find the
+        pitch correction.
         """
         pts = verts.reshape(-1, 3)
-        # Centered square: moderate depth, near optical axis
-        valid = ((pts[:, 2] > 0.5) & (pts[:, 2] < 1.5) &
-                 (np.abs(pts[:, 0]) < 0.20))
+        valid = ((pts[:, 2] > 0.3) & (pts[:, 2] < 2.0) &
+                 (np.abs(pts[:, 0]) < 0.25))
         pts = pts[valid]
-        if len(pts) < 200:
+        if len(pts) < 500:
+            print("pitch_cal: too few points (%d)" % len(pts))
             return
 
         sin_p, cos_p = float(_fw_sin_pitch), float(_fw_cos_pitch)
         cam_h = float(FW_CAM_HEIGHT)
 
         phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
-        floor = np.abs(phys_h) < 0.08
-        fp = pts[floor]
-        fh = phys_h[floor]
 
-        if len(fp) < 50:
+        # Find floor using lowest 20th-percentile in each depth bin.
+        # Robust to furniture/obstacles which have HIGHER phys_h.
+        n_bins = 8
+        z_edges = np.linspace(0.3, 2.0, n_bins + 1)
+        floor_mask = np.zeros(len(pts), dtype=bool)
+        for b in range(n_bins):
+            in_bin = (pts[:, 2] >= z_edges[b]) & (pts[:, 2] < z_edges[b + 1])
+            if np.sum(in_bin) < 20:
+                continue
+            h_bin = phys_h[in_bin]
+            thresh = np.percentile(h_bin, 20)
+            floor_mask[in_bin] = h_bin <= thresh
+
+        fp = pts[floor_mask]
+        fh = phys_h[floor_mask]
+        if len(fp) < 100:
+            print("pitch_cal: too few floor pts (%d)" % len(fp))
             return
 
         f = fp[:, 1] * sin_p - fp[:, 2] * cos_p
@@ -407,15 +436,20 @@ class Vision:
         self._pitch_cal_deltas.append(delta)
         self._pitch_cal_hoffsets.append(h_off)
 
-        if len(self._pitch_cal_deltas) < 20:
+        n_collected = len(self._pitch_cal_deltas)
+        if n_collected <= 3 or n_collected % 5 == 0:
+            print("pitch_cal: frame %d/%d  delta=%.3f° h_off=%.1fcm (%d floor pts)" % (
+                n_collected, 20, math.degrees(delta), h_off * 100, len(fp)))
+
+        if n_collected < 20:
             return
 
         med_delta = float(np.median(self._pitch_cal_deltas))
         med_hoff = float(np.median(self._pitch_cal_hoffsets))
         err_deg = math.degrees(med_delta)
 
-        print("pitch_cal: error=%.3f° h_offset=%.1fcm (%d samples, %d pts/frame)" % (
-            err_deg, med_hoff * 100, len(self._pitch_cal_deltas), len(fp)))
+        print("pitch_cal: RESULT error=%.3f° h_offset=%.1fcm (%d samples)" % (
+            err_deg, med_hoff * 100, n_collected))
 
         new_pitch = _fw_pitch_rad + med_delta
         new_sin = float(abs(math.sin(new_pitch)))
