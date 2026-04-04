@@ -118,16 +118,22 @@ void main() {
         if (!border) discard;
     }
 
-    // Per-pixel normal from height gradient (bump map)
-    vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
-    float hL = obs_h(v_uv - vec2(ts.x, 0.0));
-    float hR = obs_h(v_uv + vec2(ts.x, 0.0));
-    float hD = obs_h(v_uv - vec2(0.0, ts.y));
-    float hU = obs_h(v_uv + vec2(0.0, ts.y));
-    vec3 nrm = normalize(vec3(hL - hR, 2.0 * u_px, hD - hU));
+    // Sobel normal from height map (3-texel spacing smooths pixel staircase)
+    vec2 ts = 3.0 / vec2(textureSize(u_conf, 0));
+    float h00 = obs_h(v_uv + vec2(-ts.x, -ts.y));
+    float h10 = obs_h(v_uv + vec2(  0.0, -ts.y));
+    float h20 = obs_h(v_uv + vec2( ts.x, -ts.y));
+    float h01 = obs_h(v_uv + vec2(-ts.x,   0.0));
+    float h21 = obs_h(v_uv + vec2( ts.x,   0.0));
+    float h02 = obs_h(v_uv + vec2(-ts.x,  ts.y));
+    float h12 = obs_h(v_uv + vec2(  0.0,  ts.y));
+    float h22 = obs_h(v_uv + vec2( ts.x,  ts.y));
+    float gx = -h00 + h20 - 2.0*h01 + 2.0*h21 - h02 + h22;
+    float gz = -h00 - 2.0*h10 - h20 + h02 + 2.0*h12 + h22;
+    vec3 nrm = normalize(vec3(-gx, 6.0 * u_px, -gz));
 
     bool is_obs = (conf < 90.0);
-    if (!is_obs && hL > 0.01 && hR > 0.01 && hD > 0.01 && hU > 0.01)
+    if (!is_obs && h01 > 0.01 && h21 > 0.01 && h10 > 0.01 && h12 > 0.01)
         is_obs = true;
 
     vec3 col;
