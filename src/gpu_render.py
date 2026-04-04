@@ -171,6 +171,57 @@ void main() {
 """
 
 
+_VERT_OBS_CAP = """
+#version 330
+uniform mat4  u_mvp;
+uniform vec2  u_origin;
+uniform float u_px;
+uniform vec2  u_mapsz;
+in vec2 in_uv;
+out vec3 v_col;
+out vec3 v_nrm;
+out vec3 v_w;
+out vec2 v_uv;
+void main() {
+    float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
+    float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
+    float h = 0.10;
+    v_col = vec3(0.65);
+    v_nrm = vec3(0.0, 1.0, 0.0);
+    v_w   = vec3(wx, h, wz);
+    v_uv  = in_uv;
+    gl_Position = u_mvp * vec4(wx, h, wz, 1.0);
+}
+"""
+
+_FRAG_OBS_CAP = """
+#version 330
+uniform sampler2D u_mask;
+uniform vec3 u_cam;
+uniform float u_fogfar;
+uniform int u_topdown;
+in vec3 v_col;
+in vec3 v_nrm;
+in vec3 v_w;
+in vec2 v_uv;
+out vec4 fc;
+void main() {
+    float m = texture(u_mask, v_uv).r;
+    if (m < 0.5) discard;
+    vec3 col = v_col;
+    if (u_topdown == 0) {
+        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
+        float nl = max(dot(v_nrm, -ld), 0.0);
+        col *= (0.35 + 0.65 * nl);
+        float d = length(v_w - u_cam);
+        float fog = clamp(d / u_fogfar, 0.0, 0.75);
+        col = mix(col, vec3(0.0), fog);
+    }
+    fc = vec4(col, 1.0);
+}
+"""
+
+
 _VERT_ROBOT = """
 #version 330
 
@@ -854,7 +905,6 @@ def _build_obs_mesh(contours, ox, oy, px):
         z0 = np.zeros(n, dtype=np.float32)
         gv = np.full(n, g, dtype=np.float32)
         hv = np.full(n, h, dtype=np.float32)
-        one = np.ones(n, dtype=np.float32)
 
         # Wall vertices (side normals)
         top_w = np.column_stack([wx, hv, wz, vnx, z0, vnz, gv, gv, gv])
@@ -873,14 +923,6 @@ def _build_obs_mesh(contours, ox, oy, px):
         widx[3::6] = t;  widx[4::6] = bn; widx[5::6] = tn
         all_i.append(widx)
         voff += 2 * n
-
-        # Cap (ear-clipping on 2D contour, up-facing normals)
-        cap_tris = _ear_clip(pts)
-        if len(cap_tris) > 0:
-            cap_ring = np.column_stack([wx, hv, wz, z0, one, z0, gv, gv, gv])
-            all_v.append(cap_ring)
-            all_i.append(cap_tris + voff)
-            voff += n
 
     if not all_v:
         return np.empty((0, 9), dtype=np.float32), np.empty(0, dtype=np.int32)
@@ -1007,7 +1049,25 @@ class GPURenderer:
         self._prog_t['u_conf'].value = 0
         self._prog_t['u_topdown'].value = 0
         self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
+
+        # Obstacle cap program (mask texture on terrain grid at OBS_H)
+        self._prog_cap = ctx.program(
+            vertex_shader=_VERT_OBS_CAP, fragment_shader=_FRAG_OBS_CAP)
+        self._prog_cap['u_origin'].value = (
+            float(self._mw // 2), float(self._mh // 2))
+        self._prog_cap['u_px'].value = PX_SIZE
+        self._prog_cap['u_fogfar'].value = FOG_DIST
+        self._prog_cap['u_topdown'].value = 0
+        self._prog_cap['u_mapsz'].value = (float(self._mw), float(self._mh))
+        self._prog_cap['u_mask'].value = 2
+
         self._build_terrain()
+
+        # Cap VAO reuses terrain grid mesh at OBS_H
+        self._vao_cap = ctx.vertex_array(
+            self._prog_cap,
+            [(self._grid_vbo, '2f', 'in_uv')],
+            index_buffer=self._grid_ibo, index_element_size=4)
 
         # Obstacle wall mesh (extruded smooth contours, rebuilt per frame)
         self._prog_obs = ctx.program(
@@ -1114,11 +1174,11 @@ class GPURenderer:
         self._gw, self._gh = gw, gh
 
         verts, idx = _make_grid_data(gw, gh)
-        vbo = self._ctx.buffer(verts.tobytes())
-        ibo = self._ctx.buffer(idx.tobytes())
+        self._grid_vbo = self._ctx.buffer(verts.tobytes())
+        self._grid_ibo = self._ctx.buffer(idx.tobytes())
         self._vao_t = self._ctx.vertex_array(
-            self._prog_t, [(vbo, '2f', 'in_uv')],
-            index_buffer=ibo, index_element_size=4)
+            self._prog_t, [(self._grid_vbo, '2f', 'in_uv')],
+            index_buffer=self._grid_ibo, index_element_size=4)
 
     def _build_robot(self):
         data = _triangulate_robot()
@@ -1695,7 +1755,7 @@ class GPURenderer:
             pts = approx.reshape(-1, 2).astype(np.float32)
             if len(pts) < 3:
                 continue
-            pts = _interp_subdiv(pts, iters=3)
+            pts = _interp_subdiv(pts, iters=2)
             smoothed.append(pts)
 
         if not smoothed:
@@ -1749,7 +1809,7 @@ class GPURenderer:
         v3h = self._view3d_h
         ct, st = math.cos(theta), math.sin(theta)
 
-        # ── Binarize conf → mask, then trace contours on CPU ──
+        # ── Binarize conf → mask, trace contours for walls ──
         self._update_mask()
         self._trace_obstacles()
 
@@ -1806,6 +1866,13 @@ class GPURenderer:
             self._prog_obs['u_topdown'].value = (
                 1 if self.topdown else 0)
             self._vao_obs.render(vertices=self._obs_nidx)
+
+        # Obstacle caps: mask texture on terrain grid at OBS_H
+        self._mask_tex.use(location=2)
+        self._prog_cap['u_mvp'].write(mvp_bytes)
+        self._prog_cap['u_cam'].value = tuple(cam.tolist())
+        self._prog_cap['u_topdown'].value = (1 if self.topdown else 0)
+        self._vao_cap.render()
 
         if self._vao_r is not None:
             self._prog_r['u_mvp'].write(

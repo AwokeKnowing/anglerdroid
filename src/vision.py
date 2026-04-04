@@ -339,7 +339,7 @@ class Vision:
                         sv[py, px] = [200, 200, 0]
 
         # RS2 forward points: green = floor (phys_h < 5cm), red = obstacle
-        # X-axis = optical depth (camera z), Y-axis = phys_h
+        # X-axis = world forward distance, Y-axis = phys_h
         if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
             pts = self._rs2.verts.reshape(-1, 3)
             valid = pts[:, 2] > 0.1
@@ -348,23 +348,9 @@ class Vision:
                 step = max(1, len(pts) // 2000)
                 sampled = pts[::step]
                 phys_h = cam_h - sampled[:, 1] * cos_p - sampled[:, 2] * sin_p
-
-                if not hasattr(self, '_sv_diag_n'):
-                    self._sv_diag_n = 0
-                self._sv_diag_n += 1
-                if self._sv_diag_n <= 3 or self._sv_diag_n % 300 == 0:
-                    print("side_view: sin_p=%.4f cos_p=%.4f cam_h=%.3f  "
-                          "y=[%.3f,%.3f] z=[%.3f,%.3f]  "
-                          "phys_h: min=%.3f median=%.3f max=%.3f  "
-                          "floor(<%dcm)=%d/%d" % (
-                              sin_p, cos_p, cam_h,
-                              float(sampled[:, 1].min()), float(sampled[:, 1].max()),
-                              float(sampled[:, 2].min()), float(sampled[:, 2].max()),
-                              float(phys_h.min()), float(np.median(phys_h)), float(phys_h.max()),
-                              5, int(np.sum(phys_h < 0.05)), len(phys_h)))
-
+                fwd_d = -sin_p * sampled[:, 1] + cos_p * sampled[:, 2]
                 for i in range(len(sampled)):
-                    px, py = to_px(float(sampled[i, 2]), float(phys_h[i]))
+                    px, py = to_px(float(fwd_d[i]), float(phys_h[i]))
                     if 0 <= px < W and 0 <= py < H:
                         h = float(phys_h[i])
                         if h < 0.05:
