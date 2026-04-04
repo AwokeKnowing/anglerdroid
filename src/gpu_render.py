@@ -628,8 +628,9 @@ void main() {
     if (euv.x > 0.0 && euv.x < 1.0 && euv.y > 0.0 && euv.y < 1.0) {
         float obs_i = floor(texture(u_ego, euv).r * 255.0 + 0.5);
         if (obs_i == 1.0) {
-            conf = min(conf + u_step_free, 1.0);
-            h = 0.0;
+            float rate = conf < 0.3 ? u_step_free * 0.15 : u_step_free;
+            conf = min(conf + rate, 1.0);
+            if (conf > 0.75) h = 0.0;
         } else if (obs_i >= 2.0) {
             conf = max(conf - u_step_obs, 0.0);
             float new_h = (obs_i - 1.0) / 255.0;
