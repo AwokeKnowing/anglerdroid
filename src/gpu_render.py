@@ -49,7 +49,7 @@ _VERT_TERRAIN = """
 #version 330
 
 uniform mat4  u_mvp;
-uniform sampler2D u_conf;
+uniform sampler2D u_blur;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform vec2  u_mapsz;
@@ -60,23 +60,10 @@ out vec3 v_w;
 out vec2 v_uv;
 
 void main() {
-    float conf = texture(u_conf, in_uv).r * 255.0;
+    float b = texture(u_blur, in_uv).r;
     float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
     float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
-
-    float h = (conf < 90.0) ? 0.10 : 0.0;
-
-    // Volume-preserving hole fill: if all 4 cardinal neighbors are obstacle, fill
-    if (h < 0.01) {
-        vec2 ts = 1.0 / u_mapsz;
-        float cN = texture(u_conf, in_uv + vec2(0.0, ts.y)).r * 255.0;
-        float cS = texture(u_conf, in_uv - vec2(0.0, ts.y)).r * 255.0;
-        float cE = texture(u_conf, in_uv + vec2(ts.x, 0.0)).r * 255.0;
-        float cW = texture(u_conf, in_uv - vec2(ts.x, 0.0)).r * 255.0;
-        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
-            h = 0.10;
-    }
-
+    float h = b * 0.10;
     v_w  = vec3(wx, h, wz);
     v_uv = in_uv;
     gl_Position = u_mvp * vec4(wx, h, wz, 1.0);
@@ -87,8 +74,10 @@ _FRAG_TERRAIN = """
 #version 330
 
 uniform sampler2D u_conf;
+uniform sampler2D u_blur;
 uniform vec3  u_cam;
 uniform float u_fogfar;
+uniform float u_px;
 uniform int   u_topdown;
 
 in vec3 v_w;
@@ -113,17 +102,8 @@ void main() {
         if (!border) discard;
     }
 
-    // Obstacle classification (color) — with 1-texel hole fill
-    bool is_obs = (conf < 90.0);
-    if (!is_obs) {
-        vec2 ts1 = 1.0 / vec2(textureSize(u_conf, 0));
-        float cN = texture(u_conf, v_uv + vec2(0, ts1.y)).r * 255.0;
-        float cS = texture(u_conf, v_uv - vec2(0, ts1.y)).r * 255.0;
-        float cE = texture(u_conf, v_uv + vec2(ts1.x, 0)).r * 255.0;
-        float cW = texture(u_conf, v_uv - vec2(ts1.x, 0)).r * 255.0;
-        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
-            is_obs = true;
-    }
+    float b = texture(u_blur, v_uv).r;
+    bool is_obs = (b > 0.15);
 
     float h = v_w.y;
     bool is_wall = (h > 0.005 && h < 0.095);
@@ -138,9 +118,17 @@ void main() {
     }
 
     if (u_topdown == 0) {
-        vec3 V = normalize(u_cam - v_w);
-        float nl = max(dot(vec3(0.0, 1.0, 0.0), V), 0.0);
-        col *= (0.45 + 0.55 * nl);
+        // Compute normals from blurred height field
+        vec2 ts = 1.0 / vec2(textureSize(u_blur, 0));
+        float hL = texture(u_blur, v_uv + vec2(-ts.x, 0)).r * 0.10;
+        float hR = texture(u_blur, v_uv + vec2( ts.x, 0)).r * 0.10;
+        float hD = texture(u_blur, v_uv + vec2(0, -ts.y)).r * 0.10;
+        float hU = texture(u_blur, v_uv + vec2(0,  ts.y)).r * 0.10;
+        vec3 nrm = normalize(vec3(hL - hR, 2.0 * u_px, hD - hU));
+
+        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
+        float ndotl = max(dot(nrm, -ld), 0.0);
+        col *= (0.35 + 0.65 * ndotl);
 
         float d = length(v_w - u_cam);
         float fog = clamp(d / u_fogfar, 0.0, 0.75);
@@ -556,6 +544,25 @@ out vec4 fc;
 void main() {
     float conf = texelFetch(u_conf, ivec2(gl_FragCoord.xy), 0).r * 255.0;
     fc = vec4(conf < 90.0 ? 1.0 : 0.0);
+}
+"""
+
+_FRAG_BLUR_OBS = """
+#version 330
+uniform sampler2D u_conf;
+out vec4 fc;
+void main() {
+    ivec2 p = ivec2(gl_FragCoord.xy);
+    ivec2 sz = textureSize(u_conf, 0);
+    float sum = 0.0;
+    for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            ivec2 sp = clamp(p + ivec2(dx, dy), ivec2(0), sz - 1);
+            float c = texelFetch(u_conf, sp, 0).r * 255.0;
+            sum += (c < 90.0) ? 1.0 : 0.0;
+        }
+    }
+    fc = vec4(sum / 25.0);
 }
 """
 
@@ -1060,6 +1067,16 @@ class GPURenderer:
         self._vao_bin = ctx.vertex_array(
             self._prog_bin, [(self._fsq_vbo, '2f', 'in_pos')])
 
+        # Blurred obstacle mask (5x5 box blur of binarized conf)
+        self._blur_tex = ctx.texture((self._mw, self._mh), 1)
+        self._blur_tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self._blur_fbo = ctx.framebuffer(color_attachments=[self._blur_tex])
+        self._prog_blur = ctx.program(
+            vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BLUR_OBS)
+        self._prog_blur['u_conf'].value = 0
+        self._vao_blur = ctx.vertex_array(
+            self._prog_blur, [(self._fsq_vbo, '2f', 'in_pos')])
+
         # Flat floor terrain (obstacles drawn as separate extruded contour mesh)
         self._prog_t = ctx.program(
             vertex_shader=_VERT_TERRAIN, fragment_shader=_FRAG_TERRAIN)
@@ -1068,6 +1085,7 @@ class GPURenderer:
         self._prog_t['u_px'].value = PX_SIZE
         self._prog_t['u_fogfar'].value = FOG_DIST
         self._prog_t['u_conf'].value = 0
+        self._prog_t['u_blur'].value = 1
         self._prog_t['u_topdown'].value = 0
         self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
 
@@ -1871,7 +1889,20 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
+        # Blur pass: binarize + 5x5 box blur of confidence → _blur_tex
+        self._blur_fbo.use()
+        ctx.viewport = (0, 0, self._mw, self._mh)
+        ctx.disable(moderngl.DEPTH_TEST)
         self._gm_conf[self._gm_idx].use(location=0)
+        self._vao_blur.render(moderngl.TRIANGLE_STRIP)
+
+        # Restore scene FBO and render terrain
+        self._scene_fbo.use()
+        ctx.viewport = (0, 0, self._vw, v3h)
+        ctx.enable(moderngl.DEPTH_TEST)
+        ctx.depth_func = '<'
+        self._gm_conf[self._gm_idx].use(location=0)
+        self._blur_tex.use(location=1)
         mvp_bytes = mvp.T.astype(np.float32).tobytes()
         self._prog_t['u_mvp'].write(mvp_bytes)
         self._prog_t['u_cam'].value = tuple(cam.tolist())
