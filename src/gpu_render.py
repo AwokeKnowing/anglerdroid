@@ -125,31 +125,12 @@ void main() {
             is_obs = true;
     }
 
-    // Normal: flat (0,1,0) everywhere EXCEPT wall ramp faces
-    vec3 nrm = vec3(0.0, 1.0, 0.0);
     float h = v_w.y;
-    if (h > 0.005 && h < 0.095) {
-        // Wall ramp — Sobel on RAW conf (continuous) for smooth direction
-        vec2 ts = 3.0 / vec2(textureSize(u_conf, 0));
-        float c00 = texture(u_conf, v_uv + vec2(-ts.x, -ts.y)).r;
-        float c10 = texture(u_conf, v_uv + vec2(  0.0, -ts.y)).r;
-        float c20 = texture(u_conf, v_uv + vec2( ts.x, -ts.y)).r;
-        float c01 = texture(u_conf, v_uv + vec2(-ts.x,   0.0)).r;
-        float c21 = texture(u_conf, v_uv + vec2( ts.x,   0.0)).r;
-        float c02 = texture(u_conf, v_uv + vec2(-ts.x,  ts.y)).r;
-        float c12 = texture(u_conf, v_uv + vec2(  0.0,  ts.y)).r;
-        float c22 = texture(u_conf, v_uv + vec2( ts.x,  ts.y)).r;
-        float gx = -c00 + c20 - 2.0*c01 + 2.0*c21 - c02 + c22;
-        float gz = -c00 - 2.0*c10 - c20 + c02 + 2.0*c12 + c22;
-        float glen = length(vec2(gx, gz));
-        if (glen > 0.001) {
-            nrm = normalize(vec3(gx / glen, 0.15, gz / glen));
-        }
-    }
+    bool is_wall = (h > 0.005 && h < 0.095);
 
     vec3 col;
     if (is_obs) {
-        col = vec3(0.65);
+        col = is_wall ? vec3(0.45) : vec3(0.65);
     } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
@@ -157,14 +138,9 @@ void main() {
     }
 
     if (u_topdown == 0) {
-        vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
-        float nl;
-        if (h > 0.005 && h < 0.095) {
-            nl = abs(dot(nrm, -ld));
-        } else {
-            nl = max(dot(nrm, -ld), 0.0);
-        }
-        col *= (0.35 + 0.65 * nl);
+        vec3 V = normalize(u_cam - v_w);
+        float nl = max(dot(vec3(0.0, 1.0, 0.0), V), 0.0);
+        col *= (0.45 + 0.55 * nl);
 
         float d = length(v_w - u_cam);
         float fog = clamp(d / u_fogfar, 0.0, 0.75);
