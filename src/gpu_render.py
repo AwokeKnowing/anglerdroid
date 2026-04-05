@@ -158,7 +158,12 @@ void main() {
 
     if (u_topdown == 0) {
         vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
-        float nl = max(dot(nrm, -ld), 0.0);
+        float nl;
+        if (h > 0.005 && h < 0.095) {
+            nl = abs(dot(nrm, -ld));
+        } else {
+            nl = max(dot(nrm, -ld), 0.0);
+        }
         col *= (0.35 + 0.65 * nl);
 
         float d = length(v_w - u_cam);
