@@ -106,6 +106,8 @@ def main():
             if u.calibrate_requested:
                 u.calibrate_requested = False
                 vis.request_calibration()
+            vis._gpu.wall_smooth = u.wall_smooth
+            vis._gpu.blur_kernel = u.blur_kernel
 
             # Safety override — directional scaling (fwd / bwd / angular independent)
             if wb is not None:
