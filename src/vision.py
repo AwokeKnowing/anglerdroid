@@ -98,6 +98,34 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
     region[:, c + 1] = (region[:, c + 1].astype(np.float32) * blend + white).astype(np.uint8)
 
 
+def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
+    """Zero out border pixels of a decimated RS depth grid.
+
+    The RS SDK decimation filter averages depth in NxN blocks.  At frame
+    edges, blocks include invalid (zero) pixels, producing small non-zero
+    depth values that deproject to wildly wrong 3-D positions.  Zeroing
+    the border removes these systematic artifacts.
+
+    Returns a *copy* — the original camera buffer is never modified.
+    """
+    v = verts.reshape(-1, 3).copy()
+    n = len(v)
+    if n < 100:
+        return v
+    aspect = float(orig_w) / orig_h
+    w_est = int(round(math.sqrt(n * aspect)))
+    for w_try in (w_est, w_est - 1, w_est + 1, w_est + 2, w_est - 2):
+        if w_try > 0 and n % w_try == 0:
+            h = n // w_try
+            g = v.reshape(h, w_try, 3)
+            g[:border, :, :] = 0
+            g[-border:, :, :] = 0
+            g[:, :border, :] = 0
+            g[:, -border:, :] = 0
+            return g.reshape(-1, 3)
+    return v
+
+
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     """RS1 (top-down camera) pointcloud → (obs, known) via orthographic projection.
 
@@ -114,6 +142,8 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     known = np.zeros((out_h, out_w), dtype=np.uint8)
     if len(verts) == 0:
         return obs, known
+
+    verts = _clip_decimated_border(verts)
 
     z = verts[:, 2]
     valid = z > 0
@@ -513,8 +543,9 @@ class Vision:
             if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                 if getattr(self, '_pitch_cal_request', False):
                     self._calibrate_rs2_pitch(self._rs2.verts)
+                rs2_clean = _clip_decimated_border(self._rs2.verts)
                 _gpu_result = self._gpu.depth_forward_gpu(
-                    self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                    rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
                 if _gpu_result is not None:
                     z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
