@@ -513,7 +513,9 @@ void main() {
     v_h = 0.0;
     gl_PointSize = 1.0;
     vec3 p = in_v;
-    if (p.z < 0.28) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
+    if (p.z < 0.28 || any(isnan(p)) || any(isinf(p))) {
+        gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+    }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
     float enc;
@@ -1257,6 +1259,8 @@ class GPURenderer:
 
         self._df_obs_tex = ctx.texture((ow, oh), 1)
         self._df_obs_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_obs_tex.repeat_x = False
+        self._df_obs_tex.repeat_y = False
         self._df_obs_depth = ctx.depth_renderbuffer((ow, oh))
         self._df_obs_fbo = ctx.framebuffer(
             color_attachments=[self._df_obs_tex],
@@ -1264,11 +1268,15 @@ class GPURenderer:
 
         self._df_morph_a_tex = ctx.texture((ow, oh), 1)
         self._df_morph_a_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_morph_a_tex.repeat_x = False
+        self._df_morph_a_tex.repeat_y = False
         self._df_morph_a_fbo = ctx.framebuffer(
             color_attachments=[self._df_morph_a_tex])
 
         self._df_morph_b_tex = ctx.texture((ow, oh), 1)
         self._df_morph_b_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._df_morph_b_tex.repeat_x = False
+        self._df_morph_b_tex.repeat_y = False
         self._df_morph_b_fbo = ctx.framebuffer(
             color_attachments=[self._df_morph_b_tex])
 

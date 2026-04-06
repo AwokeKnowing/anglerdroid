@@ -596,6 +596,8 @@ class Vision:
             # Robot footprint is always known-free (robot physically occupies it)
             obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
             known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
+
+            # (diagnostic removed — phantom cause was morph texture wrap)
             _t_obs = time.monotonic()
 
             # --- Odometry: visual + wheel → Kalman fused pose ---
