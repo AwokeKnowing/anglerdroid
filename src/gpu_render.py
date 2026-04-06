@@ -571,7 +571,6 @@ out vec4 fc;
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     ivec2 sz = textureSize(u_conf, 0);
-    float center = (texelFetch(u_conf, p, 0).r * 255.0 < 90.0) ? 1.0 : 0.0;
     float sum = 0.0;
     float count = 0.0;
     for (int dy = -2; dy <= 2; dy++) {
@@ -583,8 +582,7 @@ void main() {
             count += 1.0;
         }
     }
-    // Center pixel always gets full height; blur only smooths edges
-    fc = vec4(max(sum / count, center));
+    fc = vec4(sum / count);
 }
 """
 
