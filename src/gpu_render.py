@@ -104,24 +104,15 @@ void main() {
         if (!border) discard;
     }
 
-    // Classify from raw confidence (not blur) so lone pixels are correct
-    bool is_obs = (conf < 90.0);
-    if (!is_obs) {
-        vec2 ts1 = 1.0 / vec2(textureSize(u_conf, 0));
-        float cN = texture(u_conf, v_uv + vec2(0, ts1.y)).r * 255.0;
-        float cS = texture(u_conf, v_uv - vec2(0, ts1.y)).r * 255.0;
-        float cE = texture(u_conf, v_uv + vec2(ts1.x, 0)).r * 255.0;
-        float cW = texture(u_conf, v_uv - vec2(ts1.x, 0)).r * 255.0;
-        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
-            is_obs = true;
-    }
+    float b = texture(u_blur, v_uv).r;
+    bool is_obs = (b > 0.15) || (conf < 90.0);
 
     float h = v_w.y;
     bool is_wall = (h > 0.005 && h < 0.095);
 
     vec3 col;
     if (is_obs) {
-        col = is_wall ? vec3(0.45) : vec3(0.55);
+        col = is_wall ? vec3(0.45) : vec3(0.65);
     } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
