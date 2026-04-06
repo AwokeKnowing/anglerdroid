@@ -513,7 +513,7 @@ void main() {
     v_h = 0.0;
     gl_PointSize = 1.0;
     vec3 p = in_v;
-    if (p.z <= 0.0) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
+    if (p.z < 0.15) { gl_Position = vec4(2.0,2.0,0.0,1.0); return; }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
     float enc;
