@@ -56,7 +56,7 @@ FW_PIVOT = np.array([0.0, -1.0, 0.02], dtype=np.float32)
 FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max obstacle height to accept (m)
-FW_FLOOR_CLIP  = np.float32(0.05)   # min height: ignore below 5cm (carpet/floor)
+FW_FLOOR_CLIP  = np.float32(0.15)   # ego-forward < 15cm from camera → free (not obstacle)
 FW_CAM_HEIGHT  = np.float32(0.97)   # RS2 forward camera height above floor (m)
 _fw_sin_pitch  = np.float32(abs(math.sin(_fw_pitch_rad)))  # sin(64.4°)≈0.903
 _fw_cos_pitch  = np.float32(abs(math.cos(_fw_pitch_rad)))  # cos(64.4°)≈0.431
