@@ -107,18 +107,9 @@ button{padding:8px 16px;border:none;border-radius:6px;cursor:pointer;font-size:.
           <input type="checkbox" id="dbg-depth" onchange="toggleDebug('depth')"> Depth scatter
         </label>
         <button style="margin-left:10px;font-size:.7rem;padding:2px 8px;background:#456;color:#fff;border:1px solid #678;border-radius:3px;cursor:pointer" onclick="requestCalibrate()">Calibrate</button>
-      </div>
-      <div style="margin-top:6px">
-        <label style="font-size:.75rem;color:#888">Wall smoothing <span class="val" id="smooth-val">100</span></label>
-        <input type="range" id="wall-smooth" min="0" max="100" step="1" value="100" oninput="sendSmooth(this.value)">
-        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-          <label style="font-size:.75rem;color:#888;cursor:pointer">
-            <input type="radio" name="blur-k" value="3" onchange="sendBlurK(3)"> 3×3
-          </label>
-          <label style="font-size:.75rem;color:#888;cursor:pointer">
-            <input type="radio" name="blur-k" value="5" checked onchange="sendBlurK(5)"> 5×5
-          </label>
-        </div>
+        <label style="font-size:.75rem;margin-left:8px;cursor:pointer">
+          <input type="checkbox" id="dbg-clear" onchange="toggleDebug('clear_vis')"> Clear zone
+        </label>
       </div>
     </div>
     <div class="tab-bar">
@@ -176,6 +167,8 @@ function connect() {
       const f = d.flags || {};
       const el = document.getElementById('dbg-depth');
       if (el) el.checked = !!f.depth;
+      const cl = document.getElementById('dbg-clear');
+      if (cl) cl.checked = !!f.clear_vis;
     }
     else if (d.type === 'ai_status') {
       aiActive = d.active;
@@ -275,13 +268,6 @@ function toggleDebug(key) {
 }
 function requestCalibrate() {
   if (ws) ws.send(JSON.stringify({type: 'calibrate'}));
-}
-function sendSmooth(v) {
-  document.getElementById('smooth-val').textContent = v;
-  if (ws) ws.send(JSON.stringify({type: 'wall_smooth', value: parseInt(v)}));
-}
-function sendBlurK(k) {
-  if (ws) ws.send(JSON.stringify({type: 'blur_kernel', value: k}));
 }
 
 function toggleAI() {

@@ -194,10 +194,8 @@ class UI:
         self._last_activity = time.time()
         self._last_gemini_send = 0.0
         self._agent_state = ""
-        self.debug_flags = {"depth": False}
+        self.debug_flags = {"depth": False, "clear_vis": False}
         self.calibrate_requested = False
-        self.wall_smooth = 1.0   # 0=raw staircase, 1=fully blurred
-        self.blur_kernel = 5     # 3 or 5
 
     # ── lifecycle ───────────────────────────────────────────────────
 
@@ -422,14 +420,6 @@ class UI:
                     self.calibrate_requested = True
                     self._broadcast({"type": "chat", "sender": "sys",
                                      "text": "Pitch calibration started (20 frames)"})
-
-                elif t == "wall_smooth":
-                    v = data.get("value", 100)
-                    self.wall_smooth = max(0.0, min(1.0, v / 100.0))
-
-                elif t == "blur_kernel":
-                    k = data.get("value", 5)
-                    self.blur_kernel = 3 if k <= 3 else 5
 
                 elif t == "debug_toggle":
                     key = data.get("key", "")

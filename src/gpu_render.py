@@ -49,9 +49,7 @@ _VERT_TERRAIN = """
 #version 330
 
 uniform mat4  u_mvp;
-uniform sampler2D u_conf;
 uniform sampler2D u_blur;
-uniform float u_blend;
 uniform vec2  u_origin;
 uniform float u_px;
 uniform vec2  u_mapsz;
@@ -62,9 +60,7 @@ out vec3 v_w;
 out vec2 v_uv;
 
 void main() {
-    float raw = (texture(u_conf, in_uv).r * 255.0 < 90.0) ? 1.0 : 0.0;
-    float blr = texture(u_blur, in_uv).r;
-    float b = mix(raw, blr, u_blend);
+    float b = texture(u_blur, in_uv).r;
     float wx = (in_uv.x * u_mapsz.x - u_origin.x) * u_px;
     float wz = (in_uv.y * u_mapsz.y - u_origin.y) * u_px;
     float h = b * 0.10;
@@ -79,22 +75,17 @@ _FRAG_TERRAIN = """
 
 uniform sampler2D u_conf;
 uniform sampler2D u_blur;
-uniform float u_blend;
+uniform sampler2D u_free_vis;
 uniform vec3  u_cam;
 uniform float u_fogfar;
 uniform float u_px;
 uniform int   u_topdown;
+uniform int   u_clear_vis;
 
 in vec3 v_w;
 in vec2 v_uv;
 
 out vec4 fc;
-
-float sampleH(vec2 uv) {
-    float raw = (texture(u_conf, uv).r * 255.0 < 90.0) ? 0.10 : 0.0;
-    float blr = texture(u_blur, uv).r * 0.10;
-    return mix(raw, blr, u_blend);
-}
 
 void main() {
     float conf = texture(u_conf, v_uv).r * 255.0;
@@ -113,18 +104,24 @@ void main() {
         if (!border) discard;
     }
 
-    float b = mix(
-        (conf < 90.0) ? 1.0 : 0.0,
-        texture(u_blur, v_uv).r,
-        u_blend);
-    bool is_obs = (b > 0.15);
+    // Classify from raw confidence (not blur) so lone pixels are correct
+    bool is_obs = (conf < 90.0);
+    if (!is_obs) {
+        vec2 ts1 = 1.0 / vec2(textureSize(u_conf, 0));
+        float cN = texture(u_conf, v_uv + vec2(0, ts1.y)).r * 255.0;
+        float cS = texture(u_conf, v_uv - vec2(0, ts1.y)).r * 255.0;
+        float cE = texture(u_conf, v_uv + vec2(ts1.x, 0)).r * 255.0;
+        float cW = texture(u_conf, v_uv - vec2(ts1.x, 0)).r * 255.0;
+        if (cN < 90.0 && cS < 90.0 && cE < 90.0 && cW < 90.0)
+            is_obs = true;
+    }
 
     float h = v_w.y;
     bool is_wall = (h > 0.005 && h < 0.095);
 
     vec3 col;
     if (is_obs) {
-        col = is_wall ? vec3(0.45) : vec3(0.65);
+        col = is_wall ? vec3(0.45) : vec3(0.55);
     } else if (conf > 190.0) {
         col = u_topdown == 1 ? vec3(1.0) : vec3(0.92);
     } else {
@@ -132,16 +129,22 @@ void main() {
     }
 
     if (u_topdown == 0) {
-        vec2 ts = 1.0 / vec2(textureSize(u_conf, 0));
-        float hL = sampleH(v_uv + vec2(-ts.x, 0));
-        float hR = sampleH(v_uv + vec2( ts.x, 0));
-        float hD = sampleH(v_uv + vec2(0, -ts.y));
-        float hU = sampleH(v_uv + vec2(0,  ts.y));
+        vec2 ts = 1.0 / vec2(textureSize(u_blur, 0));
+        float hL = texture(u_blur, v_uv + vec2(-ts.x, 0)).r * 0.10;
+        float hR = texture(u_blur, v_uv + vec2( ts.x, 0)).r * 0.10;
+        float hD = texture(u_blur, v_uv + vec2(0, -ts.y)).r * 0.10;
+        float hU = texture(u_blur, v_uv + vec2(0,  ts.y)).r * 0.10;
         vec3 nrm = normalize(vec3(hL - hR, 2.0 * u_px, hD - hU));
 
         vec3 ld = normalize(vec3(0.3, -0.8, -0.5));
         float ndotl = max(dot(nrm, -ld), 0.0);
         col *= (0.35 + 0.65 * ndotl);
+
+        // Debug: show current frame's clearing footprint
+        if (u_clear_vis == 1) {
+            float fv = texture(u_free_vis, v_uv).r;
+            if (fv > 0.5) col = mix(col, vec3(1.0), 0.2);
+        }
 
         float d = length(v_w - u_cam);
         float fog = clamp(d / u_fogfar, 0.0, 0.75);
@@ -568,6 +571,7 @@ out vec4 fc;
 void main() {
     ivec2 p = ivec2(gl_FragCoord.xy);
     ivec2 sz = textureSize(u_conf, 0);
+    float center = (texelFetch(u_conf, p, 0).r * 255.0 < 90.0) ? 1.0 : 0.0;
     float sum = 0.0;
     float count = 0.0;
     for (int dy = -2; dy <= 2; dy++) {
@@ -579,7 +583,8 @@ void main() {
             count += 1.0;
         }
     }
-    fc = vec4(sum / count);
+    // Center pixel always gets full height; blur only smooths edges
+    fc = vec4(max(sum / count, center));
 }
 """
 
@@ -706,12 +711,14 @@ uniform float u_step_obs;
 
 layout(location = 0) out vec4 out_conf;
 layout(location = 1) out vec4 out_hmap;
+layout(location = 2) out vec4 out_free_vis;
 
 void main() {
     vec2 gp = gl_FragCoord.xy;
     vec2 guv = gp * u_map_inv;
     float conf = texture(u_conf, guv).r;
     float h    = texture(u_hmap, guv).r;
+    float fv   = 0.0;
 
     vec3 ep = u_inv * vec3(gp, 1.0);
     vec2 euv = ep.xy * u_ego_inv;
@@ -719,6 +726,7 @@ void main() {
     if (euv.x > 0.0 && euv.x < 1.0 && euv.y > 0.0 && euv.y < 1.0) {
         float obs_i = floor(texture(u_ego, euv).r * 255.0 + 0.5);
         if (obs_i == 1.0) {
+            fv = 1.0;
             float rate = conf < 0.3 ? u_step_free * 0.15 : u_step_free;
             conf = min(conf + rate, 1.0);
             if (conf > 0.75) h = 0.0;
@@ -730,6 +738,7 @@ void main() {
     }
     out_conf = vec4(conf);
     out_hmap = vec4(h);
+    out_free_vis = vec4(fv);
 }
 """
 
@@ -1023,8 +1032,7 @@ class GPURenderer:
         self._vh = atlas_h
         self._view3d_h = map_h
         self.topdown = False
-        self.wall_smooth = 1.0   # 0=raw staircase, 1=fully blurred
-        self.blur_kernel = 5     # 3 or 5 (3x3 or 5x5 box blur)
+        self.clear_vis = False
         self._gl_ready = False
 
     # ── Depth-forward configuration (call once before use) ───────
@@ -1093,7 +1101,7 @@ class GPURenderer:
         self._prog_blur = ctx.program(
             vertex_shader=_VERT_FSQUAD, fragment_shader=_FRAG_BLUR_OBS)
         self._prog_blur['u_conf'].value = 0
-        self._prog_blur['u_radius'].value = 2
+        self._prog_blur['u_radius'].value = 1
         self._vao_blur = ctx.vertex_array(
             self._prog_blur, [(self._fsq_vbo, '2f', 'in_pos')])
 
@@ -1106,8 +1114,9 @@ class GPURenderer:
         self._prog_t['u_fogfar'].value = FOG_DIST
         self._prog_t['u_conf'].value = 0
         self._prog_t['u_blur'].value = 1
-        self._prog_t['u_blend'].value = 1.0
+        self._prog_t['u_free_vis'].value = 2
         self._prog_t['u_topdown'].value = 0
+        self._prog_t['u_clear_vis'].value = 0
         self._prog_t['u_mapsz'].value = (float(self._mw), float(self._mh))
 
         # Obstacle cap program (mask texture on terrain grid at OBS_H)
@@ -1584,7 +1593,7 @@ class GPURenderer:
 
     def configure_gmap(self, map_w, map_h, ego_w, ego_h,
                        origin_x, origin_y, px_size,
-                       step_free=60, step_obs=25):
+                       step_free=60, step_obs=50):
         self._gm_mw = int(map_w)
         self._gm_mh = int(map_h)
         self._gm_ew = int(ego_w)
@@ -1616,11 +1625,16 @@ class GPURenderer:
             t.filter = (moderngl.LINEAR, moderngl.LINEAR)
             t.write(init_hmap.tobytes())
 
+        self._gm_free_vis = ctx.texture((mw, mh), 1)
+        self._gm_free_vis.filter = (moderngl.NEAREST, moderngl.NEAREST)
+
         self._gm_fbo = [
             ctx.framebuffer(color_attachments=[self._gm_conf[0],
-                                               self._gm_hmap[0]]),
+                                               self._gm_hmap[0],
+                                               self._gm_free_vis]),
             ctx.framebuffer(color_attachments=[self._gm_conf[1],
-                                               self._gm_hmap[1]]),
+                                               self._gm_hmap[1],
+                                               self._gm_free_vis]),
         ]
         self._gm_idx = 0
 
@@ -1910,9 +1924,7 @@ class GPURenderer:
         model[:3, 3] = [x, 0, -y]
         mvp_robot = proj @ view @ model
 
-        # Blur pass: binarize + box blur of confidence → _blur_tex
-        blur_r = 1 if self.blur_kernel <= 3 else 2
-        self._prog_blur['u_radius'].value = blur_r
+        # Blur pass: binarize + 3x3 box blur of confidence → _blur_tex
         self._blur_fbo.use()
         ctx.viewport = (0, 0, self._mw, self._mh)
         ctx.disable(moderngl.DEPTH_TEST)
@@ -1920,17 +1932,17 @@ class GPURenderer:
         self._vao_blur.render(moderngl.TRIANGLE_STRIP)
 
         # Restore scene FBO and render terrain
-        blend = max(0.0, min(1.0, self.wall_smooth))
         self._scene_fbo.use()
         ctx.viewport = (0, 0, self._vw, v3h)
         ctx.enable(moderngl.DEPTH_TEST)
         ctx.depth_func = '<'
         self._gm_conf[self._gm_idx].use(location=0)
         self._blur_tex.use(location=1)
+        self._gm_free_vis.use(location=2)
         mvp_bytes = mvp.T.astype(np.float32).tobytes()
         self._prog_t['u_mvp'].write(mvp_bytes)
         self._prog_t['u_cam'].value = tuple(cam.tolist())
-        self._prog_t['u_blend'].value = blend
+        self._prog_t['u_clear_vis'].value = 1 if self.clear_vis else 0
         self._vao_t.render()
 
         if self._vao_r is not None:
