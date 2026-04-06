@@ -1374,8 +1374,29 @@ class GPURenderer:
         oh, ow = self._df_out_h, self._df_out_w
         n_pts = min(len(verts), 320 * 240)
 
-        self._df_vbo.write(
-            np.ascontiguousarray(verts[:n_pts], dtype=np.float32).tobytes())
+        v = np.array(verts[:n_pts], dtype=np.float32, copy=True)
+
+        # Zero out border of decimated depth grid — edge pixels are
+        # stereo artifacts (partial averages of valid + invalid depth).
+        if not hasattr(self, '_df_grid_w'):
+            self._df_grid_w = 0
+            aspect = 848.0 / 480.0
+            w_est = int(round(math.sqrt(n_pts * aspect)))
+            for w_try in (w_est, w_est - 1, w_est + 1):
+                if w_try > 0 and n_pts % w_try == 0:
+                    self._df_grid_w = w_try
+                    self._df_grid_h = n_pts // w_try
+                    break
+        gw = self._df_grid_w
+        if gw > 0:
+            BORDER = 3
+            g = v.reshape(self._df_grid_h, gw, 3)
+            g[:BORDER, :, :] = 0
+            g[-BORDER:, :, :] = 0
+            g[:, :BORDER, :] = 0
+            g[:, -BORDER:, :] = 0
+
+        self._df_vbo.write(v.tobytes())
         self._df_prog_obs['u_y_off'].value = float(y_offset)
 
         # Scatter all valid points → obs FBO (max-encode via depth test)
