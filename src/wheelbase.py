@@ -96,6 +96,7 @@ class WheelBase:
         self._init_gamepad()
         self._start_idle_watcher()
         self._start_stale_command_watcher()
+        self._start_watchdog_feeder()
         self._start_twist_for_thread()
 
         vbus = 0.0
@@ -498,15 +499,19 @@ class WheelBase:
                         self._enc_native_fails = 0
 
                 if not self._enc_native:
+                    # After repeated SDO failures, back off hard so we don't
+                    # starve velocity/watchdog traffic on the same CAN lock.
+                    if _sdo_fail_count >= 10:
+                        time.sleep(1.0)
                     with self.bus_lock:
                         vl = self.left.get_encoder_vel_sdo()
                     with self.bus_lock:
                         vr = self.right.get_encoder_vel_sdo()
                     if vl is None or vr is None:
                         _sdo_fail_count += 1
-                        if _sdo_fail_count in (5, 50, 500):
+                        if _sdo_fail_count in (5, 10, 50, 500):
                             print("encoder: SDO read failed %d times "
-                                  "(vl=%s vr=%s)" % (_sdo_fail_count, vl, vr))
+                                  "(vl=%s vr=%s) — backing off" % (_sdo_fail_count, vl, vr))
 
                 if vl is not None and vr is not None:
                     with self._enc_lock:
@@ -545,6 +550,29 @@ class WheelBase:
                 self._batt_next = now + 5.0
 
             time.sleep(0.030)
+
+
+    def _start_watchdog_feeder(self):
+        """Keep ODrive watchdog alive while in closed-loop, independent of vel sends.
+
+        Encoder SDO fallbacks and other bus work can delay set_wheel_vels; a
+        dedicated feeder prevents a 2–5s stall from red-LED disarm.
+        """
+        self._wd_feed_thread = threading.Thread(
+            target=self._watchdog_feeder_loop, daemon=True)
+        self._wd_feed_thread.start()
+
+    def _watchdog_feeder_loop(self):
+        while self.running:
+            try:
+                if self._is_closed_loop and not self._is_idle:
+                    with self.bus_lock:
+                        self.left.feed_watchdog()
+                        self.right.feed_watchdog()
+                    self._last_send_time = time.time()
+            except Exception:
+                pass
+            time.sleep(0.5)
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):
         """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle.
@@ -585,8 +613,8 @@ class WheelBase:
                     self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
                     self.left.set_velocity(0.0)
                     self.right.set_velocity(0.0)
-                    self.left.enable_watchdog(2.0)
-                    self.right.enable_watchdog(2.0)
+                    self.left.enable_watchdog(5.0)
+                    self.right.enable_watchdog(5.0)
                 self._is_closed_loop = True
                 self._is_idle = False
                 self._last_sent_left = None

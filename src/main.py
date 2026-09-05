@@ -60,9 +60,24 @@ def main():
 
     # Vision
     from vision import Vision
+    rs1, rs2 = args.rs1, args.rs2
+    if not rs1 or not rs2:
+        try:
+            import pyrealsense2 as _rs
+            _serials = [d.get_info(_rs.camera_info.serial_number)
+                        for d in _rs.context().devices]
+            _serials.sort()
+            if not rs1 and len(_serials) >= 1:
+                rs1 = _serials[0]
+            if not rs2 and len(_serials) >= 2:
+                rs2 = _serials[1]
+            print("main: RealSense serials rs1=%s rs2=%s"
+                  % (rs1 or "(none)", rs2 or "(none)"))
+        except Exception as e:
+            print("main: RealSense enumerate failed: %s" % e)
     vis = Vision(
-        rs1_serial=args.rs1 or "0",
-        rs2_serial=args.rs2 or "0",
+        rs1_serial=rs1 or "",
+        rs2_serial=rs2 or "",
         rgb1_device_id=args.rgb1,
         slam_backend=args.slam,
     )
