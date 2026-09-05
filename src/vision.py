@@ -678,6 +678,11 @@ class Vision:
                              self._pose.x, self._pose.y,
                              np.degrees(self._pose.theta),
                              enc_info))
+                if dt > 0.2:
+                    print("vision: slow capture loop dt=%.3fs rs1_ok=%s rs2_ok=%s"
+                          % (dt,
+                             getattr(self._rs1, 'ok', None),
+                             getattr(self._rs2, 'ok', None)))
 
             # --- Height diagnostic (every 30 frames) ---
             if not hasattr(self, '_hdiag_n'):

@@ -111,9 +111,15 @@ class RSCamera:
         self.ok = False
 
     def grab(self):
-        """Wait for next frameset (1s). Never raises — sets ok=False on timeout."""
+        """Take the newest frameset without multi-second stalls.
+
+        Prefer poll_for_frames (non-blocking). If empty, wait briefly (150ms).
+        Never raises — sets ok=False on miss.
+        """
         try:
-            frames = self._pipe.wait_for_frames(1000)
+            frames = self._pipe.poll_for_frames()
+            if not frames:
+                frames = self._pipe.wait_for_frames(150)
         except Exception:
             self.ok = False
             return False
