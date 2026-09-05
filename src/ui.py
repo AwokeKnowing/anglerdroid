@@ -236,7 +236,7 @@ class UI:
     def send_atlas(self, atlas_rgb):
         """Encode full-res JPEG — same bytes go to browser and AI."""
         t0 = time.monotonic()
-        jpeg = _jpeg_encode_rgb(atlas_rgb, quality=92)
+        jpeg = _jpeg_encode_rgb(atlas_rgb, quality=70)
         dt = (time.monotonic() - t0) * 1e3
         if not hasattr(self, '_jpeg_log_n'):
             self._jpeg_log_n = 0
@@ -372,15 +372,21 @@ class UI:
                     except queue.Empty:
                         break
                 now = time.time()
-                if now - last_atlas_bc > 0.033:
+                # ~12 fps atlas; never await a slow Wi-Fi send while newer frames pile up.
+                if (now - last_atlas_bc > 0.08
+                        and not getattr(self, '_atlas_send_inflight', False)):
                     with self._atlas_lock:
                         jpeg = self._atlas_jpeg
                     if jpeg is not None:
-                        try:
-                            await self._send_all(jpeg)
-                        except Exception:
-                            pass
-                    last_atlas_bc = now
+                        self._atlas_send_inflight = True
+                        last_atlas_bc = now
+
+                        async def _send_latest(j=jpeg):
+                            try:
+                                await self._send_all(j)
+                            finally:
+                                self._atlas_send_inflight = False
+                        asyncio.create_task(_send_latest())
                 await asyncio.sleep(0.008)
 
     async def _ws_handler(self, ws):

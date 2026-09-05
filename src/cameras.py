@@ -80,6 +80,12 @@ class RSCamera:
             except Exception:
                 break
 
+        # Keep only the newest frames — a deep RS queue is a classic multi-second lag source.
+        try:
+            for sens in self.profile.get_device().sensors:
+                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
+        except Exception:
+            pass
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
         _set_sensor_opt(sensor, rs.option.laser_power, 360)

@@ -146,11 +146,9 @@ function connect() {
   };
   ws.onmessage = (e) => {
     if (typeof e.data !== 'string') {
-      const url = URL.createObjectURL(e.data);
-      const img = document.getElementById('atlas');
-      if (_prevAtlasUrl) URL.revokeObjectURL(_prevAtlasUrl);
-      _prevAtlasUrl = url;
-      img.src = url;
+      // Keep only the newest frame — decoding every blob caused multi-second lag.
+      _pendingAtlasBlob = e.data;
+      if (!_atlasPaintBusy) _paintLatestAtlas();
       return;
     }
     const d = JSON.parse(e.data);
