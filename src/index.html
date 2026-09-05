@@ -133,15 +133,15 @@ let _prevAtlasUrl = null;
 function connect() {
   const host = location.hostname || 'localhost';
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(proto + '://' + host + ':' + WS_PORT);
+  // Same host:port as the page so one self-signed cert accept works from any browser/PC.
+  const url = (!WS_PORT || WS_PORT === location.port)
+    ? (proto + '://' + location.host)
+    : (proto + '://' + host + ':' + WS_PORT);
+  ws = new WebSocket(url);
   ws.binaryType = 'blob';
   ws.onopen = () => { document.getElementById('status').textContent = 'connected'; };
   ws.onclose = () => {
     document.getElementById('status').textContent = 'disconnected';
-    if (location.protocol === 'https:') {
-      document.getElementById('status').textContent = 'disconnected (accept WSS cert?)';
-      document.getElementById('status').title = 'Visit https://' + host + ':' + WS_PORT + ' to accept the cert, then reload.';
-    }
     setTimeout(connect, 2000);
   };
   ws.onmessage = (e) => {

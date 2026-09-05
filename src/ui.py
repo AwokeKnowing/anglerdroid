@@ -208,14 +208,24 @@ class UI:
         if os.path.exists(_CERT_FILE) and os.path.exists(_KEY_FILE):
             self._ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             self._ssl_ctx.load_cert_chain(_CERT_FILE, _KEY_FILE)
-        threading.Thread(target=self._run_http, daemon=True).start()
-        if _HAS_WS:
+        # With TLS, serve HTTP+WSS on one port so any browser only accepts one cert.
+        self._combined_tls = bool(self._ssl_ctx and _HAS_WS)
+        if self._combined_tls:
+            self._ws_port = self._http_port
             threading.Thread(target=self._run_ws, daemon=True).start()
         else:
-            print("ui: websockets not installed – WebSocket disabled")
+            threading.Thread(target=self._run_http, daemon=True).start()
+            if _HAS_WS:
+                threading.Thread(target=self._run_ws, daemon=True).start()
+            else:
+                print("ui: websockets not installed – WebSocket disabled")
         proto = "HTTPS" if self._ssl_ctx else "HTTP"
-        print("ui: %s :%d  WSS :%d  jpeg=%s" % (
-            proto, self._http_port, self._ws_port, _jpeg_backend))
+        if self._combined_tls:
+            print("ui: %s+WSS :%d  jpeg=%s (same-origin)" % (
+                proto, self._http_port, _jpeg_backend))
+        else:
+            print("ui: %s :%d  WSS :%d  jpeg=%s" % (
+                proto, self._http_port, self._ws_port, _jpeg_backend))
 
     def stop(self):
         self._running = False
@@ -301,14 +311,51 @@ class UI:
         asyncio.set_event_loop(self._ws_loop)
         self._ws_loop.run_until_complete(self._ws_main())
 
-    async def _ws_accept_cert(self, path, headers):
-        """Serve a simple page for non-WebSocket requests (lets browser accept the self-signed cert)."""
-        if headers.get('Upgrade', '').lower() == 'websocket':
+    async def _ws_accept_cert(self, connection, request):
+        """websockets 17: (connection, request) -> Response | None.
+        None continues the WebSocket handshake; Response serves HTTP (combined TLS UI)."""
+        from websockets.http11 import Response
+        from websockets.datastructures import Headers
+        upgrade = request.headers.get('Upgrade', '')
+        if upgrade.lower() == 'websocket':
             return None
+        if getattr(self, '_combined_tls', False):
+            return self._http_response_for_ws_port(request.path)
         body = (b'<html><body style="background:#111;color:#eee;font-family:sans-serif;padding:40px">'
                 b'<h2>WSS certificate accepted.</h2>'
                 b'<p>Close this tab and reload the main page.</p></body></html>')
-        return (HTTPStatus.OK, [('Content-Type', 'text/html')], body)
+        return Response(HTTPStatus.OK, 'OK', Headers([('Content-Type', 'text/html')]), body)
+
+    def _http_response_for_ws_port(self, path):
+        """Serve index.html / static files for non-upgrade GETs on the combined TLS port."""
+        import mimetypes
+        from websockets.http11 import Response
+        from websockets.datastructures import Headers
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        req = (path or '/').split('?', 1)[0]
+        if req in ('/', '/index.html'):
+            try:
+                html = open(os.path.join(base_dir, 'index.html'), 'r').read()
+            except FileNotFoundError:
+                return Response(HTTPStatus.NOT_FOUND, 'Not Found',
+                                Headers([('Content-Type', 'text/plain')]), b'not found')
+            html = html.replace('__GOOGLE_CLIENT_ID__', self._google_client_id or '')
+            html = html.replace('__WS_PORT__', str(self._ws_port))
+            return Response(HTTPStatus.OK, 'OK',
+                            Headers([('Content-Type', 'text/html; charset=utf-8')]),
+                            html.encode('utf-8'))
+        rel = req.lstrip('/')
+        if '..' in rel:
+            return Response(HTTPStatus.FORBIDDEN, 'Forbidden',
+                            Headers([('Content-Type', 'text/plain')]), b'forbidden')
+        fpath = os.path.join(base_dir, rel)
+        if not os.path.isfile(fpath):
+            return Response(HTTPStatus.NOT_FOUND, 'Not Found',
+                            Headers([('Content-Type', 'text/plain')]), b'not found')
+        ctype = mimetypes.guess_type(fpath)[0] or 'application/octet-stream'
+        with open(fpath, 'rb') as f:
+            data = f.read()
+        return Response(HTTPStatus.OK, 'OK', Headers([('Content-Type', ctype)]), data)
 
     async def _ws_main(self):
         ws_kwargs = {'process_request': self._ws_accept_cert}
@@ -336,7 +383,7 @@ class UI:
                     last_atlas_bc = now
                 await asyncio.sleep(0.008)
 
-    async def _ws_handler(self, ws, path='/'):
+    async def _ws_handler(self, ws):
         info = {"email": "", "role": "control" if not self._google_client_id else "observer"}
         self._ws_clients[ws] = info
         try:
