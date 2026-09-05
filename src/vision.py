@@ -517,12 +517,18 @@ class Vision:
         while self._running:
             _t0 = time.monotonic()
 
-            if self._webcam:
-                self._webcam.grab()
-            if self._rs1:
-                self._rs1.grab()
-            if self._rs2:
-                self._rs2.grab()
+            try:
+                if self._webcam:
+                    self._webcam.grab()
+                if self._rs1:
+                    self._rs1.grab()
+                if self._rs2:
+                    self._rs2.grab()
+            except Exception as e:
+                # Never let a camera glitch kill the capture thread (blank atlas forever).
+                if not getattr(self, '_grab_err_n', 0):
+                    print("vision: grab error (continuing): %s" % e)
+                self._grab_err_n = getattr(self, '_grab_err_n', 0) + 1
             _t_grab = time.monotonic()
 
             # --- Pose update (cuVSLAM or wheel+visual) ---

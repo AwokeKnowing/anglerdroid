@@ -73,6 +73,12 @@ class RSCamera:
 
         self._pipe = rs.pipeline()
         self.profile = self._pipe.start(cfg)
+        # Discard a few frames while AE/laser settle — avoids first-grab timeouts.
+        for _ in range(5):
+            try:
+                self._pipe.wait_for_frames(2000)
+            except Exception:
+                break
 
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
@@ -99,8 +105,12 @@ class RSCamera:
         self.ok = False
 
     def grab(self):
-        """Block until next frameset. Fills self.color (and self.verts if enabled)."""
-        frames = self._pipe.wait_for_frames()
+        """Wait for next frameset (1s). Never raises — sets ok=False on timeout."""
+        try:
+            frames = self._pipe.wait_for_frames(1000)
+        except Exception:
+            self.ok = False
+            return False
         d = frames.get_depth_frame()
         c = frames.get_color_frame()
         if not d or not c:
