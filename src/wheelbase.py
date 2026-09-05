@@ -28,14 +28,19 @@ from robot_config import WHEEL_DIAMETER_CM, WHEELBASE_CM
 class WheelBase:
     # ── Safety timing constraints ────────────────────────────────────
     # CRITICAL: COMMAND_STALE_TIMEOUT must be strictly less than the ODrive
-    # watchdog timeout to ensure the application zeros velocity before the
-    # hardware watchdog trips. The watchdog is a last-resort backstop, not
-    # the primary safety mechanism.
+    # watchdog timeout to ensure the application zeros velocity and transitions
+    # to IDLE before the hardware watchdog trips. The watchdog is a last-resort
+    # backstop, not the primary safety mechanism.
     #
-    # Timing hierarchy (increasing):
-    #   1. COMMAND_STALE_TIMEOUT (0.5s) - app detects stale non-zero command
-    #   2. ODrive watchdog (2.0s) - hardware backstop if app fails
-    #   3. IDLE_ZERO_TIMEOUT (5.0s default) - motors idle after holding zero
+    # Timing hierarchy for stale commands:
+    #   1. COMMAND_STALE_TIMEOUT (0.5s) - app detects stale non-zero command,
+    #      immediately zeros velocity, disables watchdog, transitions to IDLE,
+    #      and clears errors → clean blue LED state
+    #   2. ODrive watchdog (2.0s) - hardware backstop if app fails (should never trip)
+    #
+    # Timing hierarchy for continuous zero velocity (separate path):
+    #   1. IDLE_ZERO_TIMEOUT (5.0s default) - motors idle after holding zero
+    #      with torque check for incline hold
     #
     # Margin: 1.5s between command-stale and watchdog provides robust safety
     # buffer for the app to stop the robot gracefully before hardware disarm.
@@ -242,19 +247,22 @@ class WheelBase:
         
         Safety invariant: COMMAND_STALE_TIMEOUT < ODrive watchdog timeout.
         If a non-zero velocity is latched but no fresh command arrives within
-        COMMAND_STALE_TIMEOUT, immediately command zero velocity (and continue
-        feeding watchdog briefly) to stop the robot before ODrive watchdog trips.
+        COMMAND_STALE_TIMEOUT, immediately transition to a clean IDLE state to
+        prevent the ODrive watchdog from tripping and latching a fault (red LED).
         
         This prevents the scenario where:
         1. Someone calls set_wheel_vels(non_zero) once
         2. No further commands arrive
         3. Robot drives until ODrive watchdog expires (red LED / disarm)
         
-        Instead:
+        Instead (with this fix):
         1. Command goes stale after 0.5s
-        2. App zeros velocity (continues feeding watchdog)
-        3. Existing idle logic moves to IDLE after zero-timeout
+        2. App zeros velocity, disables watchdog, transitions to IDLE, clears errors
+        3. Robot finishes in clean IDLE state (blue LED, disarm_reason=0)
         4. ODrive watchdog never trips
+        
+        This is more robust than the previous approach which zeroed velocity but
+        waited 5s for the idle watcher, allowing the watchdog to trip at 2.0s.
         """
         while self.running:
             now = time.time()
@@ -275,23 +283,39 @@ class WheelBase:
                 time_since_command = now - self._last_command_time
                 if has_nonzero_vel and time_since_command >= self.COMMAND_STALE_TIMEOUT:
                     print(f"⚠️  SAFETY: Command stale ({time_since_command:.2f}s), "
-                          f"zeroing velocity (L={self._last_sent_left:.2f}, "
-                          f"R={self._last_sent_right:.2f})")
+                          f"zeroing velocity and transitioning to IDLE "
+                          f"(L={self._last_sent_left:.2f}, R={self._last_sent_right:.2f})")
                     
-                    # Immediately zero velocity and feed watchdog
+                    # Immediately zero velocity and transition to clean IDLE state
+                    # to prevent ODrive watchdog from tripping (red LED / disarm_reason latch).
+                    # This ensures the robot finishes in a clean IDLE state (blue LED).
                     try:
                         with self.bus_lock:
+                            # Zero velocity first
                             self.left.set_velocity(0.0)
                             self.right.set_velocity(0.0)
-                            self.left.feed_watchdog()
-                            self.right.feed_watchdog()
+                            
+                            # Disable watchdog before it can trip
+                            self.left.disable_watchdog()
+                            self.right.disable_watchdog()
+                            
+                            # Transition to IDLE state
+                            self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
+                            self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
+                            
+                            # Clear any latched errors to ensure clean blue LED state
+                            self.left.clear_errors()
+                            self.right.clear_errors()
+                        
+                        # Update internal state
                         self._last_sent_left = 0.0
                         self._last_sent_right = 0.0
                         self._last_send_time = now
+                        self._is_closed_loop = False
+                        self._is_idle = True
+                        self._zero_vel_since = None  # No longer waiting for idle transition
                         
-                        # Mark as zero velocity so idle watcher can take over
-                        if self._zero_vel_since is None:
-                            self._zero_vel_since = now
+                        print(f"         → Motors in IDLE, watchdog disabled, errors cleared")
                     except can.CanOperationError as e:
                         print(f"Warning during stale-command safety stop: {e}")
             
