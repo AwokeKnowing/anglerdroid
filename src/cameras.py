@@ -83,7 +83,7 @@ class RSCamera:
         # Keep only the newest frames — a deep RS queue is a classic multi-second lag source.
         try:
             for sens in self.profile.get_device().sensors:
-                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
+                _set_sensor_opt(sens, rs.option.frames_queue_size, 2)
         except Exception:
             pass
         sensor = self.profile.get_device().first_depth_sensor()
@@ -113,13 +113,14 @@ class RSCamera:
     def grab(self):
         """Take the newest frameset without multi-second stalls.
 
-        Prefer poll_for_frames (non-blocking). If empty, wait briefly (150ms).
+        Prefer poll_for_frames (non-blocking). If empty, wait up to 500ms.
+        150ms was too short under dual-848 USB load (systematic ok=False).
         Never raises — sets ok=False on miss.
         """
         try:
             frames = self._pipe.poll_for_frames()
             if not frames:
-                frames = self._pipe.wait_for_frames(150)
+                frames = self._pipe.wait_for_frames(500)
         except Exception:
             self.ok = False
             return False

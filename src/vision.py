@@ -17,6 +17,7 @@ Atlas layout (960×960):
 
 import math
 import threading
+import concurrent.futures
 import time
 import numpy as np
 import cv2
@@ -518,12 +519,14 @@ class Vision:
             _t0 = time.monotonic()
 
             try:
-                if self._webcam:
-                    self._webcam.grab()
-                if self._rs1:
-                    self._rs1.grab()
-                if self._rs2:
-                    self._rs2.grab()
+                # Parallel grabs so dual RealSense waits overlap (not sum).
+                _cams = [c for c in (self._webcam, self._rs1, self._rs2) if c]
+                if len(_cams) <= 1:
+                    for c in _cams:
+                        c.grab()
+                else:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(_cams)) as _ex:
+                        list(_ex.map(lambda c: c.grab(), _cams))
             except Exception as e:
                 # Never let a camera glitch kill the capture thread (blank atlas forever).
                 if not getattr(self, '_grab_err_n', 0):
