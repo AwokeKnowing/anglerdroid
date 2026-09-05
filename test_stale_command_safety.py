@@ -8,9 +8,13 @@ from keeping the robot driving until the ODrive watchdog expires.
 Expected behavior WITH the fix:
 1. Set non-zero velocity once
 2. Stop sending commands
-3. After 0.5s (COMMAND_STALE_TIMEOUT), WheelBase automatically zeros velocity
+3. After 0.5s (COMMAND_STALE_TIMEOUT), WheelBase automatically:
+   - Zeros velocity
+   - Disables watchdog
+   - Transitions to IDLE state
+   - Clears any errors
 4. Safety message printed: "⚠️  SAFETY: Command stale..."
-5. After 5s idle timeout, motors move to IDLE state
+5. Robot finishes in clean IDLE state (blue LED, disarm_reason=0)
 6. ODrive watchdog NEVER trips
 
 Expected behavior WITHOUT the fix (old code):
@@ -59,8 +63,8 @@ def test_stale_command_safety():
     print()
     print("Expected timeline:")
     print("  t=0.0s : Send 0.3 m/s forward command")
-    print("  t=0.5s : SAFETY triggers, zeros velocity")
-    print("  t=5.0s : Idle watcher moves motors to IDLE")
+    print("  t=0.5s : SAFETY triggers, zeros velocity, disables watchdog,")
+    print("           transitions to IDLE, clears errors (blue LED)")
     print("  t=never: ODrive watchdog should NOT trip")
     print()
     print("SAFETY: Robot will move briefly. Ensure safe test area.")
@@ -114,6 +118,49 @@ def test_stale_command_safety():
         
         print("-" * 70)
         print()
+        
+        # Check axis state and errors
+        print("Checking axis state and errors:")
+        print("-" * 70)
+        try:
+            with wb.bus_lock:
+                left_state = wb.left.read_property('axis0.current_state')
+                left_disarm = wb.left.read_property('axis0.disarm_reason')
+                left_active = wb.left.read_property('axis0.active_errors')
+            
+            with wb.bus_lock:
+                right_state = wb.right.read_property('axis0.current_state')
+                right_disarm = wb.right.read_property('axis0.disarm_reason')
+                right_active = wb.right.read_property('axis0.active_errors')
+            
+            print(f"Left axis:  state={left_state} (1=IDLE), disarm_reason=0x{left_disarm:08X}, active_errors=0x{left_active:08X}")
+            print(f"Right axis: state={right_state} (1=IDLE), disarm_reason=0x{right_disarm:08X}, active_errors=0x{right_active:08X}")
+            print()
+            
+            # Check for success
+            all_idle = (left_state == 1 and right_state == 1)
+            no_disarm = (left_disarm == 0 and right_disarm == 0)
+            no_errors = (left_active == 0 and right_active == 0)
+            
+            if all_idle and no_disarm and no_errors:
+                print("✅ SUCCESS: Axes in clean IDLE state (blue LED, no watchdog fault)")
+            else:
+                print("❌ FAILURE: Axes not in clean state")
+                if not all_idle:
+                    print("   → Axes not in IDLE state")
+                if not no_disarm:
+                    print("   → Watchdog fault latched (red LED)")
+                    if left_disarm & 0x01000000:
+                        print("      Left: WATCHDOG_TIMER_EXPIRED")
+                    if right_disarm & 0x01000000:
+                        print("      Right: WATCHDOG_TIMER_EXPIRED")
+                if not no_errors:
+                    print("   → Active errors present")
+        except Exception as e:
+            print(f"Could not read axis state: {e}")
+        
+        print("-" * 70)
+        print()
         print("Test complete!")
         print()
         print("RESULTS:")
@@ -121,13 +168,16 @@ def test_stale_command_safety():
         print("If the safety fix is working:")
         print("  ✓ You should see 'SAFETY: Command stale...' message around t=0.5s")
         print("  ✓ Velocity should drop to zero around t=0.5-0.6s")
-        print("  ✓ State should transition CLOSED_LOOP → IDLE around t=5-6s")
+        print("  ✓ State should transition CLOSED_LOOP → IDLE immediately at t=0.5s")
         print("  ✓ NO red LED / ODrive disarm should occur")
+        print("  ✓ disarm_reason should remain 0 (no watchdog fault)")
+        print("  ✓ Final check should show '✅ SUCCESS' with clean IDLE state")
         print()
         print("If the safety fix is NOT working (old behavior):")
         print("  ✗ Robot would continue moving until t=2.0s")
         print("  ✗ ODrive watchdog would trip (red LED / disarm)")
-        print("  ✗ You would see active_errors=0x01000000 (WATCHDOG_TIMER_EXPIRED)")
+        print("  ✗ You would see disarm_reason=0x01000000 (WATCHDOG_TIMER_EXPIRED)")
+        print("  ✗ Final check would show '❌ FAILURE'")
         print()
         
     except KeyboardInterrupt:

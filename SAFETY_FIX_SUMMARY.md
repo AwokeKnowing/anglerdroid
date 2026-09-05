@@ -13,13 +13,17 @@ One-shot command sent
          ↓
     [Robot moving]
          ↓
-t = 0.5s: ⚠️  SAFETY: Command stale, zeroing velocity
+t = 0.5s: ⚠️  SAFETY: Command stale
+          → Zero velocity
+          → Disable watchdog
+          → Transition to IDLE
+          → Clear errors
          ↓
-    [Robot stops]
+    [Robot stopped, clean IDLE state (blue LED)]
          ↓
 t = 2.0s: ODrive watchdog does NOT trip ✅
          ↓
-t = 5.0s: Motors transition to IDLE (or hold on incline)
+    [Remains in clean IDLE, disarm_reason=0]
 ```
 
 ## Key Files
