@@ -1,0 +1,30 @@
+# docker compose build    — build the image (~25 min first time)
+# docker compose up       — run anglerdroid
+# docker compose up -d    — run in background
+# docker compose exec anglerdroid bash  — open a shell
+
+services:
+  anglerdroid:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-nvcr.io/nvidia/l4t-jetpack:r36.4.0}
+    image: anglerdroid:latest
+    runtime: nvidia
+    network_mode: host
+    privileged: true                    # USB cameras + CAN bus
+    volumes:
+      - .:/app                          # live source mount for development
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+      - GEMINI_KEY=${GEMINI_KEY:-}
+    restart: unless-stopped
+    command: >
+      python3 src/main.py
+        --rs1 ${RS1_SERIAL:-0}
+        --rs2 ${RS2_SERIAL:-0}
+        --rgb1 ${RGB_DEVICE:-/dev/video0}
+        --slam ${SLAM_BACKEND:-self}
+        --http-port ${HTTP_PORT:-8080}
+        --ws-port ${WS_PORT:-8081}

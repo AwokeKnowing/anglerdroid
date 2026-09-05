@@ -37,6 +37,8 @@ def main():
     parser.add_argument("--ws-port", type=int, default=8081, help="WebSocket server port")
     parser.add_argument("--brain-url", default="",
                         help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
+    parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
+                        help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -62,6 +64,7 @@ def main():
         rs1_serial=args.rs1 or "0",
         rs2_serial=args.rs2 or "0",
         rgb1_device_id=args.rgb1,
+        slam_backend=args.slam,
     )
     vis.set_wheelbase(wb)
     vis.start()

@@ -182,11 +182,13 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
 class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
-    def __init__(self, rs1_serial, rs2_serial, rgb1_device_id, headless=True):
+    def __init__(self, rs1_serial, rs2_serial, rgb1_device_id, headless=True,
+                 slam_backend='self'):
         print("Vision: init start")
         self.rs1_serial = rs1_serial
         self.rs2_serial = rs2_serial
         self.rgb1_device_id = rgb1_device_id
+        self._slam_backend = slam_backend
 
         self.frames = [
             np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8),
@@ -202,6 +204,7 @@ class Vision:
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
+        self._cuvslam = None
         self._global_map = PoseGraphSLAM()
         self._obs_mask, self._fw_cone_mask = self._build_obs_mask()
         self._free_range_mask = self._build_free_range_mask()
@@ -302,11 +305,13 @@ class Vision:
             self._thread.start()
             return
 
+        use_ir = (self._slam_backend == 'cuvslam')
         try:
             if self.rs1_serial:
                 self._rs1 = RSCamera(self.rs1_serial, compute_pointcloud=True)
             if self.rs2_serial:
-                self._rs2 = RSCamera(self.rs2_serial, compute_pointcloud=True)
+                self._rs2 = RSCamera(self.rs2_serial, compute_pointcloud=True,
+                                     capture_ir=use_ir)
         except Exception as e:
             print("vision: RealSense init failed: %s" % e)
             self._running = True
@@ -314,12 +319,23 @@ class Vision:
             self._thread.start()
             return
 
+        if self._slam_backend == 'cuvslam':
+            try:
+                from cuvslam_tracker import CuVSLAMTracker
+                rs2_profile = self._rs2.profile if self._rs2 else None
+                self._cuvslam = CuVSLAMTracker(rs2_profile=rs2_profile)
+                print("vision: cuVSLAM backend active")
+            except Exception as e:
+                print("vision: cuVSLAM init failed (%s) — falling back to self" % e)
+                self._slam_backend = 'self'
+                self._cuvslam = None
+
         self._webcam = WebCam(self.rgb1_device_id)
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
-        print("vision: capture thread started")
+        print("vision: capture thread started (slam=%s)" % self._slam_backend)
 
     def _render_side_view(self):
         """Render a side-view cross-section showing height vs forward distance.
@@ -496,6 +512,7 @@ class Vision:
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
+        _use_cuvslam = (self._cuvslam is not None)
 
         while self._running:
             _t0 = time.monotonic()
@@ -508,8 +525,24 @@ class Vision:
                 self._rs2.grab()
             _t_grab = time.monotonic()
 
-            # Snapshot pose at capture time (before odometry advances it)
-            cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
+            # --- Pose update (cuVSLAM or wheel+visual) ---
+            if _use_cuvslam:
+                fused_yaw, fused_fwd = 0.0, 0.0
+                if (self._rs2 and self._rs2.ok
+                        and self._rs2.ir_left is not None):
+                    ts_ns = int(time.monotonic() * 1e9)
+                    result = self._cuvslam.track(
+                        self._rs2.ir_left, self._rs2.ir_right, ts_ns)
+                    if result is not None:
+                        fused_yaw, fused_fwd = result
+                cap_x = self._cuvslam.x
+                cap_y = self._cuvslam.y
+                cap_theta = self._cuvslam.theta
+                pose_src = self._cuvslam
+                self._last_capture_time = time.monotonic()
+            else:
+                cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
+                pose_src = self._pose
 
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -553,13 +586,9 @@ class Vision:
             _t_depth = time.monotonic()
 
             # --- Combine into ego-space (obs_combined, known_combined) ---
-            # Principle: a pixel is "known" ONLY where a camera actually measured
-            # depth.  No morphological expansion of known — blind spots (mast
-            # shadow, sensor holes) stay unobserved.
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
             td_dx = int(TD_X_OFFSET)
 
-            # RS2 known: clip to 80° forward cone before combining
             kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(kc_tmp, known2, fw_dx, fw_dy)
             if not hasattr(self, '_kdiag_n'):
@@ -576,68 +605,73 @@ class Vision:
             else:
                 np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
 
-            # Union of both cameras' known masks
             known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(known_combined, known1, td_dx)
             np.maximum(known_combined, kc_tmp, out=known_combined)
 
-            # Union of both cameras' obstacle masks
             obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(obs_combined, obs1, td_dx)
             obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             _blit(obs_tmp, obs2, fw_dx, fw_dy)
             np.maximum(obs_combined, obs_tmp, out=obs_combined)
 
-            # Clip both to valid observation area:
-            #   RS1 → edge-trimmed rectangle, RS2 → 80° cone (already clipped above)
             np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
             np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
 
-            # Robot footprint is always known-free (robot physically occupies it)
             obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
             known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
 
-            # (diagnostic removed — phantom cause was morph texture wrap)
             _t_obs = time.monotonic()
 
-            # --- Odometry: visual + wheel → Kalman fused pose ---
-            vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
-            if self._rs2 and self._rs2.ok:
-                fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                _odom_result = self._gpu.odom_gpu(fw_gray)
-                if _odom_result is not None:
-                    vis_yaw, vis_fwd, vis_conf = _odom_result
+            # --- Odometry (self-made stack only; cuVSLAM handled above) ---
+            if not _use_cuvslam:
+                vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
+                if self._rs2 and self._rs2.ok:
+                    fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
+                    _odom_result = self._gpu.odom_gpu(fw_gray)
+                    if _odom_result is not None:
+                        vis_yaw, vis_fwd, vis_conf = _odom_result
 
-            now = time.monotonic()
-            dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
-            self._last_capture_time = now
+                now = time.monotonic()
+                dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
+                self._last_capture_time = now
 
-            if self._wheelbase is not None:
-                vl, vr = self._wheelbase.get_wheel_velocities_mps()
-            else:
-                vl, vr = 0.0, 0.0
+                if self._wheelbase is not None:
+                    vl, vr = self._wheelbase.get_wheel_velocities_mps()
+                else:
+                    vl, vr = 0.0, 0.0
 
-            fused_yaw, fused_fwd = self._pose.update(
-                vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
+                fused_yaw, fused_fwd = self._pose.update(
+                    vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
             _t_odom = time.monotonic()
 
             if not hasattr(self, '_odom_log_n'):
                 self._odom_log_n = 0
             self._odom_log_n += 1
             if self._odom_log_n % 90 == 0:
-                wb = self._wheelbase
-                enc_info = 'no_wb'
-                if wb:
-                    enc_ok = getattr(wb, '_enc_ok', '?')
-                    enc_age = (time.monotonic() -
-                               getattr(wb, '_enc_last_good', 0))
-                    enc_info = 'enc=%s age=%.1fs' % (enc_ok, enc_age)
-                print("odom: vl=%.4f vr=%.4f dt=%.4f "
-                      "pose=(%.3f,%.3f,%.1f°) %s"
-                      % (vl, vr, dt,
-                         self._pose.x, self._pose.y,
-                         np.degrees(self._pose.theta),
-                         enc_info))
+                if _use_cuvslam:
+                    metrics = self._cuvslam.get_slam_metrics()
+                    print("cuvslam: pose=(%.3f,%.3f,%.1f°) "
+                          "tracking=%s lc=%d frames=%d" % (
+                              self._cuvslam.x, self._cuvslam.y,
+                              np.degrees(self._cuvslam.theta),
+                              metrics.get('tracking'),
+                              metrics.get('lc_count', 0),
+                              metrics.get('frame_count', 0)))
+                else:
+                    wb = self._wheelbase
+                    enc_info = 'no_wb'
+                    if wb:
+                        enc_ok = getattr(wb, '_enc_ok', '?')
+                        enc_age = (time.monotonic() -
+                                   getattr(wb, '_enc_last_good', 0))
+                        enc_info = 'enc=%s age=%.1fs' % (enc_ok, enc_age)
+                    print("odom: vl=%.4f vr=%.4f dt=%.4f "
+                          "pose=(%.3f,%.3f,%.1f°) %s"
+                          % (vl, vr, dt,
+                             self._pose.x, self._pose.y,
+                             np.degrees(self._pose.theta),
+                             enc_info))
 
             # --- Height diagnostic (every 30 frames) ---
             if not hasattr(self, '_hdiag_n'):
@@ -668,7 +702,7 @@ class Vision:
             _t_gmap_up = time.monotonic()
 
             ego_proj = self._gpu.gmap_project_gpu(
-                self._pose.x, self._pose.y, self._pose.theta,
+                pose_src.x, pose_src.y, pose_src.theta,
                 rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
             self._persistent_obs[:] = 0
@@ -681,7 +715,7 @@ class Vision:
             _t_safety = time.monotonic()
 
             # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
-            trail = self._pose.get_world_history()
+            trail = pose_src.get_world_history()
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
             rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
             rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
@@ -692,7 +726,7 @@ class Vision:
                 bat_frac = max(0.0, min(1.0, pct / 100.0)) if pct >= 0 else 0.0
 
             atlas = self._gpu.render(
-                self._pose.x, self._pose.y, self._pose.theta,
+                pose_src.x, pose_src.y, pose_src.theta,
                 cameras=[rgb1, rgbd1, rgbd2],
                 trail_xy=trail,
                 fwd_scale=self._safety.fwd_scale,

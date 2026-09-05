@@ -53,9 +53,11 @@ class RSCamera:
     With decimate_mag=8 the pointcloud has only 106x60 = 6360 vertices,
     making downstream numpy processing trivial (<1 ms).
     Set compute_pointcloud=False for cameras that only provide color.
+    Set capture_ir=True to also capture stereo IR frames (for cuVSLAM).
     """
 
-    def __init__(self, serial, decimate_mag=RS_DECIMATE_MAG, compute_pointcloud=True):
+    def __init__(self, serial, decimate_mag=RS_DECIMATE_MAG,
+                 compute_pointcloud=True, capture_ir=False):
         if not HAS_RS:
             raise ImportError("pyrealsense2 not available")
 
@@ -64,10 +66,15 @@ class RSCamera:
         cfg.enable_stream(rs.stream.depth, RS_DEPTH_W, RS_DEPTH_H, rs.format.z16, 30)
         cfg.enable_stream(rs.stream.color, FRAME_W, FRAME_H, rs.format.rgb8, 30)
 
-        self._pipe = rs.pipeline()
-        profile = self._pipe.start(cfg)
+        self._capture_ir = capture_ir
+        if capture_ir:
+            cfg.enable_stream(rs.stream.infrared, 1, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
+            cfg.enable_stream(rs.stream.infrared, 2, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
 
-        sensor = profile.get_device().first_depth_sensor()
+        self._pipe = rs.pipeline()
+        self.profile = self._pipe.start(cfg)
+
+        sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
         _set_sensor_opt(sensor, rs.option.laser_power, 360)
         _set_sensor_opt(sensor, rs.option.enable_auto_exposure, 1)
@@ -87,6 +94,8 @@ class RSCamera:
             self.verts = None
 
         self.color = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self.ir_left = None
+        self.ir_right = None
         self.ok = False
 
     def grab(self):
@@ -108,6 +117,13 @@ class RSCamera:
             if self.verts is None or self.verts.shape[0] != raw.shape[0]:
                 self.verts = np.zeros_like(raw)
             np.copyto(self.verts, raw)
+
+        if self._capture_ir:
+            ir1 = frames.get_infrared_frame(1)
+            ir2 = frames.get_infrared_frame(2)
+            if ir1 and ir2:
+                self.ir_left = np.asarray(ir1.get_data()).copy()
+                self.ir_right = np.asarray(ir2.get_data()).copy()
 
         self.ok = True
         return True
