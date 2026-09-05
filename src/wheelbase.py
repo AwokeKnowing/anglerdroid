@@ -26,7 +26,21 @@ from robot_config import WHEEL_DIAMETER_CM, WHEELBASE_CM
 
 
 class WheelBase:
-    WATCHDOG_FEED_INTERVAL = 1.0
+    # ── Safety timing constraints ────────────────────────────────────
+    # CRITICAL: COMMAND_STALE_TIMEOUT must be strictly less than the ODrive
+    # watchdog timeout to ensure the application zeros velocity before the
+    # hardware watchdog trips. The watchdog is a last-resort backstop, not
+    # the primary safety mechanism.
+    #
+    # Timing hierarchy (increasing):
+    #   1. COMMAND_STALE_TIMEOUT (0.5s) - app detects stale non-zero command
+    #   2. ODrive watchdog (2.0s) - hardware backstop if app fails
+    #   3. IDLE_ZERO_TIMEOUT (5.0s default) - motors idle after holding zero
+    #
+    # Margin: 1.5s between command-stale and watchdog provides robust safety
+    # buffer for the app to stop the robot gracefully before hardware disarm.
+    COMMAND_STALE_TIMEOUT = 0.5     # seconds - app-level command staleness
+    WATCHDOG_FEED_INTERVAL = 1.0    # seconds - keep-alive feed rate
     INCLINE_TORQUE_THRESHOLD = 1.0  # Nm — above this while holding zero = incline
     VEL_SEND_DELTA = 0.02
     TWIST_FOR_INTERVAL = 0.1  # 10 Hz
@@ -54,11 +68,13 @@ class WheelBase:
 
         self.running = True
         self.idle_thread = None
+        self.stale_command_thread = None
         self._is_closed_loop = False
         self._is_idle = True
         self._last_sent_left = None
         self._last_sent_right = None
         self._last_send_time = 0.0
+        self._last_command_time = 0.0  # tracks when set_wheel_vels() was last called
         self._zero_vel_since = None
         self._twist_for_lock = threading.Lock()
         self._twist_for_params = None  # (forward_mps, angular_rads, duration_secs, ramp_in_secs, ramp_out_secs, start_time)
@@ -73,6 +89,7 @@ class WheelBase:
         print("WheelBase: init_gamepad...")
         self._init_gamepad()
         self._start_idle_watcher()
+        self._start_stale_command_watcher()
         self._start_twist_for_thread()
 
         vbus = 0.0
@@ -206,6 +223,80 @@ class WheelBase:
                     and time.time() - self._zero_vel_since >= self.idle_zero_timeout_s):
                 self._try_idle_with_torque_check()
             time.sleep(0.5)
+
+    def _start_stale_command_watcher(self):
+        """Start monitoring thread for command staleness detection.
+        
+        This is a critical safety feature: if we're in closed-loop mode with
+        non-zero commanded velocity and no new motion command arrives within
+        COMMAND_STALE_TIMEOUT, we immediately zero velocity and feed the
+        watchdog to bring the robot to a safe stop BEFORE the ODrive hardware
+        watchdog would trip.
+        """
+        self.stale_command_thread = threading.Thread(
+            target=self._stale_command_watcher_loop, daemon=True)
+        self.stale_command_thread.start()
+
+    def _stale_command_watcher_loop(self):
+        """Monitor for stale non-zero velocity commands.
+        
+        Safety invariant: COMMAND_STALE_TIMEOUT < ODrive watchdog timeout.
+        If a non-zero velocity is latched but no fresh command arrives within
+        COMMAND_STALE_TIMEOUT, immediately command zero velocity (and continue
+        feeding watchdog briefly) to stop the robot before ODrive watchdog trips.
+        
+        This prevents the scenario where:
+        1. Someone calls set_wheel_vels(non_zero) once
+        2. No further commands arrive
+        3. Robot drives until ODrive watchdog expires (red LED / disarm)
+        
+        Instead:
+        1. Command goes stale after 0.5s
+        2. App zeros velocity (continues feeding watchdog)
+        3. Existing idle logic moves to IDLE after zero-timeout
+        4. ODrive watchdog never trips
+        """
+        while self.running:
+            now = time.time()
+            
+            # Check conditions for stale command detection
+            if (self._is_closed_loop 
+                    and not self._is_idle
+                    and self._last_command_time > 0):
+                
+                # Are we commanding non-zero velocity?
+                has_nonzero_vel = False
+                if (self._last_sent_left is not None 
+                        and self._last_sent_right is not None):
+                    has_nonzero_vel = (abs(self._last_sent_left) >= 0.01 
+                                       or abs(self._last_sent_right) >= 0.01)
+                
+                # Has the command gone stale?
+                time_since_command = now - self._last_command_time
+                if has_nonzero_vel and time_since_command >= self.COMMAND_STALE_TIMEOUT:
+                    print(f"⚠️  SAFETY: Command stale ({time_since_command:.2f}s), "
+                          f"zeroing velocity (L={self._last_sent_left:.2f}, "
+                          f"R={self._last_sent_right:.2f})")
+                    
+                    # Immediately zero velocity and feed watchdog
+                    try:
+                        with self.bus_lock:
+                            self.left.set_velocity(0.0)
+                            self.right.set_velocity(0.0)
+                            self.left.feed_watchdog()
+                            self.right.feed_watchdog()
+                        self._last_sent_left = 0.0
+                        self._last_sent_right = 0.0
+                        self._last_send_time = now
+                        
+                        # Mark as zero velocity so idle watcher can take over
+                        if self._zero_vel_since is None:
+                            self._zero_vel_since = now
+                    except can.CanOperationError as e:
+                        print(f"Warning during stale-command safety stop: {e}")
+            
+            # Check frequently (5 Hz) for responsive safety shutoff
+            time.sleep(0.2)
 
     def _try_idle_with_torque_check(self):
         try:
@@ -431,7 +522,15 @@ class WheelBase:
             time.sleep(0.030)
 
     def set_wheel_vels(self, left_tps: float, right_tps: float):
-        """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle."""
+        """Direct wheel control (turns/s). Safety-scaled, deduplicates, manages idle.
+        
+        This method is the ONLY entry point for velocity commands. Every call
+        updates _last_command_time, which is monitored by the stale-command
+        watcher to ensure continuous command flow during motion.
+        """
+        # Record this command timestamp for staleness monitoring
+        self._last_command_time = time.time()
+        
         fwd = (left_tps + right_tps) / 2.0
         turn = (right_tps - left_tps) / 2.0
         if fwd > 0:
