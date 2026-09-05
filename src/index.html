@@ -129,6 +129,26 @@ let mediaStream = null, mediaRecorder = null, audioCtx = null, analyser = null;
 let audioChunks = [], hadVoice = false, eyesBig = false;
 const VOICE_THRESHOLD = 0.06, CHUNK_MS = 4000;
 let _prevAtlasUrl = null;
+let _pendingAtlasBlob = null;
+let _atlasPaintBusy = false;
+function _paintLatestAtlas() {
+  if (_atlasPaintBusy) return;
+  if (!_pendingAtlasBlob) return;
+  _atlasPaintBusy = true;
+  const blob = _pendingAtlasBlob;
+  _pendingAtlasBlob = null;
+  const url = URL.createObjectURL(blob);
+  const img = document.getElementById('atlas');
+  const done = () => {
+    if (_prevAtlasUrl) URL.revokeObjectURL(_prevAtlasUrl);
+    _prevAtlasUrl = url;
+    _atlasPaintBusy = false;
+    if (_pendingAtlasBlob) _paintLatestAtlas();
+  };
+  img.onload = done;
+  img.onerror = done;
+  img.src = url;
+}
 
 function connect() {
   const host = location.hostname || 'localhost';
