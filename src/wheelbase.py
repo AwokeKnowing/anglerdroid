@@ -10,6 +10,7 @@ Auto mode commented out (easy to re-enable)
 """
 
 import json
+import os
 import time
 import threading
 import subprocess
@@ -51,12 +52,12 @@ class WheelBase:
     TWIST_FOR_INTERVAL = 0.1  # 10 Hz
 
     def __init__(self,
-                 can_interface: str = "can0",
+                 can_interface: str = None,
                  wheel_diameter_cm: float = WHEEL_DIAMETER_CM,
                  wheelbase_cm: float = WHEELBASE_CM,
                  idle_zero_timeout_s: float = 5.0,
                  invert_left: bool = True):
-        self.can_interface = can_interface
+        self.can_interface = can_interface or os.environ.get("CAN_IFACE", "can1")
         self.wheel_diameter_cm = wheel_diameter_cm
         self.wheelbase_cm = wheelbase_cm
         self.idle_zero_timeout_s = idle_zero_timeout_s
