@@ -15,6 +15,7 @@ Never blocks. Capture/map thread stays untouched.
 from __future__ import annotations
 
 import math
+import keepouts
 import threading
 import time
 
@@ -147,8 +148,7 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
     if obs_map is None:
         # Empty free map keeps planner ticking (open-space geometric bias)
         import numpy as np
-        import keepouts
-from robot_config import FRAME_H, FRAME_W
+        from robot_config import FRAME_H, FRAME_W
         obs_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
     pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
