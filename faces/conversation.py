@@ -36,6 +36,27 @@ GREETINGS = {
     ],
 }
 
+# Household members who prefer Spanish (mostly / always).
+SPANISH_NAMES = {"nohemi", "karina"}
+
+SPANISH_GREETINGS = {
+    "morning": [
+        "¡Buenos días, {name}!",
+        "Hola {name}, buenos días.",
+        "¡Qué gusto verte, {name}!",
+    ],
+    "afternoon": [
+        "¡Hola, {name}!",
+        "Qué tal, {name}!",
+        "Hola {name}, ¿cómo estás?",
+    ],
+    "evening": [
+        "¡Buenas noches, {name}!",
+        "Hola {name}, buenas tardes.",
+        "Qué gusto, {name}.",
+    ],
+}
+
 UNKNOWN_PROMPTS = [
     "Hi! I don't think we've met. What's your name?",
     "Hello! I'm Kevin. What should I call you?",
@@ -130,7 +151,12 @@ class ConversationManager:
                         self.last_seen[name] = current_time
                         continue
                     time_of_day = get_time_of_day()
-                    greeting = random.choice(GREETINGS[time_of_day]).format(name=name)
+                    bank = (
+                        SPANISH_GREETINGS
+                        if name.strip().lower() in SPANISH_NAMES
+                        else GREETINGS
+                    )
+                    greeting = random.choice(bank[time_of_day]).format(name=name)
                     self.speak_fn(greeting)
                     greetings.append({
                         "name": name,

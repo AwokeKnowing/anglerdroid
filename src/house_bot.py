@@ -354,16 +354,24 @@ class HouseBot:
             in_phase = True
             turn = self._phase_turn or "left"
             if self._phase == "commit":
-                # Keep going the new way; only abort commit if nose is hard-pinned
-                # again (start a fresh recover), not for soft early veers back.
-                if late and self._late_streak >= LATE_STUCK_LOOKS:
-                    # Re-enter recover from commit if we hit another wall
+                # Keep going the new way; only abort if nose is HARD-pinned again
+                # AND free space ahead is poor. Momentary fwd_scale=0 with free mid
+                # (mast-inflation ghosts) must not throw away a turnaround commit.
+                hard_repin = (
+                    fwd_scale < LATE_FWD_SCALE
+                    and free_mid < 0.50
+                )
+                if hard_repin:
+                    self._late_streak += 1
+                else:
+                    self._late_streak = 0
+                if hard_repin and self._late_streak >= LATE_STUCK_LOOKS:
                     preferred = self._pick_turn(scores, curious=True)
                     self._start_back(preferred)
                     decision = "recover_back_" + preferred
-                    note = "RECOVER re-back %s | fwd=%.2f" % (preferred, fwd_scale)
+                    note = "RECOVER re-back %s | fwd=%.2f mid=%.2f" % (
+                        preferred, fwd_scale, free_mid)
                 else:
-                    self._late_streak = 0 if not late else self._late_streak + (1 if late else 0)
                     self._refresh_commit_goal()
                     decision = "commit_" + (turn or "fwd")
                     note = "COMMIT other-way %.1fs left | fwd=%.2f mid=%.2f" % (

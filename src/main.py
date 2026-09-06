@@ -10,6 +10,7 @@ import vision as vision_mod
 import navigator
 import local_executive
 import house_bot as house_bot_mod
+import people_live as people_live_mod
 
 from rerun_log import KevinRerunLogger, available as rerun_available
 
@@ -52,6 +53,8 @@ def main():
                         help="With --auto-local, start continuous ~1m wander immediately")
     parser.add_argument("--house-bot", action="store_true",
                         help="Curious look-before-leap + local speak")
+    parser.add_argument("--people", action="store_true",
+                        help="Face greet + name-call/dirs (speech only; auto with --house-bot)")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -149,6 +152,10 @@ def main():
         hb.start()
     else:
         local_executive.clear()
+    people = None
+    if args.people or args.house_bot:
+        people = people_live_mod.PeopleLive(vis, enabled=True)
+        people.start()
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)

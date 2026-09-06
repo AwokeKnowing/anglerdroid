@@ -223,11 +223,13 @@ class HouseBotLite(Policy):
                 return self._safe_cmd(v, w, fwd_scale, bwd_scale, ang_scale)
 
             if self.phase == "commit":
-                if late:
+                # Match live house_bot: abort only on hard repin + poor free mid.
+                hard_repin = (fwd_scale < LATE_FWD_SCALE) and (free_mid < 0.50)
+                if hard_repin:
                     self.late_streak += 1
                 else:
                     self.late_streak = 0
-                if late and self.late_streak >= LATE_STUCK_LOOKS:
+                if hard_repin and self.late_streak >= LATE_STUCK_LOOKS:
                     preferred = self._pick_turn(scores, curious=True)
                     self._start_back(preferred)
                     self.last_decision = "recover_reback_" + preferred
