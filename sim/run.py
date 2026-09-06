@@ -9,7 +9,7 @@ import math
 import sys
 import numpy as np
 
-from sim.world import create_scenario, FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE
+from sim.world import create_scenario, scenario_start, FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE
 from sim.viz import render_world_frame
 from sim.robot import Robot
 from sim.policy import create_policy

@@ -236,3 +236,15 @@ def pixel_to_world(px, py):
     x_m = px * EGO_PX_SIZE
     y_m = py * EGO_PX_SIZE
     return x_m, y_m
+
+
+def scenario_start(name: str):
+    """World start pose (x_m, y_m, theta) clear of scenario geometry."""
+    # Default: atlas RC origin (matches live ego center)
+    default = (RCX * EGO_PX_SIZE, RCY * EGO_PX_SIZE, 0.0)
+    if name == "box3d_table":
+        # Padded raster puts table over default FOOT; stand slightly south
+        return (0.80, 1.10, 0.0)
+    if name == "couch_pinch":
+        return default  # couch is ahead; start clear
+    return default

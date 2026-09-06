@@ -8,6 +8,7 @@ from sim.world import (
     RCY,
     create_scenario,
     doorway_crossed,
+    scenario_start,
 )
 from sim.robot import Robot
 from sim.policy import create_policy
@@ -26,9 +27,14 @@ def run_episode(
 ) -> dict:
     """Run one episode; return collisions + doorway_cross (when scenario=doorway)."""
     obs, height = create_scenario(scenario)
-    x0 = RCX * EGO_PX_SIZE if start_x is None else start_x
-    y0 = RCY * EGO_PX_SIZE if start_y is None else start_y
-    robot = Robot(x0, y0, start_theta)
+    sx, sy, st = scenario_start(scenario)
+    if start_x is not None:
+        sx = start_x
+    if start_y is not None:
+        sy = start_y
+    if start_theta is not None:
+        st = start_theta
+    robot = Robot(sx, sy, st)
     # goalseek defaults to doorway_waypoints() when goal_xy is None — do not
     # collapse to a single far goal or the approach stage is skipped.
     policy = create_policy(policy_name, goal_xy=goal_xy)
@@ -61,7 +67,7 @@ def run_episode(
         }
         pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
         v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
-        if policy_name in ("housebot", "goalseek") and scales["fwd"] <= 0 and v_cmd > 0:
+        if policy_name in ("housebot", "goalseek", "mppi") and scales["fwd"] <= 0 and v_cmd > 0:
             raise AssertionError(f"housebot v>0 at fwd=0 step={step}")
         robot.step(v_cmd, w_cmd, dt, apply_safety=apply_safety)
 

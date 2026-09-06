@@ -67,6 +67,44 @@ def test_box3d_table_scenario_loads():
     assert hit
 
 
+def test_mppi_couch_escapes():
+    """Pinned at couch: escape back/spin must produce path, 0 collisions."""
+    obs, height = create_scenario("couch_pinch")
+    robot = Robot(0.81, 1.19, 0.0)
+    policy = create_policy("mppi")
+    policy.reset()
+    path = 0.0
+    px, py = robot.x, robot.y
+    escape_seen = False
+    for step in range(300):
+        robot.update_ego_maps(obs, height)
+        assert not robot.check_collision(), step
+        scales = {
+            "fwd": robot.safety.fwd_scale,
+            "bwd": robot.safety.bwd_scale,
+            "ang": robot.safety.ang_scale,
+        }
+        pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
+        v, w = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
+        if "escape" in getattr(policy, "last_decision", ""):
+            escape_seen = True
+        robot.step(v, w, 0.033)
+        path += abs(robot.x - px) + abs(robot.y - py)
+        px, py = robot.x, robot.y
+    assert escape_seen or path > 0.25, (escape_seen, path)
+    assert path > 0.20, path
+
+
+def test_box3d_start_clear():
+    from sim.world import scenario_start
+    obs, height = create_scenario("box3d_table")
+    sx, sy, st = scenario_start("box3d_table")
+    robot = Robot(sx, sy, st)
+    robot.update_ego_maps(obs, height)
+    assert not robot.check_collision()
+    assert robot.safety.fwd_scale > 0.3
+
+
 if __name__ == "__main__":
     for k, fn in list(globals().items()):
         if k.startswith("test_") and callable(fn):
