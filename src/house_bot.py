@@ -84,7 +84,7 @@ class HouseBot:
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
         print("house_bot: started (EARLY divert + turnaround recover, voice=am_michael)")
-        speech_io.speak("Hello. I am Kevin. I look ahead early so I can still turn.")
+        speech_io.speak("Hi. I'm Kevin. I'm still learning, but one day I will be a good and helpful robot.")
 
     def stop(self):
         self._stop = True
@@ -438,7 +438,8 @@ class HouseBot:
             else:
                 turn = preferred
 
-            if (not soft) and (not ghost_nose) and self._late_streak >= LATE_STUCK_LOOKS:
+            if (not soft) and (not ghost_nose) and self._late_streak >= LATE_STUCK_LOOKS \
+                    and not getattr(people_live_mod.PeopleLive, "social_priority", False):
                 # Curiosity on the turnaround direction
                 turn = self._pick_turn(scores, curious=True)
                 streak_at_start = self._late_streak

@@ -21,7 +21,7 @@ if _ROOT not in sys.path:
 
 import speech_io
 
-GREET_PERIOD_S = 2.0
+GREET_PERIOD_S = 0.6
 LISTEN_PERIOD_S = 12.0
 LISTEN_SECS = 2.5
 HEARTBEAT_S = 30.0
@@ -33,6 +33,7 @@ class PeopleLive:
 
     # HouseBot checks this to yield the speaker for greetings.
     social_priority = False
+    social_hold_until = 0.0
 
     def __init__(self, vision, enabled=True):
         self.vision = vision
@@ -89,6 +90,11 @@ class PeopleLive:
                 volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.30")),
             )
             self._pb.enabled_on_hardware = True
+            try:
+                speech_io._ensure_kokoro()
+                print("people_live: kokoro prewarmed")
+            except Exception as e:
+                print("people_live: kokoro prewarm skip: %s" % e)
             return True
         except Exception as e:
             print("people_live: init failed: %s" % e)
@@ -107,12 +113,13 @@ class PeopleLive:
                 self._pending = self._pending[-MAX_PENDING:]
 
     def _flush_pending(self):
+        hold = time.monotonic() < float(getattr(PeopleLive, "social_hold_until", 0.0) or 0.0)
         if speech_io.is_speaking():
             PeopleLive.social_priority = True
             return
         with self._lock:
             if not self._pending:
-                PeopleLive.social_priority = False
+                PeopleLive.social_priority = hold
                 return
             text = self._pending.pop(0)
             PeopleLive.social_priority = bool(self._pending)
@@ -165,6 +172,10 @@ class PeopleLive:
             self._n_tick += 1
             if g or u or faces:
                 self._n_greet += 1
+                if g or u:
+                    # Hold sociable window so we greet while still roughly facing them.
+                    PeopleLive.social_priority = True
+                    PeopleLive.social_hold_until = time.monotonic() + 2.5
                 print(
                     "people_live: greet#%d faces=%d greetings=%s unknowns=%d rgb=%sx%s"
                     % (
@@ -200,7 +211,7 @@ class PeopleLive:
             print("people_live: listen tick err %s" % e)
 
     def _loop(self):
-        time.sleep(4.0)  # let cameras settle
+        time.sleep(0.8)  # cameras settle (was 4s — greets came too late)
         if not self._ensure():
             return
         last_face = 0.0
