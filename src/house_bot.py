@@ -17,6 +17,7 @@ import cv2
 import numpy as np
 
 import local_executive
+import tools
 import speech_io
 from robot_config import MAST_CLEAR_CM, RCX, RCY, FOOT_X1
 from safety import build_safety_occ, OBS_THRESH as SAFETY_OBS
@@ -148,18 +149,27 @@ class HouseBot:
 
     def _set_turn_goal(self, turn, soft=True):
         pose = getattr(self.vision, "_pose", None)
-        # Soft: gentle veer while still moving. Late: sharper yaw, shorter reach
-        # so we rotate out of the pin instead of driving into it.
-        deg = (35.0 if soft else 95.0) * (1.0 if turn == "left" else -1.0)
-        dist = 0.95 if soft else 0.40
-        if pose is None:
-            local_executive.set_wander()
+        sign = 1.0 if turn == "left" else -1.0
+        if soft:
+            # Gentle veer while still moving — MPPI goal ~35° ahead.
+            deg = 35.0 * sign
+            dist = 0.95
+            if pose is None:
+                local_executive.set_wander()
+                return deg
+            th = pose.theta + math.radians(deg)
+            local_executive.set_goal_xy(
+                pose.x + dist * math.cos(th),
+                pose.y + dist * math.sin(th),
+            )
             return deg
-        th = pose.theta + math.radians(deg)
-        local_executive.set_goal_xy(
-            pose.x + dist * math.cos(th),
-            pose.y + dist * math.sin(th),
-        )
+
+        # LATE: nose pinned — MPPI can't push through fwd_scale=0.
+        # Preempt with a timed in-place spin (twist_for beats local tick).
+        deg = 95.0 * sign
+        ang = 0.85 * sign  # rad/s before safety_ang scale
+        local_executive.clear()
+        tools.twist_for(0.0, ang, duration_secs=1.2, ramp_in_secs=0.15, ramp_out_secs=0.2)
         return deg
 
     def _tick(self):
