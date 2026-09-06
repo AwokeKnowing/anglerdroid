@@ -30,6 +30,7 @@ from social_fsm import (
     WAIT_ENGAGE_TIMEOUT,
     COOLDOWN_NO_ENGAGE,
     COOLDOWN_ENGAGED,
+    COOLDOWN_DISMISSED,
     FACE_BOX_CLOSE_PX,
     FACE_BOX_FAR_PX,
     FACE_BOX_GOOD_MIN,
@@ -366,6 +367,42 @@ def test_drive_disarmed_skips_approach():
     return True
 
 
+def test_dismissal_extended_cooldown():
+    """Test 'go away' / 'not now' triggers 10 min cooldown (Designing for Exit)."""
+    fsm = SocialFSM(drive_armed=True)
+    
+    # Setup: conversing with James
+    from social_fsm import PersonEncounter
+    enc = PersonEncounter(name="James")
+    enc.state = SocialState.CONVERSE
+    fsm.encounters["James"] = enc
+    fsm.current_person = "James"
+    
+    # User says "go away"
+    action = fsm.on_command("go away", now=100.0)
+    
+    assert action is not None
+    assert action["command"] == "go_away"
+    assert action.get("cooldown_extended") is True
+    
+    # Should be on extended cooldown (10 min)
+    assert fsm.is_on_cooldown("James", now=100.0 + COOLDOWN_DISMISSED - 10.0)
+    assert not fsm.is_on_cooldown("James", now=100.0 + COOLDOWN_DISMISSED + 10.0)
+    
+    # "not now" should also trigger extended cooldown
+    fsm.reset_encounter("Erika")
+    enc2 = PersonEncounter(name="Erika")
+    fsm.encounters["Erika"] = enc2
+    fsm.current_person = "Erika"
+    
+    action2 = fsm.on_command("not now, I'm busy", now=200.0)
+    assert action2 is not None
+    assert fsm.is_on_cooldown("Erika", now=200.0 + COOLDOWN_DISMISSED - 10.0)
+    
+    print("✅ test_dismissal_extended_cooldown passed")
+    return True
+
+
 def run_all_tests():
     """Run all social FSM tests."""
     tests = [
@@ -384,6 +421,7 @@ def run_all_tests():
         test_command_cooldown,
         test_approach_stop_distance_target,
         test_drive_disarmed_skips_approach,
+        test_dismissal_extended_cooldown,
     ]
     
     failed = []
