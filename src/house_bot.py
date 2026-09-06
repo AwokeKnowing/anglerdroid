@@ -402,10 +402,14 @@ class HouseBot:
         if early or late:
             soft = bool(early and not late)
             # Mast-inflation can zero SafetyGuard fwd while mid/near sectors stay open.
+            # ONLY treat as ghost when tall/mast evidence exists — otherwise a soft
+            # bed / lip / treadmill that pins the nose strip is REAL and must escalate
+            # to late/recover (depth map remains ground truth; do not spin past it).
             ghost_nose = (
                 (not soft)
                 and free_mid >= GHOST_MID_FREE
                 and free_near >= GHOST_NEAR_FREE
+                and mast_ahead > EARLY_MAST
             )
             now = time.monotonic()
             if soft or ghost_nose:
