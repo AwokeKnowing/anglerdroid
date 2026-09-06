@@ -183,6 +183,27 @@ class SocialFSM:
         self.current_person: Optional[str] = None
         self._command_cooldown: float = 0.0
         
+
+    def on_dismiss(self, name: str, now: float) -> Optional[Dict]:
+        """Immediate leave after explicit go-away / not-now (Designing for Exit)."""
+        enc = self._get_or_create(name)
+        enc.state = SocialState.LEAVE
+        enc.engaged_this_session = False
+        self._start_cooldown(name, COOLDOWN_DISMISSED, now)
+        prefer_spanish = name.strip().lower() in SPANISH_NAMES
+        leave_bank = LEAVE_MESSAGES_ES if prefer_spanish else LEAVE_MESSAGES
+        utterance = random.choice(leave_bank)
+        hint = {"type": "retreat", "distance_m": 2.0, "dismissed": True} if self.drive_armed else None
+        enc.state = SocialState.IDLE_WANDER
+        enc.goal_hint = {"type": "resume_wander"} if self.drive_armed else None
+        self.current_person = None
+        return {
+            "action_type": "leave",
+            "person": name,
+            "utterance": utterance,
+            "goal_hint": hint or enc.goal_hint,
+        }
+
     def is_on_cooldown(self, name: str, now: float) -> bool:
         """Check if person is on cooldown."""
         enc = self.encounters.get(name)

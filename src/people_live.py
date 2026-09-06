@@ -34,6 +34,15 @@ HEARTBEAT_S = 30.0
 MAX_PENDING = 4
 DRIVE_ARM_FILE = os.path.expanduser("~/.kevin/drive_arm")
 
+def _drive_armed() -> bool:
+    """True only when ~/.kevin/drive_arm contents are exactly 'armed'."""
+    try:
+        with open(DRIVE_ARM_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip().lower() == "armed"
+    except OSError:
+        return False
+
+
 
 class PeopleLive:
     """Social layer: RGB face greets + listen for name-call / dirs."""
@@ -101,7 +110,7 @@ class PeopleLive:
             self._pb.enabled_on_hardware = True
             
             # Initialize social FSM
-            armed = os.path.exists(DRIVE_ARM_FILE)
+            armed = _drive_armed()
             self._fsm = SocialFSM(drive_armed=armed)
             print("people_live: social FSM init drive_armed=%s" % armed)
             try:
@@ -178,8 +187,10 @@ class PeopleLive:
         if hint is None:
             return
         
-        # Check drive arm file
-        armed = os.path.exists(DRIVE_ARM_FILE)
+        # Latch file always exists; contents must be "armed".
+        armed = _drive_armed()
+        if self._fsm is not None:
+            self._fsm.drive_armed = armed
         if not armed:
             print("people_live: goal hint %s skipped (drive disarmed)" % hint.get("type"))
             return
@@ -240,6 +251,19 @@ class PeopleLive:
                 print("people_live: relative_bearing %s %.0f° %.1fm" % (
                     label, bearing_deg, distance_m))
             
+            elif hint_type in ("approach_speaker", "turn_to_speaker"):
+                # Come-here / look-at: small step toward current heading (speaker assumed ahead).
+                pose = getattr(self.vision, "_pose", None)
+                if pose is None:
+                    print("people_live: no pose for %s" % hint_type)
+                    return
+                distance_m = 0.6 if hint_type == "turn_to_speaker" else float(
+                    hint.get("target_distance_m", 1.35))
+                gx = pose.x + distance_m * math.cos(pose.theta)
+                gy = pose.y + distance_m * math.sin(pose.theta)
+                local_executive.set_goal_xy(gx, gy)
+                print("people_live: %s dist %.1fm" % (hint_type, distance_m))
+
             elif hint_type == "retreat":
                 # Back away
                 pose = getattr(self.vision, "_pose", None)
@@ -272,14 +296,16 @@ class PeopleLive:
             except Exception:
                 pass
             
-            out = self._cm.process_frame(img)
-            faces = out.get("faces") or []
-            g = out.get("greetings") or []
-            u = out.get("unknowns") or []
+            # Recognize only — FSM owns known-person greets (avoid ConversationManager double-speak).
+            faces = self._cm.recognizer.recognize(img, threshold=0.6)
+            unknowns = [r for r in faces if r[0] == "unknown"]
             
             self._n_tick += 1
             
-            # FSM processing for known faces
+            # Keep FSM drive_armed latch fresh
+            if self._fsm is not None:
+                self._fsm.drive_armed = _drive_armed()
+            
             now = time.monotonic()
             fsm_actions = []
             for name, confidence, box in faces:
@@ -288,7 +314,6 @@ class PeopleLive:
                     if action:
                         fsm_actions.append(action)
             
-            # Apply FSM actions
             for action in fsm_actions:
                 action_type = action.get("action_type")
                 utterance = action.get("utterance", "")
@@ -306,21 +331,19 @@ class PeopleLive:
                     PeopleLive.social_priority = True
                     PeopleLive.social_hold_until = now + 2.5
             
-            # Legacy greeting path (for unknowns)
-            if g or u:
-                self._n_greet += 1
-                PeopleLive.social_priority = True
-                PeopleLive.social_hold_until = now + 2.5
+            # Soft unknown notice (rare); no spam — FSM cooldowns cover knowns.
+            if unknowns and not fsm_actions:
+                # Don't speak every unknown sighting; ConversationManager would spam.
+                pass
             
-            if g or u or faces or fsm_actions:
+            if faces or fsm_actions:
                 print(
-                    "people_live: tick#%d faces=%d fsm_actions=%d greetings=%s unknowns=%d rgb=%sx%s"
+                    "people_live: tick#%d faces=%d fsm_actions=%d unknowns=%d rgb=%sx%s"
                     % (
                         self._n_tick,
                         len(faces),
                         len(fsm_actions),
-                        [x.get("name") for x in g],
-                        len(u),
+                        len(unknowns),
                         img.shape[1],
                         img.shape[0],
                     )
@@ -337,8 +360,30 @@ class PeopleLive:
                 return
             self._n_hear += 1
             
-            # FSM engagement signal
             now = time.monotonic()
+            # Wake/commands first (Designing for Exit: "go away" must win over empathy).
+            action = self._pb.on_transcript(text)
+            if action is not None:
+                hint = action.goal_hint
+                kind = action.kind
+                utterance = action.utterance or ""
+                if hint and kind in ("command", "directional_help"):
+                    self._apply_goal_hint(hint)
+                # If dismissed, tell FSM to leave
+                if kind == "command" and (hint or {}).get("dismissed") and self._fsm:
+                    if self._fsm.current_person:
+                        leave = self._fsm.on_dismiss(
+                            self._fsm.current_person, now) if hasattr(self._fsm, "on_dismiss") else None
+                        if leave and leave.get("utterance"):
+                            # command ack already spoken by stub; skip duplicate
+                            pass
+                print(
+                    "people_live: heard#%d kind=%s utter=%r hint=%s"
+                    % (self._n_hear, kind, utterance[:80], hint)
+                )
+                return
+
+            # Engagement / empathy while in WAIT_ENGAGE or CONVERSE
             if self._fsm and self._fsm.current_person:
                 fsm_action = self._fsm.on_speech_heard(
                     self._fsm.current_person, text, now)
@@ -349,27 +394,8 @@ class PeopleLive:
                     print("people_live: FSM heard#%d empathy=%r" % (
                         self._n_hear, utterance[:80] if utterance else "(silent)"))
                     return
-            
-            # Check for wake-word command
-            action = self._pb.on_transcript(text)
-            if action is None:
-                print("people_live: heard#%d %r (no action)" % (self._n_hear, text[:80]))
-                return
-            
-            hint = action.goal_hint
-            kind = action.kind
-            utterance = action.utterance or ""
-            
-            # Apply goal hint if command
-            if hint and kind == "command":
-                self._apply_goal_hint(hint)
-            elif hint and kind == "directional_help":
-                self._apply_goal_hint(hint)
-            
-            print(
-                "people_live: heard#%d kind=%s utter=%r hint=%s"
-                % (self._n_hear, kind, utterance[:80], hint)
-            )
+
+            print("people_live: heard#%d %r (no action)" % (self._n_hear, text[:80]))
         except Exception as e:
             print("people_live: listen tick err %s" % e)
 

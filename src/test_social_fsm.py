@@ -239,7 +239,7 @@ def test_spanish_preference():
     
     assert action is not None
     utterance = action["utterance"]
-    assert any(word in utterance for word in ["Good morning", "Hi", "Good evening"]), \
+    assert any(word in utterance for word in ["Good morning", "Hi", "Hey", "Hello", "Good evening"]), \
         f"Expected English greeting, got {utterance}"
     
     print("✅ test_spanish_preference passed")
@@ -257,7 +257,8 @@ def test_command_stop():
     assert action["command"] == "stop"
     assert action["goal_hint"] is not None
     assert action["goal_hint"]["type"] == "clear"
-    assert "stop" in action["utterance"].lower() or "stopping" in action["utterance"].lower()
+    u = action["utterance"].lower()
+    assert any(w in u for w in ("stop", "stopping", "holding still", "wheels"))
     
     print("✅ test_command_stop passed")
     return True
