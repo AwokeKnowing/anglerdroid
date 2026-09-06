@@ -40,7 +40,7 @@ def _ensure_whisper():
     return _whisper
 
 
-def speak(text: str, voice: str = "af_heart", block: bool = False) -> None:
+def speak(text: str, voice: str = "am_michael", block: bool = False) -> None:
     text = (text or "").strip()
     if not text:
         return
