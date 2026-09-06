@@ -19,6 +19,7 @@ except ImportError:
 
 from faces.recognizer import FaceRecognizer
 from faces.conversation import ConversationManager, create_speak_function
+from faces import test_people_behavior as _people_tests
 
 
 def create_test_image(size=(640, 480)):
@@ -219,6 +220,13 @@ def run_all_tests():
         test_remove_person,
         test_conversation_manager,
         test_speak_functions,
+        _people_tests.test_greet_hours_day_window,
+        _people_tests.test_greet_hours_wrap_midnight,
+        _people_tests.test_name_call_match,
+        _people_tests.test_directional_help_landmark,
+        _people_tests.test_directional_help_with_name_call,
+        _people_tests.test_face_greet_hours_gate,
+        _people_tests.test_hardware_flag_stays_off,
     ]
     
     failed = []

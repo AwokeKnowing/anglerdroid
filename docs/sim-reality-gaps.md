@@ -60,3 +60,5 @@ Priority: P0 = high impact on collision/stuck transfer, P1 = medium, P2 = polish
 - 2026-09-05 ~22:30 PT: Cul-de-sac lookahead planner (`d9ab4d8`); 24/24. Live drive still stopped.
 - 2026-09-05 ~22:40 PT: Rerun RGB+height+obs logger (`src/rerun_log.py`) — headless `~/.kevin/rerun/live.rrd` @ ~5 Hz; Rerun 0.37 API fix. Live drive still stopped.
 - 2026-09-06 ~08:10 PT: Fidelity MPPI hard-scenario stress (`couch_pinch`/`hallway`/`doorway`/`cul_de_sac`) + multi-rate (`policy_hz=10`) transfer tests. Live drive still stopped.
+
+- 2026-09-06 ~08:40 PT: People behavior stubs (`faces/people_behavior.py`) — greet-hours / name-call / directional help; faces 14/14; not wired to drive. Live still stopped.

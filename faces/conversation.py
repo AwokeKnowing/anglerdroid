@@ -15,6 +15,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 from faces.recognizer import FaceRecognizer
+from faces.people_behavior import GreetHours, DEFAULT_GREET_START, DEFAULT_GREET_END
 
 
 GREETINGS = {
@@ -65,22 +66,30 @@ class ConversationManager:
     def __init__(self, 
                  recognizer: FaceRecognizer,
                  speak_fn: Optional[Callable[[str], None]] = None,
-                 volume: float = 0.1):
+                 volume: float = 0.1,
+                 greet_hours: Optional[GreetHours] = None):
         """Initialize conversation manager.
         
         Args:
             recognizer: FaceRecognizer instance
             speak_fn: Function to speak text (if None, uses stub print)
             volume: TTS volume (0.0-1.0), default 0.1 (10%)
+            greet_hours: optional window for proactive greetings (default 8–22 local)
         """
         self.recognizer = recognizer
         self.speak_fn = speak_fn if speak_fn is not None else self._stub_speak
         self.volume = volume
+        self.greet_hours = greet_hours or GreetHours(
+            start_hour=DEFAULT_GREET_START, end_hour=DEFAULT_GREET_END
+        )
         
         self.last_seen = {}
         self.cooldown_seconds = 300
         
-        print(f"ConversationManager: volume={volume:.0%}, cooldown={self.cooldown_seconds}s")
+        print(
+            f"ConversationManager: volume={volume:.0%}, cooldown={self.cooldown_seconds}s, "
+            f"greet_hours={self.greet_hours.start_hour}-{self.greet_hours.end_hour}"
+        )
     
     def _stub_speak(self, text: str):
         """Stub speak function for offline demos."""
@@ -116,6 +125,10 @@ class ConversationManager:
             else:
                 if name not in self.last_seen or \
                    current_time - self.last_seen[name] > self.cooldown_seconds:
+                    if not self.greet_hours.allows():
+                        # Outside greet window — remember sighting but stay quiet
+                        self.last_seen[name] = current_time
+                        continue
                     time_of_day = get_time_of_day()
                     greeting = random.choice(GREETINGS[time_of_day]).format(name=name)
                     self.speak_fn(greeting)

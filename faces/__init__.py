@@ -30,3 +30,12 @@ elif OPENCV_AVAILABLE:
     BACKEND = "opencv-dnn"
 else:
     BACKEND = "none (install opencv-python or face_recognition)"
+
+
+# People-behavior stubs (offline; do not arm on hardware from here)
+from faces.people_behavior import (  # noqa: E402
+    GreetHours,
+    PeopleAction,
+    PeopleBehaviorStub,
+    create_people_behavior,
+)

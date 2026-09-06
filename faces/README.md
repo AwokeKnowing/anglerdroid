@@ -386,3 +386,9 @@ ls /dev/video*
 - `espeak` - System TTS (Linux)
 
 Compatible with Python 3.8+, tested on Ubuntu 20.04/22.04 and Jetson Orin NX.
+
+## People behavior stubs (offline)
+
+See `people_behavior.py` for greet-hours, name-call, and directional help.
+These are **not** enabled on hardware (`enabled_on_hardware=False`).
+`goal_hint` dicts are for a future mid-layer only — never applied to drive from this module.
