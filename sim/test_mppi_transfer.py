@@ -150,6 +150,60 @@ def test_multi_rate_policy_hz_smoke():
     assert metrics["collisions"] == 0, metrics
 
 
+
+def test_corridor_centering_metric():
+    """Hallway seed sweep: soft prefer raises mean lateral clearance vs hard-mask-only.
+
+    Quantitative follow-up to soft A/B enjoy GIFs (corridor bias → centering metric).
+    """
+    from sim.run import run_simulation
+
+    seeds = (7, 11, 42, 99, 123)
+    soft_means = []
+    hard_means = []
+    for seed in seeds:
+        m_on = run_simulation(
+            "hallway", "mppi", steps=400, dt=0.033,
+            fidelity=False, use_soft_cost=True, seed=seed,
+        )
+        m_off = run_simulation(
+            "hallway", "mppi", steps=400, dt=0.033,
+            fidelity=False, use_soft_cost=False, seed=seed,
+        )
+        assert m_on["collisions"] == 0, (seed, "soft", m_on)
+        assert m_off["collisions"] == 0, (seed, "hard", m_off)
+        soft_means.append(float(m_on["mean_lat_clear_m"]))
+        hard_means.append(float(m_off["mean_lat_clear_m"]))
+    soft_avg = sum(soft_means) / len(soft_means)
+    hard_avg = sum(hard_means) / len(hard_means)
+    # Soft prefer should not crush lateral margin; expect >= hard-only on average
+    # (small epsilon for RNG / dither noise).
+    assert soft_avg + 1e-4 >= hard_avg, (soft_avg, hard_avg, soft_means, hard_means)
+    assert soft_avg > 0.05, soft_avg
+
+
+def test_fidelity_hard_mask_only_no_collision():
+    """P0 residual: fidelity=True + soft_cost OFF (hard DualScales mask only).
+
+    Soft prefer is a sim bias; transfer residual must stay clean under latency/noise
+    with hard envelope alone.
+    """
+    from sim.run import run_simulation
+
+    scenarios = ("couch_pinch", "hallway", "doorway", "cul_de_sac")
+    for name in scenarios:
+        metrics = run_simulation(
+            name,
+            "mppi",
+            steps=400,
+            dt=0.033,
+            fidelity=True,
+            use_soft_cost=False,
+            seed=42,
+        )
+        assert metrics["collisions"] == 0, (name, metrics)
+        assert metrics["mean_lat_clear_m"] >= 0.0
+
 if __name__ == "__main__":
     for k, fn in list(globals().items()):
         if k.startswith("test_") and callable(fn):

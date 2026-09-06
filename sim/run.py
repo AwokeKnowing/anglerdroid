@@ -39,6 +39,9 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
     last_cmd = (0.0, 0.0)
     collision_detected = False
     collision_step = -1
+    lat_sum = 0.0
+    lat_min = float("inf")
+    lat_n = 0
     goal = None
     try:
         from sim.world import doorway_goal
@@ -68,6 +71,11 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
             'bwd_m': float(robot.safety.bwd_clear) * float(EGO_PX_SIZE),
             'lat_m': float(robot.safety.lat_clear) * float(EGO_PX_SIZE),
         }
+        lat_m = float(safety_scales['lat_m'])
+        lat_sum += lat_m
+        lat_n += 1
+        if lat_m < lat_min:
+            lat_min = lat_m
         
         pose = {
             'x': robot.x,
@@ -105,12 +113,19 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
     if save_path and frames:
         save_frames(frames, save_path)
     
+    mean_lat = (lat_sum / lat_n) if lat_n else 0.0
     metrics = {
         'collisions': robot.collision_count,
         'collision_step': collision_step,
         'final_x': robot.x,
         'final_y': robot.y,
         'final_theta': robot.theta,
+        # Corridor-centering / soft-prefer transfer metric (meters)
+        'mean_lat_clear_m': float(mean_lat),
+        'min_lat_clear_m': float(lat_min if lat_n else 0.0),
+        'use_soft_cost': bool(use_soft_cost),
+        'fidelity': bool(fidelity),
+        'seed': seed,
     }
     
     return metrics
@@ -243,6 +258,12 @@ def main():
     if metrics['collision_step'] >= 0:
         print(f"First collision at step: {metrics['collision_step']}")
     print(f"Final pose: x={metrics['final_x']:.3f}m y={metrics['final_y']:.3f}m theta={math.degrees(metrics['final_theta']):.1f}°")
+    if "mean_lat_clear_m" in metrics:
+        print(
+            f"Lateral clear: mean={metrics['mean_lat_clear_m']:.3f}m "
+            f"min={metrics.get('min_lat_clear_m', 0):.3f}m "
+            f"soft_cost={metrics.get('use_soft_cost')} fidelity={metrics.get('fidelity')}"
+        )
     if args.scenario == "doorway" and "doorway_crossed" in metrics:
         print(
             f"Doorway crossed: {metrics['doorway_crossed']} "
