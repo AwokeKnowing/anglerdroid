@@ -165,6 +165,36 @@ class DirectionalHelp:
     def wants_help(self, transcript: str) -> bool:
         return bool(_HELP_RE.search(_normalize(transcript)))
 
+    def parse_command(self, transcript: str) -> Optional[Tuple[str, Dict]]:
+        """Parse Hey Kevin xyz commands beyond directional help.
+        
+        Returns:
+            (command_type, goal_hint) or None if not a command
+        """
+        norm = _normalize(transcript)
+        
+        # Stop/halt commands
+        if re.search(r"\b(stop|halt|freeze|hold|stay)\b", norm):
+            return ("stop", {"type": "clear"})
+        
+        # Come here commands
+        if re.search(r"\b(come (here|to me|over|closer)|approach)\b", norm):
+            return ("come_here", {"type": "approach_speaker"})
+        
+        # Go away / retreat commands (Designing for Exit: immediate response)
+        if re.search(r"\b(go away|leave me|back up|give (me )?space|retreat|not now|i'?m busy)\b", norm):
+            return ("go_away", {"type": "retreat", "distance_m": 2.0, "dismissed": True})
+        
+        # Wander / explore commands
+        if re.search(r"\b(wander|explore|look around|roam)\b", norm):
+            return ("wander", {"type": "resume_wander"})
+        
+        # Look at / turn toward commands
+        if re.search(r"\b(look at|turn (to|toward)|face)\b", norm):
+            return ("look_at", {"type": "turn_to_speaker"})
+        
+        return None
+
     def respond(self, transcript: str) -> Optional[PeopleAction]:
         text = _normalize(transcript)
         if not text:
@@ -308,6 +338,29 @@ class PeopleBehaviorStub:
 
         name_action = self.name_call.respond(text)
         help_action = self.directional.respond(text)
+        
+        # Check for command (stop, come here, go away, wander, etc.)
+        cmd = self.directional.parse_command(text)
+        if cmd is not None:
+            cmd_type, goal_hint = cmd
+            # Commands should acknowledge (curious, earnest, playful tone)
+            ack = {
+                "stop": "Stopping!",
+                "come_here": "Coming over!",
+                "go_away": "Sorry! Moving away.",
+                "wander": "Back to wandering!",
+                "look_at": "Looking!",
+            }.get(cmd_type, "Okay!")
+            
+            self._last_name_call = t
+            if speak:
+                self._speak(ack)
+            return PeopleAction(
+                kind="command",
+                utterance=ack,
+                goal_hint=goal_hint,
+                meta={"command_type": cmd_type},
+            )
 
         # Prefer directional help when both match (e.g. "Kevin, where's the kitchen?").
         if help_action is not None and (
