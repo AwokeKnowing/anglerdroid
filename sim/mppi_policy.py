@@ -134,7 +134,19 @@ class MppiSimPolicy:
             w = 0.0 if self.escape_phase == "back" else self.SPIN_W * self.escape_sign
             return self._mask(v, w, fwd, bwd, ang, safety_scales)
 
-        cmd = self.planner.tick(obs, (px, py, th), 0.033)
+        soft_scales = None
+        if all(k in safety_scales for k in ("fwd_m", "bwd_m", "lat_m")):
+            dual = evaluate_dual(
+                float(safety_scales["fwd_m"]),
+                float(safety_scales["bwd_m"]),
+                float(safety_scales["lat_m"]),
+            )
+            soft_scales = {
+                "soft_cost_fwd": float(dual.soft_cost_fwd()),
+                "soft_cost_bwd": float(dual.soft_cost_bwd()),
+                "soft_cost_ang": float(dual.soft_cost_ang()),
+            }
+        cmd = self.planner.tick(obs, (px, py, th), 0.033, soft_scales=soft_scales)
         if cmd is None:
             # Idle: still spin toward open if partially constrained
             if fwd < 0.4 and ang > 0.2:

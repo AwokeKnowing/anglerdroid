@@ -118,6 +118,33 @@ def soft_cost_bonus(scales: DualScales, *, w_soft: float = 1.0) -> float:
     )
 
 
+def soft_sample_cost(
+    v: float,
+    w: float,
+    scales: DualScales,
+    *,
+    w_soft: float = 1.0,
+    eps: float = 1e-9,
+) -> float:
+    """Directional soft prefer cost for one MPPI first-step sample (v, w).
+
+    Unlike soft_cost_bonus (same scalar for every sample → argmin no-op), this
+    only charges axes the sample actually asks for:
+      v > 0  → 0.6 * soft_cost_fwd
+      v < 0  → 0.6 * soft_cost_bwd
+      |w| > 0 → 0.2 * soft_cost_ang
+    Then multiply by w_soft. Hard mask is applied separately after selection.
+    """
+    cost = 0.0
+    if v > eps:
+        cost += 0.6 * scales.soft_cost_fwd()
+    if v < -eps:
+        cost += 0.6 * scales.soft_cost_bwd()
+    if abs(w) > eps:
+        cost += 0.2 * scales.soft_cost_ang()
+    return float(w_soft) * float(cost)
+
+
 def mask_from_clearances(
     v_cmd: float,
     w_cmd: float,

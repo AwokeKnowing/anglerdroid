@@ -63,3 +63,4 @@ Priority: P0 = high impact on collision/stuck transfer, P1 = medium, P2 = polish
 
 - 2026-09-06 ~08:40 PT: People behavior stubs (`faces/people_behavior.py`) — greet-hours / name-call / directional help; faces 14/14; not wired to drive. Live still stopped.
 - 2026-09-06 ~11:45 PT: Landed DualScales + MPPI action_mask + AABB mast pack on Orin; wired clearances (`fwd_m`/`bwd_m`/`lat_m`) into `sim/run.py` and DualScales mask into `sim/mppi_policy._mask` (legacy hard-scale fallback retained). Thin Kevin URDF + robox3d ContactSensor committed. Tests: dual 8/8, mask 9/9, mast 2/2, robox3d 5/5, dynamics 7/7, mppi transfer 8/8, sim 24/24, faces 14/14. Live drive still stopped.
+- 2026-09-06 ~12:15 PT: Soft prefer buffer into MPPI *sample* cost (directional `soft_sample_cost` + optional `soft_scales` on `MppiCostmapPlanner.tick`, default OFF so live unchanged). Sim policy passes DualScales soft floats before hard `_mask`. Live drive still stopped.

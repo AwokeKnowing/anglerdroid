@@ -84,6 +84,7 @@ class MppiCostmapPlanner:
             'n_samples': self.n_samples,
             'n_steps': self.n_steps,
             'live': True,
+            'soft_cost_applied': False,
         }
 
         print("MppiCostmapPlanner: LIVE NumPy MPPI (mppi-costmap-v0) — NOT stub")
@@ -338,8 +339,14 @@ class MppiCostmapPlanner:
 
     # ── Main tick ─────────────────────────────────────────────────────────
 
-    def tick(self, obs_map: np.ndarray, pose: tuple, dt: float):
-        """Run LIVE MPPI when active. Returns {'fwd_mps','ang_rads'} or None."""
+    def tick(self, obs_map: np.ndarray, pose: tuple, dt: float, soft_scales=None):
+        """Run LIVE MPPI when active. Returns {'fwd_mps','ang_rads'} or None.
+
+        soft_scales: optional dict with float keys soft_cost_fwd / soft_cost_bwd /
+        soft_cost_ang in [0,1]. When provided, adds directional soft prefer cost
+        to sample costs from first-step controls (weights 0.6/0.6/0.2). Default
+        None keeps live behavior unchanged (no sim.* imports).
+        """
         if not self._active:
             return None
 
@@ -373,6 +380,22 @@ class MppiCostmapPlanner:
 
         U = self._mppi_sample_trajectories(self._u_prev, self.n_samples, self.n_steps)
         S, X = self._mppi_rollout_batch(U, pose_t, ego, subgoal)
+
+        soft_cost_applied = False
+        if soft_scales is not None:
+            # Directional soft prefer on first-step controls only (floats; no sim deps).
+            sc_fwd = float(soft_scales.get('soft_cost_fwd', 0.0) or 0.0)
+            sc_bwd = float(soft_scales.get('soft_cost_bwd', 0.0) or 0.0)
+            sc_ang = float(soft_scales.get('soft_cost_ang', 0.0) or 0.0)
+            v0 = U[:, 0, 0]
+            w0 = U[:, 0, 1]
+            soft = np.zeros_like(S)
+            soft[v0 > 1e-9] += 0.6 * sc_fwd
+            soft[v0 < -1e-9] += 0.6 * sc_bwd
+            soft[np.abs(w0) > 1e-9] += 0.2 * sc_ang
+            S = S + soft
+            soft_cost_applied = True
+
         w = self._mppi_compute_weights(S)
         v_star, w_star = self._mppi_weighted_control(U, w)
 
@@ -399,6 +422,7 @@ class MppiCostmapPlanner:
             'n_steps': self.n_steps,
             'live': True,
             'dist_goal': dist,
+            'soft_cost_applied': soft_cost_applied,
         })
 
         return {'fwd_mps': v_star, 'ang_rads': w_star}
@@ -476,6 +500,21 @@ if __name__ == "__main__":
     atlas = np.zeros((480, 640, 3), dtype=np.uint8)
     extracted = le._extract_obs_map(atlas)
     assert extracted.shape == (240, 320)
+
+    # Optional soft_scales path: default OFF identical; when set, marks debug.
+    le2 = MppiCostmapPlanner(n_samples=64, horizon_sec=0.8)
+    le2.set_goal(1.0, 0.0)
+    cmd_off = le2.tick(obs_map, pose, 0.033)
+    assert cmd_off is not None
+    assert le2.get_debug_state().get('soft_cost_applied') is False
+    cmd_on = le2.tick(
+        obs_map, pose, 0.033,
+        soft_scales={'soft_cost_fwd': 0.8, 'soft_cost_bwd': 0.0, 'soft_cost_ang': 0.0},
+    )
+    assert cmd_on is not None
+    assert le2.get_debug_state().get('soft_cost_applied') is True
+    print("    ✓ optional soft_scales (default OFF / directional ON)")
+    le2.cancel()
 
     print("\n✓ All unit tests passed — LIVE NumPy MPPI (mppi-costmap-v0)")
     print("  measured tick p95=%.2f ms" % float(np.percentile(lat, 95)))

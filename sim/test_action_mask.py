@@ -13,6 +13,7 @@ from sim.action_mask import (
     classify_mode,
     mask_from_clearances,
     soft_cost_bonus,
+    soft_sample_cost,
 )
 from sim.dual_clearance import evaluate
 
@@ -96,6 +97,42 @@ class TestActionMask(unittest.TestCase):
         self.assertEqual(classify_mode(evaluate(0.25, 0.5, 0.5)), "squeeze")
         self.assertEqual(classify_mode(evaluate(0.01, 0.5, 0.2)), "recover")
         self.assertEqual(classify_mode(evaluate(0.0, 0.0, 0.0)), "halt")
+
+    def test_soft_sample_open_near_zero(self):
+        s = evaluate(0.5, 0.5, 0.5)
+        self.assertEqual(s.soft_cost_fwd(), 0.0)
+        self.assertTrue(_approx(soft_sample_cost(0.2, 0.0, s), 0.0))
+        self.assertTrue(_approx(soft_sample_cost(0.2, 0.3, s), 0.0))
+
+    def test_soft_sample_fwd_blocked_prefers_reverse_spin(self):
+        # Squeeze band: soft-blocked fwd, bwd/lat clear → forward costs more.
+        s = evaluate(0.25, 0.5, 0.5)
+        self.assertTrue(s.squeeze)
+        self.assertGreater(s.soft_cost_fwd(), 0.0)
+        self.assertEqual(s.soft_cost_bwd(), 0.0)
+        self.assertEqual(s.soft_cost_ang(), 0.0)
+        c_fwd = soft_sample_cost(0.2, 0.0, s)
+        c_rev = soft_sample_cost(-0.2, 0.0, s)
+        c_spin = soft_sample_cost(0.0, 0.5, s)
+        self.assertGreater(c_fwd, c_rev)
+        self.assertGreater(c_fwd, c_spin)
+        self.assertTrue(_approx(c_rev, 0.0))
+        self.assertTrue(_approx(c_spin, 0.0))
+        # Directional: same scales, aggregate bonus alone would be identical.
+        self.assertGreater(soft_cost_bonus(s), 0.0)
+
+    def test_soft_sample_recover_still_costs_but_hard_unchanged(self):
+        s = evaluate(0.01, 0.5, 0.2)
+        self.assertEqual(s.hard_fwd, 0.0)
+        self.assertEqual(classify_mode(s), "recover")
+        # Soft prefer still has cost in recover band (planner hint).
+        self.assertGreater(soft_sample_cost(0.2, 0.0, s), 0.0)
+        # Hard mask still absolute — soft cost must not weaken it.
+        m = apply_action_mask(0.25, 0.3, s)
+        self.assertEqual(m.mode, "recover")
+        self.assertEqual(m.v, 0.0)
+        self.assertEqual(m.scales.hard_fwd, 0.0)
+        self.assertFalse(action_feasible(0.25, 0.0, s))
 
 
 def run():
