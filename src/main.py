@@ -9,6 +9,7 @@ import tools
 import vision as vision_mod
 import navigator
 import local_executive
+import house_bot as house_bot_mod
 
 try:
     import rerun as rr
@@ -46,6 +47,8 @@ def main():
                         help="LocalExecutive backend: vfh (default) or mppi (NumPy MPPI on ego costmap)")
     parser.add_argument("--wander", action="store_true",
                         help="With --auto-local, start continuous ~1m wander immediately")
+    parser.add_argument("--house-bot", action="store_true",
+                        help="Curious look-before-leap + local speak")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -123,6 +126,10 @@ def main():
         if args.wander:
             local_executive.set_wander()
             print("main: wander started (~1m rolling goals)")
+    hb = None
+    if args.house_bot:
+        hb = house_bot_mod.HouseBot(vis, enabled=True)
+        hb.start()
     else:
         local_executive.clear()
 
@@ -288,6 +295,10 @@ def main():
         u.stop()
         navigator.clear_goal()
         local_executive.clear()
+        try:
+            if hb: hb.stop()
+        except Exception:
+            pass
         if wb:
             wb.shutdown()
         print("main: shutdown complete")

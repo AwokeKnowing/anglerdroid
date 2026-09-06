@@ -15,6 +15,7 @@ import vision
 import ui
 import navigator
 import local_executive
+import speech_io
 
 
 # --- Shared instances (main script sets these or tools.init) ---
@@ -157,3 +158,10 @@ def local_wander(enable: bool = True):
 
 def local_cancel():
     local_stop()
+
+
+def speak_local(text: str):
+    speech_io.speak(text)
+
+def listen_local(secs: float = 3.0) -> str:
+    return speech_io.listen_seconds(secs)

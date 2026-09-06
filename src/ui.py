@@ -73,9 +73,16 @@ def _jpeg_encode_rgb(rgb, quality=92):
 
 
 try:
+    import os as _os
     from kokoro_onnx import Kokoro as _KokoroClass
-    _kokoro = _KokoroClass()
-    _HAS_KOKORO = True
+    _km = _os.path.expanduser("~/.kevin/models/kokoro/kokoro-v1.0.onnx")
+    _kv = _os.path.expanduser("~/.kevin/models/kokoro/voices-v1.0.bin")
+    if _os.path.isfile(_km) and _os.path.isfile(_kv):
+        _kokoro = _KokoroClass(_km, _kv)
+        _HAS_KOKORO = True
+    else:
+        _kokoro = None
+        _HAS_KOKORO = False
 except Exception:
     _kokoro = None
     _HAS_KOKORO = False
