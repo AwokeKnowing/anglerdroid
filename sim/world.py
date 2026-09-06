@@ -46,8 +46,15 @@ def create_scenario(name: str):
     elif name == "doorway":
         _add_doorway(obs, height)
 
+    elif name == "box3d_table":
+        from sim.box3d import house_boxes, rasterize_boxes
+        obs, height = rasterize_boxes(house_boxes())
+        return obs, height
     elif name == "l_corner":
         _add_l_corner(obs, height)
+
+    elif name == "cul_de_sac":
+        _add_cul_de_sac(obs, height)
 
     else:
         raise ValueError(f"Unknown scenario: {name}")
@@ -153,6 +160,29 @@ def doorway_goal():
     """Final world-frame waypoint past the doorway gap (meters)."""
     return doorway_waypoints()[-1]
 
+
+def _add_cul_de_sac(obs, height):
+    """Open room with a U-shaped pocket dead ahead; right side stays open.
+
+    Cul-de-sac lookahead should score forward/pocket low and open-right high.
+    Walls kept clear of start FOOT.
+    """
+    # Outer walls
+    _add_rect(obs, height, 0, 0, 8, FRAME_H, h_cm=200)
+    _add_rect(obs, height, FRAME_W - 8, 0, FRAME_W, FRAME_H, h_cm=200)
+    _add_rect(obs, height, 0, 0, FRAME_W, 8, h_cm=200)
+    _add_rect(obs, height, 0, FRAME_H - 8, FRAME_W, FRAME_H, h_cm=200)
+    # U-pocket centered on +x ~0.6–1.15 m ahead (mouth toward robot)
+    mouth_x0 = RCX + 60
+    mouth_x1 = mouth_x0 + 55
+    half = 28  # pocket half-width (~0.28 m)
+    # upper wall (smaller y)
+    _add_rect(obs, height, mouth_x0, RCY - half - 14, mouth_x1, RCY - half + 4, h_cm=200)
+    # lower wall (larger y)
+    _add_rect(obs, height, mouth_x0, RCY + half - 4, mouth_x1, RCY + half + 14, h_cm=200)
+    # back wall
+    _add_rect(obs, height, mouth_x1 - 14, RCY - half - 14, mouth_x1, RCY + half + 14, h_cm=200)
+    # Leave RIGHT side of room (larger y / negative yaw) open for escape
 
 def doorway_waypoints():
     """Staged mid-layer goals: align to gap, then cross to far side.

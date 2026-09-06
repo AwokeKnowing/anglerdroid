@@ -16,7 +16,7 @@ from sim.policy import create_policy
 from sim.metrics import run_episode as metrics_run_episode
 
 
-def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False, enjoy=False):
+def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False, enjoy=False, fidelity=False, policy_hz=None):
     """Run a simulation episode.
     
     Returns:
@@ -28,12 +28,13 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
     start_y = RCY * EGO_PX_SIZE
     start_theta = 0.0
     
-    robot = Robot(start_x, start_y, start_theta)
+    robot = Robot(start_x, start_y, start_theta, fidelity=fidelity)
     policy = create_policy(policy_name)
     policy.reset()
     
     frames = []
     trail = []
+    last_cmd = (0.0, 0.0)
     collision_detected = False
     collision_step = -1
     goal = None
@@ -68,8 +69,14 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
             'theta': robot.theta,
         }
         
-        v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, safety_scales, pose)
-        
+        if policy_hz is None:
+            every = 1
+        else:
+            every = max(1, int(round((1.0 / dt) / float(policy_hz))))
+        if step % every == 0:
+            last_cmd = policy.act(robot.ego_obs, robot.ego_height, safety_scales, pose)
+        v_cmd, w_cmd = last_cmd
+
         robot.step(v_cmd, w_cmd, dt)
         trail.append((robot.x, robot.y))
 
@@ -170,14 +177,18 @@ def main():
     parser = argparse.ArgumentParser(description='Run lightweight 2D simulator')
     parser.add_argument('--steps', type=int, default=200, help='Number of simulation steps')
     parser.add_argument('--scenario', type=str, default='empty', 
-                        choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner'],
+                        choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner', 'box3d_table'],
                         help='Scenario to run')
     parser.add_argument('--policy', type=str, default='housebot',
-                        choices=['random', 'housebot', 'goalseek', 'stop', 'unsafe'],
+                        choices=['random', 'housebot', 'goalseek', 'mppi', 'stop', 'unsafe'],
                         help='Policy to use')
     parser.add_argument('--hz', type=float, default=30.0, help='Simulation frequency (Hz)')
     parser.add_argument('--save', type=str, default=None, help='Save path for GIF or PNG')
     parser.add_argument('--render', action='store_true', help='Render frames (requires save or display)')
+    parser.add_argument('--fidelity', action='store_true',
+                        help='Enable latency + perception noise (transfer mode)')
+    parser.add_argument('--policy-hz', type=float, default=None,
+                        help='Run policy at lower Hz than dynamics (multi-rate)')
     parser.add_argument('--enjoy', action='store_true',
                         help='Top-down enjoy mode GIF (auto-saves under /tmp/kevin-sim if --save omitted)')
     
@@ -203,6 +214,8 @@ def main():
             save_path=save_path,
             render=args.render or args.enjoy,
             enjoy=args.enjoy,
+            fidelity=getattr(args, "fidelity", False),
+            policy_hz=getattr(args, "policy_hz", None),
         )
         if args.enjoy:
             print(f"Enjoy GIF: {save_path}")

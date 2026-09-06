@@ -120,6 +120,92 @@ def soft_heading_score(obs_soft, yaw_off_rad, horizon_m=0.9):
             free += 1
     return (free / hits) if hits else 0.0
 
+def cul_de_sac_escape(obs_soft, yaw_off_rad=0.0, approach_m=0.95, tip_radius_m=0.26):
+    """Lookahead trap score in [0, 1]: 1 = open ahead, 0 = dead-end pocket.
+
+    Walk along yaw_off up to approach_m but stop at the first soft hit so the
+    tip sits *inside* a pocket rather than tunneling past the back wall.
+    At the tip, score disk free + forward stub + lateral fan exits.
+    """
+    if obs_soft is None:
+        return 1.0
+    h, w = obs_soft.shape
+    n_max = max(8, int(approach_m / EGO_PX_SIZE))
+    tip_i = n_max
+    tip_x = FOOT_X1 + n_max * math.cos(yaw_off_rad)
+    tip_y = RCY + n_max * math.sin(yaw_off_rad)
+    hit_wall = False
+    for i in range(1, n_max + 1):
+        ix = int(round(FOOT_X1 + i * math.cos(yaw_off_rad)))
+        iy = int(round(RCY + i * math.sin(yaw_off_rad)))
+        if not (0 <= ix < w and 0 <= iy < h):
+            tip_i = max(1, i - 1)
+            tip_x = FOOT_X1 + tip_i * math.cos(yaw_off_rad)
+            tip_y = RCY + tip_i * math.sin(yaw_off_rad)
+            hit_wall = True
+            break
+        if obs_soft[iy, ix]:
+            # Tip just before the soft hit (inside pocket / at mouth closure)
+            tip_i = max(1, i - 2)
+            tip_x = FOOT_X1 + tip_i * math.cos(yaw_off_rad)
+            tip_y = RCY + tip_i * math.sin(yaw_off_rad)
+            hit_wall = True
+            break
+    rad = max(3, int(tip_radius_m / EGO_PX_SIZE))
+    free = hits = 0
+    for dy in range(-rad, rad + 1):
+        for dx in range(-rad, rad + 1):
+            if dx * dx + dy * dy > rad * rad:
+                continue
+            ix = int(round(tip_x + dx))
+            iy = int(round(tip_y + dy))
+            if not (0 <= ix < w and 0 <= iy < h):
+                continue
+            hits += 1
+            if not obs_soft[iy, ix]:
+                free += 1
+    disk = (free / hits) if hits else 0.0
+    stub_n = max(4, int(0.35 / EGO_PX_SIZE))
+    stub_free = stub_hits = 0
+    for i in range(1, stub_n + 1):
+        ix = int(round(tip_x + i * math.cos(yaw_off_rad)))
+        iy = int(round(tip_y + i * math.sin(yaw_off_rad)))
+        if not (0 <= ix < w and 0 <= iy < h):
+            break
+        stub_hits += 1
+        if not obs_soft[iy, ix]:
+            stub_free += 1
+    stub = (stub_free / stub_hits) if stub_hits else 0.0
+    fan_free = fan_hits = 0
+    fan_len = max(4, int(0.28 / EGO_PX_SIZE))
+    for dlat in (-math.radians(55), math.radians(55), -math.radians(90), math.radians(90)):
+        yaw = yaw_off_rad + dlat
+        for i in range(1, fan_len + 1):
+            ix = int(round(tip_x + i * math.cos(yaw)))
+            iy = int(round(tip_y + i * math.sin(yaw)))
+            if not (0 <= ix < w and 0 <= iy < h):
+                break
+            fan_hits += 1
+            if not obs_soft[iy, ix]:
+                fan_free += 1
+    fan = (fan_free / fan_hits) if fan_hits else 0.0
+    score = 0.25 * disk + 0.45 * stub + 0.30 * fan
+    # If we never hit a soft wall within approach, reward open corridors
+    if not hit_wall:
+        score = max(score, 0.85 * disk + 0.15)
+    return float(max(0.0, min(1.0, score)))
+
+
+def score_heading_with_lookahead(obs_soft, yaw_off_rad, horizon_m=0.9):
+    """Blend soft ray free fraction with cul-de-sac escape (prefer open exits)."""
+    ray = soft_heading_score(obs_soft, yaw_off_rad, horizon_m=horizon_m)
+    esc = cul_de_sac_escape(obs_soft, yaw_off_rad, approach_m=min(1.2, horizon_m + 0.15))
+    # Escape-dominant: clear ray into a pocket still loses
+    return float(0.30 * ray + 0.70 * esc)
+
+
+
+
 
 class SafetyGuard:
     """Directional collision avoidance matching src/safety.py."""
@@ -247,6 +333,9 @@ class Robot:
         self.soft_mid = sm
         # Squeeze: hard still allows some forward, soft buffer already gone
         self.squeeze = (sm < SQUEEZE_FWD_SOFT_MAX) and (self.safety.fwd_scale > 0.05)
+        if self.fidelity:
+            self._apply_perception_noise()
+
     
 
     def _apply_body_ring_safety(self, ego_obs):

@@ -1,3 +1,4 @@
+from sim.mppi_policy import MppiSimPolicy
 """Pluggable policy interface + HouseBotLite reference implementation.
 
 HouseBotLite ports real house_bot phased recover:
@@ -11,7 +12,7 @@ BUT refuses to override hard stops from SafetyGuard.
 from __future__ import annotations
 
 import math
-from sim.robot import soft_heading_score, soft_inflate
+from sim.robot import soft_heading_score, soft_inflate, score_heading_with_lookahead, cul_de_sac_escape
 import numpy as np
 
 
@@ -116,18 +117,19 @@ class HouseBotLite(Policy):
         return turn
 
     def _pick_turn_soft(self, obs, scores, curious=False):
-        """Prefer heading with soft-buffer ray clear; fall back to sector scores."""
+        """Prefer soft-clear headings that also escape cul-de-sacs."""
         soft = soft_inflate(obs) if obs is not None else None
         cands = []
         for name, yaw in (("left", math.radians(35)), ("right", math.radians(-35)),
                           ("hard_left", math.radians(75)), ("hard_right", math.radians(-75))):
-            s = soft_heading_score(soft, yaw) if soft is not None else 0.5
-            # Blend with lateral sector
+            if soft is not None:
+                s = score_heading_with_lookahead(soft, yaw)
+            else:
+                s = 0.5
             lat = scores.get("left" if "left" in name else "right", 0.5)
             cands.append((0.7 * s + 0.3 * lat, name.replace("hard_", "")))
         cands.sort(reverse=True)
         turn = cands[0][1]
-        # If best soft score is still poor, keep sector pick
         if cands[0][0] < 0.35:
             try:
                 turn = self._pick_turn(scores, curious=curious)
@@ -293,13 +295,14 @@ class HouseBotLite(Policy):
         # Prefer buffer: if soft mid is tight, slow + micro-steer toward freer soft ray
         soft = soft_inflate(obs) if obs is not None else None
         if soft is not None:
-            sL = soft_heading_score(soft, math.radians(25))
-            sR = soft_heading_score(soft, math.radians(-25))
-            sF = soft_heading_score(soft, 0.0)
-            if sF < 0.55:
-                # squeeze / pre-throttle: slow and veer to better soft side
+            sL = score_heading_with_lookahead(soft, math.radians(25))
+            sR = score_heading_with_lookahead(soft, math.radians(-25))
+            sF = score_heading_with_lookahead(soft, 0.0)
+            # Strong trap ahead: treat like squeeze even if near soft ray looks OK
+            if sF < 0.55 or cul_de_sac_escape(soft, 0.0) < 0.40:
                 w = self.SEEK_W * 0.6 if sL >= sR else -self.SEEK_W * 0.6
-                v = self.v_cruise * (0.35 + 0.65 * max(0.0, sF))
+                v = self.v_cruise * (0.35 + 0.65 * max(0.0, min(sF, 0.85)))
+                self.last_decision = "avoid_trap" if cul_de_sac_escape(soft, 0.0) < 0.40 else "soft_squeeze"
                 return self._safe_cmd(v, w, fwd_scale, bwd_scale, ang_scale)
             if abs(sL - sR) > 0.12 and min(sL, sR) < 0.7:
                 w = self.SEEK_W * 0.35 if sL > sR else -self.SEEK_W * 0.35
@@ -378,6 +381,26 @@ class GoalSeekLite(HouseBotLite):
 
         desired = math.atan2(dy, dx)
         err = (desired - th + math.pi) % (2 * math.pi) - math.pi
+        # Cul-de-sac lookahead: if goal heading traps and a side exits, divert
+        soft = soft_inflate(obs) if obs is not None else None
+        if soft is not None and dist > self.ARRIVE_M * 2:
+            goal_yaw = err  # relative to current heading
+            esc_g = cul_de_sac_escape(soft, goal_yaw)
+            if esc_g < 0.38:
+                best = None
+                best_s = esc_g
+                for yaw in (math.radians(40), math.radians(-40),
+                            math.radians(80), math.radians(-80)):
+                    s = score_heading_with_lookahead(soft, yaw)
+                    if s > best_s + 0.12:
+                        best_s = s
+                        best = yaw
+                if best is not None:
+                    self.last_decision = "seek_avoid_trap"
+                    sign = 1.0 if best > 0 else -1.0
+                    v_cmd = self.SEEK_V * 0.35 if fwd_scale > 0 else 0.0
+                    w_cmd = self.SEEK_W * 0.85 * sign
+                    return self._safe_cmd(v_cmd, w_cmd, fwd_scale, bwd_scale, ang_scale)
         need_turn = abs(err) > self.ALIGN_RAD
 
         # Laterals hard-pin: back up a hair to regain yaw authority
@@ -410,6 +433,8 @@ def create_policy(name: str, goal_xy=None):
         return HouseBotLite()
     elif name == "goalseek":
         return GoalSeekLite(goal_xy=goal_xy)
+    elif name == "mppi":
+        return MppiSimPolicy(goal_xy=goal_xy, wander=(goal_xy is None))
     elif name == "stop":
         return StopPolicy()
     elif name in ("unsafe", "unsafe_commit"):

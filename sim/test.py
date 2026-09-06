@@ -215,7 +215,7 @@ def test_house_episode_no_collision():
 
 def test_new_scenarios_have_obstacles():
     """hallway / doorway / l_corner are non-empty maps."""
-    for name in ("hallway", "doorway", "l_corner"):
+    for name in ("hallway", "doorway", "l_corner", "cul_de_sac"):
         obs, height = create_scenario(name)
         assert obs.max() == 255, f"{name} has no obstacles"
         assert height.max() > 0, f"{name} height map empty"
@@ -356,6 +356,39 @@ def test_stress_5k_housebot_scenarios():
     print("✅ test_stress_5k_housebot_scenarios passed")
 
 
+
+def test_cul_de_sac_escape_rejects_pocket():
+    """Forward into U-pocket scores lower than open-right escape."""
+    import math
+    from sim.robot import soft_inflate, cul_de_sac_escape, score_heading_with_lookahead
+    obs, _ = create_scenario("cul_de_sac")
+    soft = soft_inflate(obs)
+    esc_f = cul_de_sac_escape(soft, 0.0)
+    esc_open = max(
+        cul_de_sac_escape(soft, math.radians(50)),
+        cul_de_sac_escape(soft, math.radians(-60)),
+    )
+    assert esc_f < 0.40, f"pocket escape too high: {esc_f:.3f}"
+    assert esc_open > esc_f + 0.15, f"open vs pocket {esc_open:.3f} vs {esc_f:.3f}"
+    score_f = score_heading_with_lookahead(soft, 0.0)
+    score_r = score_heading_with_lookahead(soft, math.radians(-60))
+    assert score_r > score_f + 0.08, f"lookahead scores R={score_r:.3f} F={score_f:.3f}"
+    print(
+        f"✅ test_cul_de_sac_escape_rejects_pocket passed "
+        f"(esc F={esc_f:.2f} open={esc_open:.2f} score F={score_f:.2f} R={score_r:.2f})"
+    )
+
+
+def test_cul_de_sac_housebot_no_collision():
+    """HouseBotLite with cul-de-sac lookahead stays collision-free in U-pocket map."""
+    m = _run_episode("cul_de_sac", "housebot", steps=800)
+    assert m["collisions"] == 0, f"cul_de_sac collision at {m['collision_step']}"
+    print(
+        f"✅ test_cul_de_sac_housebot_no_collision passed "
+        f"(path_m={m['path_len_m']:.2f} decisions check via stress)"
+    )
+
+
 def run_all_tests():
     """Run all tests."""
     tests = [
@@ -380,6 +413,8 @@ def run_all_tests():
         test_doorway_cross_metric_tracked,
         test_goalseek_respects_hard_stop,
         test_doorway_goalseek_crosses,
+        test_cul_de_sac_escape_rejects_pocket,
+        test_cul_de_sac_housebot_no_collision,
         test_stress_5k_housebot_scenarios,
     ]
 
