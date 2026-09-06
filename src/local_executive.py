@@ -147,10 +147,15 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
     if obs_map is None:
         # Empty free map keeps planner ticking (open-space geometric bias)
         import numpy as np
-        from robot_config import FRAME_H, FRAME_W
+        import keepouts
+from robot_config import FRAME_H, FRAME_W
         obs_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
     pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
+    try:
+        obs_map = keepouts.paint_ego(obs_map, pose)
+    except Exception as e:
+        print("keepouts: paint skip %s" % e)
     cmd = mppi.tick(obs_map, pose, 0.033)
     with _lock:
         if not mppi.is_active():
