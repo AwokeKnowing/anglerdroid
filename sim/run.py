@@ -12,6 +12,7 @@ import numpy as np
 from sim.world import create_scenario, FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE
 from sim.robot import Robot
 from sim.policy import create_policy
+from sim.metrics import run_episode as metrics_run_episode
 
 
 def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False):
@@ -166,20 +167,31 @@ def main():
     print(f"Running simulation: scenario={args.scenario} policy={args.policy} steps={args.steps} hz={args.hz}")
     print(f"Timestep dt={dt:.4f}s")
     
-    metrics = run_simulation(
-        args.scenario,
-        args.policy,
-        args.steps,
-        dt,
-        save_path=args.save,
-        render=args.render
-    )
+    if args.save or args.render:
+        metrics = run_simulation(
+            args.scenario,
+            args.policy,
+            args.steps,
+            dt,
+            save_path=args.save,
+            render=args.render
+        )
+    else:
+        metrics = metrics_run_episode(
+            args.scenario, args.policy, steps=args.steps, dt=dt
+        )
     
     print("\n=== SIMULATION COMPLETE ===")
     print(f"Collisions: {metrics['collisions']}")
     if metrics['collision_step'] >= 0:
         print(f"First collision at step: {metrics['collision_step']}")
     print(f"Final pose: x={metrics['final_x']:.3f}m y={metrics['final_y']:.3f}m theta={math.degrees(metrics['final_theta']):.1f}°")
+    if args.scenario == "doorway" and "doorway_crossed" in metrics:
+        print(
+            f"Doorway crossed: {metrics['doorway_crossed']} "
+            f"(step={metrics.get('doorway_crossed_step', -1)}) "
+            f"path_m={metrics.get('path_len_m', 0):.2f}"
+        )
     
     if metrics['collisions'] > 0:
         print("\n❌ FAILED: Collision detected")

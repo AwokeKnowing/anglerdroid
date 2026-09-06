@@ -3,10 +3,11 @@
 import math
 import sys
 import numpy as np
-from sim.world import create_scenario
+from sim.world import create_scenario, doorway_crossed
 from sim.robot import Robot
 from sim.policy import create_policy, HouseBotLite, LATE_STUCK_LOOKS
 from sim.unsafe_policy import UnsafeCommitPolicy
+from sim.metrics import run_episode
 
 
 def test_empty_scenario():
@@ -222,40 +223,10 @@ def test_new_scenarios_have_obstacles():
 
 
 def _run_episode(scenario, policy_name, steps=400, apply_safety=True):
-    obs, height = create_scenario(scenario)
-    robot = Robot(0.81, 1.19, 0.0)
-    policy = create_policy(policy_name)
-    policy.reset()
-    dt = 0.033
-    for step in range(steps):
-        robot.update_ego_maps(obs, height)
-        if robot.check_collision():
-            return {
-                "collisions": robot.collision_count + 1,
-                "collision_step": step,
-                "final_theta": robot.theta,
-            }
-        scales = {
-            "fwd": robot.safety.fwd_scale,
-            "bwd": robot.safety.bwd_scale,
-            "ang": robot.safety.ang_scale,
-        }
-        pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
-        v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
-        if policy_name == "housebot" and scales["fwd"] <= 0 and v_cmd > 0:
-            raise AssertionError(f"housebot v>0 at fwd=0 step={step}")
-        robot.step(v_cmd, w_cmd, dt, apply_safety=apply_safety)
-        if robot.check_collision():
-            return {
-                "collisions": max(1, robot.collision_count),
-                "collision_step": step,
-                "final_theta": robot.theta,
-            }
-    return {
-        "collisions": robot.collision_count,
-        "collision_step": -1,
-        "final_theta": robot.theta,
-    }
+    """Thin wrapper — full metrics live in sim.metrics.run_episode."""
+    return run_episode(
+        scenario, policy_name, steps=steps, apply_safety=apply_safety
+    )
 
 
 def test_hallway_housebot_no_collision():
@@ -318,6 +289,51 @@ def test_unsafe_overrides_fwd0():
     assert v > 0.0, f"unsafe commit should force forward, got v={v}"
     print("✅ test_unsafe_overrides_fwd0 passed")
 
+def test_doorway_cross_helper():
+    """doorway_crossed geometry: far side + in-gap counts; wall-clip does not."""
+    # Far side through gap
+    assert doorway_crossed(1.05, 0.50), "gap far-side should count"
+    # Still on start side
+    assert not doorway_crossed(1.05, 1.19), "start side should not count"
+    # Far side but past wall ends (not through door)
+    assert not doorway_crossed(0.20, 0.50), "left-of-gap far side should not count"
+    assert not doorway_crossed(2.50, 0.50), "right-of-gap far side should not count"
+    print("✅ test_doorway_cross_helper passed")
+
+
+def test_doorway_cross_metric_tracked():
+    """Doorway episode reports doorway_crossed field; collisions stay 0.
+
+    Crossing is aspirational for cruise-only HouseBotLite — we assert the
+    metric is present and collision-free; crossed may be False until a
+    goal-seeking mid-layer is wired.
+    """
+    m = _run_episode("doorway", "housebot", steps=800)
+    assert m["collisions"] == 0, f"doorway collision at {m['collision_step']}"
+    assert "doorway_crossed" in m
+    assert "doorway_crossed_step" in m
+    print(
+        "✅ test_doorway_cross_metric_tracked passed "
+        f"(crossed={m['doorway_crossed']} step={m['doorway_crossed_step']} "
+        f"path_m={m['path_len_m']:.2f})"
+    )
+
+
+def test_stress_5k_housebot_scenarios():
+    """Long stress: HouseBotLite, 5k steps, key maps, zero collisions."""
+    scenarios = ("couch_pinch", "hallway", "doorway", "l_corner", "house")
+    for name in scenarios:
+        m = _run_episode(name, "housebot", steps=5000)
+        assert m["collisions"] == 0, (
+            f"{name} stress collision at step {m['collision_step']}"
+        )
+        print(
+            f"  {name}: ok steps={m['steps']} path_m={m['path_len_m']:.1f} "
+            f"crossed={m.get('doorway_crossed')}"
+        )
+    print("✅ test_stress_5k_housebot_scenarios passed")
+
+
 def run_all_tests():
     """Run all tests."""
     tests = [
@@ -338,6 +354,9 @@ def run_all_tests():
         test_l_corner_housebot_no_collision,
         test_unsafe_overrides_fwd0,
         test_unsafe_vs_housebot_couch_contrast,
+        test_doorway_cross_helper,
+        test_doorway_cross_metric_tracked,
+        test_stress_5k_housebot_scenarios,
     ]
 
     print("Running simulator tests...\n")

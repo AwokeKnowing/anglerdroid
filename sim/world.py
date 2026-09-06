@@ -137,6 +137,29 @@ def _add_l_corner(obs, height):
     _add_rect(obs, height, FOOT_X1 + 20, 10, FRAME_W - 10, RCY + 50, h_cm=50)
     _add_rect(obs, height, RCX - 10, 10, FOOT_X1 + 20, FOOT_Y0 - 25, h_cm=50)
 
+# Doorway success-metric geometry (world pixels → meters via EGO_PX_SIZE).
+# Matching _add_doorway: horizontal dividing wall with gap offset +x of start.
+DOORWAY_WALL_Y0 = RCY - 55          # 64
+DOORWAY_WALL_Y1 = DOORWAY_WALL_Y0 + 12
+DOORWAY_DOOR_X0 = RCX + 10          # 91
+DOORWAY_DOOR_X1 = DOORWAY_DOOR_X0 + 35
+
+
+def doorway_crossed(x_m: float, y_m: float, margin_m: float = 0.05) -> bool:
+    """True when pose is on the far side of the dividing wall (past doorway).
+
+    Start pose is south of the wall (larger y). Far side is y < wall_y0 - margin.
+    x must be near the door gap so a wall-clip around the ends does not count.
+    """
+    wall_y0_m = DOORWAY_WALL_Y0 * EGO_PX_SIZE
+    door_x0_m = DOORWAY_DOOR_X0 * EGO_PX_SIZE
+    door_x1_m = DOORWAY_DOOR_X1 * EGO_PX_SIZE
+    pad = 0.08  # allow footprint overhang near gap edges
+    if y_m > wall_y0_m - margin_m:
+        return False
+    return (door_x0_m - pad) <= x_m <= (door_x1_m + pad)
+
+
 def world_to_pixel(x_m, y_m):
     """Convert world coords (meters) to pixel coords."""
     px = int(round(x_m / EGO_PX_SIZE))
