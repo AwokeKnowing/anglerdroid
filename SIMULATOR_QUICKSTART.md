@@ -4,9 +4,10 @@
 
 **LIVE DRIVING IS STOPPED** following couch crash incident.
 
-Use the `sim/` package for offline policy development.
+Use the `sim/` package for offline policy development.  
+Use the `faces/` package for offline face recognition practice.
 
-## Quick Commands
+## Simulator Quick Commands
 
 ### Smoke Test (Required)
 ```bash
@@ -40,7 +41,28 @@ Demonstrates that simulator enforces safety hard stops.
 
 ## Documentation
 
-Full guide: `sim/README.md`
+Full guide: `sim/README.md`  
+Face recognition: `faces/README.md`
+
+## Face Recognition (New!)
+
+Offline-safe face enrollment and conversational greetings:
+
+```bash
+# Enroll faces
+python -m faces.cli enroll "John Doe" photo.jpg
+
+# List enrolled people
+python -m faces.cli list
+
+# Recognize from image
+python -m faces.cli recognize photo.jpg
+
+# Live demo (requires opencv-python)
+python -m faces.demo webcam --tts stub --volume 0.1
+```
+
+See `faces/README.md` for installation and usage.
 
 ## Safety Note
 
@@ -56,4 +78,5 @@ This prevents the couch crash scenario where recover/commit forced motion throug
 1. Run smoke test to verify installation
 2. Develop policy in simulator
 3. Validate zero collisions
-4. Port to robot ONLY after sim validation
+4. (Optional) Set up face recognition for conversational greetings
+5. Port to robot ONLY after sim validation
