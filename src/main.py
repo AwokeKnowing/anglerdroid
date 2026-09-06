@@ -252,7 +252,11 @@ def main():
                     if twist is None and atlas is not None:
                         twist = navigator.compute_twist(atlas)
                     if twist is not None:
-                        tools.twist(twist[0], twist[1])
+                        if not getattr(vis, "topdown_depth_ok", True):
+                            wb.cancel_twist_for()
+                            tools.twist(0.0, 0.0)
+                        else:
+                            tools.twist(twist[0], twist[1])
                     else:
                         tools.set_wheel_vels(0.0, 0.0)
 

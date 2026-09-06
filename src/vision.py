@@ -203,6 +203,9 @@ class Vision:
         self._pitch_cal_done = False
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._topdown_ok = False
+        self._topdown_known_px = 0
+        self._topdown_lost_n = 0
         self._persistent_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
@@ -561,6 +564,16 @@ class Vision:
                 z1, k1 = depth_topdown(self._rs1.verts)
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
+            # Top-down depth is ground truth for open-space. No valid known
+            # coverage ⇒ immobilize (empty map must NOT look like free space).
+            self._topdown_known_px = int(np.count_nonzero(known1))
+            TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
+            self._topdown_ok = bool(
+                self._rs1 is not None
+                and getattr(self._rs1, 'ok', False)
+                and self._rs1.verts is not None
+                and self._topdown_known_px >= TOPDOWN_MIN_KNOWN
+            )
             if not hasattr(self, '_k1_bbox_n'):
                 self._k1_bbox_n = 0
             self._k1_bbox_n += 1
@@ -732,6 +745,26 @@ class Vision:
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height)
+            if not self._topdown_ok:
+                # Hard immobilize: no top-down depth reading.
+                self._safety._fwd_scale = 0.0
+                self._safety._bwd_scale = 0.0
+                self._safety._ang_scale = 0.0
+                self._topdown_lost_n = getattr(self, '_topdown_lost_n', 0) + 1
+                if self._topdown_lost_n == 1 or self._topdown_lost_n % 60 == 0:
+                    print(
+                        "vision: TOPDOWN LOST — immobilized "
+                        "(rs1_ok=%s known_px=%d)"
+                        % (getattr(self._rs1, 'ok', None), self._topdown_known_px)
+                    )
+            else:
+                if getattr(self, '_topdown_lost_n', 0):
+                    print(
+                        "vision: TOPDOWN OK — drive re-enabled "
+                        "(known_px=%d after %d lost frames)"
+                        % (self._topdown_known_px, self._topdown_lost_n)
+                    )
+                self._topdown_lost_n = 0
             _t_safety = time.monotonic()
 
             # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
@@ -821,6 +854,16 @@ class Vision:
                 self.atlas.copy(),
                 self.timestamp,
             )
+
+    
+    @property
+    def topdown_depth_ok(self):
+        """True when RS1 top-down depth produced enough known open/occ pixels."""
+        return bool(getattr(self, '_topdown_ok', False))
+
+    @property
+    def topdown_known_px(self):
+        return int(getattr(self, '_topdown_known_px', 0))
 
     @property
     def safety_fwd_scale(self):

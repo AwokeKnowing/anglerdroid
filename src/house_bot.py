@@ -327,6 +327,12 @@ class HouseBot:
             fwd_scale = float(vis.safety_fwd_scale)
         except Exception:
             fwd_scale = 1.0
+        topdown_ok = bool(getattr(vis, "topdown_depth_ok", True))
+        if not topdown_ok:
+            # No top-down depth ⇒ do not claim open space; stop divert chatter.
+            fwd_scale = 0.0
+            scores["fwd_near"] = 0.0
+            scores["fwd_mid"] = 0.0
         try:
             ang_scale = float(vis.safety_ang_scale)
         except Exception:
@@ -491,7 +497,10 @@ class HouseBot:
                 pass
             elif now - self._last_narrate > NARRATE_EVERY_S and not speech_io.is_speaking():
                 self._last_narrate = now
-                speech_io.speak("Looking ahead. Still clear.")
+                if getattr(self.vision, "topdown_depth_ok", True):
+                    speech_io.speak("Looking ahead. Still clear.")
+                else:
+                    speech_io.speak("I lost top-down depth. Holding still.")
 
         self._last_decision = decision
         line = "house_bot: look#%d %s %s snaps=%s" % (
