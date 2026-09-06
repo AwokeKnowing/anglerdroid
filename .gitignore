@@ -166,3 +166,40 @@ cython_debug/
 # Rerun recordings
 *.rrd
 .kevin/rerun/
+
+# ═══════════════════════════════════════════════════════════════════
+# PRIVACY: Face gallery images and embeddings (NEVER commit)
+# ═══════════════════════════════════════════════════════════════════
+# Face gallery lives only on Kevin at ~/.kevin/faces (not in repo)
+# - Gallery images: ~/.kevin/faces/*.jpg
+# - Full photo backup: ~/.kevin/faces_fullphoto_backup/*.jpg
+# - Embeddings database: ~/.kevin/faces/database.pkl
+# - Incoming enrollment: ~/gallery_incoming/*.jpg
+
+# All face gallery directories and files
+.kevin/faces/
+.kevin/faces_fullphoto_backup/
+gallery_incoming/
+
+# Face-related files anywhere in repo (safety net)
+**/faces/**/*.jpg
+**/faces/**/*.jpeg
+**/faces/**/*.png
+**/faces/**/*.pkl
+**/faces/**/database.pkl
+**/gallery_incoming/**/*.jpg
+**/gallery_incoming/**/*.jpeg
+**/gallery_incoming/**/*.png
+
+# Enrollment dumps (any .jpg in root or subdirs that might be face crops)
+# Code should save to ~/.kevin/faces, but this catches accidental local saves
+/*.jpg
+/*.jpeg
+/*.png
+/enroll_*.jpg
+/face_*.jpg
+/crop_*.jpg
+
+# Face embeddings database (never commit)
+database.pkl
+**/database.pkl
