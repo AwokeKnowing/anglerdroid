@@ -38,7 +38,8 @@ WAIT_ENGAGE_TIMEOUT = 15.0     # silence → polite leave
 CONVERSE_TURN_MAX = 8.0        # keep conversational turns short
 COOLDOWN_NO_ENGAGE = 300.0     # 5 min after leave-without-chat
 COOLDOWN_ENGAGED = 90.0        # 1.5 min after conversation
-NOTICE_DECIDE_DELAY = 0.5      # brief observation before approach
+COOLDOWN_DISMISSED = 600.0     # 10 min after explicit "go away" (2x normal)
+NOTICE_DECIDE_DELAY = 0.5      # brief observation before approach (Kendon initiation phase)
 
 # Face box heuristic calibration (when depth unavailable)
 # Assume typical face width ~20 cm at ~4 ft (1.2 m) → box_width ~X pixels at 320px wide
@@ -421,12 +422,18 @@ class SocialFSM:
                 "command": "come_here",
             }
         
-        if any(w in cmd for w in ["go away", "leave me alone", "back up", "give me space"]):
+        # Designing for Exit (WeRobot 2022): immediate response + long cooldown
+        if any(w in cmd for w in ["go away", "leave me alone", "back up", "give me space", "not now", "i'm busy"]):
+            # Set extended cooldown for current person if known
+            if self.current_person and self.current_person in self.encounters:
+                self._start_cooldown(self.current_person, COOLDOWN_DISMISSED, now)
+            
             return {
                 "action_type": "command",
                 "utterance": "Sorry. Moving away.",
-                "goal_hint": {"type": "retreat", "distance_m": 2.0},
+                "goal_hint": {"type": "retreat", "distance_m": 2.0, "dismissed": True},
                 "command": "go_away",
+                "cooldown_extended": True,
             }
         
         if any(w in cmd for w in ["wander", "explore", "look around", "roam"]):

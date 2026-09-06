@@ -181,9 +181,9 @@ class DirectionalHelp:
         if re.search(r"\b(come (here|to me|over|closer)|approach)\b", norm):
             return ("come_here", {"type": "approach_speaker"})
         
-        # Go away / retreat commands
-        if re.search(r"\b(go away|leave me|back up|give (me )?space|retreat)\b", norm):
-            return ("go_away", {"type": "retreat", "distance_m": 2.0})
+        # Go away / retreat commands (Designing for Exit: immediate response)
+        if re.search(r"\b(go away|leave me|back up|give (me )?space|retreat|not now|i'?m busy)\b", norm):
+            return ("go_away", {"type": "retreat", "distance_m": 2.0, "dismissed": True})
         
         # Wander / explore commands
         if re.search(r"\b(wander|explore|look around|roam)\b", norm):
