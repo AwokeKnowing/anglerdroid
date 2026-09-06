@@ -105,6 +105,51 @@ def test_box3d_start_clear():
     assert robot.safety.fwd_scale > 0.3
 
 
+
+def test_fidelity_mppi_hard_no_collision():
+    """Fidelity + MPPI stress on tight layouts; 0 collisions (P0 transfer)."""
+    from sim.world import scenario_start
+
+    # cul_de_sac included when start pose is clear (default FOOT is).
+    scenarios = ("couch_pinch", "hallway", "doorway", "cul_de_sac")
+    steps = 400
+    dt = 0.033
+    for name in scenarios:
+        obs, height = create_scenario(name)
+        sx, sy, st = scenario_start(name)
+        robot = Robot(sx, sy, st, fidelity=True)
+        policy = create_policy("mppi")
+        policy.reset()
+        robot.update_ego_maps(obs, height)
+        assert not robot.check_collision(), f"{name} start colliding"
+        for step in range(steps):
+            robot.update_ego_maps(obs, height)
+            assert not robot.check_collision(), f"{name} collision at step {step}"
+            scales = {
+                "fwd": robot.safety.fwd_scale,
+                "bwd": robot.safety.bwd_scale,
+                "ang": robot.safety.ang_scale,
+            }
+            pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
+            v, w = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
+            robot.step(v, w, dt)
+
+
+def test_multi_rate_policy_hz_smoke():
+    """C1 multi-rate: dynamics ~30 Hz, policy 10 Hz, fidelity on, 0 collisions."""
+    from sim.run import run_simulation
+
+    metrics = run_simulation(
+        scenario_name="hallway",
+        policy_name="mppi",
+        steps=240,
+        dt=0.033,
+        fidelity=True,
+        policy_hz=10,
+    )
+    assert metrics["collisions"] == 0, metrics
+
+
 if __name__ == "__main__":
     for k, fn in list(globals().items()):
         if k.startswith("test_") and callable(fn):

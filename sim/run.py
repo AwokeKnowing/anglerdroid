@@ -177,7 +177,7 @@ def main():
     parser = argparse.ArgumentParser(description='Run lightweight 2D simulator')
     parser.add_argument('--steps', type=int, default=200, help='Number of simulation steps')
     parser.add_argument('--scenario', type=str, default='empty', 
-                        choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner', 'box3d_table'],
+                        choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner', 'cul_de_sac', 'box3d_table'],
                         help='Scenario to run')
     parser.add_argument('--policy', type=str, default='housebot',
                         choices=['random', 'housebot', 'goalseek', 'mppi', 'stop', 'unsafe'],
