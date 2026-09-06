@@ -39,6 +39,8 @@ def main():
                         help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
     parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
                         help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
+    parser.add_argument("--auto-local", action="store_true",
+                        help="Enable LocalExecutive mid-layer for autonomous navigation (default: VFH navigator)")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -99,6 +101,13 @@ def main():
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
 
+    # LocalExecutive (optional, --auto-local flag)
+    local_executive = None
+    if args.auto_local:
+        from local_executive import LocalExecutive
+        local_executive = LocalExecutive()
+        print("LocalExecutive: enabled (--auto-local flag)")
+
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
     frame_id = 0
@@ -153,13 +162,28 @@ def main():
                 if gamepad_active:
                     wb.cancel_twist_for()
                     navigator.clear_goal()
+                    if local_executive:
+                        local_executive.cancel()
                     tools.set_wheel_vels(left_tps, right_tps)
                 elif not wb.is_twist_for_active():
-                    twist = navigator.compute_twist(atlas) if atlas is not None else None
-                    if twist is not None:
-                        tools.twist(twist[0], twist[1])
+                    # LocalExecutive mode (if enabled and active)
+                    if local_executive and local_executive.is_active():
+                        cmd = local_executive.tick(
+                            obs_map=vis._persistent_obs,
+                            pose=(vis._pose.x, vis._pose.y, vis._pose.theta),
+                            dt=LOOP_DT
+                        )
+                        if cmd is not None:
+                            tools.twist(cmd['fwd_mps'], cmd['ang_rads'])
+                        else:
+                            tools.set_wheel_vels(0.0, 0.0)
                     else:
-                        tools.set_wheel_vels(0.0, 0.0)
+                        # Default: VFH navigator (existing)
+                        twist = navigator.compute_twist(atlas) if atlas is not None else None
+                        if twist is not None:
+                            tools.twist(twist[0], twist[1])
+                        else:
+                            tools.set_wheel_vels(0.0, 0.0)
 
             # Tool calls from agent (only act if gamepad is idle)
             if not gamepad_active:
@@ -192,6 +216,18 @@ def main():
                             navigator.set_goal(float(hdg))
                         else:
                             navigator.clear_goal()
+                    elif name == "local_goto":
+                        if local_executive:
+                            x = cargs.get("x", 0.0)
+                            y = cargs.get("y", 0.0)
+                            local_executive.set_goal(x, y)
+                    elif name == "local_wander":
+                        if local_executive:
+                            enable = cargs.get("enable", True)
+                            local_executive.set_wander_mode(enable)
+                    elif name == "local_cancel":
+                        if local_executive:
+                            local_executive.cancel()
                     elif name == "twist":
                         tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
                     elif name == "set_wheel_vels":
@@ -220,6 +256,9 @@ def main():
                 hdg = navigator.get_goal()
                 if hdg is not None:
                     nav_info = "  nav=%.0f°" % hdg
+                if local_executive and local_executive.is_active():
+                    dbg = local_executive.get_debug_state()
+                    nav_info += "  local=(%.1f,%.1f)" % (dbg.get('goal_x', 0), dbg.get('goal_y', 0))
                 print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)%s" % (
                     actual_fps, avg_process, avg_wait, BUDGET_MS, nav_info))
     except KeyboardInterrupt:
@@ -228,6 +267,8 @@ def main():
         vis.stop()
         u.stop()
         navigator.clear_goal()
+        if local_executive:
+            local_executive.cancel()
         if wb:
             wb.shutdown()
         print("main: shutdown complete")

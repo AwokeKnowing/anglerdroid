@@ -118,6 +118,36 @@ def navigate_stop():
     navigator.clear_goal()
 
 
+# --- LocalExecutive (optional mid-layer) ---
+
+def local_goto(x: float, y: float):
+    """
+    LocalExecutive: Set world-space goal (meters).
+    Requires --auto-local flag and LocalExecutive instance in main loop.
+    """
+    # Note: main loop handles this via tool dispatch
+    # This is a convenience wrapper if direct access is needed
+    pass
+
+
+def local_wander(enable: bool = True):
+    """
+    LocalExecutive: Enable/disable wander mode.
+    Requires --auto-local flag and LocalExecutive instance in main loop.
+    """
+    # Note: main loop handles this via tool dispatch
+    pass
+
+
+def local_cancel():
+    """
+    LocalExecutive: Cancel current goal/wander mode.
+    Requires --auto-local flag and LocalExecutive instance in main loop.
+    """
+    # Note: main loop handles this via tool dispatch
+    pass
+
+
 # --- Raw access for main loop ---
 def get_vision():
     return _vision
