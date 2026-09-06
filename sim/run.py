@@ -10,12 +10,13 @@ import sys
 import numpy as np
 
 from sim.world import create_scenario, FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE
+from sim.viz import render_world_frame
 from sim.robot import Robot
 from sim.policy import create_policy
 from sim.metrics import run_episode as metrics_run_episode
 
 
-def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False):
+def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False, enjoy=False):
     """Run a simulation episode.
     
     Returns:
@@ -32,9 +33,20 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
     policy.reset()
     
     frames = []
+    trail = []
     collision_detected = False
     collision_step = -1
-    
+    goal = None
+    try:
+        from sim.world import doorway_goal
+        if scenario_name == "doorway":
+            goal = doorway_goal()
+    except Exception:
+        goal = None
+
+    # Enjoy mode: subsample frames so GIFs stay small/watchable
+    frame_stride = 3 if enjoy else 1
+
     for step in range(steps):
         robot.update_ego_maps(world_obs, world_height)
         
@@ -59,10 +71,17 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
         v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, safety_scales, pose)
         
         robot.step(v_cmd, w_cmd, dt)
-        
-        if render or save_path:
-            frame = render_frame(robot.ego_obs, robot, step, safety_scales)
-            frames.append(frame)
+        trail.append((robot.x, robot.y))
+
+        if render or save_path or enjoy:
+            if step % frame_stride == 0 or step == steps - 1:
+                if enjoy:
+                    frame = render_world_frame(
+                        world_obs, robot, step, safety_scales, trail, goal=goal
+                    )
+                else:
+                    frame = render_frame(robot.ego_obs, robot, step, safety_scales)
+                frames.append(frame)
         
         if step % 50 == 0:
             print(f"Step {step}/{steps}: pos=({robot.x:.2f}, {robot.y:.2f}) "
@@ -123,7 +142,7 @@ def save_frames(frames, save_path):
     if save_path.endswith('.gif'):
         try:
             import imageio
-            imageio.mimsave(save_path, frames, fps=30, loop=0)
+            imageio.mimsave(save_path, frames, fps=(12 if len(frames) > 80 else 20), loop=0)
             print(f"Saved GIF: {save_path}")
         except ImportError:
             print("Warning: imageio not available, saving first frame as PNG")
@@ -154,11 +173,13 @@ def main():
                         choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner'],
                         help='Scenario to run')
     parser.add_argument('--policy', type=str, default='housebot',
-                        choices=['random', 'housebot', 'stop', 'unsafe'],
+                        choices=['random', 'housebot', 'goalseek', 'stop', 'unsafe'],
                         help='Policy to use')
     parser.add_argument('--hz', type=float, default=30.0, help='Simulation frequency (Hz)')
     parser.add_argument('--save', type=str, default=None, help='Save path for GIF or PNG')
     parser.add_argument('--render', action='store_true', help='Render frames (requires save or display)')
+    parser.add_argument('--enjoy', action='store_true',
+                        help='Top-down enjoy mode GIF (auto-saves under /tmp/kevin-sim if --save omitted)')
     
     args = parser.parse_args()
     
@@ -167,15 +188,24 @@ def main():
     print(f"Running simulation: scenario={args.scenario} policy={args.policy} steps={args.steps} hz={args.hz}")
     print(f"Timestep dt={dt:.4f}s")
     
-    if args.save or args.render:
+    save_path = args.save
+    if args.enjoy and not save_path:
+        import os
+        os.makedirs('/tmp/kevin-sim', exist_ok=True)
+        save_path = f'/tmp/kevin-sim/{args.scenario}_{args.policy}_enjoy.gif'
+
+    if args.save or args.render or args.enjoy:
         metrics = run_simulation(
             args.scenario,
             args.policy,
             args.steps,
             dt,
-            save_path=args.save,
-            render=args.render
+            save_path=save_path,
+            render=args.render or args.enjoy,
+            enjoy=args.enjoy,
         )
+        if args.enjoy:
+            print(f"Enjoy GIF: {save_path}")
     else:
         metrics = metrics_run_episode(
             args.scenario, args.policy, steps=args.steps, dt=dt
