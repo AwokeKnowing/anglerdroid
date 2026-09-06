@@ -409,7 +409,7 @@ class GoalSeekLite(HouseBotLite):
 
 
 
-def create_policy(name: str, goal_xy=None):
+def create_policy(name: str, goal_xy=None, use_soft_cost=True):
     if name == "random":
         return RandomPolicy()
     elif name == "housebot":
@@ -418,7 +418,7 @@ def create_policy(name: str, goal_xy=None):
         return GoalSeekLite(goal_xy=goal_xy)
     elif name == "mppi":
         from sim.mppi_policy import MppiSimPolicy
-        return MppiSimPolicy(goal_xy=goal_xy, wander=(goal_xy is None))
+        return MppiSimPolicy(goal_xy=goal_xy, wander=(goal_xy is None), use_soft_cost=use_soft_cost)
     elif name == "stop":
         return StopPolicy()
     elif name in ("unsafe", "unsafe_commit"):

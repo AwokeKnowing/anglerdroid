@@ -32,10 +32,11 @@ class MppiSimPolicy:
     ESCAPE_SPIN_STEPS = 48  # ~1.6s
     ESCAPE_BACK_STEPS = 22  # ~0.7s
 
-    def __init__(self, goal_xy=None, wander=True):
+    def __init__(self, goal_xy=None, wander=True, use_soft_cost: bool = True):
         self.planner = MppiCostmapPlanner()
         self.goal_xy = goal_xy
         self.wander = wander
+        self.use_soft_cost = bool(use_soft_cost)
         self.last_decision = "mppi_init"
         self.reset()
 
@@ -135,7 +136,7 @@ class MppiSimPolicy:
             return self._mask(v, w, fwd, bwd, ang, safety_scales)
 
         soft_scales = None
-        if all(k in safety_scales for k in ("fwd_m", "bwd_m", "lat_m")):
+        if self.use_soft_cost and all(k in safety_scales for k in ("fwd_m", "bwd_m", "lat_m")):
             dual = evaluate_dual(
                 float(safety_scales["fwd_m"]),
                 float(safety_scales["bwd_m"]),

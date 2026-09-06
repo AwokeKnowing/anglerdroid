@@ -16,12 +16,14 @@ from sim.policy import create_policy
 from sim.metrics import run_episode as metrics_run_episode
 
 
-def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False, enjoy=False, fidelity=False, policy_hz=None):
+def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render=False, enjoy=False, fidelity=False, policy_hz=None, use_soft_cost=True, seed=None):
     """Run a simulation episode.
     
     Returns:
         metrics dict with collisions, time_to_clear, recover_counts, etc.
     """
+    if seed is not None:
+        np.random.seed(int(seed))
     world_obs, world_height = create_scenario(scenario_name)
     
     start_x = RCX * EGO_PX_SIZE
@@ -29,7 +31,7 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
     start_theta = 0.0
     
     robot = Robot(start_x, start_y, start_theta, fidelity=fidelity)
-    policy = create_policy(policy_name)
+    policy = create_policy(policy_name, use_soft_cost=use_soft_cost)
     policy.reset()
     
     frames = []
@@ -195,13 +197,19 @@ def main():
                         help='Run policy at lower Hz than dynamics (multi-rate)')
     parser.add_argument('--enjoy', action='store_true',
                         help='Top-down enjoy mode GIF (auto-saves under /tmp/kevin-sim if --save omitted)')
+    parser.add_argument('--soft-cost', dest='soft_cost', action='store_true', default=True,
+                        help='Pass DualScales soft prefer into MPPI sample cost (default ON for sim)')
+    parser.add_argument('--no-soft-cost', dest='soft_cost', action='store_false',
+                        help='Disable soft prefer sample cost (hard mask still applies)')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Seed np.random before episode (MPPI samples use np.random.normal)')
     
     args = parser.parse_args()
     
     dt = 1.0 / args.hz
     
     print(f"Running simulation: scenario={args.scenario} policy={args.policy} steps={args.steps} hz={args.hz}")
-    print(f"Timestep dt={dt:.4f}s")
+    print(f"Timestep dt={dt:.4f}s soft_cost={getattr(args, 'soft_cost', True)} seed={getattr(args, 'seed', None)}")
     
     save_path = args.save
     if args.enjoy and not save_path:
@@ -220,6 +228,8 @@ def main():
             enjoy=args.enjoy,
             fidelity=getattr(args, "fidelity", False),
             policy_hz=getattr(args, "policy_hz", None),
+            use_soft_cost=bool(getattr(args, "soft_cost", True)),
+            seed=getattr(args, "seed", None),
         )
         if args.enjoy:
             print(f"Enjoy GIF: {save_path}")
