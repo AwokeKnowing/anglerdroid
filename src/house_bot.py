@@ -29,7 +29,7 @@ OBS_THRESH = 100
 EARLY_FWD_SCALE = 0.55
 LATE_FWD_SCALE = 0.18
 EARLY_FREE = 0.72
-EARLY_MAST = 0.06
+EARLY_MAST = 0.12
 MIN_ANG_TO_DIVERT = 0.30
 
 
@@ -146,8 +146,10 @@ class HouseBot:
 
     def _set_turn_goal(self, turn, soft=True):
         pose = getattr(self.vision, "_pose", None)
-        deg = (35.0 if soft else 75.0) * (1.0 if turn == "left" else -1.0)
-        dist = 0.95 if soft else 0.65
+        # Soft: gentle veer while still moving. Late: sharper yaw, shorter reach
+        # so we rotate out of the pin instead of driving into it.
+        deg = (35.0 if soft else 95.0) * (1.0 if turn == "left" else -1.0)
+        dist = 0.95 if soft else 0.40
         if pose is None:
             local_executive.set_wander()
             return deg
@@ -166,8 +168,15 @@ class HouseBot:
             getattr(vis, "_persistent_obs", None),
             getattr(vis, "_persistent_height", None),
         )
-        fwd_scale = float(getattr(vis, "safety_fwd_scale", 1.0) or 1.0)
-        ang_scale = float(getattr(vis, "safety_ang_scale", 1.0) or 1.0)
+        # Do NOT use `or 1.0` — real safety scale 0.0 is falsy and must stay 0.
+        try:
+            fwd_scale = float(vis.safety_fwd_scale)
+        except Exception:
+            fwd_scale = 1.0
+        try:
+            ang_scale = float(vis.safety_ang_scale)
+        except Exception:
+            ang_scale = 1.0
         scores["safety_fwd"] = fwd_scale
         scores["safety_ang"] = ang_scale
 
