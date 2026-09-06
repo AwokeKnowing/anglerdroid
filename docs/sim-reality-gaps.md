@@ -58,3 +58,4 @@ Priority: P0 = high impact on collision/stuck transfer, P1 = medium, P2 = polish
 - 2026-09-05/06: Catalog written. DiffDriveDynamics (accel + optional latency + wheelbase caps). AABB Box3D mast/body. Body-ring safety for side-swipe. `robox3d` 0.1.0 **imports on Orin** — next: thin Kevin URDF / browser viewer spike.
 - Latency default OFF (`Robot(fidelity=True)` for D2); accel+caps always on.
 - 2026-09-05 ~22:30 PT: Cul-de-sac lookahead planner (`d9ab4d8`); 24/24. Live drive still stopped.
+- 2026-09-05 ~22:40 PT: Rerun RGB+height+obs logger (`src/rerun_log.py`) — headless `~/.kevin/rerun/live.rrd` @ ~5 Hz; Rerun 0.37 API fix. Live drive still stopped.

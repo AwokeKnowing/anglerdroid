@@ -11,12 +11,7 @@ import navigator
 import local_executive
 import house_bot as house_bot_mod
 
-try:
-    import rerun as rr
-    HAS_RERUN = True
-except (ImportError, TypeError):
-    rr = None
-    HAS_RERUN = False
+from rerun_log import KevinRerunLogger, available as rerun_available
 
 
 TARGET_FPS = 30
@@ -28,6 +23,14 @@ def main():
     parser = argparse.ArgumentParser(description="AnglerDroid v2 main loop")
     parser.add_argument("--no-wheelbase", action="store_true", help="Do not init real wheelbase (e.g. dev machine)")
     parser.add_argument("--no-rerun", action="store_true", help="Disable rerun logging")
+    parser.add_argument("--rerun-save", default="",
+                        help="Rerun .rrd path (default ~/.kevin/rerun/live.rrd unless --rerun-spawn)")
+    parser.add_argument("--rerun-connect", default="",
+                        help="Optional rerun+http://host:9876/proxy viewer URL")
+    parser.add_argument("--rerun-spawn", action="store_true",
+                        help="Spawn a local Rerun viewer (skips file save by default)")
+    parser.add_argument("--rerun-hz", type=float, default=5.0,
+                        help="Max rate for RGB/depth/obs rerun logs (default 5 Hz)")
     parser.add_argument("--rs1", default="", help="RealSense 1 serial")
     parser.add_argument("--rs2", default="", help="RealSense 2 serial")
     parser.add_argument("--rgb1", default="", help="RGB camera device (e.g. /dev/video1); empty = auto-detect USB webcam")
@@ -54,10 +57,24 @@ def main():
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
     brain_url = args.brain_url or os.environ.get("BRAIN_URL", "")
 
-    # Rerun
-    if HAS_RERUN and not args.no_rerun:
-        rr.init("anglerdroid_v2")
-        rr.connect()
+    # Rerun (RGB + height/depth + obstacle map); prep only — does not arm drive
+    every_n = max(1, int(round(TARGET_FPS / max(0.5, float(args.rerun_hz)))))
+    if args.no_rerun or not rerun_available():
+        rerun_logger = KevinRerunLogger(enabled=False)
+    else:
+        save_kw = {}
+        if args.rerun_spawn:
+            save_kw["save_path"] = None  # viewer stream; skip file
+        elif args.rerun_save:
+            save_kw["save_path"] = args.rerun_save
+        # else: module default ~/.kevin/rerun/live.rrd
+        rerun_logger = KevinRerunLogger(
+            enabled=True,
+            connect_url=args.rerun_connect or None,
+            spawn=bool(args.rerun_spawn),
+            every_n=every_n,
+            **save_kw,
+        )
 
     # Wheelbase (real or None)
     wb = None
@@ -149,9 +166,35 @@ def main():
                 u.send_atlas(atlas)
 
 
-            if HAS_RERUN and not args.no_rerun:
-                rr.set_time_seconds("capture", ts)
-                rr.log("vision/atlas", rr.Image(atlas))
+            if rerun_logger.enabled:
+                # Throttled RGB + ego obs/height; atlas when present.
+                frames = None
+                obs = getattr(vis, "_persistent_obs", None)
+                height = getattr(vis, "_persistent_height", None)
+                # Only copy camera frames on log ticks (every_n gate inside logger
+                # still needs the arrays — peek counter via force=False path).
+                if rerun_logger.due:
+                    try:
+                        frames, _atlas2, _ts2 = tools.get_frames()
+                    except Exception:
+                        frames = None
+                rgb = rs1 = rs2 = None
+                if frames is not None and len(frames) >= 3:
+                    rgb, rs1, rs2 = frames[0], frames[1], frames[2]
+                rerun_logger.maybe_log(
+                    ts=ts,
+                    atlas=atlas,
+                    rgb=rgb,
+                    rs1=rs1,
+                    rs2=rs2,
+                    obs=obs,
+                    height_cm=height,
+                    safety={
+                        "fwd": getattr(vis, "safety_fwd_scale", 1.0),
+                        "bwd": getattr(vis, "safety_bwd_scale", 1.0),
+                        "ang": getattr(vis, "safety_ang_scale", 1.0),
+                    },
+                )
 
             # Propagate debug flags from UI to vision
             vis.debug_depth = u.debug_flags.get("depth", False)
