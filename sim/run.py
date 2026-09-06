@@ -150,10 +150,10 @@ def main():
     parser = argparse.ArgumentParser(description='Run lightweight 2D simulator')
     parser.add_argument('--steps', type=int, default=200, help='Number of simulation steps')
     parser.add_argument('--scenario', type=str, default='empty', 
-                        choices=['empty', 'couch_pinch', 'house'],
+                        choices=['empty', 'couch_pinch', 'house', 'hallway', 'doorway', 'l_corner'],
                         help='Scenario to run')
     parser.add_argument('--policy', type=str, default='housebot',
-                        choices=['random', 'housebot', 'stop'],
+                        choices=['random', 'housebot', 'stop', 'unsafe'],
                         help='Policy to use')
     parser.add_argument('--hz', type=float, default=30.0, help='Simulation frequency (Hz)')
     parser.add_argument('--save', type=str, default=None, help='Save path for GIF or PNG')

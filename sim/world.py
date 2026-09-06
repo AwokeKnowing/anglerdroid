@@ -33,13 +33,22 @@ def create_scenario(name: str):
     
     if name == "empty":
         pass
-    
+
     elif name == "couch_pinch":
         _add_couch_pinch(obs, height)
-    
+
     elif name == "house":
         _add_house(obs, height)
-    
+
+    elif name == "hallway":
+        _add_hallway(obs, height)
+
+    elif name == "doorway":
+        _add_doorway(obs, height)
+
+    elif name == "l_corner":
+        _add_l_corner(obs, height)
+
     else:
         raise ValueError(f"Unknown scenario: {name}")
     
@@ -87,6 +96,46 @@ def _add_house(obs, height):
     _add_rect(obs, height, 200, 180, 220, 200, h_cm=45)
     _add_rect(obs, height, 240, 180, 260, 200, h_cm=45)
 
+
+
+def _add_hallway(obs, height):
+    """Long corridor with walls on both sides; clear ahead then a dead-end."""
+    # Side walls leave ~0.9 m corridor centered on robot
+    _add_rect(obs, height, 0, 0, RCX - 45, FRAME_H, h_cm=200)
+    _add_rect(obs, height, RCX + 45, 0, FRAME_W, FRAME_H, h_cm=200)
+    # Dead-end wall ahead
+    _add_rect(obs, height, RCX - 45, RCY - 100, RCX + 45, RCY - 85, h_cm=200)
+
+
+def _add_doorway(obs, height):
+    """Room walls with a narrow doorway offset to the right of heading."""
+    # Outer walls
+    _add_rect(obs, height, 0, 0, 10, FRAME_H, h_cm=200)
+    _add_rect(obs, height, FRAME_W - 10, 0, FRAME_W, FRAME_H, h_cm=200)
+    _add_rect(obs, height, 0, 0, FRAME_W, 10, h_cm=200)
+    _add_rect(obs, height, 0, FRAME_H - 10, FRAME_W, FRAME_H, h_cm=200)
+    # Dividing wall ahead with doorway gap (~35 px / ~35 cm)
+    wall_y0 = RCY - 55
+    wall_y1 = wall_y0 + 12
+    door_x0 = RCX + 10
+    door_x1 = door_x0 + 35
+    _add_rect(obs, height, 10, wall_y0, door_x0, wall_y1, h_cm=200)
+    _add_rect(obs, height, door_x1, wall_y0, FRAME_W - 10, wall_y1, h_cm=200)
+
+
+def _add_l_corner(obs, height):
+    """L-shaped obstacle forcing a left turn; right side blocked.
+
+    Geometry stays clear of the start footprint (FOOT ~56..101, 97..142).
+    """
+    # Outer walls
+    _add_rect(obs, height, 0, 0, 10, FRAME_H, h_cm=200)
+    _add_rect(obs, height, FRAME_W - 10, 0, FRAME_W, FRAME_H, h_cm=200)
+    _add_rect(obs, height, 0, 0, FRAME_W, 10, h_cm=200)
+    _add_rect(obs, height, 0, FRAME_H - 10, FRAME_W, FRAME_H, h_cm=200)
+    # Block ahead+right, leave left open; keep >=15 px clear of FOOT_X1/FOOT_Y0
+    _add_rect(obs, height, FOOT_X1 + 20, 10, FRAME_W - 10, RCY + 50, h_cm=50)
+    _add_rect(obs, height, RCX - 10, 10, FOOT_X1 + 20, FOOT_Y0 - 25, h_cm=50)
 
 def world_to_pixel(x_m, y_m):
     """Convert world coords (meters) to pixel coords."""

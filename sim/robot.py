@@ -174,35 +174,43 @@ class Robot:
         footprint = self.ego_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1]
         return np.any(footprint >= OBS_THRESH)
     
-    def step(self, v_cmd, w_cmd, dt):
+    def step(self, v_cmd, w_cmd, dt, apply_safety=True):
         """Step robot forward with commanded velocities.
-        
-        CRITICAL: Apply safety clipping BEFORE motion.
+
+        CRITICAL: Apply safety clipping BEFORE motion (default).
         Hard stop when fwd_scale=0 for forward motion.
         Hard stop when bwd_scale=0 for backward motion.
         Hard stop when ang_scale=0 for angular motion.
+
+        apply_safety=False is ONLY for crash-hypothesis contrast runs
+        (UnsafeCommitPolicy mimicking live recover override). Never use
+        on HouseBotLite / production-path sims.
         """
-        v_safe = v_cmd
-        w_safe = w_cmd
-        
-        if v_cmd > 0 and self.safety.fwd_scale <= 0:
-            v_safe = 0.0
-        elif v_cmd > 0:
-            v_safe = v_cmd * self.safety.fwd_scale
-        
-        if v_cmd < 0 and self.safety.bwd_scale <= 0:
-            v_safe = 0.0
-        elif v_cmd < 0:
-            v_safe = v_cmd * self.safety.bwd_scale
-        
-        if abs(w_cmd) > 0 and self.safety.ang_scale <= 0:
-            w_safe = 0.0
+        if apply_safety:
+            v_safe = v_cmd
+            w_safe = w_cmd
+
+            if v_cmd > 0 and self.safety.fwd_scale <= 0:
+                v_safe = 0.0
+            elif v_cmd > 0:
+                v_safe = v_cmd * self.safety.fwd_scale
+
+            if v_cmd < 0 and self.safety.bwd_scale <= 0:
+                v_safe = 0.0
+            elif v_cmd < 0:
+                v_safe = v_cmd * self.safety.bwd_scale
+
+            if abs(w_cmd) > 0 and self.safety.ang_scale <= 0:
+                w_safe = 0.0
+            else:
+                w_safe = w_cmd * self.safety.ang_scale
         else:
-            w_safe = w_cmd * self.safety.ang_scale
-        
+            v_safe = v_cmd
+            w_safe = w_cmd
+
         self.v = v_safe
         self.w = w_safe
-        
+
         self.x += v_safe * math.cos(self.theta) * dt
         self.y += v_safe * math.sin(self.theta) * dt
         self.theta += w_safe * dt

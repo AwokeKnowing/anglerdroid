@@ -275,5 +275,8 @@ def create_policy(name: str):
         return HouseBotLite()
     elif name == "stop":
         return StopPolicy()
+    elif name in ("unsafe", "unsafe_commit"):
+        from sim.unsafe_policy import UnsafeCommitPolicy
+        return UnsafeCommitPolicy()
     else:
         raise ValueError(f"Unknown policy: {name}")

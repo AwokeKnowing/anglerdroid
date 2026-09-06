@@ -6,6 +6,7 @@ import numpy as np
 from sim.world import create_scenario
 from sim.robot import Robot
 from sim.policy import create_policy, HouseBotLite, LATE_STUCK_LOOKS
+from sim.unsafe_policy import UnsafeCommitPolicy
 
 
 def test_empty_scenario():
@@ -65,7 +66,7 @@ def test_collision_detection():
 
 def test_policy_interface():
     """All policies should implement the interface."""
-    for name in ["stop", "random", "housebot"]:
+    for name in ["stop", "random", "housebot", "unsafe"]:
         policy = create_policy(name)
         policy.reset()
 
@@ -210,6 +211,113 @@ def test_house_episode_no_collision():
     print("✅ test_house_episode_no_collision passed")
 
 
+
+def test_new_scenarios_have_obstacles():
+    """hallway / doorway / l_corner are non-empty maps."""
+    for name in ("hallway", "doorway", "l_corner"):
+        obs, height = create_scenario(name)
+        assert obs.max() == 255, f"{name} has no obstacles"
+        assert height.max() > 0, f"{name} height map empty"
+    print("✅ test_new_scenarios_have_obstacles passed")
+
+
+def _run_episode(scenario, policy_name, steps=400, apply_safety=True):
+    obs, height = create_scenario(scenario)
+    robot = Robot(0.81, 1.19, 0.0)
+    policy = create_policy(policy_name)
+    policy.reset()
+    dt = 0.033
+    for step in range(steps):
+        robot.update_ego_maps(obs, height)
+        if robot.check_collision():
+            return {
+                "collisions": robot.collision_count + 1,
+                "collision_step": step,
+                "final_theta": robot.theta,
+            }
+        scales = {
+            "fwd": robot.safety.fwd_scale,
+            "bwd": robot.safety.bwd_scale,
+            "ang": robot.safety.ang_scale,
+        }
+        pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
+        v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
+        if policy_name == "housebot" and scales["fwd"] <= 0 and v_cmd > 0:
+            raise AssertionError(f"housebot v>0 at fwd=0 step={step}")
+        robot.step(v_cmd, w_cmd, dt, apply_safety=apply_safety)
+        if robot.check_collision():
+            return {
+                "collisions": max(1, robot.collision_count),
+                "collision_step": step,
+                "final_theta": robot.theta,
+            }
+    return {
+        "collisions": robot.collision_count,
+        "collision_step": -1,
+        "final_theta": robot.theta,
+    }
+
+
+def test_hallway_housebot_no_collision():
+    """Hallway dead-end: HouseBotLite backs/spins without colliding."""
+    m = _run_episode("hallway", "housebot", steps=500)
+    assert m["collisions"] == 0, f"hallway collision at {m['collision_step']}"
+    print("✅ test_hallway_housebot_no_collision passed")
+
+
+def test_doorway_housebot_no_collision():
+    """Doorway room: HouseBotLite stays collision-free."""
+    m = _run_episode("doorway", "housebot", steps=500)
+    assert m["collisions"] == 0, f"doorway collision at {m['collision_step']}"
+    print("✅ test_doorway_housebot_no_collision passed")
+
+
+def test_l_corner_housebot_no_collision():
+    """L-corner: HouseBotLite turns away without colliding."""
+    m = _run_episode("l_corner", "housebot", steps=500)
+    assert m["collisions"] == 0, f"l_corner collision at {m['collision_step']}"
+    print("✅ test_l_corner_housebot_no_collision passed")
+
+
+def test_unsafe_vs_housebot_couch_contrast():
+    """Crash hypothesis contrast on couch_pinch.
+
+    - HouseBotLite + SafetyGuard: 0 collisions
+    - UnsafeCommit + SafetyGuard still on: also 0 (guard is last line)
+    - UnsafeCommit with apply_safety=False: collides (live override bug)
+    """
+    safe = _run_episode("couch_pinch", "housebot", steps=300, apply_safety=True)
+    unsafe_guarded = _run_episode("couch_pinch", "unsafe", steps=300, apply_safety=True)
+    unsafe_bypass = _run_episode("couch_pinch", "unsafe", steps=300, apply_safety=False)
+    assert safe["collisions"] == 0, (
+        f"HouseBotLite should stay clean; collided at {safe['collision_step']}"
+    )
+    assert unsafe_guarded["collisions"] == 0, (
+        "SafetyGuard must still hard-stop UnsafeCommit when apply_safety=True"
+    )
+    assert unsafe_bypass["collisions"] > 0, (
+        "UnsafeCommit with safety bypassed should recreate couch crash"
+    )
+    print(
+        "✅ test_unsafe_vs_housebot_couch_contrast passed "
+        f"(bypass_hit_step={unsafe_bypass['collision_step']} "
+        "housebot_clean guarded_unsafe_clean)"
+    )
+
+
+def test_unsafe_overrides_fwd0():
+    """UnsafeCommitPolicy returns v>0 even when fwd_scale=0 (crash hypothesis)."""
+    pol = UnsafeCommitPolicy()
+    pol.reset()
+    pol.stuck_counter = 20
+    pol.commit_mode = True
+    obs = np.zeros((240, 320), dtype=np.uint8)
+    height = np.zeros_like(obs)
+    pose = {"x": 0.81, "y": 1.19, "theta": 0.0}
+    v, w = pol.act(obs, height, {"fwd": 0.0, "bwd": 1.0, "ang": 1.0}, pose)
+    assert v > 0.0, f"unsafe commit should force forward, got v={v}"
+    print("✅ test_unsafe_overrides_fwd0 passed")
+
 def run_all_tests():
     """Run all tests."""
     tests = [
@@ -224,6 +332,12 @@ def run_all_tests():
         test_commit_never_overrides_fwd0,
         test_couch_pinch_episode_no_collision,
         test_house_episode_no_collision,
+        test_new_scenarios_have_obstacles,
+        test_hallway_housebot_no_collision,
+        test_doorway_housebot_no_collision,
+        test_l_corner_housebot_no_collision,
+        test_unsafe_overrides_fwd0,
+        test_unsafe_vs_housebot_couch_contrast,
     ]
 
     print("Running simulator tests...\n")
