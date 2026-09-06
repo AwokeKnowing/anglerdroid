@@ -195,7 +195,7 @@ class SafetyGuard:
 class Robot:
     """Differential-drive robot with pose and collision detection."""
     
-    def __init__(self, x_m, y_m, theta_rad):
+    def __init__(self, x_m, y_m, theta_rad, fidelity=False):
         self.x = x_m
         self.y = y_m
         self.theta = theta_rad
@@ -206,7 +206,10 @@ class Robot:
         self.recover_count = 0
         self.ego_obs = None
         self.ego_height = None
-        self.dyn = DiffDriveDynamics()
+        # fidelity=True enables ~150ms cmd latency (gap D2)
+        from sim.dynamics import LATENCY_S
+        self.dyn = DiffDriveDynamics(latency_s=(LATENCY_S if fidelity else 0.0))
+        self.fidelity = bool(fidelity)
         self.ego_soft = None
         self.soft_near = 1.0
         self.soft_mid = 1.0
@@ -236,6 +239,8 @@ class Robot:
         self.ego_obs = ego_obs
         self.ego_height = ego_height
         self.safety.update(ego_obs)
+        # Gap: side-swipe into FOOT while fwd scan still clear — clamp if body ring dirty
+        self._apply_body_ring_safety(ego_obs)
         self.ego_soft = soft_inflate(ego_obs)
         sn, sm = soft_forward_clear_px(self.ego_soft)
         self.soft_near = sn
@@ -243,6 +248,29 @@ class Robot:
         # Squeeze: hard still allows some forward, soft buffer already gone
         self.squeeze = (sm < SQUEEZE_FWD_SOFT_MAX) and (self.safety.fwd_scale > 0.05)
     
+
+    def _apply_body_ring_safety(self, ego_obs):
+        """If obstacles kiss the footprint from the side, cut motion (P0 geometry)."""
+        if ego_obs is None:
+            return
+        foot = ego_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1]
+        if foot.size and foot.max() >= OBS_THRESH:
+            self.safety.fwd_scale = 0.0
+            self.safety.bwd_scale = min(self.safety.bwd_scale, 0.2)
+            self.safety.ang_scale = min(self.safety.ang_scale, 0.3)
+            return
+        pad = 6
+        y0, y1 = max(0, FOOT_Y0 - pad), min(ego_obs.shape[0], FOOT_Y1 + pad)
+        x0, x1 = max(0, FOOT_X0 - pad), min(ego_obs.shape[1], FOOT_X1 + pad)
+        ring = ego_obs[y0:y1, x0:x1].copy()
+        # Clear interior FOOT so we only see the ring
+        iy0, iy1 = FOOT_Y0 - y0, FOOT_Y1 - y0
+        ix0, ix1 = FOOT_X0 - x0, FOOT_X1 - x0
+        ring[iy0:iy1, ix0:ix1] = 0
+        if ring.size and ring.max() >= OBS_THRESH:
+            self.safety.fwd_scale = min(self.safety.fwd_scale, 0.35)
+            self.safety.ang_scale = min(self.safety.ang_scale, 0.6)
+
     def check_collision(self):
         """Check if robot footprint overlaps any obstacle."""
         if self.ego_obs is None:

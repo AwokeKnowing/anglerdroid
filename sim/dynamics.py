@@ -13,7 +13,7 @@ WHEELBASE_M = 0.34
 WHEEL_RADIUS_M = 0.08565
 V_MAX = 0.25
 W_MAX = 0.80
-V_MIN = -0.05
+V_MIN = -0.20  # match live MPPI reverse band
 A_MAX = 1.61
 ALPHA_MAX = 4.0
 LATENCY_S = 0.15
@@ -21,9 +21,13 @@ CTRL_HZ = 30.0
 
 
 class DiffDriveDynamics:
-    """Command delay + accel-limited unicycle with wheelbase-aware ω."""
+    """Command delay + accel-limited unicycle with wheelbase-aware ω.
 
-    def __init__(self, latency_s=LATENCY_S, dt_nominal=1.0 / CTRL_HZ):
+    latency_s=0 by default so unit tests stay deterministic; pass
+    latency_s=LATENCY_S (or Robot(fidelity=True)) for reality-gap D2.
+    """
+
+    def __init__(self, latency_s=0.0, dt_nominal=1.0 / CTRL_HZ):
         self.latency_s = float(latency_s)
         self.dt_nominal = float(dt_nominal)
         n = max(0, int(round(self.latency_s / max(1e-6, self.dt_nominal))))

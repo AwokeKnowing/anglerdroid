@@ -52,3 +52,8 @@ Priority: P0 = high impact on collision/stuck transfer, P1 = medium, P2 = polish
 3. Add **Box3D** layer: furniture as axis-aligned 3D boxes → project to occ+height; mast collision = 3D.
 4. Later: optional PyBullet/MuJoCo if Box3D isn't enough — not required to start.
 5. Never re-arm live until P0 gaps have tests or known residuals documented.
+
+
+## Progress log
+- 2026-09-05/06: Catalog written. DiffDriveDynamics (accel + optional latency + wheelbase caps). AABB Box3D mast/body. Body-ring safety for side-swipe. `robox3d` 0.1.0 **imports on Orin** — next: thin Kevin URDF / browser viewer spike.
+- Latency default OFF (`Robot(fidelity=True)` for D2); accel+caps always on.
