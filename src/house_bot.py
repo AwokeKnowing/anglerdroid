@@ -26,6 +26,7 @@ import numpy as np
 import local_executive
 import tools
 import speech_io
+import people_live as people_live_mod
 from robot_config import MAST_CLEAR_CM, RCX, RCY, FOOT_X1
 from safety import build_safety_occ, OBS_THRESH as SAFETY_OBS
 
@@ -431,7 +432,7 @@ class HouseBot:
                     "RECOVER start back→spin→commit %s | fwd=%.2f mid=%.2f near=%.2f streak=%d"
                     % (turn, fwd_scale, free_mid, free_near, self._late_streak)
                 )
-                if decision != self._last_decision and not speech_io.is_speaking():
+                if decision != self._last_decision and not speech_io.is_speaking() and not getattr(people_live_mod.PeopleLive, "social_priority", False):
                     speech_io.speak("No room. Backing up, then the other way.")
             elif soft:
                 deg = self._set_soft_veer(turn)
@@ -440,7 +441,7 @@ class HouseBot:
                     "early divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f"
                     % (turn, deg, fwd_scale, free_mid, free_near, mast_ahead, ang_scale)
                 )
-                if decision != self._last_decision and not speech_io.is_speaking():
+                if decision != self._last_decision and not speech_io.is_speaking() and not getattr(people_live_mod.PeopleLive, "social_priority", False):
                     if mast_ahead > EARLY_MAST:
                         speech_io.speak("Tall obstacle ahead. Veering %s." % turn)
                     else:
@@ -452,14 +453,17 @@ class HouseBot:
                     "LATE divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f ang=%.2f streak=%d"
                     % (turn, deg, fwd_scale, free_mid, free_near, ang_scale, self._late_streak)
                 )
-                if decision != self._last_decision and not speech_io.is_speaking():
+                if decision != self._last_decision and not speech_io.is_speaking() and not getattr(people_live_mod.PeopleLive, "social_priority", False):
                     speech_io.speak("Tight. Turning %s." % turn)
         else:
             self._late_streak = 0
             if not local_executive.is_active():
                 local_executive.set_wander()
             now = time.monotonic()
-            if now - self._last_narrate > NARRATE_EVERY_S and not speech_io.is_speaking():
+            # Yield the speaker when a face greet is queued.
+            if getattr(people_live_mod.PeopleLive, "social_priority", False):
+                pass
+            elif now - self._last_narrate > NARRATE_EVERY_S and not speech_io.is_speaking():
                 self._last_narrate = now
                 speech_io.speak("Looking ahead. Still clear.")
 
