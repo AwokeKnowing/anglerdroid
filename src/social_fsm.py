@@ -85,32 +85,84 @@ class PersonEncounter:
 # Spanish-preferred names (from conversation.py)
 SPANISH_NAMES = {"nohemi", "karina"}
 
+# Kevin's personality: curious, calm, earnest helper (Hero / Astro Boy)
+# Clean wholesome humor: puns, gentle self-deprecation, playful observations
+# Keep encouraging/empathizing; jokes secondary to kindness
+
 # Empathy/encouragement templates (English)
+# Keep short (1-2 sentences), earnest, optionally playful
 EMPATHY_TEMPLATES = [
-    "I hear you.",
-    "That makes sense.",
-    "I understand.",
-    "You're doing great.",
-    "Keep going!",
-    "That sounds tough.",
-    "I'm here if you need me.",
+    "I hear you!",
+    "That makes sense to me.",
+    "You're doing great!",
+    "I'm learning too. Keep going!",
+    "That sounds tricky.",
+    "I'm here if you need me!",
     "You've got this!",
-    "Hang in there.",
-    "That's interesting!",
+    "That's really interesting!",
+    "I think I understand.",
+    "Hang in there, friend.",
 ]
 
-# Spanish empathy templates
+EMPATHY_TOUGH = [
+    "That sounds hard. You're doing your best!",
+    "I'm still learning, but I think you're brave.",
+    "Tough day? I'm here.",
+    "Keep going. I believe in you!",
+]
+
+EMPATHY_HAPPY = [
+    "That's wonderful! I'm happy for you!",
+    "That sounds great!",
+    "I love hearing good news!",
+    "That made my sensors warm. Keep it up!",
+]
+
+# Spanish empathy templates (same earnest, gentle tone)
 EMPATHY_TEMPLATES_ES = [
-    "Te escucho.",
-    "Tiene sentido.",
-    "Te entiendo.",
-    "Lo estás haciendo muy bien.",
-    "¡Sigue así!",
+    "¡Te escucho!",
+    "Tiene sentido para mí.",
+    "¡Lo estás haciendo muy bien!",
+    "Yo también estoy aprendiendo. ¡Sigue así!",
     "Eso suena difícil.",
-    "Estoy aquí si me necesitas.",
+    "¡Estoy aquí si me necesitas!",
     "¡Tú puedes!",
-    "Ten paciencia.",
     "¡Qué interesante!",
+    "Creo que entiendo.",
+    "Ten paciencia, amigo.",
+]
+
+EMPATHY_TOUGH_ES = [
+    "Eso suena difícil. ¡Lo estás haciendo bien!",
+    "Todavía estoy aprendiendo, pero creo que eres valiente.",
+    "¿Día difícil? Estoy aquí.",
+    "Sigue adelante. ¡Creo en ti!",
+]
+
+EMPATHY_HAPPY_ES = [
+    "¡Qué maravilla! ¡Me alegro por ti!",
+    "¡Eso suena genial!",
+    "¡Me encanta escuchar buenas noticias!",
+    "Eso me calentó los sensores. ¡Sigue así!",
+]
+
+# Leave messages (polite + optional tiny clean joke, never guilt-trip)
+LEAVE_MESSAGES = [
+    "",  # silent leave is fine
+    "I'll let you get back to it!",
+    "Catch you later!",
+    "I'll keep wandering. Call if you need me!",
+    "Bye for now!",
+    "Off to explore. My wheels are excited!",
+]
+
+LEAVE_MESSAGES_ES = [
+    "",  # silent leave
+    "¡Te dejo trabajar!",
+    "¡Nos vemos!",
+    "Voy a seguir explorando. ¡Llámame si me necesitas!",
+    "¡Hasta luego!",
+    "A explorar. ¡Mis ruedas están emocionadas!",
 ]
 
 
@@ -310,9 +362,11 @@ class SocialFSM:
                 enc.state = SocialState.LEAVE
                 self.current_person = None
                 self._start_cooldown(name, COOLDOWN_NO_ENGAGE, now)
+                prefer_spanish = name.strip().lower() in SPANISH_NAMES
+                leave_bank = LEAVE_MESSAGES_ES if prefer_spanish else LEAVE_MESSAGES
                 return {
                     "action_type": "leave",
-                    "utterance": "",  # silent leave; don't spam
+                    "utterance": random.choice(leave_bank),  # polite leave, optional tiny joke
                     "goal_hint": {"type": "resume_wander"},
                     "state": "leave",
                     "person": name,
@@ -326,9 +380,11 @@ class SocialFSM:
                 enc.state = SocialState.LEAVE
                 self.current_person = None
                 self._start_cooldown(name, COOLDOWN_ENGAGED, now)
+                prefer_spanish = name.strip().lower() in SPANISH_NAMES
+                leave_msg = "¡Fue un placer hablar contigo!" if prefer_spanish else "Good talking with you!"
                 return {
                     "action_type": "leave",
-                    "utterance": "Good talking with you!",
+                    "utterance": leave_msg,
                     "goal_hint": {"type": "resume_wander"},
                     "state": "leave",
                     "person": name,
@@ -405,19 +461,22 @@ class SocialFSM:
         
         cmd = command.strip().lower()
         
+        # Command acknowledgements: curious, calm, earnest helper tone
         # Movement commands
         if any(w in cmd for w in ["stop", "halt", "freeze", "hold"]):
+            acks = ["Stopping!", "Okay, holding still.", "Wheels stopping now!"]
             return {
                 "action_type": "command",
-                "utterance": "Stopping.",
+                "utterance": random.choice(acks),
                 "goal_hint": {"type": "clear"},
                 "command": "stop",
             }
         
         if any(w in cmd for w in ["come here", "come to me", "come over"]):
+            acks = ["Coming over!", "On my way!", "Rolling over now!"]
             return {
                 "action_type": "command",
-                "utterance": "Coming over.",
+                "utterance": random.choice(acks),
                 "goal_hint": {"type": "approach_speaker"},
                 "command": "come_here",
             }
@@ -428,35 +487,41 @@ class SocialFSM:
             if self.current_person and self.current_person in self.encounters:
                 self._start_cooldown(self.current_person, COOLDOWN_DISMISSED, now)
             
+            acks = ["Sorry! Moving away.", "Understood. Backing up.", "No problem. I'll give you space!"]
             return {
                 "action_type": "command",
-                "utterance": "Sorry. Moving away.",
+                "utterance": random.choice(acks),
                 "goal_hint": {"type": "retreat", "distance_m": 2.0, "dismissed": True},
                 "command": "go_away",
                 "cooldown_extended": True,
             }
         
         if any(w in cmd for w in ["wander", "explore", "look around", "roam"]):
+            acks = ["Back to wandering!", "Time to explore!", "Off I go!"]
             return {
                 "action_type": "command",
-                "utterance": "Wandering around.",
+                "utterance": random.choice(acks),
                 "goal_hint": {"type": "resume_wander"},
                 "command": "wander",
             }
         
         if "say hi to" in cmd or "greet" in cmd:
-            # Extract name if possible
             return {
                 "action_type": "command",
-                "utterance": "I'll say hello if I see them.",
+                "utterance": "I'll say hello if I see them!",
                 "goal_hint": None,
                 "command": "greet_request",
             }
         
-        # Unknown command; acknowledge honestly
+        # Unknown command; acknowledge honestly (gentle self-deprecation)
+        acks = [
+            "I heard you, but I'm not sure how to do that yet.",
+            "Hmm. I'm still learning that one!",
+            "That's a new one for me. Still learning!",
+        ]
         return {
             "action_type": "command",
-            "utterance": "I heard you, but I'm not sure how to do that yet.",
+            "utterance": random.choice(acks),
             "goal_hint": None,
             "command": "unknown",
         }
@@ -467,25 +532,27 @@ class SocialFSM:
         now: float,
         enc: PersonEncounter,
     ) -> Dict:
-        """Generate greeting utterance (respects language preference)."""
+        """Generate greeting utterance (curious, earnest, optionally playful)."""
         hour = time.localtime().tm_hour
         prefer_spanish = name.strip().lower() in SPANISH_NAMES
         
+        # Keep greetings short, warm, earnest (Hero / Astro Boy style)
         if prefer_spanish:
             if 5 <= hour < 12:
-                utterance = f"¡Buenos días, {name}!"
+                greetings = [f"¡Buenos días, {name}!", f"¡Hola {name}! Buenos días."]
             elif 12 <= hour < 18:
-                utterance = f"¡Hola, {name}!"
+                greetings = [f"¡Hola, {name}!", f"¡Qué tal, {name}!"]
             else:
-                utterance = f"¡Buenas noches, {name}!"
+                greetings = [f"¡Buenas noches, {name}!", f"¡Hola {name}! Buenas noches."]
         else:
             if 5 <= hour < 12:
-                utterance = f"Good morning, {name}!"
+                greetings = [f"Good morning, {name}!", f"Hi {name}! Nice morning."]
             elif 12 <= hour < 18:
-                utterance = f"Hi, {name}!"
+                greetings = [f"Hi, {name}!", f"Hey {name}!", f"Hello, {name}!"]
             else:
-                utterance = f"Good evening, {name}!"
+                greetings = [f"Good evening, {name}!", f"Hi {name}! How was your day?"]
         
+        utterance = random.choice(greetings)
         enc.last_spoke_time = now
         return {
             "action_type": "greet",
@@ -502,28 +569,24 @@ class SocialFSM:
         enc: PersonEncounter,
         now: float,
     ) -> Dict:
-        """Generate short empathetic response."""
+        """Generate short empathetic response (curious, calm, earnest helper tone)."""
         prefer_spanish = name.strip().lower() in SPANISH_NAMES
-        templates = EMPATHY_TEMPLATES_ES if prefer_spanish else EMPATHY_TEMPLATES
         
         # Simple keyword-based response selection
         text = transcript.lower()
         
         # Negative/difficult keywords → supportive
-        if any(w in text for w in ["hard", "difficult", "tough", "bad", "sad", "tired", "difícil"]):
-            if prefer_spanish:
-                utterance = random.choice(["Ten paciencia.", "Te entiendo.", "Eso suena difícil."])
-            else:
-                utterance = random.choice(["Hang in there.", "I understand.", "That sounds tough."])
+        if any(w in text for w in ["hard", "difficult", "tough", "bad", "sad", "tired", "difícil", "cansado"]):
+            bank = EMPATHY_TOUGH_ES if prefer_spanish else EMPATHY_TOUGH
+            utterance = random.choice(bank)
         # Positive keywords → encouraging
-        elif any(w in text for w in ["good", "great", "awesome", "happy", "bien", "genial"]):
-            if prefer_spanish:
-                utterance = random.choice(["¡Qué bien!", "¡Sigue así!", "¡Tú puedes!"])
-            else:
-                utterance = random.choice(["That's great!", "Keep going!", "You've got this!"])
+        elif any(w in text for w in ["good", "great", "awesome", "happy", "bien", "genial", "feliz"]):
+            bank = EMPATHY_HAPPY_ES if prefer_spanish else EMPATHY_HAPPY
+            utterance = random.choice(bank)
         else:
             # Generic acknowledgement
-            utterance = random.choice(templates)
+            bank = EMPATHY_TEMPLATES_ES if prefer_spanish else EMPATHY_TEMPLATES
+            utterance = random.choice(bank)
         
         enc.last_spoke_time = now
         return {
