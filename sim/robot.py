@@ -36,6 +36,15 @@ SOFT_INFLATE_PX = 10          # ~10 cm prefer-clear around obstacles
 HARD_PAD_PX = 2              # tiny pad for hard contact scan only
 SQUEEZE_FWD_SOFT_MAX = 0.55  # below this soft clearance → squeeze mode
 
+# Cul-de-sac tip disk offsets (px), radius ~0.26 m
+_CUL_RAD = max(3, int(0.26 / EGO_PX_SIZE))
+_CUL_DISK = [
+    (dx, dy)
+    for dy in range(-_CUL_RAD, _CUL_RAD + 1)
+    for dx in range(-_CUL_RAD, _CUL_RAD + 1)
+    if dx * dx + dy * dy <= _CUL_RAD * _CUL_RAD
+]
+
 _HALF_DIAG = 26
 LAT_X0 = max(0, RCX - _HALF_DIAG)
 LAT_X1 = min(FRAME_W, RCX + _HALF_DIAG)
@@ -123,76 +132,64 @@ def soft_heading_score(obs_soft, yaw_off_rad, horizon_m=0.9):
 def cul_de_sac_escape(obs_soft, yaw_off_rad=0.0, approach_m=0.95, tip_radius_m=0.26):
     """Lookahead trap score in [0, 1]: 1 = open ahead, 0 = dead-end pocket.
 
-    Walk along yaw_off up to approach_m but stop at the first soft hit so the
-    tip sits *inside* a pocket rather than tunneling past the back wall.
-    At the tip, score disk free + forward stub + lateral fan exits.
+    Walk along yaw_off up to approach_m but stop just before first soft hit.
+    Tip uses a precomputed disk + short stub + sparse lateral fans.
     """
     if obs_soft is None:
         return 1.0
     h, w = obs_soft.shape
+    cos_y = math.cos(yaw_off_rad)
+    sin_y = math.sin(yaw_off_rad)
     n_max = max(8, int(approach_m / EGO_PX_SIZE))
     tip_i = n_max
-    tip_x = FOOT_X1 + n_max * math.cos(yaw_off_rad)
-    tip_y = RCY + n_max * math.sin(yaw_off_rad)
     hit_wall = False
     for i in range(1, n_max + 1):
-        ix = int(round(FOOT_X1 + i * math.cos(yaw_off_rad)))
-        iy = int(round(RCY + i * math.sin(yaw_off_rad)))
-        if not (0 <= ix < w and 0 <= iy < h):
-            tip_i = max(1, i - 1)
-            tip_x = FOOT_X1 + tip_i * math.cos(yaw_off_rad)
-            tip_y = RCY + tip_i * math.sin(yaw_off_rad)
-            hit_wall = True
-            break
-        if obs_soft[iy, ix]:
-            # Tip just before the soft hit (inside pocket / at mouth closure)
+        ix = int(round(FOOT_X1 + i * cos_y))
+        iy = int(round(RCY + i * sin_y))
+        if not (0 <= ix < w and 0 <= iy < h) or obs_soft[iy, ix]:
             tip_i = max(1, i - 2)
-            tip_x = FOOT_X1 + tip_i * math.cos(yaw_off_rad)
-            tip_y = RCY + tip_i * math.sin(yaw_off_rad)
             hit_wall = True
             break
-    rad = max(3, int(tip_radius_m / EGO_PX_SIZE))
+    tip_x = FOOT_X1 + tip_i * cos_y
+    tip_y = RCY + tip_i * sin_y
+
     free = hits = 0
-    for dy in range(-rad, rad + 1):
-        for dx in range(-rad, rad + 1):
-            if dx * dx + dy * dy > rad * rad:
-                continue
-            ix = int(round(tip_x + dx))
-            iy = int(round(tip_y + dy))
-            if not (0 <= ix < w and 0 <= iy < h):
-                continue
+    for dx, dy in _CUL_DISK:
+        ix = int(tip_x + dx)
+        iy = int(tip_y + dy)
+        if 0 <= ix < w and 0 <= iy < h:
             hits += 1
             if not obs_soft[iy, ix]:
                 free += 1
-    disk = (free / hits) if hits else 0.0
-    stub_n = max(4, int(0.35 / EGO_PX_SIZE))
+    disk_s = (free / hits) if hits else 0.0
+
     stub_free = stub_hits = 0
-    for i in range(1, stub_n + 1):
-        ix = int(round(tip_x + i * math.cos(yaw_off_rad)))
-        iy = int(round(tip_y + i * math.sin(yaw_off_rad)))
+    for i in range(1, 21):
+        ix = int(round(tip_x + i * cos_y))
+        iy = int(round(tip_y + i * sin_y))
         if not (0 <= ix < w and 0 <= iy < h):
             break
         stub_hits += 1
         if not obs_soft[iy, ix]:
             stub_free += 1
     stub = (stub_free / stub_hits) if stub_hits else 0.0
+
     fan_free = fan_hits = 0
-    fan_len = max(4, int(0.28 / EGO_PX_SIZE))
-    for dlat in (-math.radians(55), math.radians(55), -math.radians(90), math.radians(90)):
-        yaw = yaw_off_rad + dlat
-        for i in range(1, fan_len + 1):
-            ix = int(round(tip_x + i * math.cos(yaw)))
-            iy = int(round(tip_y + i * math.sin(yaw)))
+    for dlat in (-0.96, 0.96, -1.57, 1.57):
+        cy = math.cos(yaw_off_rad + dlat)
+        sy = math.sin(yaw_off_rad + dlat)
+        for i in (6, 12, 18):
+            ix = int(round(tip_x + i * cy))
+            iy = int(round(tip_y + i * sy))
             if not (0 <= ix < w and 0 <= iy < h):
                 break
             fan_hits += 1
             if not obs_soft[iy, ix]:
                 fan_free += 1
     fan = (fan_free / fan_hits) if fan_hits else 0.0
-    score = 0.25 * disk + 0.45 * stub + 0.30 * fan
-    # If we never hit a soft wall within approach, reward open corridors
+    score = 0.25 * disk_s + 0.45 * stub + 0.30 * fan
     if not hit_wall:
-        score = max(score, 0.85 * disk + 0.15)
+        score = max(score, 0.85 * disk_s + 0.15)
     return float(max(0.0, min(1.0, score)))
 
 
@@ -337,6 +334,51 @@ class Robot:
             self._apply_perception_noise()
 
     
+
+
+    def _apply_perception_noise(self):
+        """Fidelity: salt-pepper on ego obs + mild height noise + tiny pose drift.
+
+        Mimics RealSense dropouts / VO jitter without poisoning SafetyGuard
+        with impossible geometry. Noise is applied AFTER safety.update so hard
+        stops still see clean geometry for the hard layer; soft map sees noise.
+        Actually: we already called safety.update on clean map. Re-run soft only
+        and optionally flip a few distant cells so MPPI costs get messier.
+        """
+        if self.ego_obs is None:
+            return
+        obs = self.ego_obs
+        # Salt-pepper far from FOOT (don't invent contact under the body)
+        rng = getattr(self, '_fid_rng', None)
+        if rng is None:
+            import numpy as np
+            self._fid_rng = np.random.default_rng(0)
+            rng = self._fid_rng
+        import numpy as np
+        mask = np.ones_like(obs, dtype=bool)
+        pad = 8
+        mask[max(0, FOOT_Y0 - pad):min(FRAME_H, FOOT_Y1 + pad),
+             max(0, FOOT_X0 - pad):min(FRAME_W, FOOT_X1 + pad)] = False
+        flip = (rng.random(obs.shape) < 0.008) & mask
+        # Flip clear↔occupied sparsely
+        flipped = obs.copy()
+        flipped[flip] = np.where(flipped[flip] >= OBS_THRESH, 0, 255).astype(np.uint8)
+        self.ego_obs = flipped
+        if self.ego_height is not None:
+            h = self.ego_height.astype(np.int16)
+            h = np.clip(h + rng.integers(-3, 4, size=h.shape), 0, 255).astype(np.uint8)
+            self.ego_height = h
+        # Rebuild soft inflate from noisy obs (hard safety stays from clean)
+        self.ego_soft = soft_inflate(self.ego_obs)
+        sn, sm = soft_forward_clear_px(self.ego_soft)
+        self.soft_near = sn
+        self.soft_mid = sm
+        # Tiny VO drift (gap D1) — apply occasionally
+        if rng.random() < 0.15:
+            self.x += float(rng.normal(0.0, 0.004))
+            self.y += float(rng.normal(0.0, 0.004))
+            self.theta += float(rng.normal(0.0, 0.01))
+
 
     def _apply_body_ring_safety(self, ego_obs):
         """If obstacles kiss the footprint from the side, cut motion (P0 geometry)."""

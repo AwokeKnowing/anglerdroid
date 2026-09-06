@@ -48,7 +48,20 @@ def create_scenario(name: str):
 
     elif name == "box3d_table":
         from sim.box3d import house_boxes, rasterize_boxes
-        obs, height = rasterize_boxes(house_boxes())
+        raw_obs, raw_h = rasterize_boxes(house_boxes())
+        # Center-crop / pad to ego frame so FOOT indices match live atlas
+        obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        rh, rw = raw_obs.shape
+        y0 = max(0, (rh - FRAME_H) // 2)
+        x0 = max(0, (rw - FRAME_W) // 2)
+        y1 = min(rh, y0 + FRAME_H)
+        x1 = min(rw, x0 + FRAME_W)
+        dy = max(0, (FRAME_H - (y1 - y0)) // 2)
+        dx = max(0, (FRAME_W - (x1 - x0)) // 2)
+        hh, ww = y1 - y0, x1 - x0
+        obs[dy:dy+hh, dx:dx+ww] = raw_obs[y0:y1, x0:x1]
+        height[dy:dy+hh, dx:dx+ww] = raw_h[y0:y1, x0:x1]
         return obs, height
     elif name == "l_corner":
         _add_l_corner(obs, height)
