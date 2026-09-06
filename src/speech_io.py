@@ -24,7 +24,7 @@ RS_SRC = os.environ.get(
     "KEVIN_LISTEN_SRC",
     "alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-surround-21",
 )
-SPEAK_VOLUME = float(os.environ.get("KEVIN_SPEAK_VOL", "0.30"))
+SPEAK_VOLUME = float(os.environ.get("KEVIN_SPEAK_VOL", "0.75"))
 
 _lock = threading.Lock()
 _kokoro = None
@@ -66,7 +66,7 @@ def speak(text: str, voice: str = "am_michael", block: bool = False) -> None:
             samples, sr = k.create(text, voice=voice, speed=1.0)
             import soundfile as sf
             import numpy as np
-            vol = max(0.0, min(1.0, float(SPEAK_VOLUME)))
+            vol = max(0.0, min(1.0, float(os.environ.get("KEVIN_SPEAK_VOL", str(SPEAK_VOLUME)))))
             # Full-scale WAV; loudness only via paplay --volume (single attenuator).
             samples = np.asarray(samples, dtype=np.float32)
             peak = float(np.max(np.abs(samples))) if samples.size else 0.0
