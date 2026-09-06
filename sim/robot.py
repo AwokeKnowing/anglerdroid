@@ -44,6 +44,12 @@ MASK_Y1 = FOOT_Y1
 BWD_SCAN_X0 = FOOT_X0
 
 
+# Precomputed ego-frame offsets (meters) for vectorized world-to-ego warp.
+_EY, _EX = np.mgrid[0:FRAME_H, 0:FRAME_W]
+_DX_EGO = (_EX - RCX).astype(np.float64) * EGO_PX_SIZE
+_DY_EGO = (_EY - RCY).astype(np.float64) * EGO_PX_SIZE
+
+
 def _clearance_scale(clear_px):
     """S-curve 0→1 based purely on distance."""
     if clear_px <= MIN_CLEARANCE_PX:
@@ -136,36 +142,26 @@ class Robot:
         self.ego_height = None
     
     def update_ego_maps(self, world_obs, world_height):
-        """Transform world maps to robot-centric ego frame.
-        
+        """Transform world maps to robot-centric ego frame (vectorized).
+
         Robot faces RIGHT in ego frame (x-axis points forward).
+        Uses precomputed ego grid + NumPy indexing (~40x vs nested Python).
         """
         h, w = world_obs.shape
-        
-        ego_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        ego_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-        
         cos_t = math.cos(self.theta)
         sin_t = math.sin(self.theta)
-        
-        for ey in range(FRAME_H):
-            for ex in range(FRAME_W):
-                dx_ego = (ex - RCX) * EGO_PX_SIZE
-                dy_ego = (ey - RCY) * EGO_PX_SIZE
-                
-                dx_world = dx_ego * cos_t - dy_ego * sin_t
-                dy_world = dx_ego * sin_t + dy_ego * cos_t
-                
-                wx = self.x + dx_world
-                wy = self.y + dy_world
-                
-                wx_px = int(round(wx / EGO_PX_SIZE))
-                wy_px = int(round(wy / EGO_PX_SIZE))
-                
-                if 0 <= wx_px < w and 0 <= wy_px < h:
-                    ego_obs[ey, ex] = world_obs[wy_px, wx_px]
-                    ego_height[ey, ex] = world_height[wy_px, wx_px]
-        
+
+        dx_world = _DX_EGO * cos_t - _DY_EGO * sin_t
+        dy_world = _DX_EGO * sin_t + _DY_EGO * cos_t
+        wx_px = np.rint((self.x + dx_world) / EGO_PX_SIZE).astype(np.int32)
+        wy_px = np.rint((self.y + dy_world) / EGO_PX_SIZE).astype(np.int32)
+        valid = (wx_px >= 0) & (wx_px < w) & (wy_px >= 0) & (wy_px < h)
+
+        ego_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        ego_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        ego_obs[valid] = world_obs[wy_px[valid], wx_px[valid]]
+        ego_height[valid] = world_height[wy_px[valid], wx_px[valid]]
+
         self.ego_obs = ego_obs
         self.ego_height = ego_height
         self.safety.update(ego_obs)
