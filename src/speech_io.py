@@ -24,7 +24,7 @@ RS_SRC = os.environ.get(
     "KEVIN_LISTEN_SRC",
     "alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-surround-21",
 )
-SPEAK_VOLUME = float(os.environ.get("KEVIN_SPEAK_VOL", "0.75"))
+SPEAK_VOLUME = float(os.environ.get("KEVIN_SPEAK_VOL", "0.70"))
 
 _lock = threading.Lock()
 _kokoro = None
