@@ -14,6 +14,7 @@ except ImportError:
 import vision
 import ui
 import navigator
+import local_executive
 
 
 # --- Shared instances (main script sets these or tools.init) ---
@@ -115,6 +116,20 @@ def navigate(heading_deg):
 
 def navigate_stop():
     """Stop reactive navigation."""
+    navigator.clear_goal()
+    local_executive.clear()
+
+def goto_xy(x: float, y: float):
+    """Async mid-layer goal in world meters (requires --auto-local)."""
+    local_executive.set_goal_xy(x, y)
+
+def wander():
+    """Continuous ~1m free-space wander (requires --auto-local)."""
+    local_executive.set_wander()
+
+def local_stop():
+    """Stop LocalExecutive + navigator."""
+    local_executive.clear()
     navigator.clear_goal()
 
 

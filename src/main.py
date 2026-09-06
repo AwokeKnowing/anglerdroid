@@ -8,6 +8,7 @@ import argparse
 import tools
 import vision as vision_mod
 import navigator
+import local_executive
 
 try:
     import rerun as rr
@@ -39,6 +40,10 @@ def main():
                         help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
     parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
                         help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
+    parser.add_argument("--auto-local", action="store_true",
+                        help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI)")
+    parser.add_argument("--wander", action="store_true",
+                        help="With --auto-local, start continuous ~1m wander immediately")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -109,6 +114,13 @@ def main():
     u.start()
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
+    if args.auto_local:
+        print("main: LocalExecutive ENABLED (mailbox: goto_xy / wander)")
+        if args.wander:
+            local_executive.set_wander()
+            print("main: wander started (~1m rolling goals)")
+    else:
+        local_executive.clear()
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
@@ -166,7 +178,15 @@ def main():
                     navigator.clear_goal()
                     tools.set_wheel_vels(left_tps, right_tps)
                 elif not wb.is_twist_for_active():
-                    twist = navigator.compute_twist(atlas) if atlas is not None else None
+                    twist = None
+                    if args.auto_local and local_executive.is_active():
+                        pose = getattr(vis, "_pose", None)
+                        px = py = pth = None
+                        if pose is not None:
+                            px, py, pth = pose.x, pose.y, pose.theta
+                        twist = local_executive.tick(atlas, px, py, pth)
+                    if twist is None and atlas is not None:
+                        twist = navigator.compute_twist(atlas)
                     if twist is not None:
                         tools.twist(twist[0], twist[1])
                     else:
@@ -195,14 +215,32 @@ def main():
                     elif name == "stop":
                         if wb:
                             wb.cancel_twist_for()
+                        local_executive.clear()
                         navigator.clear_goal()
                         tools.stop()
                     elif name == "navigate":
+                        local_executive.clear()
                         hdg = cargs.get("heading_deg")
                         if hdg is not None:
                             navigator.set_goal(float(hdg))
                         else:
                             navigator.clear_goal()
+                    elif name == "goto_xy":
+                        if not args.auto_local:
+                            print("exec: goto_xy ignored (pass --auto-local)")
+                        else:
+                            local_executive.set_goal_xy(cargs.get("x", 0.0), cargs.get("y", 0.0))
+                            print("exec: goto_xy(%.2f, %.2f)" % (float(cargs.get("x", 0)), float(cargs.get("y", 0))))
+                    elif name == "wander":
+                        if not args.auto_local:
+                            print("exec: wander ignored (pass --auto-local)")
+                        else:
+                            local_executive.set_wander()
+                            print("exec: wander")
+                    elif name == "local_stop":
+                        local_executive.clear()
+                        navigator.clear_goal()
+                        tools.stop()
                     elif name == "twist":
                         tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
                     elif name == "set_wheel_vels":
@@ -231,6 +269,9 @@ def main():
                 hdg = navigator.get_goal()
                 if hdg is not None:
                     nav_info = "  nav=%.0f°" % hdg
+                st = local_executive.status()
+                if st.get("active"):
+                    nav_info += "  local=%s" % st.get("mode")
                 print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)%s" % (
                     actual_fps, avg_process, avg_wait, BUDGET_MS, nav_info))
     except KeyboardInterrupt:
@@ -239,6 +280,7 @@ def main():
         vis.stop()
         u.stop()
         navigator.clear_goal()
+        local_executive.clear()
         if wb:
             wb.shutdown()
         print("main: shutdown complete")
