@@ -297,7 +297,7 @@ class PeopleLive:
                 pass
             
             # Recognize only — FSM owns known-person greets (avoid ConversationManager double-speak).
-            faces = self._cm.recognizer.recognize(img, threshold=0.6)
+            faces = self._cm.recognizer.recognize(img, threshold=0.85, margin=0.12)
             unknowns = [r for r in faces if r[0] == "unknown"]
             
             self._n_tick += 1
@@ -337,13 +337,15 @@ class PeopleLive:
                 pass
             
             if faces or fsm_actions:
+                ids = ["%s:%.2f" % (n, c) for n, c, _b in faces]
                 print(
-                    "people_live: tick#%d faces=%d fsm_actions=%d unknowns=%d rgb=%sx%s"
+                    "people_live: tick#%d faces=%d fsm_actions=%d unknowns=%d ids=%s rgb=%sx%s"
                     % (
                         self._n_tick,
                         len(faces),
                         len(fsm_actions),
                         len(unknowns),
+                        ids,
                         img.shape[1],
                         img.shape[0],
                     )

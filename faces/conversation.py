@@ -129,7 +129,7 @@ class ConversationManager:
             print("Warning: NumPy not available, conversation disabled")
             return {"faces": [], "greetings": [], "unknowns": [], "enrollments": []}
         
-        results = self.recognizer.recognize(image, threshold=0.6)
+        results = self.recognizer.recognize(image, threshold=0.85)
         
         current_time = time.time()
         greetings = []

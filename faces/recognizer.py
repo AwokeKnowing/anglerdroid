@@ -272,47 +272,58 @@ class FaceRecognizer:
         print(f"Enrolled {len(embeddings)} face(s) for {name} (total: {len(self.db[name]['embeddings'])})")
         return len(embeddings)
     
-    def recognize(self, image: np.ndarray, threshold: float = 0.6) -> List[Tuple[str, float, Tuple[int, int, int, int]]]:
+    def recognize(self, image: np.ndarray, threshold: float = 0.85,
+                  margin: float = 0.12) -> List[Tuple[str, float, Tuple[int, int, int, int]]]:
         """Recognize faces in image.
-        
+
         Args:
             image: BGR image
-            threshold: Recognition confidence threshold (lower = stricter)
-        
+            threshold: Min confidence (1 - distance). HIGHER = stricter.
+            margin: Best match must beat 2nd-best person by at least this
+                confidence gap (blocks lookalike false IDs).
+
         Returns:
             List of (name, confidence, box) tuples
         """
         boxes = self.detect_faces(image)
         results = []
-        
+
         for box in boxes:
             emb = self.extract_embedding(image, box)
             if emb is None:
                 continue
-            
-            best_name = "unknown"
-            best_distance = float('inf')
-            
+
+            # Best distance per enrolled person (min over that person's embeds)
+            per_person = {}
             for name, data in self.db.items():
+                best_for = float("inf")
                 for stored_emb in data["embeddings"]:
                     if self.backend == "face_recognition":
-                        distance = np.linalg.norm(emb - stored_emb)
+                        distance = float(np.linalg.norm(emb - stored_emb))
                     else:
-                        distance = 1.0 - np.dot(emb, stored_emb) / (
+                        distance = 1.0 - float(np.dot(emb, stored_emb) / (
                             np.linalg.norm(emb) * np.linalg.norm(stored_emb) + 1e-8
-                        )
-                    
-                    if distance < best_distance:
-                        best_distance = distance
-                        best_name = name
-            
+                        ))
+                    if distance < best_for:
+                        best_for = distance
+                per_person[name] = best_for
+
+            if not per_person:
+                results.append(("unknown", 0.0, box))
+                continue
+
+            ranked = sorted(per_person.items(), key=lambda kv: kv[1])
+            best_name, best_distance = ranked[0]
+            second_distance = ranked[1][1] if len(ranked) > 1 else float("inf")
             confidence = max(0.0, 1.0 - best_distance)
-            
-            if confidence >= threshold:
+            second_conf = max(0.0, 1.0 - second_distance)
+            gap = confidence - second_conf
+
+            if confidence >= threshold and gap >= margin:
                 results.append((best_name, confidence, box))
             else:
                 results.append(("unknown", confidence, box))
-        
+
         return results
     
     def list_people(self) -> List[Tuple[str, int]]:
