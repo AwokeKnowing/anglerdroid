@@ -44,6 +44,8 @@ class HouseBot:
         self._last_narrate = 0.0
         self._turn_bias = 1.0
         self._n_looks = 0
+        self._escape_until = 0.0
+        self._escape_turn = None
         self._last_decision = "init"
         os.makedirs(SNAP_DIR, exist_ok=True)
 
@@ -152,6 +154,8 @@ class HouseBot:
         sign = 1.0 if turn == "left" else -1.0
         if soft:
             # Gentle veer while still moving — MPPI goal ~35° ahead.
+            self._escape_until = 0.0
+            self._escape_turn = None
             deg = 35.0 * sign
             dist = 0.95
             if pose is None:
@@ -165,11 +169,19 @@ class HouseBot:
             return deg
 
         # LATE: nose pinned — MPPI can't push through fwd_scale=0.
-        # Preempt with a timed in-place spin (twist_for beats local tick).
+        # Sticky spin: hold one direction ~2.5s so we don't thrash left/right
+        # and cancel MPPI mid-tick every look.
+        now = time.monotonic()
+        if now < self._escape_until and self._escape_turn:
+            turn = self._escape_turn
+            sign = 1.0 if turn == "left" else -1.0
+        else:
+            self._escape_turn = turn
+            self._escape_until = now + 2.5
+            local_executive.clear()
+            ang = 0.85 * sign
+            tools.twist_for(0.0, ang, duration_secs=2.4, ramp_in_secs=0.15, ramp_out_secs=0.25)
         deg = 95.0 * sign
-        ang = 0.85 * sign  # rad/s before safety_ang scale
-        local_executive.clear()
-        tools.twist_for(0.0, ang, duration_secs=1.2, ramp_in_secs=0.15, ramp_out_secs=0.2)
         return deg
 
     def _tick(self):
@@ -213,7 +225,10 @@ class HouseBot:
 
         if early or late:
             soft = bool(early and not late)
-            turn = self._pick_turn(scores)
+            if (not soft) and time.monotonic() < self._escape_until and self._escape_turn:
+                turn = self._escape_turn
+            else:
+                turn = self._pick_turn(scores)
             deg = self._set_turn_goal(turn, soft=soft)
             decision = ("early_" if soft else "late_") + turn
             note = (

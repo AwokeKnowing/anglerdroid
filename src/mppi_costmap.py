@@ -349,11 +349,12 @@ class MppiCostmapPlanner:
 
         self._maybe_refresh_wander_goal(pose_t)
 
-        if self._goal is None:
+        goal = self._goal
+        if goal is None:
             return None
 
-        dx = self._goal[0] - x
-        dy = self._goal[1] - y
+        dx = goal[0] - x
+        dy = goal[1] - y
         dist = math.hypot(dx, dy)
 
         if (not self._wander_mode) and dist < self.goal_tolerance:
@@ -361,7 +362,7 @@ class MppiCostmapPlanner:
             self.cancel()
             return None
 
-        subgoal = self._compute_subgoal(self._goal, pose_t)
+        subgoal = self._compute_subgoal(goal, pose_t)
         ego = self._extract_obs_map(obs_map)
 
         # If nearly stuck against obstacle ahead, bias reverse into warm-start
@@ -386,8 +387,8 @@ class MppiCostmapPlanner:
         best_i = int(np.argmin(S))
 
         self._debug.update({
-            'goal_x': self._goal[0],
-            'goal_y': self._goal[1],
+            'goal_x': goal[0],
+            'goal_y': goal[1],
             'subgoal_x': subgoal[0],
             'subgoal_y': subgoal[1],
             'cmd_fwd': v_star,
