@@ -3,9 +3,9 @@
 import math
 import sys
 import numpy as np
-from sim.world import create_scenario, doorway_crossed
+from sim.world import create_scenario, doorway_crossed, doorway_goal, doorway_waypoints
 from sim.robot import Robot
-from sim.policy import create_policy, HouseBotLite, LATE_STUCK_LOOKS
+from sim.policy import create_policy, HouseBotLite, GoalSeekLite, LATE_STUCK_LOOKS
 from sim.unsafe_policy import UnsafeCommitPolicy
 from sim.metrics import run_episode
 
@@ -67,7 +67,7 @@ def test_collision_detection():
 
 def test_policy_interface():
     """All policies should implement the interface."""
-    for name in ["stop", "random", "housebot", "unsafe"]:
+    for name in ["stop", "random", "housebot", "goalseek", "unsafe"]:
         policy = create_policy(name)
         policy.reset()
 
@@ -291,10 +291,11 @@ def test_unsafe_overrides_fwd0():
 
 def test_doorway_cross_helper():
     """doorway_crossed geometry: far side + in-gap counts; wall-clip does not."""
+    gx, _ = doorway_goal()
     # Far side through gap
-    assert doorway_crossed(1.05, 0.50), "gap far-side should count"
+    assert doorway_crossed(gx, 0.50), "gap far-side should count"
     # Still on start side
-    assert not doorway_crossed(1.05, 1.19), "start side should not count"
+    assert not doorway_crossed(gx, 1.19), "start side should not count"
     # Far side but past wall ends (not through door)
     assert not doorway_crossed(0.20, 0.50), "left-of-gap far side should not count"
     assert not doorway_crossed(2.50, 0.50), "right-of-gap far side should not count"
@@ -302,12 +303,7 @@ def test_doorway_cross_helper():
 
 
 def test_doorway_cross_metric_tracked():
-    """Doorway episode reports doorway_crossed field; collisions stay 0.
-
-    Crossing is aspirational for cruise-only HouseBotLite — we assert the
-    metric is present and collision-free; crossed may be False until a
-    goal-seeking mid-layer is wired.
-    """
+    """Doorway episode reports doorway_crossed; HouseBotLite stays collision-free."""
     m = _run_episode("doorway", "housebot", steps=800)
     assert m["collisions"] == 0, f"doorway collision at {m['collision_step']}"
     assert "doorway_crossed" in m
@@ -316,6 +312,32 @@ def test_doorway_cross_metric_tracked():
         "✅ test_doorway_cross_metric_tracked passed "
         f"(crossed={m['doorway_crossed']} step={m['doorway_crossed_step']} "
         f"path_m={m['path_len_m']:.2f})"
+    )
+
+
+def test_goalseek_respects_hard_stop():
+    """GoalSeekLite must never ask v>0 when fwd_scale==0."""
+    pol = GoalSeekLite(waypoints=doorway_waypoints())
+    pol.reset()
+    obs = __import__("numpy").zeros((240, 320), dtype="uint8")
+    height = obs.copy()
+    pose = {"x": 0.81, "y": 1.19, "theta": -1.2}
+    v, w = pol.act(obs, height, {"fwd": 0.0, "bwd": 1.0, "ang": 1.0}, pose)
+    assert v <= 0.0, f"goalseek v={v} with fwd_scale=0"
+    print("✅ test_goalseek_respects_hard_stop passed")
+
+
+def test_doorway_goalseek_crosses():
+    """Staged GoalSeekLite crosses the doorway without collisions."""
+    m = _run_episode("doorway", "goalseek", steps=1500)
+    assert m["collisions"] == 0, f"goalseek collision at {m['collision_step']}"
+    assert m["doorway_crossed"] is True, (
+        f"expected doorway_crossed; final=({m['final_x']:.3f},{m['final_y']:.3f}) "
+        f"path={m['path_len_m']:.2f}"
+    )
+    print(
+        "✅ test_doorway_goalseek_crosses passed "
+        f"(step={m['doorway_crossed_step']} path_m={m['path_len_m']:.2f})"
     )
 
 
@@ -356,6 +378,8 @@ def run_all_tests():
         test_unsafe_vs_housebot_couch_contrast,
         test_doorway_cross_helper,
         test_doorway_cross_metric_tracked,
+        test_goalseek_respects_hard_stop,
+        test_doorway_goalseek_crosses,
         test_stress_5k_housebot_scenarios,
     ]
 

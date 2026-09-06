@@ -268,11 +268,109 @@ class HouseBotLite(Policy):
         return self._safe_cmd(self.v_cruise, 0.0, fwd_scale, bwd_scale, ang_scale)
 
 
-def create_policy(name: str):
+
+class GoalSeekLite(HouseBotLite):
+    """Pure-pursuit mid-layer toward staged world goals + hard-stop recover.
+
+    Skips early divert (goal owns heading). Recover only when fwd_scale==0
+    for LATE_STUCK_LOOKS. If laterals pin yaw (ang_scale==0) while still
+    needing to turn, creep reverse to reopen space — never force v>0 at fwd=0.
+    """
+
+    ARRIVE_M = 0.09
+    ALIGN_RAD = 0.45
+    SEEK_W = 1.6
+    SEEK_V = 0.14
+    NUDGE_BACK = -0.10
+
+    def __init__(self, goal_xy=None, waypoints=None, v_cruise=0.15, w_cruise=0.4):
+        super().__init__(v_cruise=v_cruise, w_cruise=w_cruise)
+        if waypoints is not None:
+            self.waypoints = [(float(x), float(y)) for x, y in waypoints]
+        elif goal_xy is not None:
+            self.waypoints = [(float(goal_xy[0]), float(goal_xy[1]))]
+        else:
+            from sim.world import doorway_waypoints
+            self.waypoints = list(doorway_waypoints())
+        self.goal_xy = self.waypoints[-1]
+
+    def reset(self):
+        super().reset()
+        self.last_decision = "init"
+        self.goal_reached = False
+        self.wp_i = 0
+
+    def _active_goal(self):
+        i = min(self.wp_i, len(self.waypoints) - 1)
+        return self.waypoints[i]
+
+    def act(self, obs, height, safety_scales, pose):
+        if self.phase is not None:
+            return super().act(obs, height, safety_scales, pose)
+
+        fwd_scale = float(safety_scales.get("fwd", 1.0))
+        bwd_scale = float(safety_scales.get("bwd", 1.0))
+        ang_scale = float(safety_scales.get("ang", 1.0))
+
+        if fwd_scale <= 0.02:
+            self.late_streak += 1
+        else:
+            self.late_streak = 0
+
+        if self.late_streak >= LATE_STUCK_LOOKS:
+            return super().act(obs, height, safety_scales, pose)
+
+        gx, gy = self._active_goal()
+        x = float(pose.get("x", 0.0))
+        y = float(pose.get("y", 0.0))
+        th = float(pose.get("theta", 0.0))
+        dx = gx - x
+        dy = gy - y
+        dist = math.hypot(dx, dy)
+
+        if dist <= self.ARRIVE_M:
+            if self.wp_i < len(self.waypoints) - 1:
+                self.wp_i += 1
+                self.last_decision = "wp_advance"
+                return self._safe_cmd(0.0, 0.0, fwd_scale, bwd_scale, ang_scale)
+            self.goal_reached = True
+            self.last_decision = "arrive"
+            return self._safe_cmd(0.0, 0.0, fwd_scale, bwd_scale, ang_scale)
+
+        desired = math.atan2(dy, dx)
+        err = (desired - th + math.pi) % (2 * math.pi) - math.pi
+        need_turn = abs(err) > self.ALIGN_RAD
+
+        # Laterals hard-pin: back up a hair to regain yaw authority
+        if need_turn and ang_scale <= 0.0 and bwd_scale > BWD_OK:
+            self.last_decision = "seek_reopen"
+            return self._safe_cmd(self.NUDGE_BACK, 0.0, fwd_scale, bwd_scale, ang_scale)
+
+        if need_turn:
+            v_cmd = 0.0
+            w_cmd = self.SEEK_W * (1.0 if err > 0 else -1.0)
+            self.last_decision = "align"
+            return self._safe_cmd(v_cmd, w_cmd, fwd_scale, bwd_scale, ang_scale)
+
+        speed = self.SEEK_V * min(1.0, max(0.25, fwd_scale)) * min(1.0, dist / 0.30)
+        v_cmd = speed if fwd_scale > 0 else 0.0
+        w_cmd = self.SEEK_W * err
+        if fwd_scale <= 0.0 and ang_scale > 0 and abs(err) > 0.06:
+            self.last_decision = "seek_nudge"
+            return self._safe_cmd(0.0, self.SEEK_W * (1.0 if err > 0 else -1.0),
+                                  fwd_scale, bwd_scale, ang_scale)
+        self.last_decision = "seek"
+        return self._safe_cmd(v_cmd, w_cmd, fwd_scale, bwd_scale, ang_scale)
+
+
+
+def create_policy(name: str, goal_xy=None):
     if name == "random":
         return RandomPolicy()
     elif name == "housebot":
         return HouseBotLite()
+    elif name == "goalseek":
+        return GoalSeekLite(goal_xy=goal_xy)
     elif name == "stop":
         return StopPolicy()
     elif name in ("unsafe", "unsafe_commit"):

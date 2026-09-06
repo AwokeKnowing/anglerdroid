@@ -22,13 +22,16 @@ def run_episode(
     start_x: float | None = None,
     start_y: float | None = None,
     start_theta: float = 0.0,
+    goal_xy=None,
 ) -> dict:
     """Run one episode; return collisions + doorway_cross (when scenario=doorway)."""
     obs, height = create_scenario(scenario)
     x0 = RCX * EGO_PX_SIZE if start_x is None else start_x
     y0 = RCY * EGO_PX_SIZE if start_y is None else start_y
     robot = Robot(x0, y0, start_theta)
-    policy = create_policy(policy_name)
+    # goalseek defaults to doorway_waypoints() when goal_xy is None — do not
+    # collapse to a single far goal or the approach stage is skipped.
+    policy = create_policy(policy_name, goal_xy=goal_xy)
     policy.reset()
 
     crossed = False
@@ -58,7 +61,7 @@ def run_episode(
         }
         pose = {"x": robot.x, "y": robot.y, "theta": robot.theta}
         v_cmd, w_cmd = policy.act(robot.ego_obs, robot.ego_height, scales, pose)
-        if policy_name == "housebot" and scales["fwd"] <= 0 and v_cmd > 0:
+        if policy_name in ("housebot", "goalseek") and scales["fwd"] <= 0 and v_cmd > 0:
             raise AssertionError(f"housebot v>0 at fwd=0 step={step}")
         robot.step(v_cmd, w_cmd, dt, apply_safety=apply_safety)
 

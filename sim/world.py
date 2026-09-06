@@ -108,17 +108,21 @@ def _add_hallway(obs, height):
 
 
 def _add_doorway(obs, height):
-    """Room walls with a narrow doorway offset to the right of heading."""
+    """Room walls with a doorway offset to the right of heading.
+
+    Gap is wider than the FOOT lateral span (~45 px) so a centered pass is
+    geometrically possible; still tight enough to punish bad aim.
+    """
     # Outer walls
     _add_rect(obs, height, 0, 0, 10, FRAME_H, h_cm=200)
     _add_rect(obs, height, FRAME_W - 10, 0, FRAME_W, FRAME_H, h_cm=200)
     _add_rect(obs, height, 0, 0, FRAME_W, 10, h_cm=200)
     _add_rect(obs, height, 0, FRAME_H - 10, FRAME_W, FRAME_H, h_cm=200)
-    # Dividing wall ahead with doorway gap (~35 px / ~35 cm)
+    # Dividing wall ahead with doorway gap (~60 px / ~60 cm)
     wall_y0 = RCY - 55
     wall_y1 = wall_y0 + 12
-    door_x0 = RCX + 10
-    door_x1 = door_x0 + 35
+    door_x0 = RCX + 5
+    door_x1 = door_x0 + 60
     _add_rect(obs, height, 10, wall_y0, door_x0, wall_y1, h_cm=200)
     _add_rect(obs, height, door_x1, wall_y0, FRAME_W - 10, wall_y1, h_cm=200)
 
@@ -141,8 +145,25 @@ def _add_l_corner(obs, height):
 # Matching _add_doorway: horizontal dividing wall with gap offset +x of start.
 DOORWAY_WALL_Y0 = RCY - 55          # 64
 DOORWAY_WALL_Y1 = DOORWAY_WALL_Y0 + 12
-DOORWAY_DOOR_X0 = RCX + 10          # 91
-DOORWAY_DOOR_X1 = DOORWAY_DOOR_X0 + 35
+DOORWAY_DOOR_X0 = RCX + 5           # 86
+DOORWAY_DOOR_X1 = DOORWAY_DOOR_X0 + 60  # 146
+
+
+def doorway_goal():
+    """Final world-frame waypoint past the doorway gap (meters)."""
+    return doorway_waypoints()[-1]
+
+
+def doorway_waypoints():
+    """Staged mid-layer goals: align to gap, then cross to far side.
+
+    1) Approach: door-center x, still south of the wall (clearance for footprint)
+    2) Far: door-center x, past wall_y0 (satisfies doorway_crossed)
+    """
+    gx = 0.5 * (DOORWAY_DOOR_X0 + DOORWAY_DOOR_X1) * EGO_PX_SIZE
+    approach_y = (DOORWAY_WALL_Y1 + 55) * EGO_PX_SIZE  # farther south so yaw isn't lat-pinned
+    far_y = (DOORWAY_WALL_Y0 - 18) * EGO_PX_SIZE
+    return [(float(gx), float(approach_y)), (float(gx), float(far_y))]
 
 
 def doorway_crossed(x_m: float, y_m: float, margin_m: float = 0.05) -> bool:
