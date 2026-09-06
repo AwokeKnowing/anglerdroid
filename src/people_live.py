@@ -297,7 +297,7 @@ class PeopleLive:
                 pass
             
             # Recognize only — FSM owns known-person greets (avoid ConversationManager double-speak).
-            faces = self._cm.recognizer.recognize(img, threshold=0.85, margin=0.12)
+            faces = self._cm.recognizer.recognize(img)  # SFace defaults: sim>=0.45, margin>=0.08
             unknowns = [r for r in faces if r[0] == "unknown"]
             
             self._n_tick += 1

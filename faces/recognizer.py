@@ -76,14 +76,21 @@ class FaceRecognizer:
         model_dir.mkdir(exist_ok=True)
         self.face_net = None
         self.yunet = None
+        self.sface = None
 
         yunet = model_dir / "face_detection_yunet_2023mar.onnx"
         if yunet.exists() and hasattr(cv2, "FaceDetectorYN"):
             # Input size set per-frame in detect
             self.yunet = cv2.FaceDetectorYN.create(
-                str(yunet), "", (320, 320), 0.45, 0.3, 5000
+                str(yunet), "", (320, 320), 0.55, 0.3, 5000
             )
             print(f"FaceRecognizer: YuNet loaded from {yunet}")
+            sface = model_dir / "face_recognition_sface_2021dec.onnx"
+            if sface.exists() and hasattr(cv2, "FaceRecognizerSF"):
+                self.sface = cv2.FaceRecognizerSF.create(str(sface), "")
+                print(f"FaceRecognizer: SFace loaded from {sface}")
+            else:
+                print("FaceRecognizer: SFace missing — embeddings will be weak")
             return
 
         prototxt = model_dir / "deploy.prototxt"
@@ -147,13 +154,16 @@ class FaceRecognizer:
         if getattr(self, "yunet", None) is not None:
             self.yunet.setInputSize((w, h))
             _, faces = self.yunet.detect(image)
+            self._last_yunet_faces = faces  # full rows for SFace alignCrop
             boxes = []
             if faces is not None:
                 for f in faces:
                     x, y, bw, bh = [int(v) for v in f[:4]]
-                    # clamp
                     x = max(0, x); y = max(0, y)
                     bw = max(1, min(bw, w - x)); bh = max(1, min(bh, h - y))
+                    # Ignore tiny detections (common false faces on textures)
+                    if bw < 28 or bh < 28:
+                        continue
                     boxes.append((x, y, bw, bh))
             return boxes
 
@@ -213,11 +223,45 @@ class FaceRecognizer:
             encodings = face_recognition.face_encodings(rgb, [face_location])
             return encodings[0] if encodings else None
         else:
+            # Prefer SFace (real face embedding). Fall back to weak pixel embed.
+            if getattr(self, "sface", None) is not None:
+                face_row = None
+                raw = getattr(self, "_last_yunet_faces", None)
+                if raw is not None:
+                    x, y, bw, bh = box
+                    best_i, best_iou = None, -1.0
+                    for i, f in enumerate(raw):
+                        fx, fy, fw, fh = [float(v) for v in f[:4]]
+                        # IoU with requested box
+                        xa, ya = max(x, fx), max(y, fy)
+                        xb, yb = min(x + bw, fx + fw), min(y + bh, fy + fh)
+                        inter = max(0.0, xb - xa) * max(0.0, yb - ya)
+                        union = bw * bh + fw * fh - inter + 1e-6
+                        iou = inter / union
+                        if iou > best_iou:
+                            best_iou, best_i = iou, i
+                    if best_i is not None and best_iou > 0.1:
+                        face_row = raw[best_i]
+                if face_row is None:
+                    # Synthetic YuNet-like row: box + empty landmarks + score
+                    x, y, bw, bh = box
+                    face_row = np.array(
+                        [x, y, bw, bh, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1.0],
+                        dtype=np.float32,
+                    )
+                try:
+                    aligned = self.sface.alignCrop(image, face_row)
+                    feat = self.sface.feature(aligned)
+                    vec = np.asarray(feat, dtype=np.float32).reshape(-1)
+                    n = float(np.linalg.norm(vec)) + 1e-8
+                    return vec / n
+                except Exception as e:
+                    print(f"FaceRecognizer: SFace embed failed: {e}")
+
             face, _ = self.padded_crop(image, box, pad=0.25)
             if face is None or face.size == 0:
                 return None
             face_resized = cv2.resize(face, (128, 128))
-            # L2-normalize so cosine match is stable across lighting
             vec = face_resized.flatten().astype(np.float32) / 255.0
             n = float(np.linalg.norm(vec)) + 1e-8
             return vec / n
@@ -272,19 +316,26 @@ class FaceRecognizer:
         print(f"Enrolled {len(embeddings)} face(s) for {name} (total: {len(self.db[name]['embeddings'])})")
         return len(embeddings)
     
-    def recognize(self, image: np.ndarray, threshold: float = 0.85,
-                  margin: float = 0.12) -> List[Tuple[str, float, Tuple[int, int, int, int]]]:
+    def recognize(self, image: np.ndarray, threshold: float = None,
+                  margin: float = None) -> List[Tuple[str, float, Tuple[int, int, int, int]]]:
         """Recognize faces in image.
 
         Args:
             image: BGR image
-            threshold: Min confidence (1 - distance). HIGHER = stricter.
-            margin: Best match must beat 2nd-best person by at least this
-                confidence gap (blocks lookalike false IDs).
+            threshold: Min cosine similarity (HIGHER = stricter).
+                Default 0.45 with SFace, 0.92 with weak pixel embeds.
+            margin: Best person must beat 2nd-best by this cosine gap.
+                Default 0.08 (SFace) / 0.05 (weak).
 
         Returns:
-            List of (name, confidence, box) tuples
+            List of (name, confidence, box) tuples — confidence is cosine sim.
         """
+        use_sface = getattr(self, "sface", None) is not None
+        if threshold is None:
+            threshold = 0.45 if use_sface else 0.92
+        if margin is None:
+            margin = 0.08 if use_sface else 0.05
+
         boxes = self.detect_faces(image)
         results = []
 
@@ -293,31 +344,30 @@ class FaceRecognizer:
             if emb is None:
                 continue
 
-            # Best distance per enrolled person (min over that person's embeds)
             per_person = {}
             for name, data in self.db.items():
-                best_for = float("inf")
+                best_sim = -1.0
                 for stored_emb in data["embeddings"]:
                     if self.backend == "face_recognition":
-                        distance = float(np.linalg.norm(emb - stored_emb))
+                        # dlib distance → fake similarity
+                        sim = float(1.0 - np.linalg.norm(emb - stored_emb))
                     else:
-                        distance = 1.0 - float(np.dot(emb, stored_emb) / (
+                        sim = float(np.dot(emb, stored_emb) / (
                             np.linalg.norm(emb) * np.linalg.norm(stored_emb) + 1e-8
                         ))
-                    if distance < best_for:
-                        best_for = distance
-                per_person[name] = best_for
+                    if sim > best_sim:
+                        best_sim = sim
+                per_person[name] = best_sim
 
             if not per_person:
                 results.append(("unknown", 0.0, box))
                 continue
 
-            ranked = sorted(per_person.items(), key=lambda kv: kv[1])
-            best_name, best_distance = ranked[0]
-            second_distance = ranked[1][1] if len(ranked) > 1 else float("inf")
-            confidence = max(0.0, 1.0 - best_distance)
-            second_conf = max(0.0, 1.0 - second_distance)
-            gap = confidence - second_conf
+            ranked = sorted(per_person.items(), key=lambda kv: kv[1], reverse=True)
+            best_name, best_sim = ranked[0]
+            second_sim = ranked[1][1] if len(ranked) > 1 else -1.0
+            gap = best_sim - second_sim
+            confidence = float(best_sim)
 
             if confidence >= threshold and gap >= margin:
                 results.append((best_name, confidence, box))
