@@ -61,6 +61,10 @@ def run_simulation(scenario_name, policy_name, steps, dt, save_path=None, render
             'fwd': robot.safety.fwd_scale,
             'bwd': robot.safety.bwd_scale,
             'ang': robot.safety.ang_scale,
+            # meters for DualScales / action_mask (EGO_PX_SIZE=0.01)
+            'fwd_m': float(robot.safety.fwd_clear) * float(EGO_PX_SIZE),
+            'bwd_m': float(robot.safety.bwd_clear) * float(EGO_PX_SIZE),
+            'lat_m': float(robot.safety.lat_clear) * float(EGO_PX_SIZE),
         }
         
         pose = {

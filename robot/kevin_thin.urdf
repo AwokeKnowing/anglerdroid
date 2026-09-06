@@ -1,0 +1,79 @@
+<?xml version="1.0"?>
+<!-- Thin primitive Kevin for robox3d.load_urdf (collision-friendly).
+     Origin: axle centre, +X forward, +Y left, +Z up (same as generate_urdf.py).
+     Dimensions approximate robot/anglerdroid.urdf + sim/box3d.py constants.
+     No STL meshes — boxes/cylinders only so load_urdf collision works. -->
+<robot name="kevin_thin">
+  <link name="base_link">
+    <inertial>
+      <origin xyz="-0.02 0.0 0.05" rpy="0 0 0"/>
+      <mass value="8.0"/>
+      <!-- Rough box inertia about COM for ~0.30×0.42×0.25 @ 8 kg -->
+      <inertia ixx="0.15" ixy="0" ixz="0" iyy="0.12" iyz="0" izz="0.18"/>
+    </inertial>
+
+    <!-- Body footprint (L×W×H ≈ 0.30×0.42×0.25) -->
+    <visual name="body">
+      <origin xyz="-0.01 0.0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.30 0.42 0.25"/></geometry>
+      <material name="body_mat"><color rgba="0.18 0.18 0.20 1"/></material>
+    </visual>
+    <collision name="body">
+      <origin xyz="-0.01 0.0 0.05" rpy="0 0 0"/>
+      <geometry><box size="0.30 0.42 0.25"/></geometry>
+    </collision>
+
+    <!-- Drive wheels (r≈0.083, track≈0.37, wheelbase L≈0.34 visual context) -->
+    <visual name="wheel_left">
+      <origin xyz="0.0 -0.185 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.083" length="0.05"/></geometry>
+      <material name="wheel_mat"><color rgba="0.09 0.09 0.10 1"/></material>
+    </visual>
+    <collision name="wheel_left">
+      <origin xyz="0.0 -0.185 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.083" length="0.05"/></geometry>
+    </collision>
+    <visual name="wheel_right">
+      <origin xyz="0.0 0.185 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.083" length="0.05"/></geometry>
+      <material name="wheel_mat"><color rgba="0.09 0.09 0.10 1"/></material>
+    </visual>
+    <collision name="wheel_right">
+      <origin xyz="0.0 0.185 0.0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.083" length="0.05"/></geometry>
+    </collision>
+
+    <!-- Rear caster (approx) -->
+    <visual name="caster">
+      <origin xyz="-0.18 0.0 -0.06" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.03 0.04"/></geometry>
+      <material name="caster_mat"><color rgba="0.16 0.16 0.18 1"/></material>
+    </visual>
+    <collision name="caster">
+      <origin xyz="-0.18 0.0 -0.06" rpy="0 0 0"/>
+      <geometry><box size="0.04 0.03 0.04"/></geometry>
+    </collision>
+
+    <!-- Mast ~0.03×0.03×0.78 near rear (matches anglerdroid.urdf mast visual) -->
+    <visual name="mast">
+      <origin xyz="-0.135 0.0 0.5243" rpy="0 0 0"/>
+      <geometry><box size="0.03 0.03 0.78"/></geometry>
+      <material name="mast_mat"><color rgba="0.40 0.42 0.45 1"/></material>
+    </visual>
+    <collision name="mast">
+      <origin xyz="-0.135 0.0 0.5243" rpy="0 0 0"/>
+      <geometry><box size="0.03 0.03 0.78"/></geometry>
+    </collision>
+
+    <!-- Short camera arm (visual+collision for boom under shelves) -->
+    <visual name="camera_arm">
+      <origin xyz="-0.0525 0.0 0.8993" rpy="0 0 0"/>
+      <geometry><box size="0.135 0.03 0.03"/></geometry>
+      <material name="arm_mat"><color rgba="0.34 0.36 0.40 1"/></material>
+    </visual>
+    <collision name="camera_arm">
+      <origin xyz="-0.0525 0.0 0.8993" rpy="0 0 0"/>
+      <geometry><box size="0.135 0.03 0.03"/></geometry>
+    </collision>
+  </link>
+</robot>

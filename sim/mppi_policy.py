@@ -19,6 +19,8 @@ if str(_SRC) not in sys.path:
 
 from mppi_costmap import MppiCostmapPlanner  # noqa: E402
 from sim.robot import soft_inflate, score_heading_with_lookahead
+from sim.dual_clearance import evaluate as evaluate_dual
+from sim.action_mask import apply_action_mask
 
 
 class MppiSimPolicy:
@@ -59,7 +61,18 @@ class MppiSimPolicy:
         right = score_heading_with_lookahead(soft, math.radians(-70))
         return 1.0 if left >= right else -1.0
 
-    def _mask(self, v, w, fwd, bwd, ang):
+    def _mask(self, v, w, fwd, bwd, ang, safety_scales=None):
+        """Hard envelope last; prefer DualScales mask when clearances present."""
+        scales = safety_scales or {}
+        if all(k in scales for k in ("fwd_m", "bwd_m", "lat_m")):
+            dual = evaluate_dual(
+                float(scales["fwd_m"]),
+                float(scales["bwd_m"]),
+                float(scales["lat_m"]),
+            )
+            masked = apply_action_mask(float(v), float(w), dual)
+            self.last_mask_mode = masked.mode
+            return masked.v, masked.w
         if v > 0:
             v *= fwd
             if fwd <= 0:
@@ -71,6 +84,7 @@ class MppiSimPolicy:
         w *= ang
         if ang <= 0:
             w = 0.0
+        self.last_mask_mode = "legacy"
         return v, w
 
     def act(self, obs, height, safety_scales, pose):
@@ -100,7 +114,7 @@ class MppiSimPolicy:
                     # Re-seed wander so planner picks a new direction
                     if self.wander:
                         self.planner.set_wander_mode(True)
-            return self._mask(v, w, fwd, bwd, ang)
+            return self._mask(v, w, fwd, bwd, ang, safety_scales)
 
         if fwd < 0.08:
             self.pin_streak += 1
@@ -118,7 +132,7 @@ class MppiSimPolicy:
             self.last_decision = "mppi_escape_start"
             v = self.BACK_MPS if self.escape_phase == "back" else 0.0
             w = 0.0 if self.escape_phase == "back" else self.SPIN_W * self.escape_sign
-            return self._mask(v, w, fwd, bwd, ang)
+            return self._mask(v, w, fwd, bwd, ang, safety_scales)
 
         cmd = self.planner.tick(obs, (px, py, th), 0.033)
         if cmd is None:
@@ -126,13 +140,13 @@ class MppiSimPolicy:
             if fwd < 0.4 and ang > 0.2:
                 s = self._open_side_sign(obs)
                 self.last_decision = "mppi_idle_spin"
-                return self._mask(0.0, 0.45 * s, fwd, bwd, ang)
+                return self._mask(0.0, 0.45 * s, fwd, bwd, ang, safety_scales)
             self.last_decision = "mppi_idle"
             return 0.0, 0.0
 
         v = float(cmd.get("fwd_mps", 0.0))
         w = float(cmd.get("ang_rads", 0.0))
-        v, w = self._mask(v, w, fwd, bwd, ang)
+        v, w = self._mask(v, w, fwd, bwd, ang, safety_scales)
 
         # Tiny-command dither after mask → move (not freeze).
         # Never flip a reverse into forward — that fought escape.
@@ -140,18 +154,18 @@ class MppiSimPolicy:
         if abs(v) < 0.05:
             if v < -0.005 and bwd > 0.15:
                 self.last_decision = "mppi_keep_back"
-                return self._mask(min(v, -0.10), 0.0, fwd, bwd, ang)
+                return self._mask(min(v, -0.10), 0.0, fwd, bwd, ang, safety_scales)
             if fwd >= 0.30 and v >= 0.0:
                 self.last_decision = "mppi_nudge_fwd"
-                return self._mask(0.12, w if abs(w) < 0.4 else 0.0, fwd, bwd, ang)
+                return self._mask(0.12, w if abs(w) < 0.4 else 0.0, fwd, bwd, ang, safety_scales)
             if ang > 0.15:
                 s = self._open_side_sign(obs)
                 self.last_decision = "mppi_nudge_spin"
-                return self._mask(0.0, 0.65 * s, fwd, bwd, ang)
+                return self._mask(0.0, 0.65 * s, fwd, bwd, ang, safety_scales)
             if bwd > 0.2:
                 # Yaw also clamped — reverse to reopen (insect)
                 self.last_decision = "mppi_nudge_reopen"
-                return self._mask(-0.10, 0.0, fwd, bwd, ang)
+                return self._mask(-0.10, 0.0, fwd, bwd, ang, safety_scales)
 
         self.last_decision = "mppi_v%.2f_w%.2f" % (v, w)
         return v, w

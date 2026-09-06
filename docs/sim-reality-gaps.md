@@ -55,10 +55,11 @@ Priority: P0 = high impact on collision/stuck transfer, P1 = medium, P2 = polish
 
 
 ## Progress log
-- 2026-09-05/06: Catalog written. DiffDriveDynamics (accel + optional latency + wheelbase caps). AABB Box3D mast/body. Body-ring safety for side-swipe. `robox3d` 0.1.0 **imports on Orin** — next: thin Kevin URDF / browser viewer spike.
+- 2026-09-05/06: Catalog written. DiffDriveDynamics (accel + optional latency + wheelbase caps). AABB Box3D mast/body. Body-ring safety for side-swipe. `robox3d` 0.1.0 **imports on Orin** — thin Kevin URDF spike done (`robot/kevin_thin.urdf` + `sim/robox3d_kevin.py`).
 - Latency default OFF (`Robot(fidelity=True)` for D2); accel+caps always on.
 - 2026-09-05 ~22:30 PT: Cul-de-sac lookahead planner (`d9ab4d8`); 24/24. Live drive still stopped.
 - 2026-09-05 ~22:40 PT: Rerun RGB+height+obs logger (`src/rerun_log.py`) — headless `~/.kevin/rerun/live.rrd` @ ~5 Hz; Rerun 0.37 API fix. Live drive still stopped.
 - 2026-09-06 ~08:10 PT: Fidelity MPPI hard-scenario stress (`couch_pinch`/`hallway`/`doorway`/`cul_de_sac`) + multi-rate (`policy_hz=10`) transfer tests. Live drive still stopped.
 
 - 2026-09-06 ~08:40 PT: People behavior stubs (`faces/people_behavior.py`) — greet-hours / name-call / directional help; faces 14/14; not wired to drive. Live still stopped.
+- 2026-09-06 ~11:45 PT: Landed DualScales + MPPI action_mask + AABB mast pack on Orin; wired clearances (`fwd_m`/`bwd_m`/`lat_m`) into `sim/run.py` and DualScales mask into `sim/mppi_policy._mask` (legacy hard-scale fallback retained). Thin Kevin URDF + robox3d ContactSensor committed. Tests: dual 8/8, mask 9/9, mast 2/2, robox3d 5/5, dynamics 7/7, mppi transfer 8/8, sim 24/24, faces 14/14. Live drive still stopped.
