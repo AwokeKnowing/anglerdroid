@@ -343,14 +343,14 @@ class PeopleBehaviorStub:
         cmd = self.directional.parse_command(text)
         if cmd is not None:
             cmd_type, goal_hint = cmd
-            # Commands should acknowledge
+            # Commands should acknowledge (curious, earnest, playful tone)
             ack = {
-                "stop": "Stopping.",
-                "come_here": "Coming over.",
-                "go_away": "Okay, moving away.",
-                "wander": "Wandering around.",
-                "look_at": "Looking.",
-            }.get(cmd_type, "Okay.")
+                "stop": "Stopping!",
+                "come_here": "Coming over!",
+                "go_away": "Sorry! Moving away.",
+                "wander": "Back to wandering!",
+                "look_at": "Looking!",
+            }.get(cmd_type, "Okay!")
             
             self._last_name_call = t
             if speak:
