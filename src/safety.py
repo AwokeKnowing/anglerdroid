@@ -121,8 +121,11 @@ class SafetyGuard:
 
     # ── per-frame update ──
 
-    def update(self, obs_map, yaw_delta, fwd_delta):
-        """Feed per-frame odometry.  Computes directional scales."""
+    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None):
+        """Feed per-frame odometry. Computes directional scales.
+
+        height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
+        """
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
 
