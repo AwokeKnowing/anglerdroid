@@ -2,6 +2,9 @@
 
 TTS: Kokoro-ONNX → paplay on ReSpeaker sink.
 ASR: faster-whisper now (Parakeet on i777 3090 is the upgrade path).
+
+Volume: apply ONCE via paplay --volume. Do not also scale samples and
+pactl-set the sink to the same fraction (that made 30% effectively ~3%).
 """
 
 from __future__ import annotations
@@ -13,9 +16,15 @@ import threading
 
 KOKORO_MODEL = os.path.expanduser("~/.kevin/models/kokoro/kokoro-v1.0.onnx")
 KOKORO_VOICES = os.path.expanduser("~/.kevin/models/kokoro/voices-v1.0.bin")
-RS_SINK = "alsa_output.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-stereo"
-RS_SRC = "alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-surround-21"
-SPEAK_VOLUME = float(__import__("os").environ.get("KEVIN_SPEAK_VOL", "0.10"))
+RS_SINK = os.environ.get(
+    "KEVIN_SPEAK_SINK",
+    "alsa_output.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-stereo",
+)
+RS_SRC = os.environ.get(
+    "KEVIN_LISTEN_SRC",
+    "alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-surround-21",
+)
+SPEAK_VOLUME = float(os.environ.get("KEVIN_SPEAK_VOL", "0.30"))
 
 _lock = threading.Lock()
 _kokoro = None
@@ -58,22 +67,33 @@ def speak(text: str, voice: str = "am_michael", block: bool = False) -> None:
             import soundfile as sf
             import numpy as np
             vol = max(0.0, min(1.0, float(SPEAK_VOLUME)))
-            samples = (np.asarray(samples, dtype=np.float32) * vol)
+            # Full-scale WAV; loudness only via paplay --volume (single attenuator).
+            samples = np.asarray(samples, dtype=np.float32)
+            peak = float(np.max(np.abs(samples))) if samples.size else 0.0
+            if peak > 1.0:
+                samples = samples / peak
             path = os.path.join(tempfile.gettempdir(), "kevin_tts.wav")
             sf.write(path, samples, sr)
+            # Keep the physical sink near full; user volume = paplay only.
             try:
                 subprocess.run(
-                    ["pactl", "set-sink-volume", RS_SINK, "%d%%" % int(round(vol * 100))],
+                    ["pactl", "set-sink-mute", RS_SINK, "0"],
+                    check=False, timeout=2,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-volume", RS_SINK, "100%"],
                     check=False, timeout=2,
                 )
             except Exception:
                 pass
             paplay_vol = max(1, int(round(65536 * vol)))
-            subprocess.run(
+            r = subprocess.run(
                 ["paplay", f"--device={RS_SINK}", f"--volume={paplay_vol}", path],
-                check=False, timeout=60,
+                check=False, timeout=60, capture_output=True, text=True,
             )
-            print("speech: said %r (vol=%.0f%%)" % (text[:80], vol * 100))
+            if r.returncode != 0:
+                print("speech: paplay rc=%s err=%r" % (r.returncode, (r.stderr or "")[:120]))
+            print("speech: said %r (vol=%.0f%% sink=%s)" % (text[:80], vol * 100, RS_SINK.split(".")[-1]))
         except Exception as e:
             print("speech: speak failed: %s" % e)
         finally:
