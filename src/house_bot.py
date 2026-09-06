@@ -4,6 +4,7 @@ CRITICAL: Divert EARLY. Once SafetyGuard pins forward (and often angular),
 "turn left" is already too late. Steer while clearance still allows yaw.
 
 Mast-aware: tall cells (>= MAST_CLEAR_CM) count as overhangs/tables.
+Stuck recovery: after several late looks, reverse+spin toward freer side.
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ LATE_FWD_SCALE = 0.18
 EARLY_FREE = 0.72
 EARLY_MAST = 0.12
 MIN_ANG_TO_DIVERT = 0.30
+LATE_STUCK_LOOKS = 4          # consecutive late looks → reverse+spin
+RECOVER_BACK_MPS = -0.18
+RECOVER_SPIN_RAD = 0.95
+RECOVER_SECS = 1.1
+STICKY_BREAK_MARGIN = 0.25    # freer opposite breaks sticky early
 
 
 class HouseBot:
@@ -46,6 +52,8 @@ class HouseBot:
         self._n_looks = 0
         self._escape_until = 0.0
         self._escape_turn = None
+        self._late_streak = 0
+        self._recover_until = 0.0
         self._last_decision = "init"
         os.makedirs(SNAP_DIR, exist_ok=True)
 
@@ -149,13 +157,14 @@ class HouseBot:
             turn = "right"
         return turn
 
-    def _set_turn_goal(self, turn, soft=True):
+    def _set_turn_goal(self, turn, soft=True, recover=False, bwd_ok=True):
         pose = getattr(self.vision, "_pose", None)
         sign = 1.0 if turn == "left" else -1.0
         if soft:
             # Gentle veer while still moving — MPPI goal ~35° ahead.
             self._escape_until = 0.0
             self._escape_turn = None
+            self._late_streak = 0
             deg = 35.0 * sign
             dist = 0.95
             if pose is None:
@@ -172,16 +181,25 @@ class HouseBot:
         # Sticky spin: hold one direction ~2.5s so we don't thrash left/right
         # and cancel MPPI mid-tick every look.
         now = time.monotonic()
-        if now < self._escape_until and self._escape_turn:
+        if (not recover) and now < self._escape_until and self._escape_turn:
             turn = self._escape_turn
             sign = 1.0 if turn == "left" else -1.0
         else:
             self._escape_turn = turn
-            self._escape_until = now + 2.5
+            self._escape_until = now + (RECOVER_SECS + 0.4 if recover else 2.5)
             local_executive.clear()
-            ang = 0.85 * sign
-            tools.twist_for(0.0, ang, duration_secs=2.4, ramp_in_secs=0.15, ramp_out_secs=0.25)
-        deg = 95.0 * sign
+            ang = (RECOVER_SPIN_RAD if recover else 0.85) * sign
+            # Back up while yawing when stuck — pure spin often stays pinned.
+            fwd = RECOVER_BACK_MPS if (recover and bwd_ok) else 0.0
+            tools.twist_for(
+                fwd, ang,
+                duration_secs=(RECOVER_SECS if recover else 2.4),
+                ramp_in_secs=0.12, ramp_out_secs=0.2,
+            )
+            if recover:
+                self._recover_until = now + RECOVER_SECS + 0.3
+                self._late_streak = 0
+        deg = (120.0 if recover else 95.0) * sign
         return deg
 
     def _tick(self):
@@ -225,25 +243,57 @@ class HouseBot:
 
         if early or late:
             soft = bool(early and not late)
-            if (not soft) and time.monotonic() < self._escape_until and self._escape_turn:
-                turn = self._escape_turn
+            now = time.monotonic()
+            if soft:
+                self._late_streak = 0
             else:
-                turn = self._pick_turn(scores)
-            deg = self._set_turn_goal(turn, soft=soft)
-            decision = ("early_" if soft else "late_") + turn
+                self._late_streak += 1
+
+            # Prefer freer side; break sticky early if opposite is clearly better.
+            preferred = self._pick_turn(scores)
+            sticky = (
+                (not soft)
+                and now < self._escape_until
+                and self._escape_turn
+                and now >= self._recover_until
+            )
+            if sticky:
+                sticky_turn = self._escape_turn
+                left_s = scores["left"] - 0.5 * scores.get("mast_mid", 0)
+                right_s = scores["right"] - 0.5 * scores.get("mast_mid", 0)
+                sticky_score = left_s if sticky_turn == "left" else right_s
+                other_score = right_s if sticky_turn == "left" else left_s
+                if other_score >= sticky_score + STICKY_BREAK_MARGIN:
+                    turn = preferred
+                    self._escape_until = 0.0  # force re-arm toward freer side
+                else:
+                    turn = sticky_turn
+            else:
+                turn = preferred
+
+            try:
+                bwd_ok = float(vis.safety_bwd_scale) > 0.25
+            except Exception:
+                bwd_ok = True
+            recover = (not soft) and self._late_streak >= LATE_STUCK_LOOKS and now >= self._recover_until
+            deg = self._set_turn_goal(turn, soft=soft, recover=recover, bwd_ok=bwd_ok)
+            decision = ("early_" if soft else ("recover_" if recover else "late_")) + turn
             note = (
-                "%s divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f"
-                % (("early" if soft else "LATE"), turn, deg,
-                   fwd_scale, free_mid, free_near, mast_ahead, ang_scale)
+                "%s divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f streak=%d"
+                % (("early" if soft else ("RECOVER" if recover else "LATE")), turn, deg,
+                   fwd_scale, free_mid, free_near, mast_ahead, ang_scale, self._late_streak)
             )
             if decision != self._last_decision and not speech_io.is_speaking():
-                if mast_ahead > EARLY_MAST:
+                if recover:
+                    speech_io.speak("Stuck. Backing and turning %s." % turn)
+                elif mast_ahead > EARLY_MAST:
                     speech_io.speak("Tall obstacle ahead. Veering %s." % turn)
                 elif soft:
                     speech_io.speak("Path tightening. Going %s." % turn)
                 else:
                     speech_io.speak("Tight. Turning %s." % turn)
         else:
+            self._late_streak = 0
             if not local_executive.is_active():
                 local_executive.set_wander()
             now = time.monotonic()
