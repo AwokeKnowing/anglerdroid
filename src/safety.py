@@ -197,13 +197,15 @@ class SafetyGuard:
         else:
             self._ang_scale = 1.0
 
-        # Escape spin: if nose/tail is pinned, keep a minimum angular authority
-        # so HouseBot can yaw out. Prefer stronger floor when laterals are free;
+        # Escape spin: if nose/tail is tight, keep a minimum angular authority
+        # so HouseBot can yaw out (ghost-nose spins need this too — fwd≈0.1 with
+        # ang=0 freezes forever). Prefer stronger floor when laterals are free;
         # even when laterals look hard (often mast-inflation ghosts), allow a
-        # weaker spin rather than freezing forever.
+        # weaker spin rather than freezing forever. Never overrides fwd=0.
         ESCAPE_ANG_FLOOR = 0.45
         ESCAPE_ANG_HARD = 0.30
-        nose_or_tail_pinned = (self._fwd_scale < 0.08) or (self._bwd_scale < 0.08)
+        ESCAPE_FWD = 0.20   # match house_bot LATE-ish; was 0.08 and left ghost spins dead
+        nose_or_tail_pinned = (self._fwd_scale < ESCAPE_FWD) or (self._bwd_scale < 0.08)
         if nose_or_tail_pinned:
             floor = ESCAPE_ANG_FLOOR if min_lat > LAT_HARD_PX else ESCAPE_ANG_HARD
             self._ang_scale = max(self._ang_scale, floor)
