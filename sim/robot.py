@@ -7,6 +7,7 @@ reverse only when bwd_scale>0.
 
 import math
 import numpy as np
+from sim.dynamics import DiffDriveDynamics
 
 
 FRAME_W = 320
@@ -205,6 +206,7 @@ class Robot:
         self.recover_count = 0
         self.ego_obs = None
         self.ego_height = None
+        self.dyn = DiffDriveDynamics()
         self.ego_soft = None
         self.soft_near = 1.0
         self.soft_mid = 1.0
@@ -283,10 +285,12 @@ class Robot:
             v_safe = v_cmd
             w_safe = w_cmd
 
-        self.v = v_safe
-        self.w = w_safe
+        # Dynamics: latency + accel + wheelbase-aware caps (gaps D1–D4)
+        v_int, w_int = self.dyn.apply(v_safe, w_safe, dt)
+        self.v = v_int
+        self.w = w_int
 
-        self.x += v_safe * math.cos(self.theta) * dt
-        self.y += v_safe * math.sin(self.theta) * dt
-        self.theta += w_safe * dt
+        self.x += v_int * math.cos(self.theta) * dt
+        self.y += v_int * math.sin(self.theta) * dt
+        self.theta += w_int * dt
         self.theta = (self.theta + math.pi) % (2 * math.pi) - math.pi
