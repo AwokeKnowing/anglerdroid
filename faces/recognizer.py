@@ -81,7 +81,7 @@ class FaceRecognizer:
         if yunet.exists() and hasattr(cv2, "FaceDetectorYN"):
             # Input size set per-frame in detect
             self.yunet = cv2.FaceDetectorYN.create(
-                str(yunet), "", (320, 320), 0.6, 0.3, 5000
+                str(yunet), "", (320, 320), 0.45, 0.3, 5000
             )
             print(f"FaceRecognizer: YuNet loaded from {yunet}")
             return
@@ -180,6 +180,22 @@ class FaceRecognizer:
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
         return [(int(x), int(y), int(w), int(h)) for x, y, w, h in faces]
     
+
+    @staticmethod
+    def padded_crop(image: np.ndarray, box: Tuple[int, int, int, int],
+                    pad: float = 0.25) -> Tuple[np.ndarray, Tuple[int, int, int, int]]:
+        """Crop face with margin; returns (crop_bgr, clamped_box)."""
+        h, w = image.shape[:2]
+        x, y, bw, bh = box
+        px = int(round(bw * pad))
+        py = int(round(bh * pad))
+        x0 = max(0, x - px)
+        y0 = max(0, y - py)
+        x1 = min(w, x + bw + px)
+        y1 = min(h, y + bh + py)
+        crop = image[y0:y1, x0:x1].copy()
+        return crop, (x0, y0, x1 - x0, y1 - y0)
+
     def extract_embedding(self, image: np.ndarray, box: Tuple[int, int, int, int]) -> np.ndarray:
         """Extract face embedding from image.
         
@@ -197,12 +213,14 @@ class FaceRecognizer:
             encodings = face_recognition.face_encodings(rgb, [face_location])
             return encodings[0] if encodings else None
         else:
-            x, y, w, h = box
-            face = image[y:y+h, x:x+w]
-            if face.size == 0:
+            face, _ = self.padded_crop(image, box, pad=0.25)
+            if face is None or face.size == 0:
                 return None
             face_resized = cv2.resize(face, (128, 128))
-            return face_resized.flatten().astype(np.float32) / 255.0
+            # L2-normalize so cosine match is stable across lighting
+            vec = face_resized.flatten().astype(np.float32) / 255.0
+            n = float(np.linalg.norm(vec)) + 1e-8
+            return vec / n
     
     def enroll(self, name: str, image: np.ndarray) -> int:
         """Enroll a person's face.
@@ -241,11 +259,16 @@ class FaceRecognizer:
         
         person_dir = self.gallery_path / name.replace(" ", "_").lower()
         person_dir.mkdir(exist_ok=True)
-        
-        img_idx = len(list(person_dir.glob("*.jpg")))
-        img_path = person_dir / f"{img_idx:03d}.jpg"
-        cv2.imwrite(str(img_path), image)
-        
+
+        # Persist TIGHT face crops (with pad), not the full source photo.
+        for box in boxes:
+            crop, _ = self.padded_crop(image, box, pad=0.25)
+            if crop is None or crop.size == 0:
+                continue
+            img_idx = len(list(person_dir.glob("*.jpg")))
+            img_path = person_dir / f"{img_idx:03d}.jpg"
+            cv2.imwrite(str(img_path), crop)
+
         print(f"Enrolled {len(embeddings)} face(s) for {name} (total: {len(self.db[name]['embeddings'])})")
         return len(embeddings)
     
