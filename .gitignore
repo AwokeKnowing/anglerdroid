@@ -167,8 +167,20 @@ cython_debug/
 *.rrd
 .kevin/rerun/
 
-# Face gallery / enroll PII — never commit (lives on Kevin ~/.kevin/faces)
+# ═══════════════════════════════════════════════════════════════════
+# PRIVACY: Face gallery images and embeddings (NEVER commit)
+# Live gallery: ~/.kevin/faces — never in this public repo
+# ═══════════════════════════════════════════════════════════════════
 faces/gallery_incoming/
+.kevin/faces/
+.kevin/faces_fullphoto_backup/
+.kevin/faces_staging/
+**/.kevin/faces/
+**/.kevin/faces_fullphoto_backup/
+**/.kevin/faces_staging/
+gallery_incoming/
+
+# Face-related files anywhere in repo (safety net)
 faces/**/*.jpg
 faces/**/*.jpeg
 faces/**/*.png
@@ -177,7 +189,22 @@ faces/**/*.tar
 faces/**/*.tar.gz
 faces/**/*.pkl
 faces/**/database.pkl
-**/.kevin/faces/
-**/.kevin/faces_fullphoto_backup/
-.kevin/faces/
-.kevin/faces_fullphoto_backup/
+**/faces/**/*.jpg
+**/faces/**/*.jpeg
+**/faces/**/*.png
+**/faces/**/*.pkl
+**/faces/**/database.pkl
+**/gallery_incoming/**/*.jpg
+**/gallery_incoming/**/*.jpeg
+**/gallery_incoming/**/*.png
+
+# Accidental enroll dumps at repo root
+/*.jpg
+/*.jpeg
+/enroll_*.jpg
+/enroll_*.jpeg
+/crop_*.jpg
+
+# Face embeddings database (never commit)
+database.pkl
+**/database.pkl
