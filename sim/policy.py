@@ -11,6 +11,7 @@ BUT refuses to override hard stops from SafetyGuard.
 from __future__ import annotations
 
 import math
+from sim.robot import soft_heading_score, soft_inflate
 import numpy as np
 
 
@@ -92,6 +93,7 @@ class HouseBotLite(Policy):
     def __init__(self, v_cruise=0.15, w_cruise=0.4):
         self.v_cruise = v_cruise
         self.w_cruise = w_cruise
+        self.SEEK_W = max(0.5, float(w_cruise) * 2.0)  # soft-buffer micro-steer
         self.reset()
 
     def reset(self):
@@ -112,6 +114,29 @@ class HouseBotLite(Policy):
             # slight bias flip for variety without RNG dependency in tests
             turn = "right" if turn == "left" else "left"
         return turn
+
+    def _pick_turn_soft(self, obs, scores, curious=False):
+        """Prefer heading with soft-buffer ray clear; fall back to sector scores."""
+        soft = soft_inflate(obs) if obs is not None else None
+        cands = []
+        for name, yaw in (("left", math.radians(35)), ("right", math.radians(-35)),
+                          ("hard_left", math.radians(75)), ("hard_right", math.radians(-75))):
+            s = soft_heading_score(soft, yaw) if soft is not None else 0.5
+            # Blend with lateral sector
+            lat = scores.get("left" if "left" in name else "right", 0.5)
+            cands.append((0.7 * s + 0.3 * lat, name.replace("hard_", "")))
+        cands.sort(reverse=True)
+        turn = cands[0][1]
+        # If best soft score is still poor, keep sector pick
+        if cands[0][0] < 0.35:
+            try:
+                turn = self._pick_turn(scores, curious=curious)
+            except TypeError:
+                turn = self._pick_turn(scores)
+        elif curious and __import__('random').random() < 0.2:
+            turn = "right" if turn == "left" else "left"
+        return turn
+
 
     def _safe_cmd(self, v, w, fwd_scale, bwd_scale, ang_scale):
         """Policy-side clamp: never ask for motion SafetyGuard will hard-stop
@@ -239,11 +264,11 @@ class HouseBotLite(Policy):
             else:
                 self.late_streak += 1
 
-            turn = self._pick_turn(scores, curious=False)
+            turn = self._pick_turn_soft(obs, scores, curious=False)
             sign = 1.0 if turn == "left" else -1.0
 
             if late and self.late_streak >= LATE_STUCK_LOOKS:
-                turn = self._pick_turn(scores, curious=True)
+                turn = self._pick_turn_soft(obs, scores, curious=True)
                 self._start_back(turn)
                 self.last_decision = "recover_back_" + turn
                 v = BACK_MPS if bwd_scale > BWD_OK else 0.0
@@ -265,6 +290,20 @@ class HouseBotLite(Policy):
 
         self.late_streak = 0
         self.last_decision = "cruise"
+        # Prefer buffer: if soft mid is tight, slow + micro-steer toward freer soft ray
+        soft = soft_inflate(obs) if obs is not None else None
+        if soft is not None:
+            sL = soft_heading_score(soft, math.radians(25))
+            sR = soft_heading_score(soft, math.radians(-25))
+            sF = soft_heading_score(soft, 0.0)
+            if sF < 0.55:
+                # squeeze / pre-throttle: slow and veer to better soft side
+                w = self.SEEK_W * 0.6 if sL >= sR else -self.SEEK_W * 0.6
+                v = self.v_cruise * (0.35 + 0.65 * max(0.0, sF))
+                return self._safe_cmd(v, w, fwd_scale, bwd_scale, ang_scale)
+            if abs(sL - sR) > 0.12 and min(sL, sR) < 0.7:
+                w = self.SEEK_W * 0.35 if sL > sR else -self.SEEK_W * 0.35
+                return self._safe_cmd(self.v_cruise * 0.85, w, fwd_scale, bwd_scale, ang_scale)
         return self._safe_cmd(self.v_cruise, 0.0, fwd_scale, bwd_scale, ang_scale)
 
 

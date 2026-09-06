@@ -30,6 +30,10 @@ FOOT_PAD_LAT = 2
 MIN_CLEARANCE_PX = 1
 BRAKE_START_PX = 30
 OBS_THRESH = 100
+# Planner soft buffer (prefer). Hard SafetyGuard still uses bare FOOT scans.
+SOFT_INFLATE_PX = 10          # ~10 cm prefer-clear around obstacles
+HARD_PAD_PX = 2              # tiny pad for hard contact scan only
+SQUEEZE_FWD_SOFT_MAX = 0.55  # below this soft clearance → squeeze mode
 
 _HALF_DIAG = 26
 LAT_X0 = max(0, RCX - _HALF_DIAG)
@@ -58,6 +62,62 @@ def _clearance_scale(clear_px):
         return 1.0
     t = (clear_px - MIN_CLEARANCE_PX) / float(BRAKE_START_PX - MIN_CLEARANCE_PX)
     return t * t * (3.0 - 2.0 * t)
+
+
+def soft_inflate(obs, rad=SOFT_INFLATE_PX):
+    """Binary dilation for planner soft-buffer cost (not used by hard SafetyGuard)."""
+    if rad <= 0:
+        return (obs >= OBS_THRESH)
+    try:
+        import cv2
+        k = 2 * int(rad) + 1
+        kernel = np.ones((k, k), np.uint8)
+        return cv2.dilate((obs >= OBS_THRESH).astype(np.uint8), kernel, iterations=1).astype(bool)
+    except Exception:
+        # Cheap square max-pool fallback
+        from numpy.lib.stride_tricks import sliding_window_view
+        m = (obs >= OBS_THRESH).astype(np.uint8)
+        pad = int(rad)
+        mp = np.pad(m, pad, mode='constant')
+        win = sliding_window_view(mp, (2 * pad + 1, 2 * pad + 1))
+        return win.max(axis=(-1, -2)).astype(bool)
+
+
+def soft_forward_clear_px(obs_soft, near=12, mid=55):
+    """Free fraction in forward near/mid strips (ego +x). Higher = more buffer."""
+    if obs_soft is None:
+        return 1.0, 1.0
+    h, w = obs_soft.shape
+    y0, y1 = max(0, RCY - 12), min(h, RCY + 12)
+    n0, n1 = FOOT_X1, min(w, FOOT_X1 + near)
+    m0, m1 = min(w, FOOT_X1 + near), min(w, FOOT_X1 + mid)
+    def free(a0, a1):
+        patch = obs_soft[y0:y1, a0:a1]
+        if patch.size == 0:
+            return 0.0
+        return 1.0 - float(patch.mean())
+    return free(n0, n1), free(m0, m1)
+
+
+def soft_heading_score(obs_soft, yaw_off_rad, horizon_m=0.9):
+    """Score a candidate heading offset: fraction soft-free along a ray."""
+    if obs_soft is None:
+        return 1.0
+    h, w = obs_soft.shape
+    # Ray from FOOT_X1 along yaw_off relative to +x
+    n = max(8, int(horizon_m / EGO_PX_SIZE))
+    hits = 0
+    free = 0
+    for i in range(1, n + 1):
+        x = FOOT_X1 + i * math.cos(yaw_off_rad)
+        y = RCY + i * math.sin(yaw_off_rad)
+        ix, iy = int(round(x)), int(round(y))
+        if not (0 <= ix < w and 0 <= iy < h):
+            break
+        hits += 1
+        if not obs_soft[iy, ix]:
+            free += 1
+    return (free / hits) if hits else 0.0
 
 
 class SafetyGuard:
@@ -124,6 +184,11 @@ class SafetyGuard:
             self.ang_scale = (min_lat - LAT_HARD_PX) / float(LAT_SAFE_PX - LAT_HARD_PX)
         else:
             self.ang_scale = 1.0
+        # Insect spin-out: if nose pinned but not laterally crushed, keep yaw.
+        if self.fwd_scale < 0.15 and min_lat > LAT_HARD_PX:
+            self.ang_scale = max(self.ang_scale, 0.35)
+        if self.bwd_scale < 0.15 and min_lat > LAT_HARD_PX:
+            self.ang_scale = max(self.ang_scale, 0.35)
 
 
 class Robot:
@@ -140,6 +205,10 @@ class Robot:
         self.recover_count = 0
         self.ego_obs = None
         self.ego_height = None
+        self.ego_soft = None
+        self.soft_near = 1.0
+        self.soft_mid = 1.0
+        self.squeeze = False
     
     def update_ego_maps(self, world_obs, world_height):
         """Transform world maps to robot-centric ego frame (vectorized).
@@ -165,6 +234,12 @@ class Robot:
         self.ego_obs = ego_obs
         self.ego_height = ego_height
         self.safety.update(ego_obs)
+        self.ego_soft = soft_inflate(ego_obs)
+        sn, sm = soft_forward_clear_px(self.ego_soft)
+        self.soft_near = sn
+        self.soft_mid = sm
+        # Squeeze: hard still allows some forward, soft buffer already gone
+        self.squeeze = (sm < SQUEEZE_FWD_SOFT_MAX) and (self.safety.fwd_scale > 0.05)
     
     def check_collision(self):
         """Check if robot footprint overlaps any obstacle."""
