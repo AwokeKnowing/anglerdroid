@@ -31,3 +31,10 @@ FOOT_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
 FOOT_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT)
 FOOT_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
 FOOT_Y1 = min(FRAME_H, RCY + ROBOT_H // 2 + FOOT_PAD_LAT)
+
+
+# Mast / tall payload: floor can look free under a table while the mast hits the top.
+# Obstacles at or above MAST_CLEAR_CM are treated as mast-colliders (overhangs).
+MAST_CLEAR_CM = 45          # cm above floor → dangerous for mast
+MAST_RADIUS_PX = 8           # ego-map half-width of mast column around centerline
+MAST_INFLATE_PX = 12         # extra inflation for tall obstacles in safety/planning

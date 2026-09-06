@@ -12,6 +12,7 @@ import numpy as np
 
 import local_executive
 import speech_io
+from robot_config import MAST_CLEAR_CM
 
 SNAP_DIR = os.path.expanduser("~/.kevin/snapshots")
 LOOK_PERIOD_S = 2.0
@@ -64,13 +65,17 @@ class HouseBot:
             print("house_bot: snapshot err %s" % e)
         return paths
 
-    def _score_sectors(self, obs):
+    def _score_sectors(self, obs, height=None):
         if obs is None:
-            return {"fwd": 0.5, "left": 0.5, "right": 0.5}
+            return {"fwd": 0.5, "left": 0.5, "right": 0.5, "mast_fwd": 0.0}
         if obs.ndim == 3:
             obs = obs[:, :, 0]
         h, w = obs.shape[:2]
         blocked = (obs.astype(np.float32) >= OBS_THRESH).astype(np.float32)
+        if height is not None:
+            tall = (height.astype(np.float32) >= MAST_CLEAR_CM).astype(np.float32)
+            # Mast collision: tall overhangs count double in forward corridor
+            blocked = np.clip(blocked + tall, 0, 1)
         cy, cx = h * 2 // 3, w // 2
 
         def free_score(y0, y1, x0, x1):
@@ -79,10 +84,17 @@ class HouseBot:
                 return 0.0
             return 1.0 - float(patch.mean())
 
+        mast_fwd = 0.0
+        if height is not None:
+            strip = height[max(0, cy - h // 3):cy, max(0, cx - 6):min(w, cx + 6)]
+            if strip.size:
+                mast_fwd = float((strip >= MAST_CLEAR_CM).mean())
+
         return {
             "fwd": free_score(cy - h // 3, cy, cx - w // 10, cx + w // 10),
             "left": free_score(cy - h // 4, cy + h // 8, 0, cx - w // 8),
             "right": free_score(cy - h // 4, cy + h // 8, cx + w // 8, w),
+            "mast_fwd": mast_fwd,
         }
 
     def _loop(self):
@@ -99,10 +111,16 @@ class HouseBot:
         vis = self.vision
         self._n_looks += 1
         paths = self._snapshot()
-        scores = self._score_sectors(getattr(vis, "_persistent_obs", None))
+        scores = self._score_sectors(
+            getattr(vis, "_persistent_obs", None),
+            getattr(vis, "_persistent_height", None))
         fwd_scale = float(getattr(vis, "safety_fwd_scale", 1.0) or 1.0)
+        ang_scale = float(getattr(vis, "safety_ang_scale", 1.0) or 1.0)
         scores["safety_fwd"] = fwd_scale
-        blocked = (fwd_scale < FWD_BLOCKED) or (scores["fwd"] < 0.35)
+        scores["safety_ang"] = ang_scale
+        # Table/mast: free floor but tall overhang ahead
+        blocked = ((fwd_scale < FWD_BLOCKED) or (scores["fwd"] < 0.35)
+                   or (scores.get("mast_fwd", 0) > 0.15))
         if blocked:
             turn = "left" if scores["left"] >= scores["right"] else "right"
             hdg = 70.0 * self._turn_bias if turn == "left" else -70.0 * self._turn_bias
@@ -119,7 +137,10 @@ class HouseBot:
             decision = "turn_" + turn
             note = "blocked safety=%.2f free=%.2f → %s" % (fwd_scale, scores["fwd"], turn)
             if not speech_io.is_speaking():
-                speech_io.speak("Oops, blocked. Turning %s." % turn)
+                if scores.get("mast_fwd", 0) > 0.15:
+                    speech_io.speak("Table or mast hazard. Turning %s." % turn)
+                else:
+                    speech_io.speak("Oops, blocked. Turning %s." % turn)
         else:
             if not local_executive.is_active():
                 local_executive.set_wander()

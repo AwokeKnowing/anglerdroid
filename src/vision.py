@@ -203,6 +203,7 @@ class Vision:
         self._pitch_cal_done = False
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._persistent_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._cuvslam = None
@@ -720,12 +721,17 @@ class Vision:
                 rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
             self._persistent_obs[:] = 0
+            self._persistent_height[:] = 0
             if ego_proj is not None:
                 self._persistent_obs[ego_proj < 90] = 255
+            # obs_combined is height-cm (1..100) where obstacles exist
             self._persistent_obs[obs_combined > 0] = 255
+            self._persistent_height[:] = obs_combined.astype(np.uint8, copy=False)
             self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+            self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
-            self._safety.update(self._persistent_obs, fused_yaw, fused_fwd)
+            self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
+                                height_cm=self._persistent_height)
             _t_safety = time.monotonic()
 
             # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---

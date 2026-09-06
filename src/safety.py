@@ -21,7 +21,8 @@ OBS_THRESH = 100
 # ── Costmap geometry ──
 from robot_config import (FRAME_W, EGO_PX_SIZE, WHEEL_RADIUS_M,
                           ROBOT_W, ROBOT_H, RCX, RCY,
-                          FOOT_X0, FOOT_X1, FOOT_Y0, FOOT_Y1)
+                          FOOT_X0, FOOT_X1, FOOT_Y0, FOOT_Y1,
+                          MAST_CLEAR_CM, MAST_RADIUS_PX, MAST_INFLATE_PX)
 
 PX_M = EGO_PX_SIZE
 DECEL_MPS2 = VEL_RAMP_RATE * 2.0 * math.pi * WHEEL_RADIUS_M  # ≈1.61 m/s²
@@ -48,6 +49,38 @@ HISTORY_LEN = 3
 PATH_COLOR = (60, 120, 255)
 TRACK_FLASH = (120, 170, 255)
 FLASH_HALF = 4
+
+
+
+def _dilate_binary(mask, rad):
+    """Cheap square dilate for mast/overhang inflation."""
+    if rad <= 0 or not mask.any():
+        return mask
+    import cv2
+    k = 2 * rad + 1
+    kernel = np.ones((k, k), np.uint8)
+    return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+
+def build_safety_occ(obs_binary, height_cm=None):
+    """Binary occupancy for safety scans, with tall (mast) overhangs inflated.
+
+    obs_binary: HxW bool/0-255 floor-plan obstacles (any height).
+    height_cm: optional HxW uint8 height above floor in cm (0 = free/unknown).
+    Tall cells (>= MAST_CLEAR_CM) are dilated so table tops block the mast path
+    even when the floor under the table looks clear.
+    """
+    occ = (np.asarray(obs_binary) >= OBS_THRESH) if np.asarray(obs_binary).dtype != bool else np.asarray(obs_binary)
+    if height_cm is not None:
+        h = np.asarray(height_cm)
+        tall = h >= MAST_CLEAR_CM
+        if tall.any():
+            tall = _dilate_binary(tall, MAST_INFLATE_PX)
+            # Also mark a mast-width corridor through tall cells as blocked
+            occ = occ | tall
+    out = np.zeros(occ.shape, dtype=np.uint8)
+    out[occ] = 255
+    return out
 
 
 def _clearance_scale(clear_px):
@@ -92,6 +125,9 @@ class SafetyGuard:
         """Feed per-frame odometry.  Computes directional scales."""
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
+
+        # Mast/overhang-aware occupancy (tables: floor free, top hits mast)
+        obs_map = build_safety_occ(obs_map, height_cm)
 
         h_map, w_map = obs_map.shape
         y0, y1 = MASK_Y0, min(h_map, MASK_Y1)
@@ -148,6 +184,15 @@ class SafetyGuard:
             self._ang_scale = (min_lat - LAT_HARD_PX) / float(LAT_SAFE_PX - LAT_HARD_PX)
         else:
             self._ang_scale = 1.0
+
+        # Escape spin: if nose is pinned but we are not laterally crushed,
+        # keep a minimum angular authority so LocalExecutive/HouseBot can turn.
+        # (Safety still zeros forward; this only unsticks yaw.)
+        ESCAPE_ANG_FLOOR = 0.45
+        if self._fwd_scale < 0.08 and min_lat > LAT_HARD_PX:
+            self._ang_scale = max(self._ang_scale, ESCAPE_ANG_FLOOR)
+        if self._bwd_scale < 0.08 and min_lat > LAT_HARD_PX:
+            self._ang_scale = max(self._ang_scale, ESCAPE_ANG_FLOOR)
 
         self._throttled = (self._fwd_scale < 0.95 or self._bwd_scale < 0.95
                            or self._ang_scale < 0.95)
