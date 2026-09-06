@@ -15,6 +15,7 @@ KOKORO_MODEL = os.path.expanduser("~/.kevin/models/kokoro/kokoro-v1.0.onnx")
 KOKORO_VOICES = os.path.expanduser("~/.kevin/models/kokoro/voices-v1.0.bin")
 RS_SINK = "alsa_output.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-stereo"
 RS_SRC = "alsa_input.usb-SEEED_ReSpeaker_4_Mic_Array__UAC1.0_-00.analog-surround-21"
+SPEAK_VOLUME = float(__import__("os").environ.get("KEVIN_SPEAK_VOL", "0.10"))
 
 _lock = threading.Lock()
 _kokoro = None
@@ -55,13 +56,24 @@ def speak(text: str, voice: str = "am_michael", block: bool = False) -> None:
             k = _ensure_kokoro()
             samples, sr = k.create(text, voice=voice, speed=1.0)
             import soundfile as sf
+            import numpy as np
+            vol = max(0.0, min(1.0, float(SPEAK_VOLUME)))
+            samples = (np.asarray(samples, dtype=np.float32) * vol)
             path = os.path.join(tempfile.gettempdir(), "kevin_tts.wav")
             sf.write(path, samples, sr)
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-volume", RS_SINK, "%d%%" % int(round(vol * 100))],
+                    check=False, timeout=2,
+                )
+            except Exception:
+                pass
+            paplay_vol = max(1, int(round(65536 * vol)))
             subprocess.run(
-                ["paplay", f"--device={RS_SINK}", path],
+                ["paplay", f"--device={RS_SINK}", f"--volume={paplay_vol}", path],
                 check=False, timeout=60,
             )
-            print("speech: said %r" % (text[:80],))
+            print("speech: said %r (vol=%.0f%%)" % (text[:80], vol * 100))
         except Exception as e:
             print("speech: speak failed: %s" % e)
         finally:
