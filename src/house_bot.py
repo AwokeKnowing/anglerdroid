@@ -1,4 +1,11 @@
-"""house_bot.py – Curious look-before-leap layer for Kevin."""
+"""house_bot.py – Curious look-before-leap for Kevin.
+
+CRITICAL: Divert EARLY. Once SafetyGuard pins forward (and often angular),
+"turn left" is already too late. We steer while clearance is still healthy
+enough to yaw.
+
+Also mast-aware: tall cells (>= MAST_CLEAR_CM) count as overhangs/tables.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +22,16 @@ import speech_io
 from robot_config import MAST_CLEAR_CM
 
 SNAP_DIR = os.path.expanduser("~/.kevin/snapshots")
-LOOK_PERIOD_S = 2.0
-NARRATE_EVERY_S = 45.0
-FWD_BLOCKED = 0.12
+LOOK_PERIOD_S = 1.0
+NARRATE_EVERY_S = 50.0
 OBS_THRESH = 100
+
+# Divert while we can still turn — NOT after nose is pinned.
+EARLY_FWD_SCALE = 0.55      # start worrying below this (still movable)
+LATE_FWD_SCALE = 0.18       # emergency; may already be stuck
+EARLY_FREE = 0.72           # mid-range free score below this → divert
+EARLY_MAST = 0.06           # any tall mass in look-ahead corridor
+MIN_ANG_TO_DIVERT = 0.30    # need angular authority to bother diverting
 
 
 class HouseBot:
@@ -30,6 +43,7 @@ class HouseBot:
         self._last_narrate = 0.0
         self._turn_bias = 1.0
         self._n_looks = 0
+        self._last_decision = "init"
         os.makedirs(SNAP_DIR, exist_ok=True)
 
     def start(self):
@@ -37,8 +51,8 @@ class HouseBot:
             return
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("house_bot: started (look-before-leap @ %.1fs)" % LOOK_PERIOD_S)
-        speech_io.speak("Hello. I am Kevin. I will look before I wander.")
+        print("house_bot: started (EARLY divert @ %.1fs)" % LOOK_PERIOD_S)
+        speech_io.speak("Hello. I look ahead early so I can still turn.")
 
     def stop(self):
         self._stop = True
@@ -66,15 +80,19 @@ class HouseBot:
         return paths
 
     def _score_sectors(self, obs, height=None):
+        """Near + mid forward corridors; left/right; mast look-ahead."""
         if obs is None:
-            return {"fwd": 0.5, "left": 0.5, "right": 0.5, "mast_fwd": 0.0}
+            return {
+                "fwd_near": 0.5, "fwd_mid": 0.5, "left": 0.5, "right": 0.5,
+                "mast_near": 0.0, "mast_mid": 0.0,
+            }
         if obs.ndim == 3:
             obs = obs[:, :, 0]
         h, w = obs.shape[:2]
         blocked = (obs.astype(np.float32) >= OBS_THRESH).astype(np.float32)
+        tall = None
         if height is not None:
             tall = (height.astype(np.float32) >= MAST_CLEAR_CM).astype(np.float32)
-            # Mast collision: tall overhangs count double in forward corridor
             blocked = np.clip(blocked + tall, 0, 1)
         cy, cx = h * 2 // 3, w // 2
 
@@ -84,28 +102,72 @@ class HouseBot:
                 return 0.0
             return 1.0 - float(patch.mean())
 
-        mast_fwd = 0.0
-        if height is not None:
-            strip = height[max(0, cy - h // 3):cy, max(0, cx - 6):min(w, cx + 6)]
-            if strip.size:
-                mast_fwd = float((strip >= MAST_CLEAR_CM).mean())
+        def mast_score(y0, y1, x0, x1):
+            if tall is None:
+                return 0.0
+            patch = tall[max(0, y0):min(h, y1), max(0, x0):min(w, x1)]
+            if patch.size == 0:
+                return 0.0
+            return float(patch.mean())
+
+        # Ego map: robot faces +x (right). Forward = toward lower x? Check FOOT —
+        # safety scans MASK_X1: (rightward). So forward is increasing x from FOOT_X1.
+        # persistent_obs uses same frame: robot center RCX, forward = +x (right in image).
+        # Our cy,cx heuristic used "up" as forward — WRONG for this map.
+        # Use column-forward from robot center toward +x.
+        from robot_config import RCX, RCY, FOOT_X1
+        cx, cy = int(RCX), int(RCY)
+        # near: just ahead of bumper; mid: 30–80 px ahead
+        near_x0, near_x1 = FOOT_X1, min(w, FOOT_X1 + 28)
+        mid_x0, mid_x1 = min(w, FOOT_X1 + 28), min(w, FOOT_X1 + 85)
+        y0, y1 = max(0, cy - 12), min(h, cy + 12)
 
         return {
-            "fwd": free_score(cy - h // 3, cy, cx - w // 10, cx + w // 10),
-            "left": free_score(cy - h // 4, cy + h // 8, 0, cx - w // 8),
-            "right": free_score(cy - h // 4, cy + h // 8, cx + w // 8, w),
-            "mast_fwd": mast_fwd,
+            "fwd_near": free_score(y0, y1, near_x0, near_x1),
+            "fwd_mid": free_score(y0, y1, mid_x0, mid_x1),
+            "left": free_score(max(0, cy - 40), cy - 8, FOOT_X1, min(w, FOOT_X1 + 50)),
+            "right": free_score(cy + 8, min(h, cy + 40), FOOT_X1, min(w, FOOT_X1 + 50)),
+            "mast_near": mast_score(y0, y1, near_x0, near_x1),
+            "mast_mid": mast_score(y0, y1, mid_x0, mid_x1),
         }
 
     def _loop(self):
-        time.sleep(4.0)
+        time.sleep(3.0)
         while not self._stop:
             t0 = time.monotonic()
             try:
                 self._tick()
             except Exception as e:
                 print("house_bot: tick err %s" % e)
-            time.sleep(max(0.2, LOOK_PERIOD_S - (time.monotonic() - t0)))
+            time.sleep(max(0.15, LOOK_PERIOD_S - (time.monotonic() - t0)))
+
+    def _pick_turn(self, scores):
+        # Prefer side with more free + less mast
+        left = scores["left"] - 0.5 * scores.get("mast_mid", 0)
+        right = scores["right"] - 0.5 * scores.get("mast_mid", 0)
+        if abs(left - right) < 0.05:
+            turn = "left" if self._turn_bias > 0 else "right"
+            self._turn_bias *= -1.0
+        elif left >= right:
+            turn = "left"
+        else:
+            turn = "right"
+        return turn
+
+    def _set_turn_goal(self, turn, soft=True):
+        """soft: gentle early divert (~35° / 0.9m). hard: sharper recovery."""
+        pose = getattr(self.vision, "_pose", None)
+        deg = (35.0 if soft else 75.0) * (1.0 if turn == "left" else -1.0)
+        dist = 0.95 if soft else 0.65
+        if pose is None:
+            local_executive.set_wander()
+            return deg
+        th = pose.theta + math.radians(deg)
+        local_executive.set_goal_xy(
+            pose.x + dist * math.cos(th),
+            pose.y + dist * math.sin(th),
+        )
+        return deg
 
     def _tick(self):
         vis = self.vision
@@ -113,43 +175,61 @@ class HouseBot:
         paths = self._snapshot()
         scores = self._score_sectors(
             getattr(vis, "_persistent_obs", None),
-            getattr(vis, "_persistent_height", None))
+            getattr(vis, "_persistent_height", None),
+        )
         fwd_scale = float(getattr(vis, "safety_fwd_scale", 1.0) or 1.0)
         ang_scale = float(getattr(vis, "safety_ang_scale", 1.0) or 1.0)
         scores["safety_fwd"] = fwd_scale
         scores["safety_ang"] = ang_scale
-        # Table/mast: free floor but tall overhang ahead
-        blocked = ((fwd_scale < FWD_BLOCKED) or (scores["fwd"] < 0.35)
-                   or (scores.get("mast_fwd", 0) > 0.15))
-        if blocked:
-            turn = "left" if scores["left"] >= scores["right"] else "right"
-            hdg = 70.0 * self._turn_bias if turn == "left" else -70.0 * self._turn_bias
-            self._turn_bias *= -1.0
-            pose = getattr(vis, "_pose", None)
-            if pose is not None:
-                th = pose.theta + math.radians(hdg)
-                local_executive.set_goal_xy(
-                    pose.x + 0.7 * math.cos(th),
-                    pose.y + 0.7 * math.sin(th),
-                )
-            else:
-                local_executive.set_wander()
-            decision = "turn_" + turn
-            note = "blocked safety=%.2f free=%.2f → %s" % (fwd_scale, scores["fwd"], turn)
-            if not speech_io.is_speaking():
-                if scores.get("mast_fwd", 0) > 0.15:
-                    speech_io.speak("Table or mast hazard. Turning %s." % turn)
+
+        mast_ahead = max(scores.get("mast_near", 0), scores.get("mast_mid", 0))
+        free_mid = scores.get("fwd_mid", 1.0)
+        free_near = scores.get("fwd_near", 1.0)
+
+        # --- EARLY divert: still have angular, path getting tight ---
+        early = (
+            ang_scale >= MIN_ANG_TO_DIVERT
+            and (
+                (fwd_scale < EARLY_FWD_SCALE and fwd_scale >= LATE_FWD_SCALE)
+                or (free_mid < EARLY_FREE)
+                or (mast_ahead > EARLY_MAST)
+                or (free_near < 0.80 and free_mid < 0.85)
+            )
+        )
+        # --- LATE: already almost pinned ---
+        late = (fwd_scale < LATE_FWD_SCALE) or (free_near < 0.40)
+
+        decision = "wander"
+        note = "ok fwd=%.2f mid=%.2f mast=%.2f ang=%.2f" % (
+            fwd_scale, free_mid, mast_ahead, ang_scale)
+
+        if early or late:
+            soft = early and not late
+            turn = self._pick_turn(scores)
+            deg = self._set_turn_goal(turn, soft=soft)
+            decision = ("early_" if soft else "late_") + turn
+            note = (
+                "%s divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f"
+                % ( "early" if soft else "LATE", turn, deg,
+                    fwd_scale, free_mid, free_near, mast_ahead, ang_scale)
+            )
+            # Speak only on decision change / early (avoid chatter when stuck late)
+            if decision != self._last_decision and not speech_io.is_speaking():
+                if mast_ahead > EARLY_MAST:
+                    speech_io.speak("Tall obstacle ahead. Veering %s." % turn)
+                elif soft:
+                    speech_io.speak("Path tightening. Going %s." % turn)
                 else:
-                    speech_io.speak("Oops, blocked. Turning %s." % turn)
+                    speech_io.speak("Tight. Turning %s." % turn)
         else:
             if not local_executive.is_active():
                 local_executive.set_wander()
-            decision = "wander"
-            note = "clear safety=%.2f free=%.2f" % (fwd_scale, scores["fwd"])
             now = time.monotonic()
             if now - self._last_narrate > NARRATE_EVERY_S and not speech_io.is_speaking():
                 self._last_narrate = now
-                speech_io.speak("Looking around. Path looks open.")
+                speech_io.speak("Looking ahead. Still clear.")
+
+        self._last_decision = decision
         line = "house_bot: look#%d %s %s snaps=%s" % (
             self._n_looks, decision, note, ",".join(paths.keys()))
         print(line)
