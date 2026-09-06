@@ -1,5 +1,13 @@
 """Unit tests for offline people-behavior stubs (no hardware, no drive)."""
 
+import os
+import sys
+
+# Add parent to path for imports
+_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PARENT not in sys.path:
+    sys.path.insert(0, _PARENT)
+
 from faces.people_behavior import (
     DirectionalHelp,
     GreetHours,
@@ -110,6 +118,62 @@ def test_hardware_flag_stays_off():
     return True
 
 
+def test_command_parsing_stop():
+    dh = DirectionalHelp()
+    cmd = dh.parse_command("Kevin, stop right now")
+    assert cmd is not None
+    assert cmd[0] == "stop"
+    assert cmd[1]["type"] == "clear"
+    print("✅ test_command_parsing_stop passed")
+    return True
+
+
+def test_command_parsing_come_here():
+    dh = DirectionalHelp()
+    cmd = dh.parse_command("come here please")
+    assert cmd is not None
+    assert cmd[0] == "come_here"
+    assert cmd[1]["type"] == "approach_speaker"
+    print("✅ test_command_parsing_come_here passed")
+    return True
+
+
+def test_command_parsing_go_away():
+    dh = DirectionalHelp()
+    cmd = dh.parse_command("go away and give me space")
+    assert cmd is not None
+    assert cmd[0] == "go_away"
+    assert cmd[1]["type"] == "retreat"
+    print("✅ test_command_parsing_go_away passed")
+    return True
+
+
+def test_command_parsing_wander():
+    dh = DirectionalHelp()
+    cmd = dh.parse_command("wander around the house")
+    assert cmd is not None
+    assert cmd[0] == "wander"
+    assert cmd[1]["type"] == "resume_wander"
+    print("✅ test_command_parsing_wander passed")
+    return True
+
+
+def test_command_execution_in_stub():
+    spoken = []
+    stub = create_people_behavior(
+        speak_fn=lambda t: spoken.append(t),
+        cooldown_seconds=300.0,
+    )
+    action = stub.on_transcript("Kevin, stop", now=1000.0)
+    assert action is not None
+    assert action.kind == "command"
+    assert action.goal_hint is not None
+    assert action.goal_hint["type"] == "clear"
+    assert spoken and "stop" in spoken[0].lower()
+    print("✅ test_command_execution_in_stub passed")
+    return True
+
+
 def run_all_tests():
     tests = [
         test_greet_hours_day_window,
@@ -119,6 +183,11 @@ def run_all_tests():
         test_directional_help_with_name_call,
         test_face_greet_hours_gate,
         test_hardware_flag_stays_off,
+        test_command_parsing_stop,
+        test_command_parsing_come_here,
+        test_command_parsing_go_away,
+        test_command_parsing_wander,
+        test_command_execution_in_stub,
     ]
     failed = []
     for t in tests:

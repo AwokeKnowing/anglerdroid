@@ -1,14 +1,18 @@
-"""people_live.py – Face greet + name-call / dirs (SPEECH ONLY).
+"""people_live.py – Face greet + social conversation FSM.
 
-Runs beside HouseBot. Never commands wheels. Uses ~/.kevin/faces gallery
-and speech_io (Kokoro + faster-whisper). Goal hints from DirectionalHelp
-are logged only — not applied to LocalExecutive.
+Runs beside HouseBot. Implements respectful approach/greet/converse/leave
+behavior. Uses ~/.kevin/faces gallery, speech_io (Kokoro + faster-whisper),
+and social_fsm for state management.
+
+Goal hints are applied to LocalExecutive when drive is ARMED (~/.kevin/drive_arm).
+When disarmed, speech-only behavior continues safely.
 
 RGB webcam is frames[0] (Vision rgb1). Upscaled before YuNet for 320x240.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 import threading
@@ -19,13 +23,16 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import local_executive
 import speech_io
+from social_fsm import SocialFSM
 
 GREET_PERIOD_S = 0.6
 LISTEN_PERIOD_S = 12.0
 LISTEN_SECS = 2.5
 HEARTBEAT_S = 30.0
 MAX_PENDING = 4
+DRIVE_ARM_FILE = os.path.expanduser("~/.kevin/drive_arm")
 
 
 class PeopleLive:
@@ -42,12 +49,14 @@ class PeopleLive:
         self._thread = None
         self._cm = None
         self._pb = None
+        self._fsm = None
         self._n_greet = 0
         self._n_hear = 0
         self._n_tick = 0
         self._n_rgb_miss = 0
         self._pending = []
         self._lock = threading.Lock()
+        self._last_goal_apply = 0.0
 
     def start(self):
         if not self.enabled:
@@ -90,6 +99,11 @@ class PeopleLive:
                 volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.30")),
             )
             self._pb.enabled_on_hardware = True
+            
+            # Initialize social FSM
+            armed = os.path.exists(DRIVE_ARM_FILE)
+            self._fsm = SocialFSM(drive_armed=armed)
+            print("people_live: social FSM init drive_armed=%s" % armed)
             try:
                 speech_io._ensure_kokoro()
                 print("people_live: kokoro prewarmed")
@@ -159,28 +173,152 @@ class PeopleLive:
             print("people_live: rgb err %s" % e)
             return None
 
+    def _apply_goal_hint(self, hint: dict, person: str = None):
+        """Apply goal hint to LocalExecutive when drive is armed."""
+        if hint is None:
+            return
+        
+        # Check drive arm file
+        armed = os.path.exists(DRIVE_ARM_FILE)
+        if not armed:
+            print("people_live: goal hint %s skipped (drive disarmed)" % hint.get("type"))
+            return
+        
+        now = time.monotonic()
+        # Throttle goal updates
+        if now - self._last_goal_apply < 0.5:
+            return
+        self._last_goal_apply = now
+        
+        hint_type = hint.get("type", "")
+        
+        try:
+            if hint_type == "clear":
+                local_executive.clear()
+                print("people_live: cleared goals")
+            
+            elif hint_type == "resume_wander":
+                local_executive.set_wander()
+                print("people_live: resumed wander")
+            
+            elif hint_type == "stop":
+                local_executive.clear()
+                print("people_live: stopped for %s" % (person or "social"))
+            
+            elif hint_type == "approach_person":
+                # Convert bearing and distance to world goal
+                pose = getattr(self.vision, "_pose", None)
+                if pose is None:
+                    print("people_live: no pose for approach")
+                    return
+                bearing_deg = hint.get("bearing_deg", 0.0)
+                target_dist = hint.get("target_distance_m", 1.35)
+                
+                # Bearing is relative to current heading
+                target_theta = pose.theta + math.radians(bearing_deg)
+                gx = pose.x + target_dist * math.cos(target_theta)
+                gy = pose.y + target_dist * math.sin(target_theta)
+                
+                local_executive.set_goal_xy(gx, gy)
+                print("people_live: approach %s at bearing %.0f° dist %.1fm" % (
+                    person or "person", bearing_deg, target_dist))
+            
+            elif hint_type == "relative_bearing":
+                # Directional help (kitchen, left, etc.)
+                pose = getattr(self.vision, "_pose", None)
+                if pose is None:
+                    return
+                bearing_deg = hint.get("bearing_deg", 0.0)
+                distance_m = hint.get("distance_m", 1.0)
+                
+                target_theta = pose.theta + math.radians(bearing_deg)
+                gx = pose.x + distance_m * math.cos(target_theta)
+                gy = pose.y + distance_m * math.sin(target_theta)
+                
+                local_executive.set_goal_xy(gx, gy)
+                label = hint.get("label", "target")
+                print("people_live: relative_bearing %s %.0f° %.1fm" % (
+                    label, bearing_deg, distance_m))
+            
+            elif hint_type == "retreat":
+                # Back away
+                pose = getattr(self.vision, "_pose", None)
+                if pose is None:
+                    return
+                distance_m = hint.get("distance_m", 2.0)
+                # Move backwards
+                gx = pose.x - distance_m * math.cos(pose.theta)
+                gy = pose.y - distance_m * math.sin(pose.theta)
+                
+                local_executive.set_goal_xy(gx, gy)
+                print("people_live: retreat %.1fm" % distance_m)
+            
+        except Exception as e:
+            print("people_live: goal apply err %s" % e)
+
     def _tick_faces(self):
         img = self._rgb()
         if img is None:
             self._n_rgb_miss += 1
             return
         try:
+            # Get depth map if available (for distance estimation)
+            depth_map = None
+            try:
+                # Vision may have depth from RGB-D camera
+                if hasattr(self.vision, "frames") and len(self.vision.frames) > 0:
+                    # For now, use box heuristic; depth integration is TODO
+                    pass
+            except Exception:
+                pass
+            
             out = self._cm.process_frame(img)
+            faces = out.get("faces") or []
             g = out.get("greetings") or []
             u = out.get("unknowns") or []
-            faces = out.get("faces") or []
+            
             self._n_tick += 1
-            if g or u or faces:
-                self._n_greet += 1
-                if g or u:
-                    # Hold sociable window so we greet while still roughly facing them.
+            
+            # FSM processing for known faces
+            now = time.monotonic()
+            fsm_actions = []
+            for name, confidence, box in faces:
+                if name != "unknown" and self._fsm is not None:
+                    action = self._fsm.on_face_seen(name, confidence, box, now, depth_map)
+                    if action:
+                        fsm_actions.append(action)
+            
+            # Apply FSM actions
+            for action in fsm_actions:
+                action_type = action.get("action_type")
+                utterance = action.get("utterance", "")
+                goal_hint = action.get("goal_hint")
+                person = action.get("person")
+                
+                if utterance:
+                    self._enqueue(utterance)
+                
+                if goal_hint:
+                    self._apply_goal_hint(goal_hint, person)
+                
+                if action_type in ("greet", "approach"):
+                    self._n_greet += 1
                     PeopleLive.social_priority = True
-                    PeopleLive.social_hold_until = time.monotonic() + 2.5
+                    PeopleLive.social_hold_until = now + 2.5
+            
+            # Legacy greeting path (for unknowns)
+            if g or u:
+                self._n_greet += 1
+                PeopleLive.social_priority = True
+                PeopleLive.social_hold_until = now + 2.5
+            
+            if g or u or faces or fsm_actions:
                 print(
-                    "people_live: greet#%d faces=%d greetings=%s unknowns=%d rgb=%sx%s"
+                    "people_live: tick#%d faces=%d fsm_actions=%d greetings=%s unknowns=%d rgb=%sx%s"
                     % (
-                        self._n_greet,
+                        self._n_tick,
                         len(faces),
+                        len(fsm_actions),
                         [x.get("name") for x in g],
                         len(u),
                         img.shape[1],
@@ -198,14 +336,39 @@ class PeopleLive:
             if not text:
                 return
             self._n_hear += 1
+            
+            # FSM engagement signal
+            now = time.monotonic()
+            if self._fsm and self._fsm.current_person:
+                fsm_action = self._fsm.on_speech_heard(
+                    self._fsm.current_person, text, now)
+                if fsm_action:
+                    utterance = fsm_action.get("utterance", "")
+                    if utterance:
+                        self._enqueue(utterance)
+                    print("people_live: FSM heard#%d empathy=%r" % (
+                        self._n_hear, utterance[:80] if utterance else "(silent)"))
+                    return
+            
+            # Check for wake-word command
             action = self._pb.on_transcript(text)
             if action is None:
                 print("people_live: heard#%d %r (no action)" % (self._n_hear, text[:80]))
                 return
+            
             hint = action.goal_hint
+            kind = action.kind
+            utterance = action.utterance or ""
+            
+            # Apply goal hint if command
+            if hint and kind == "command":
+                self._apply_goal_hint(hint)
+            elif hint and kind == "directional_help":
+                self._apply_goal_hint(hint)
+            
             print(
                 "people_live: heard#%d kind=%s utter=%r hint=%s"
-                % (self._n_hear, action.kind, (action.utterance or "")[:80], hint)
+                % (self._n_hear, kind, utterance[:80], hint)
             )
         except Exception as e:
             print("people_live: listen tick err %s" % e)
