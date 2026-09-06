@@ -42,6 +42,8 @@ def main():
                         help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
     parser.add_argument("--auto-local", action="store_true",
                         help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI)")
+    parser.add_argument("--local-planner", default="vfh", choices=["vfh", "mppi"],
+                        help="LocalExecutive backend: vfh (default) or mppi (NumPy MPPI on ego costmap)")
     parser.add_argument("--wander", action="store_true",
                         help="With --auto-local, start continuous ~1m wander immediately")
     args = parser.parse_args()
@@ -115,7 +117,9 @@ def main():
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
     if args.auto_local:
+        local_executive.set_planner(args.local_planner)
         print("main: LocalExecutive ENABLED (mailbox: goto_xy / wander)")
+        print("main: local planner armed: %s" % args.local_planner)
         if args.wander:
             local_executive.set_wander()
             print("main: wander started (~1m rolling goals)")
@@ -184,7 +188,10 @@ def main():
                         px = py = pth = None
                         if pose is not None:
                             px, py, pth = pose.x, pose.y, pose.theta
-                        twist = local_executive.tick(atlas, px, py, pth)
+                        # VFH uses atlas quadrant; MPPI uses ego persistent_obs
+                        obs = getattr(vis, "_persistent_obs", None)
+                        twist = local_executive.tick(
+                            atlas, px, py, pth, obs_map=obs)
                     if twist is None and atlas is not None:
                         twist = navigator.compute_twist(atlas)
                     if twist is not None:
