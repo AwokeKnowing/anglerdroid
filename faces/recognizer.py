@@ -71,26 +71,36 @@ class FaceRecognizer:
         print(f"FaceRecognizer: loaded {len(self.db)} known faces")
     
     def _init_opencv_dnn(self):
-        """Initialize OpenCV DNN face detector."""
+        """Initialize face detector — YuNet ONNX on OpenCV 5 (no Caffe)."""
         model_dir = self.gallery_path / "models"
         model_dir.mkdir(exist_ok=True)
-        
+        self.face_net = None
+        self.yunet = None
+
+        yunet = model_dir / "face_detection_yunet_2023mar.onnx"
+        if yunet.exists() and hasattr(cv2, "FaceDetectorYN"):
+            # Input size set per-frame in detect
+            self.yunet = cv2.FaceDetectorYN.create(
+                str(yunet), "", (320, 320), 0.6, 0.3, 5000
+            )
+            print(f"FaceRecognizer: YuNet loaded from {yunet}")
+            return
+
         prototxt = model_dir / "deploy.prototxt"
         caffemodel = model_dir / "res10_300x300_ssd_iter_140000.caffemodel"
-        
-        if not prototxt.exists() or not caffemodel.exists():
-            print("Warning: OpenCV DNN models not found. Face detection may be limited.")
-            print(f"Download from: https://github.com/opencv/opencv/tree/master/samples/dnn/face_detector")
-            print(f"Place in: {model_dir}")
-            self.face_net = None
-        else:
+        if prototxt.exists() and caffemodel.exists() and hasattr(cv2.dnn, "readNetFromCaffe"):
             self.face_net = cv2.dnn.readNetFromCaffe(str(prototxt), str(caffemodel))
+            return
+
+        print("Warning: No YuNet/Caffe face model usable; detection may fail.")
     
     def _init_opencv_haar(self):
-        """Initialize OpenCV Haar cascade face detector."""
-        self.face_cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-        )
+        """Initialize OpenCV Haar cascade face detector (if available)."""
+        self.face_cascade = None
+        if hasattr(cv2, "CascadeClassifier") and hasattr(cv2, "data"):
+            self.face_cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            )
     
     def _load_database(self) -> Dict[str, Dict]:
         """Load face database from disk."""
@@ -132,15 +142,27 @@ class FaceRecognizer:
                 for top, right, bottom, left in boxes]
     
     def _detect_opencv_dnn(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Detect faces using OpenCV DNN."""
+        """Detect faces using YuNet (preferred) or legacy SSD."""
+        h, w = image.shape[:2]
+        if getattr(self, "yunet", None) is not None:
+            self.yunet.setInputSize((w, h))
+            _, faces = self.yunet.detect(image)
+            boxes = []
+            if faces is not None:
+                for f in faces:
+                    x, y, bw, bh = [int(v) for v in f[:4]]
+                    # clamp
+                    x = max(0, x); y = max(0, y)
+                    bw = max(1, min(bw, w - x)); bh = max(1, min(bh, h - y))
+                    boxes.append((x, y, bw, bh))
+            return boxes
+
         if self.face_net is None:
             return self._detect_opencv_haar(image)
-        
-        h, w = image.shape[:2]
+
         blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300), (104, 117, 123))
         self.face_net.setInput(blob)
         detections = self.face_net.forward()
-        
         boxes = []
         for i in range(detections.shape[2]):
             confidence = detections[0, 0, i, 2]
@@ -148,11 +170,12 @@ class FaceRecognizer:
                 box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
                 x1, y1, x2, y2 = box.astype(int)
                 boxes.append((x1, y1, x2 - x1, y2 - y1))
-        
         return boxes
     
     def _detect_opencv_haar(self, image: np.ndarray) -> List[Tuple[int, int, int, int]]:
         """Detect faces using OpenCV Haar cascades."""
+        if getattr(self, "face_cascade", None) is None:
+            return []
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
         return [(int(x), int(y), int(w), int(h)) for x, y, w, h in faces]
@@ -195,6 +218,10 @@ class FaceRecognizer:
         if not boxes:
             print(f"No faces detected in image for {name}")
             return 0
+
+        # Prefer largest face (primary subject) when multiple detections
+        if len(boxes) > 1:
+            boxes = [max(boxes, key=lambda b: b[2] * b[3])]
         
         embeddings = []
         for box in boxes:
