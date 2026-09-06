@@ -42,6 +42,10 @@ EARLY_FREE = 0.72
 EARLY_MAST = 0.12
 MIN_ANG_TO_DIVERT = 0.30
 LATE_STUCK_LOOKS = 3          # consecutive late looks → phased recover
+# Ghost nose: SafetyGuard fwd≈0 while sector mid/near still open (mast-inflate bleed).
+# Full recover only when sectors also look pinched; otherwise late-spin only.
+GHOST_MID_FREE = 0.60
+GHOST_NEAR_FREE = 0.50
 
 # Phased recover: back → ~180 spin → commit other way
 BACK_MPS = -0.22
@@ -397,8 +401,15 @@ class HouseBot:
         # ── Normal look-before-leap ──
         if early or late:
             soft = bool(early and not late)
+            # Mast-inflation can zero SafetyGuard fwd while mid/near sectors stay open.
+            ghost_nose = (
+                (not soft)
+                and free_mid >= GHOST_MID_FREE
+                and free_near >= GHOST_NEAR_FREE
+            )
             now = time.monotonic()
-            if soft:
+            if soft or ghost_nose:
+                # Soft divert or ghost pin: do not escalate to full recover.
                 self._late_streak = 0
             else:
                 self._late_streak += 1
@@ -423,17 +434,27 @@ class HouseBot:
             else:
                 turn = preferred
 
-            if (not soft) and self._late_streak >= LATE_STUCK_LOOKS:
+            if (not soft) and (not ghost_nose) and self._late_streak >= LATE_STUCK_LOOKS:
                 # Curiosity on the turnaround direction
                 turn = self._pick_turn(scores, curious=True)
+                streak_at_start = self._late_streak
                 self._start_back(turn)
                 decision = "recover_back_" + turn
                 note = (
                     "RECOVER start back→spin→commit %s | fwd=%.2f mid=%.2f near=%.2f streak=%d"
-                    % (turn, fwd_scale, free_mid, free_near, self._late_streak)
+                    % (turn, fwd_scale, free_mid, free_near, streak_at_start)
                 )
                 if decision != self._last_decision and not speech_io.is_speaking() and not getattr(people_live_mod.PeopleLive, "social_priority", False):
                     speech_io.speak("No room. Backing up, then the other way.")
+            elif ghost_nose:
+                deg = self._set_late_spin(turn)
+                decision = "ghost_" + turn
+                note = (
+                    "GHOST nose spin %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f ang=%.2f"
+                    % (turn, deg, fwd_scale, free_mid, free_near, ang_scale)
+                )
+                if decision != self._last_decision and not speech_io.is_speaking() and not getattr(people_live_mod.PeopleLive, "social_priority", False):
+                    speech_io.speak("False pinch. Spinning %s." % turn)
             elif soft:
                 deg = self._set_soft_veer(turn)
                 decision = "early_" + turn

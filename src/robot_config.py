@@ -18,9 +18,9 @@ ROBOT_W = 30                  # front-back (x direction)
 ROBOT_H = 42                  # side-to-side (y direction)
 ROBOT_CX_OFF = -78            # x offset from crosshair center
 
-FOOT_PAD_FWD = 5              # extra clear pixels forward (self-reflection margin)
+FOOT_PAD_FWD = 8              # extra clear pixels forward (self-reflection + mast-inflate ghosts)
 FOOT_PAD_BWD = 10             # extra clear pixels backward (self-observation margin)
-FOOT_PAD_LAT = 2              # extra clear pixels lateral
+FOOT_PAD_LAT = 4              # extra clear pixels lateral (mast-inflate ghosts on spin)
 
 # Derived: robot center in ego frame
 RCX = CROSSHAIR_CX + ROBOT_CX_OFF   # 81
