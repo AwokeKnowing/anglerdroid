@@ -166,3 +166,18 @@ cython_debug/
 # Rerun recordings
 *.rrd
 .kevin/rerun/
+
+# Face gallery / enroll PII — never commit (lives on Kevin ~/.kevin/faces)
+faces/gallery_incoming/
+faces/**/*.jpg
+faces/**/*.jpeg
+faces/**/*.png
+faces/**/*.tgz
+faces/**/*.tar
+faces/**/*.tar.gz
+faces/**/*.pkl
+faces/**/database.pkl
+**/.kevin/faces/
+**/.kevin/faces_fullphoto_backup/
+.kevin/faces/
+.kevin/faces_fullphoto_backup/
