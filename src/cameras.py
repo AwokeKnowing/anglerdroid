@@ -24,17 +24,66 @@ def _set_sensor_opt(sensor, option, value):
         pass
 
 
+
+def find_rgb_device():
+    """Pick the USB RGB webcam V4L node (not RealSense).
+
+    RealSense also registers /dev/video* nodes; defaulting to video0 often
+    hits a RealSense metadata/depth node that OpenCV cannot capture.
+    Prefer names containing 'USB Camera' / 'webcam', skip 'RealSense' / 'Intel'.
+    """
+    import os
+    base = '/sys/class/video4linux'
+    if not os.path.isdir(base):
+        return None
+    candidates = []
+    for ent in sorted(os.listdir(base), key=lambda s: int(s.replace('video', '') or -1)):
+        if not ent.startswith('video'):
+            continue
+        name_path = os.path.join(base, ent, 'name')
+        try:
+            name = open(name_path, 'r').read().strip()
+        except OSError:
+            continue
+        low = name.lower()
+        if 'realsense' in low or 'intel(r)' in low:
+            continue
+        path = '/dev/' + ent
+        if not os.path.exists(path):
+            continue
+        score = 0
+        if 'usb camera' in low or 'webcam' in low or '16mp' in low:
+            score += 10
+        if 'camera' in low:
+            score += 1
+        candidates.append((score, int(ent.replace('video', '')), path, name))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda t: (-t[0], t[1]))
+    path, name = candidates[0][2], candidates[0][3]
+    print('cameras: auto-selected RGB %s (%s)' % (path, name))
+    return path
+
+
 def _open_rgb_capture(device_id):
     """Open V4L2 camera by path or int index. Tries path, then numeric fallback."""
     import re
-    for attempt in (device_id, None):
-        if attempt is None:
-            if not isinstance(device_id, str):
-                break
-            m = re.search(r"video(\d+)$", device_id)
-            if not m:
-                break
-            attempt = int(m.group(1))
+    if device_id is None or device_id == "":
+        device_id = find_rgb_device()
+        if not device_id:
+            return None
+    # Normalize "dev/videoN" -> "/dev/videoN"
+    if isinstance(device_id, str) and device_id.startswith('dev/'):
+        device_id = '/' + device_id
+    attempts = []
+    if isinstance(device_id, str):
+        attempts.append(device_id)
+        m = re.search(r"video(\d+)$", device_id)
+        if m:
+            attempts.append(int(m.group(1)))
+    else:
+        attempts.append(device_id)
+    for attempt in attempts:
         cap = cv2.VideoCapture(attempt, cv2.CAP_V4L2)
         if not cap.isOpened():
             cap.release()

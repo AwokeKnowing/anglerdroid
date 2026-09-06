@@ -28,7 +28,7 @@ def main():
     parser.add_argument("--no-rerun", action="store_true", help="Disable rerun logging")
     parser.add_argument("--rs1", default="", help="RealSense 1 serial")
     parser.add_argument("--rs2", default="", help="RealSense 2 serial")
-    parser.add_argument("--rgb1", default="/dev/video0", help="RGB camera device (e.g. /dev/video0)")
+    parser.add_argument("--rgb1", default="", help="RGB camera device (e.g. /dev/video1); empty = auto-detect USB webcam")
     parser.add_argument("--gemini-key", default="", help="Gemini API key (or set GEMINI_KEY env)")
     parser.add_argument("--gemini-model", default="", help="Gemini model name (default: gemini-2.5-flash)")
     parser.add_argument("--auth-email", default="", help="Email allowed full control (default: everyone)")
@@ -75,10 +75,21 @@ def main():
                   % (rs1 or "(none)", rs2 or "(none)"))
         except Exception as e:
             print("main: RealSense enumerate failed: %s" % e)
+    rgb1 = args.rgb1
+    if not rgb1:
+        try:
+            from cameras import find_rgb_device
+            rgb1 = find_rgb_device() or ""
+        except Exception as e:
+            print("main: RGB auto-detect failed: %s" % e)
+            rgb1 = ""
+    if rgb1.startswith("dev/"):
+        rgb1 = "/" + rgb1
+    print("main: RGB device %s" % (rgb1 or "(none)"))
     vis = Vision(
         rs1_serial=rs1 or "",
         rs2_serial=rs2 or "",
-        rgb1_device_id=args.rgb1,
+        rgb1_device_id=rgb1,
         slam_backend=args.slam,
     )
     vis.set_wheelbase(wb)
