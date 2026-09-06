@@ -69,6 +69,9 @@ def build_safety_occ(obs_binary, height_cm=None):
     height_cm: optional HxW uint8 height above floor in cm (0 = free/unknown).
     Tall cells (>= MAST_CLEAR_CM) are dilated so table tops block the mast path
     even when the floor under the table looks clear.
+
+    After inflation, clear the robot footprint so dilated tall cells cannot
+    self-collide us into fwd=0 + ang=0 (classic table-edge ghost pin).
     """
     occ = (np.asarray(obs_binary) >= OBS_THRESH) if np.asarray(obs_binary).dtype != bool else np.asarray(obs_binary)
     if height_cm is not None:
@@ -76,8 +79,14 @@ def build_safety_occ(obs_binary, height_cm=None):
         tall = h >= MAST_CLEAR_CM
         if tall.any():
             tall = _dilate_binary(tall, MAST_INFLATE_PX)
-            # Also mark a mast-width corridor through tall cells as blocked
             occ = occ | tall
+    # Never treat our own body as an obstacle (inflation bleed).
+    hh, ww = occ.shape[:2]
+    y0, y1 = max(0, FOOT_Y0), min(hh, FOOT_Y1)
+    x0, x1 = max(0, FOOT_X0), min(ww, FOOT_X1)
+    if y1 > y0 and x1 > x0:
+        occ = occ.copy()
+        occ[y0:y1, x0:x1] = False
     out = np.zeros(occ.shape, dtype=np.uint8)
     out[occ] = 255
     return out
@@ -188,14 +197,19 @@ class SafetyGuard:
         else:
             self._ang_scale = 1.0
 
-        # Escape spin: if nose is pinned but we are not laterally crushed,
-        # keep a minimum angular authority so LocalExecutive/HouseBot can turn.
-        # (Safety still zeros forward; this only unsticks yaw.)
+        # Escape spin: if nose/tail is pinned, keep a minimum angular authority
+        # so HouseBot can yaw out. Prefer stronger floor when laterals are free;
+        # even when laterals look hard (often mast-inflation ghosts), allow a
+        # weaker spin rather than freezing forever.
         ESCAPE_ANG_FLOOR = 0.45
-        if self._fwd_scale < 0.08 and min_lat > LAT_HARD_PX:
-            self._ang_scale = max(self._ang_scale, ESCAPE_ANG_FLOOR)
-        if self._bwd_scale < 0.08 and min_lat > LAT_HARD_PX:
-            self._ang_scale = max(self._ang_scale, ESCAPE_ANG_FLOOR)
+        ESCAPE_ANG_HARD = 0.30
+        nose_or_tail_pinned = (self._fwd_scale < 0.08) or (self._bwd_scale < 0.08)
+        if nose_or_tail_pinned:
+            floor = ESCAPE_ANG_FLOOR if min_lat > LAT_HARD_PX else ESCAPE_ANG_HARD
+            self._ang_scale = max(self._ang_scale, floor)
+        if nose_or_tail_pinned and self._tick % 15 == 0:
+            print("safety: escape_spin ang=%.2f min_lat=%d fwd=%.2f bwd=%.2f"
+                  % (self._ang_scale, min_lat, self._fwd_scale, self._bwd_scale))
 
         self._throttled = (self._fwd_scale < 0.95 or self._bwd_scale < 0.95
                            or self._ang_scale < 0.95)

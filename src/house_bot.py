@@ -19,6 +19,7 @@ import numpy as np
 import local_executive
 import speech_io
 from robot_config import MAST_CLEAR_CM, RCX, RCY, FOOT_X1
+from safety import build_safety_occ, OBS_THRESH as SAFETY_OBS
 
 SNAP_DIR = os.path.expanduser("~/.kevin/snapshots")
 LOOK_PERIOD_S = 1.0
@@ -87,11 +88,12 @@ class HouseBot:
         if obs.ndim == 3:
             obs = obs[:, :, 0]
         h, w = obs.shape[:2]
-        blocked = (obs.astype(np.float32) >= OBS_THRESH).astype(np.float32)
+        # Same mast-inflated occ SafetyGuard uses (footprint cleared).
+        occ = build_safety_occ(obs, height)
+        blocked = (occ.astype(np.float32) >= 100).astype(np.float32)
         tall = None
         if height is not None:
             tall = (height.astype(np.float32) >= MAST_CLEAR_CM).astype(np.float32)
-            blocked = np.clip(blocked + tall, 0, 1)
 
         def free_score(y0, y1, x0, x1):
             patch = blocked[max(0, y0):min(h, y1), max(0, x0):min(w, x1)]
