@@ -136,17 +136,22 @@ class MppiSimPolicy:
 
         # Tiny-command dither after mask → move (not freeze).
         # Never flip a reverse into forward — that fought escape.
-        if abs(v) < 0.045 and abs(w) < 0.12:
+        # Wide |w| gate: shy MPPI often pairs tiny v with leftover w noise.
+        if abs(v) < 0.05:
             if v < -0.005 and bwd > 0.15:
                 self.last_decision = "mppi_keep_back"
-                return self._mask(min(v, -0.10), w, fwd, bwd, ang)
+                return self._mask(min(v, -0.10), 0.0, fwd, bwd, ang)
             if fwd >= 0.30 and v >= 0.0:
                 self.last_decision = "mppi_nudge_fwd"
-                return self._mask(0.12, w, fwd, bwd, ang)
-            if ang > 0.2:
+                return self._mask(0.12, w if abs(w) < 0.4 else 0.0, fwd, bwd, ang)
+            if ang > 0.15:
                 s = self._open_side_sign(obs)
                 self.last_decision = "mppi_nudge_spin"
-                return self._mask(0.0, 0.60 * s, fwd, bwd, ang)
+                return self._mask(0.0, 0.65 * s, fwd, bwd, ang)
+            if bwd > 0.2:
+                # Yaw also clamped — reverse to reopen (insect)
+                self.last_decision = "mppi_nudge_reopen"
+                return self._mask(-0.10, 0.0, fwd, bwd, ang)
 
         self.last_decision = "mppi_v%.2f_w%.2f" % (v, w)
         return v, w
