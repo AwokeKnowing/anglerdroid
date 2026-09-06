@@ -4,13 +4,19 @@ CRITICAL: Divert EARLY. Once SafetyGuard pins forward (and often angular),
 "turn left" is already too late. Steer while clearance still allows yaw.
 
 Mast-aware: tall cells (>= MAST_CLEAR_CM) count as overhangs/tables.
-Stuck recovery: after several late looks, reverse+spin toward freer side.
+
+Stuck recovery (no forward/back oscillation):
+  1) BACK  – reverse out of the pinch
+  2) SPIN  – ~180° toward freer/curious side
+  3) COMMIT – keep driving the NEW way for several seconds
+             (do not immediately nose back into the same pinch)
 """
 
 from __future__ import annotations
 
 import math
 import os
+import random
 import threading
 import time
 
@@ -34,11 +40,17 @@ LATE_FWD_SCALE = 0.18
 EARLY_FREE = 0.72
 EARLY_MAST = 0.12
 MIN_ANG_TO_DIVERT = 0.30
-LATE_STUCK_LOOKS = 4          # consecutive late looks → reverse+spin
-RECOVER_BACK_MPS = -0.18
-RECOVER_SPIN_RAD = 0.95
-RECOVER_SECS = 1.1
-STICKY_BREAK_MARGIN = 0.25    # freer opposite breaks sticky early
+LATE_STUCK_LOOKS = 3          # consecutive late looks → phased recover
+
+# Phased recover: back → ~180 spin → commit other way
+BACK_MPS = -0.22
+BACK_SECS = 1.15
+SPIN_RAD = 0.90               # before safety_ang scale (~0.3 → ~0.27 rad/s)
+SPIN_SECS = 3.2               # ~180° at ~0.27 rad/s * 0.3 floor needs longer; aim big
+COMMIT_SECS = 5.5
+COMMIT_DIST_M = 1.25
+STICKY_BREAK_MARGIN = 0.25
+CURIOUS_FLIP_P = 0.35         # sometimes pick the other side on purpose
 
 
 class HouseBot:
@@ -53,8 +65,12 @@ class HouseBot:
         self._escape_until = 0.0
         self._escape_turn = None
         self._late_streak = 0
-        self._recover_until = 0.0
         self._last_decision = "init"
+        # Phased recover state
+        self._phase = None          # None | 'back' | 'spin' | 'commit'
+        self._phase_until = 0.0
+        self._phase_turn = None     # 'left' | 'right'
+        self._commit_theta = None   # world heading to keep after turnaround
         os.makedirs(SNAP_DIR, exist_ok=True)
 
     def start(self):
@@ -62,7 +78,7 @@ class HouseBot:
             return
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
-        print("house_bot: started (EARLY divert @ %.1fs, voice=am_michael)" % LOOK_PERIOD_S)
+        print("house_bot: started (EARLY divert + turnaround recover, voice=am_michael)")
         speech_io.speak("Hello. I am Kevin. I look ahead early so I can still turn.")
 
     def stop(self):
@@ -99,7 +115,6 @@ class HouseBot:
         if obs.ndim == 3:
             obs = obs[:, :, 0]
         h, w = obs.shape[:2]
-        # Same mast-inflated occ SafetyGuard uses (footprint cleared).
         occ = build_safety_occ(obs, height)
         blocked = (occ.astype(np.float32) >= 100).astype(np.float32)
         tall = None
@@ -120,7 +135,6 @@ class HouseBot:
                 return 0.0
             return float(patch.mean())
 
-        # Ego map: forward = +x (rightward from FOOT_X1), same as SafetyGuard.
         cx, cy = int(RCX), int(RCY)
         near_x0, near_x1 = FOOT_X1, min(w, FOOT_X1 + 28)
         mid_x0, mid_x1 = min(w, FOOT_X1 + 28), min(w, FOOT_X1 + 85)
@@ -145,62 +159,156 @@ class HouseBot:
                 print("house_bot: tick err %s" % e)
             time.sleep(max(0.15, LOOK_PERIOD_S - (time.monotonic() - t0)))
 
-    def _pick_turn(self, scores):
+    def _pick_turn(self, scores, curious=False):
         left = scores["left"] - 0.5 * scores.get("mast_mid", 0)
         right = scores["right"] - 0.5 * scores.get("mast_mid", 0)
-        if abs(left - right) < 0.05:
+        if abs(left - right) < 0.08:
             turn = "left" if self._turn_bias > 0 else "right"
             self._turn_bias *= -1.0
         elif left >= right:
             turn = "left"
         else:
             turn = "right"
+        # Curiosity: sometimes leave the "optimal" side so we don't tunnel
+        # into the same dead-end forever.
+        if curious and random.random() < CURIOUS_FLIP_P:
+            turn = "right" if turn == "left" else "left"
         return turn
 
-    def _set_turn_goal(self, turn, soft=True, recover=False, bwd_ok=True):
-        pose = getattr(self.vision, "_pose", None)
+    def _pose(self):
+        return getattr(self.vision, "_pose", None)
+
+    def _bwd_ok(self):
+        try:
+            return float(self.vision.safety_bwd_scale) > 0.20
+        except Exception:
+            return True
+
+    def _start_back(self, turn):
+        """Phase 1: reverse out of the pinch (little yaw)."""
+        now = time.monotonic()
+        self._phase = "back"
+        self._phase_turn = turn
+        self._phase_until = now + BACK_SECS
+        self._escape_turn = turn
+        self._escape_until = self._phase_until
+        self._late_streak = 0
+        local_executive.clear()
         sign = 1.0 if turn == "left" else -1.0
-        if soft:
-            # Gentle veer while still moving — MPPI goal ~35° ahead.
+        fwd = BACK_MPS if self._bwd_ok() else 0.0
+        # Mostly reverse; tiny yaw so we don't stay square to the wall.
+        tools.twist_for(
+            fwd, 0.25 * sign,
+            duration_secs=BACK_SECS,
+            ramp_in_secs=0.1, ramp_out_secs=0.15,
+        )
+        print("house_bot: PHASE back turn=%s fwd=%.2f for %.1fs" % (turn, fwd, BACK_SECS))
+
+    def _start_spin(self):
+        """Phase 2: big turnaround spin (~180° ambition)."""
+        now = time.monotonic()
+        turn = self._phase_turn or "left"
+        sign = 1.0 if turn == "left" else -1.0
+        self._phase = "spin"
+        self._phase_until = now + SPIN_SECS
+        self._escape_turn = turn
+        self._escape_until = self._phase_until
+        local_executive.clear()
+        tools.twist_for(
+            0.0, SPIN_RAD * sign,
+            duration_secs=SPIN_SECS,
+            ramp_in_secs=0.1, ramp_out_secs=0.2,
+        )
+        print("house_bot: PHASE spin turn=%s for %.1fs (turnaround)" % (turn, SPIN_SECS))
+
+    def _start_commit(self):
+        """Phase 3: drive the NEW way; don't immediately re-enter the pinch."""
+        now = time.monotonic()
+        pose = self._pose()
+        self._phase = "commit"
+        self._phase_until = now + COMMIT_SECS
+        if pose is not None:
+            # After spin, current theta IS the new "other way".
+            self._commit_theta = float(pose.theta)
+            th = self._commit_theta
+            local_executive.set_goal_xy(
+                pose.x + COMMIT_DIST_M * math.cos(th),
+                pose.y + COMMIT_DIST_M * math.sin(th),
+            )
+        else:
+            self._commit_theta = None
+            local_executive.set_wander()
+        print("house_bot: PHASE commit other-way for %.1fs theta=%s" % (
+            COMMIT_SECS,
+            ("%.1f°" % math.degrees(self._commit_theta)) if self._commit_theta is not None else "?",
+        ))
+
+    def _refresh_commit_goal(self):
+        pose = self._pose()
+        if pose is None or self._commit_theta is None:
+            if not local_executive.is_active():
+                local_executive.set_wander()
+            return
+        th = self._commit_theta
+        local_executive.set_goal_xy(
+            pose.x + COMMIT_DIST_M * math.cos(th),
+            pose.y + COMMIT_DIST_M * math.sin(th),
+        )
+
+    def _advance_phase(self):
+        """Step back→spin→commit→done when timers elapse."""
+        now = time.monotonic()
+        if self._phase is None:
+            return False
+        if now < self._phase_until:
+            return True  # still in phase
+        if self._phase == "back":
+            self._start_spin()
+            return True
+        if self._phase == "spin":
+            self._start_commit()
+            return True
+        if self._phase == "commit":
+            print("house_bot: PHASE done — resume normal wander")
+            self._phase = None
+            self._phase_turn = None
+            self._commit_theta = None
             self._escape_until = 0.0
             self._escape_turn = None
-            self._late_streak = 0
-            deg = 35.0 * sign
-            dist = 0.95
-            if pose is None:
-                local_executive.set_wander()
-                return deg
-            th = pose.theta + math.radians(deg)
-            local_executive.set_goal_xy(
-                pose.x + dist * math.cos(th),
-                pose.y + dist * math.sin(th),
-            )
-            return deg
+            return False
+        return False
 
-        # LATE: nose pinned — MPPI can't push through fwd_scale=0.
-        # Sticky spin: hold one direction ~2.5s so we don't thrash left/right
-        # and cancel MPPI mid-tick every look.
+    def _set_soft_veer(self, turn):
+        pose = self._pose()
+        sign = 1.0 if turn == "left" else -1.0
+        deg = 35.0 * sign
+        if pose is None:
+            local_executive.set_wander()
+            return deg
+        th = pose.theta + math.radians(deg)
+        local_executive.set_goal_xy(
+            pose.x + 0.95 * math.cos(th),
+            pose.y + 0.95 * math.sin(th),
+        )
+        return deg
+
+    def _set_late_spin(self, turn):
+        """Short in-place spin while waiting for recover threshold."""
         now = time.monotonic()
-        if (not recover) and now < self._escape_until and self._escape_turn:
+        sign = 1.0 if turn == "left" else -1.0
+        if now < self._escape_until and self._escape_turn:
             turn = self._escape_turn
             sign = 1.0 if turn == "left" else -1.0
         else:
             self._escape_turn = turn
-            self._escape_until = now + (RECOVER_SECS + 0.4 if recover else 2.5)
+            self._escape_until = now + 2.0
             local_executive.clear()
-            ang = (RECOVER_SPIN_RAD if recover else 0.85) * sign
-            # Back up while yawing when stuck — pure spin often stays pinned.
-            fwd = RECOVER_BACK_MPS if (recover and bwd_ok) else 0.0
             tools.twist_for(
-                fwd, ang,
-                duration_secs=(RECOVER_SECS if recover else 2.4),
+                0.0, 0.85 * sign,
+                duration_secs=2.0,
                 ramp_in_secs=0.12, ramp_out_secs=0.2,
             )
-            if recover:
-                self._recover_until = now + RECOVER_SECS + 0.3
-                self._late_streak = 0
-        deg = (120.0 if recover else 95.0) * sign
-        return deg
+        return 95.0 * sign
 
     def _tick(self):
         vis = self.vision
@@ -210,7 +318,6 @@ class HouseBot:
             getattr(vis, "_persistent_obs", None),
             getattr(vis, "_persistent_height", None),
         )
-        # Do NOT use `or 1.0` — real safety scale 0.0 is falsy and must stay 0.
         try:
             fwd_scale = float(vis.safety_fwd_scale)
         except Exception:
@@ -241,6 +348,44 @@ class HouseBot:
         note = "ok fwd=%.2f mid=%.2f mast=%.2f ang=%.2f" % (
             fwd_scale, free_mid, mast_ahead, ang_scale)
 
+        # ── Phased recover owns the robot until commit finishes ──
+        in_phase = self._advance_phase() if self._phase else False
+        if self._phase:
+            in_phase = True
+            turn = self._phase_turn or "left"
+            if self._phase == "commit":
+                # Keep going the new way; only abort commit if nose is hard-pinned
+                # again (start a fresh recover), not for soft early veers back.
+                if late and self._late_streak >= LATE_STUCK_LOOKS:
+                    # Re-enter recover from commit if we hit another wall
+                    preferred = self._pick_turn(scores, curious=True)
+                    self._start_back(preferred)
+                    decision = "recover_back_" + preferred
+                    note = "RECOVER re-back %s | fwd=%.2f" % (preferred, fwd_scale)
+                else:
+                    self._late_streak = 0 if not late else self._late_streak + (1 if late else 0)
+                    self._refresh_commit_goal()
+                    decision = "commit_" + (turn or "fwd")
+                    note = "COMMIT other-way %.1fs left | fwd=%.2f mid=%.2f" % (
+                        max(0.0, self._phase_until - time.monotonic()),
+                        fwd_scale, free_mid)
+            else:
+                decision = "recover_%s_%s" % (self._phase, turn)
+                note = "RECOVER %s %s | fwd=%.2f bwd_ok=%s" % (
+                    self._phase, turn, fwd_scale, self._bwd_ok())
+            self._last_decision = decision
+            line = "house_bot: look#%d %s %s snaps=%s" % (
+                self._n_looks, decision, note, ",".join(paths.keys()))
+            print(line)
+            try:
+                with open(os.path.join(SNAP_DIR, "latest.txt"), "w") as f:
+                    f.write(line + "\n")
+                    f.write("scores=%s\n" % scores)
+            except Exception:
+                pass
+            return
+
+        # ── Normal look-before-leap ──
         if early or late:
             soft = bool(early and not late)
             now = time.monotonic()
@@ -249,13 +394,11 @@ class HouseBot:
             else:
                 self._late_streak += 1
 
-            # Prefer freer side; break sticky early if opposite is clearly better.
-            preferred = self._pick_turn(scores)
+            preferred = self._pick_turn(scores, curious=False)
             sticky = (
                 (not soft)
                 and now < self._escape_until
                 and self._escape_turn
-                and now >= self._recover_until
             )
             if sticky:
                 sticky_turn = self._escape_turn
@@ -265,32 +408,43 @@ class HouseBot:
                 other_score = right_s if sticky_turn == "left" else left_s
                 if other_score >= sticky_score + STICKY_BREAK_MARGIN:
                     turn = preferred
-                    self._escape_until = 0.0  # force re-arm toward freer side
+                    self._escape_until = 0.0
                 else:
                     turn = sticky_turn
             else:
                 turn = preferred
 
-            try:
-                bwd_ok = float(vis.safety_bwd_scale) > 0.25
-            except Exception:
-                bwd_ok = True
-            recover = (not soft) and self._late_streak >= LATE_STUCK_LOOKS and now >= self._recover_until
-            deg = self._set_turn_goal(turn, soft=soft, recover=recover, bwd_ok=bwd_ok)
-            decision = ("early_" if soft else ("recover_" if recover else "late_")) + turn
-            note = (
-                "%s divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f streak=%d"
-                % (("early" if soft else ("RECOVER" if recover else "LATE")), turn, deg,
-                   fwd_scale, free_mid, free_near, mast_ahead, ang_scale, self._late_streak)
-            )
-            if decision != self._last_decision and not speech_io.is_speaking():
-                if recover:
-                    speech_io.speak("Stuck. Backing and turning %s." % turn)
-                elif mast_ahead > EARLY_MAST:
-                    speech_io.speak("Tall obstacle ahead. Veering %s." % turn)
-                elif soft:
-                    speech_io.speak("Path tightening. Going %s." % turn)
-                else:
+            if (not soft) and self._late_streak >= LATE_STUCK_LOOKS:
+                # Curiosity on the turnaround direction
+                turn = self._pick_turn(scores, curious=True)
+                self._start_back(turn)
+                decision = "recover_back_" + turn
+                note = (
+                    "RECOVER start back→spin→commit %s | fwd=%.2f mid=%.2f near=%.2f streak=%d"
+                    % (turn, fwd_scale, free_mid, free_near, self._late_streak)
+                )
+                if decision != self._last_decision and not speech_io.is_speaking():
+                    speech_io.speak("No room. Backing up, then the other way.")
+            elif soft:
+                deg = self._set_soft_veer(turn)
+                decision = "early_" + turn
+                note = (
+                    "early divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f mast=%.2f ang=%.2f"
+                    % (turn, deg, fwd_scale, free_mid, free_near, mast_ahead, ang_scale)
+                )
+                if decision != self._last_decision and not speech_io.is_speaking():
+                    if mast_ahead > EARLY_MAST:
+                        speech_io.speak("Tall obstacle ahead. Veering %s." % turn)
+                    else:
+                        speech_io.speak("Path tightening. Going %s." % turn)
+            else:
+                deg = self._set_late_spin(turn)
+                decision = "late_" + turn
+                note = (
+                    "LATE divert %s deg=%.0f | fwd=%.2f mid=%.2f near=%.2f ang=%.2f streak=%d"
+                    % (turn, deg, fwd_scale, free_mid, free_near, ang_scale, self._late_streak)
+                )
+                if decision != self._last_decision and not speech_io.is_speaking():
                     speech_io.speak("Tight. Turning %s." % turn)
         else:
             self._late_streak = 0
