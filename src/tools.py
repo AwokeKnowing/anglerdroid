@@ -142,3 +142,18 @@ def get_wheelbase():
 
 def get_ui():
     return _ui
+
+
+# --- Aliases matching cloud-agent / Doctor tool names ---
+def local_goto(x: float, y: float):
+    """Alias for goto_xy (world meters)."""
+    goto_xy(x, y)
+
+def local_wander(enable: bool = True):
+    if enable:
+        wander()
+    else:
+        local_stop()
+
+def local_cancel():
+    local_stop()
