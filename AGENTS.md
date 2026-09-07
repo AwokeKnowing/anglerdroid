@@ -28,6 +28,20 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
   `RS_DECIMATE_MAG=3` produced ~45k verts (≈3×3 blocks). Mag=8 → ~6k verts (old docstring).
   On this JP6 stack mag is **linear** (mag=3≈45k verts, mag=8≈6.5k). Numpy can beat SDK pc on CPU ms, but **detail metric above gates any mag change**. Default stays mag=3 until GSD/ego-fill probe says otherwise.
 
+### Thread architecture (James 2026-09-07)
+1. **Pre-allocate and mutate in place** — hot path must not alloc/copy per frame when
+   a buffer can be reused. Prefer `np.copyto` / slice assign into preallocated arrays.
+   Drop fresh `.copy()` / `asarray().copy()` on IR/color/atlas/reader paths where safe.
+2. **Frame loop waits for synced camera frames** each tick (RealSense poll/wait). Do
+   not busy-spin past frame sync. Webcam stays off the RS grab barrier (already landed).
+3. **Faster odom thread** — a dedicated high-rate thread (~100-200 Hz) deals with
+   wheel odometry + IMU yaw and **emits/publishes poses at ~30 Hz** (or lock-free
+   latest snapshot) for the frame/capture loop to consume. Capture must not be the
+   only place that integrates wheels/IMU.
+4. **Keep IMU and depth separate** (already mostly true via `IMUPipeline`). Do not
+   require IMU↔depth hardware sync. SLAM may later care about IMU stamps paired
+   with clouds, but that is out of scope for this thread split.
+
 ### Hardware-first (GPU > CPU NumPy)
 A “numpy algorithm” is a *shape*, not a placement. On Orin prefer **CuPy /
 CUDA / ModernGL** (or other GPU-resident ops already in `gpu_render`) for
