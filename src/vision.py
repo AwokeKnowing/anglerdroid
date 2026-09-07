@@ -816,11 +816,12 @@ class Vision:
             self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
             # Wood bump + checkered mat detection (ego-frame, RS1 RGB, no SLAM)
-            # Uses RS1 top-down color (already rotated 180° above) to detect:
+            # Uses RS1 top-down color (rotated 180°) to detect:
             #   (a) Wood floor bump/lip (texture transition, strong H edge)
             #   (b) Checkered door mat (alternating grid pattern)
-            if self._rs1 and self._rs1.ok:
-                # RS1 color is already rotated 180° as rgbd1 (line ~841 above)
+            # Compute RS1 color now (reused later for atlas render)
+            rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else None
+            if rgbd1 is not None:
                 triggered, score, meta = detect_checkered_mat(
                     rgbd1, prev_triggered=self._checkered_prev)
                 self._checkered_mat = triggered
@@ -875,7 +876,9 @@ class Vision:
             # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
             trail = pose_src.get_world_history()
             rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
-            rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
+            # rgbd1 already computed above for checkered detection; fallback to black if None
+            if rgbd1 is None:
+                rgbd1 = black
             rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
 
             bat_frac = 0.0

@@ -5,8 +5,8 @@ Depth/occupancy remains ground truth for hard obstacles. Soft things
 painted into the ego obs map as synthetic obstacles when marked.
 
 Kind-aware paint (matches mppi_costmap OBS_THRESH=100):
-  soft / floor_mat → value 90  (soft prefer cost, not hard hit)
-  hard             → value 200 (hard obstacle)
+  soft             → value 90  (soft prefer cost, not hard hit)
+  floor_mat / hard → value 200 (hard obstacle)
 
 Marks are session-local until we have a persistent map origin.
 File: ~/.kevin/keepouts.json
