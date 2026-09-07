@@ -510,14 +510,32 @@ uniform float u_floor;
 uniform float u_ceil;
 uniform float u_y_off;
 uniform vec2  u_fbo_sz;
+uniform int   u_border;
+uniform ivec2 u_grid_size;
 in vec3 in_v;
 flat out float v_h;
 void main() {
     v_h = 0.0;
     gl_PointSize = 1.0;
     vec3 p = in_v;
+    
+    // Early discard: invalid depth, NaN, inf
     if (p.z < 0.28 || any(isnan(p)) || any(isinf(p))) {
         gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+    }
+    
+    // Early discard: border clipping (replaces CPU _clip_decimated_border)
+    // Compute grid position from vertex index (approximation for decimated grid)
+    int vid = gl_VertexID;
+    int gw = u_grid_size.x;
+    int gh = u_grid_size.y;
+    if (gw > 0 && gh > 0) {
+        int gy = vid / gw;
+        int gx = vid - gy * gw;
+        if (gx < u_border || gx >= gw - u_border ||
+            gy < u_border || gy >= gh - u_border) {
+            gl_Position = vec4(2.0,2.0,0.0,1.0); return;
+        }
     }
     p.y += u_y_off;
     vec3 r = u_rot * (p - u_pivot) + u_pivot - u_trans;
@@ -641,6 +659,62 @@ void main() {
 }
 """
 
+# ── GPU depth combination shader (replaces CPU blit/max/mask) ────
+
+_FRAG_DEPTH_COMBINE = """
+#version 330
+uniform sampler2D u_obs1;
+uniform sampler2D u_known1;
+uniform sampler2D u_obs2;
+uniform sampler2D u_known2;
+uniform sampler2D u_obs_mask;
+uniform sampler2D u_fw_cone_mask;
+uniform ivec2 u_td_offset;
+uniform ivec2 u_fw_offset;
+layout(location = 0) out vec4 out_obs;
+layout(location = 1) out vec4 out_known;
+void main() {
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    
+    // NOTE: Robot footprint clearing done on CPU after GPU combine
+    // (multi-box footprint: body + 4 wheels, simpler on CPU)
+    
+    // Sample RS1 (topdown) with offset
+    ivec2 px1 = px - u_td_offset;
+    float obs1 = 0.0;
+    float known1 = 0.0;
+    if (px1.x >= 0 && px1.y >= 0) {
+        obs1 = texelFetch(u_obs1, px1, 0).r;
+        known1 = texelFetch(u_known1, px1, 0).r;
+    }
+    
+    // Sample RS2 (forward) with offset
+    ivec2 px2 = px - u_fw_offset;
+    float obs2 = 0.0;
+    float known2 = 0.0;
+    if (px2.x >= 0 && px2.y >= 0) {
+        float raw_obs2 = texelFetch(u_obs2, px2, 0).r;
+        float raw_known2 = texelFetch(u_known2, px2, 0).r;
+        // Apply forward cone mask to known2
+        float cone = texelFetch(u_fw_cone_mask, px, 0).r;
+        obs2 = raw_obs2;
+        known2 = raw_known2 * cone;
+    }
+    
+    // Maximum blend
+    float obs_combined = max(obs1, obs2);
+    float known_combined = max(known1, known2);
+    
+    // Apply observation mask
+    float mask = texelFetch(u_obs_mask, px, 0).r;
+    obs_combined *= mask;
+    known_combined *= mask;
+    
+    out_obs = vec4(obs_combined);
+    out_known = vec4(known_combined);
+}
+"""
+
 # ── GPU visual odometry shaders ──────────────────────────────────
 
 _FRAG_DOWNSAMPLE = """
@@ -698,14 +772,31 @@ uniform float u_scale;
 uniform vec2  u_offset;
 uniform float u_floor_clip;
 uniform vec2  u_fbo_sz;
+uniform int   u_border;
+uniform ivec2 u_grid_size;
 in vec3 in_v;
 flat out float v_h;
 void main() {
     v_h = 0.0;
     gl_PointSize = 1.0;
     vec3 p = in_v;
+    
+    // Early discard: invalid depth, NaN, inf
     if (p.z <= 0.01 || any(isnan(p)) || any(isinf(p))) {
         gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+    }
+    
+    // Early discard: border clipping (replaces CPU _clip_decimated_border)
+    int vid = gl_VertexID;
+    int gw = u_grid_size.x;
+    int gh = u_grid_size.y;
+    if (gw > 0 && gh > 0) {
+        int gy = vid / gw;
+        int gx = vid - gy * gw;
+        if (gx < u_border || gx >= gw - u_border ||
+            gy < u_border || gy >= gh - u_border) {
+            gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+        }
     }
     
     // Orthographic project XY to pixel coords
@@ -1112,6 +1203,27 @@ class GPURenderer:
         self._dt_out_w = out_w
         self._dt_configured = True
         self._dt_gl_ready = False
+    
+    # ── GPU depth combination configuration ─────────────────────────
+    
+    def configure_depth_combine(self, out_h, out_w, obs_mask, fw_cone_mask):
+        """Configure GPU depth combination (replaces CPU blit/max/mask).
+        
+        Args:
+            out_h: Output height (FRAME_H, typically 240)
+            out_w: Output width (FRAME_W, typically 320)
+            obs_mask: Observation mask (H, W) uint8
+            fw_cone_mask: Forward cone mask (H, W) uint8
+        
+        Note: Robot footprint clearing done on CPU after GPU combine
+              (multi-box: body + 4 wheels, simpler on CPU)
+        """
+        self._dc_out_h = out_h
+        self._dc_out_w = out_w
+        self._dc_obs_mask = obs_mask
+        self._dc_fw_cone_mask = fw_cone_mask
+        self._dc_configured = True
+        self._dc_gl_ready = False
 
     # ── GL init ──────────────────────────────────────────────────
 
@@ -1385,6 +1497,11 @@ class GPURenderer:
         p['u_floor'].value = self._df_floor
         p['u_ceil'].value = self._df_ceil
         p['u_fbo_sz'].value = (float(ow), float(oh))
+        # Border clipping for decimated grid (replaces CPU _clip_decimated_border)
+        p['u_border'].value = 4
+        # Estimate grid size from typical D435 decimated resolution
+        # mag=3 on 848x480 → ~283x160 grid
+        p['u_grid_size'].value = (283, 160)
 
         df_texel = (1.0 / float(ow), 1.0 / float(oh))
         p = self._df_prog_morph
@@ -1542,6 +1659,11 @@ class GPURenderer:
         p['u_offset'].value = tuple(self._dt_offset.tolist())
         p['u_floor_clip'].value = self._dt_floor
         p['u_fbo_sz'].value = (float(ow), float(oh))
+        # Border clipping for decimated grid (replaces CPU _clip_decimated_border)
+        p['u_border'].value = 4
+        # Estimate grid size from typical D435 decimated resolution
+        # mag=3 on 848x480 → ~283x160 grid
+        p['u_grid_size'].value = (283, 160)
 
         try:
             ctx.enable(moderngl.PROGRAM_POINT_SIZE)
@@ -1620,6 +1742,130 @@ class GPURenderer:
                 (t1 - t0) * 1e3, n_floor, n_obs, n_empty))
 
         return obs, known
+    
+    # ── GPU depth combination ─────────────────────────────────────
+    
+    def _init_depth_combine_gl(self):
+        """Initialize GPU depth combination (replaces CPU blit/max/mask)."""
+        ctx = self._ctx
+        ow, oh = self._dc_out_w, self._dc_out_h
+        
+        # Input textures (uploaded each frame from RS1/RS2 outputs)
+        self._dc_obs1_tex = ctx.texture((ow, oh), 1)
+        self._dc_obs1_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_known1_tex = ctx.texture((ow, oh), 1)
+        self._dc_known1_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        
+        self._dc_obs2_tex = ctx.texture((ow, oh), 1)
+        self._dc_obs2_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_known2_tex = ctx.texture((ow, oh), 1)
+        self._dc_known2_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        
+        # Mask textures (static, uploaded once)
+        self._dc_obs_mask_tex = ctx.texture((ow, oh), 1)
+        self._dc_obs_mask_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_obs_mask_tex.write(self._dc_obs_mask.tobytes())
+        
+        self._dc_fw_cone_tex = ctx.texture((ow, oh), 1)
+        self._dc_fw_cone_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_fw_cone_tex.write(self._dc_fw_cone_mask.tobytes())
+        
+        # Output FBO (MRT: obs + known)
+        self._dc_obs_out_tex = ctx.texture((ow, oh), 1)
+        self._dc_obs_out_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_known_out_tex = ctx.texture((ow, oh), 1)
+        self._dc_known_out_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dc_out_fbo = ctx.framebuffer(
+            color_attachments=[self._dc_obs_out_tex, self._dc_known_out_tex])
+        
+        # Shader program
+        self._dc_prog = ctx.program(
+            vertex_shader=_VERT_FSQUAD,
+            fragment_shader=_FRAG_DEPTH_COMBINE)
+        
+        self._dc_prog['u_obs1'].value = 0
+        self._dc_prog['u_known1'].value = 1
+        self._dc_prog['u_obs2'].value = 2
+        self._dc_prog['u_known2'].value = 3
+        self._dc_prog['u_obs_mask'].value = 4
+        self._dc_prog['u_fw_cone_mask'].value = 5
+        
+        # NOTE: Robot footprint clearing done on CPU after GPU combine
+        
+        # VAO (fullscreen quad)
+        fsq_buf = self._fsq_vbo
+        self._dc_vao = ctx.vertex_array(
+            self._dc_prog, [(fsq_buf, '2f', 'in_pos')])
+        
+        self._dc_gl_ready = True
+        self._dc_n = 0
+        print("gpu_render: depth_combine ready %dx%d (GPU blit+max+mask)" % (ow, oh))
+    
+    def depth_combine_gpu(self, obs1, known1, obs2, known2, td_offset, fw_offset):
+        """GPU depth combination: blit + maximum + mask (replaces CPU NumPy ops).
+        
+        Args:
+            obs1: RS1 topdown obstacles (H, W) uint8
+            known1: RS1 topdown known mask (H, W) uint8
+            obs2: RS2 forward obstacles (H, W) uint8
+            known2: RS2 forward known mask (H, W) uint8
+            td_offset: (dx, dy) pixel offset for RS1 topdown
+            fw_offset: (dx, dy) pixel offset for RS2 forward
+        
+        Returns:
+            (obs_combined, known_combined) tuple of uint8 (H, W) or None
+        """
+        if not self.available or not getattr(self, '_dc_configured', False):
+            return None
+        if not self._gl_ready:
+            return None
+        if not getattr(self, '_dc_gl_ready', False):
+            try:
+                self._init_depth_combine_gl()
+            except Exception as e:
+                print("gpu_render: depth_combine init failed: %s" % e)
+                import traceback; traceback.print_exc()
+                return None
+        
+        t0 = time.monotonic()
+        
+        # Upload input textures
+        self._dc_obs1_tex.write(obs1.tobytes())
+        self._dc_known1_tex.write(known1.tobytes())
+        self._dc_obs2_tex.write(obs2.tobytes())
+        self._dc_known2_tex.write(known2.tobytes())
+        
+        # Set offsets
+        self._dc_prog['u_td_offset'].value = td_offset
+        self._dc_prog['u_fw_offset'].value = fw_offset
+        
+        # Bind textures
+        self._dc_obs1_tex.use(location=0)
+        self._dc_known1_tex.use(location=1)
+        self._dc_obs2_tex.use(location=2)
+        self._dc_known2_tex.use(location=3)
+        self._dc_obs_mask_tex.use(location=4)
+        self._dc_fw_cone_tex.use(location=5)
+        
+        # Render
+        self._ctx.disable(moderngl.DEPTH_TEST)
+        self._dc_out_fbo.use()
+        self._dc_vao.render(moderngl.TRIANGLE_STRIP)
+        
+        # Readback
+        obs_data = self._dc_obs_out_tex.read(components=1, alignment=1)
+        known_data = self._dc_known_out_tex.read(components=1, alignment=1)
+        
+        oh, ow = self._dc_out_h, self._dc_out_w
+        obs_combined = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
+        known_combined = np.frombuffer(known_data, dtype=np.uint8).reshape(oh, ow).copy()
+        
+        self._dc_n += 1
+        t1 = time.monotonic()
+        if self._dc_n <= 3 or self._dc_n % 100 == 0:
+            print("gpu_depth_combine: %.1fms" % ((t1 - t0) * 1e3))
+        
+        return obs_combined, known_combined
 
     # ── GPU visual odometry ─────────────────────────────────────
 

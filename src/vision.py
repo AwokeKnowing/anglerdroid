@@ -784,6 +784,10 @@ class Vision:
             px_size=float(TD_PX_SIZE),
             floor_clip=float(TD_FLOOR_CLIP),
             out_h=FRAME_H, out_w=FRAME_W)
+        self._gpu.configure_depth_combine(
+            out_h=FRAME_H, out_w=FRAME_W,
+            obs_mask=self._obs_mask,
+            fw_cone_mask=self._fw_cone_mask)
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
@@ -1291,16 +1295,19 @@ class Vision:
             self._k1[:] = 0
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
                 # GPU heightmap @30Hz for policy + sparse CPU reflexes
-                v_clean = _clip_decimated_border(self._rs1.verts, out=self._rs1_work_verts)
-                _gpu_result = self._gpu.depth_topdown_gpu(v_clean)
+                # GPU shader now handles border clipping (u_border uniform in scatter shader)
+                # Pass verts directly; skip CPU _clip_decimated_border
+                _gpu_result = self._gpu.depth_topdown_gpu(self._rs1.verts)
                 
                 if _gpu_result is not None:
                     # GPU path: heightmap from GPU, sparse reflexes from CPU
                     self._z1[:], self._k1[:] = _gpu_result
                     
                     # Sparse reflexes (near + overhang) on CPU stride=8
+                    # Still need CPU border clip for sparse reflexes (they're CPU-based)
+                    v_clean = _clip_decimated_border(self._rs1.verts, out=self._rs1_work_verts)
                     _rs1_sparse = process_rs1_sparse_reflexes(
-                        self._rs1.verts, work_verts=self._rs1_work_verts)
+                        v_clean, work_verts=None)
                     
                     # Soft-low not needed on GPU path: dog bed shows as normal
                     # heightmap obstacle. Prior "soft-low" pain was empty-frame nav,
@@ -1408,9 +1415,9 @@ class Vision:
                     if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
                         if getattr(self, '_pitch_cal_request', False):
                             self._calibrate_rs2_pitch(self._rs2.verts)
-                        rs2_clean = _clip_decimated_border(self._rs2.verts)
+                        # GPU shader now handles border clipping (u_border uniform in scatter shader)
                         _gpu_result = self._gpu.depth_forward_gpu(
-                            rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                            self._rs2.verts, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
                         if _gpu_result is not None:
                             self._z2[:], self._k2[:], _raw_scatter = _gpu_result
             obs2 = np.rot90(self._z2, k=-1)
@@ -1419,45 +1426,59 @@ class Vision:
             _t_depth = _t_rs2  # Keep for backwards compat with old logging
 
             # --- Combine into ego-space (obs_combined, known_combined) ---
+            # GPU path: single shader pass replaces CPU blit/max/mask
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
             td_dx = int(TD_X_OFFSET)
+            
+            _gpu_combine_result = self._gpu.depth_combine_gpu(
+                obs1, known1, obs2, known2,
+                td_offset=(td_dx, 0), fw_offset=(fw_dx, fw_dy))
+            
+            if _gpu_combine_result is not None:
+                # GPU path succeeded
+                self._obs_combined[:], self._known_combined[:] = _gpu_combine_result
+            else:
+                # CPU fallback (if GPU not available)
+                # Use preallocated buffer (clear instead of allocate)
+                self._kc_tmp[:] = 0
+                _blit(self._kc_tmp, known2, fw_dx, fw_dy)
+                np.bitwise_and(self._kc_tmp, self._fw_cone_mask, out=self._kc_tmp)
 
-            # Use preallocated buffer (clear instead of allocate)
-            self._kc_tmp[:] = 0
-            _blit(self._kc_tmp, known2, fw_dx, fw_dy)
+                # Use preallocated buffers (clear instead of allocate)
+                self._known_combined[:] = 0
+                _blit(self._known_combined, known1, td_dx)
+                np.maximum(self._known_combined, self._kc_tmp, out=self._known_combined)
+
+                self._obs_combined[:] = 0
+                _blit(self._obs_combined, obs1, td_dx)
+                self._obs_tmp[:] = 0
+                _blit(self._obs_tmp, obs2, fw_dx, fw_dy)
+                np.maximum(self._obs_combined, self._obs_tmp, out=self._obs_combined)
+
+                np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
+                np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
+
+                # Clear robot footprint (multi-box: body + 4 wheels)
+                for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                    self._obs_combined[y0:y1, x0:x1] = 0
+                    self._known_combined[y0:y1, x0:x1] = 255
+            
+            # Clear robot footprint (multi-box: body + 4 wheels)
+            # Force self-mask to known-free (prevent self-observation as obstacles)
+            # NOTE: CPU fallback already cleared footprint; GPU path needs post-clear
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                self._obs_combined[y0:y1, x0:x1] = 0
+                self._known_combined[y0:y1, x0:x1] = 255
+            
+            # Diagnostic logging (rate-limited)
             if not hasattr(self, '_kdiag_n'):
                 self._kdiag_n = 0
             self._kdiag_n += 1
             if self._kdiag_n <= 2 or self._kdiag_n % 300 == 0:
                 _k2nz = int(np.count_nonzero(known2))
-                _kcnz_pre = int(np.count_nonzero(self._kc_tmp))
-                np.bitwise_and(self._kc_tmp, self._fw_cone_mask, out=self._kc_tmp)
-                _kcnz_post = int(np.count_nonzero(self._kc_tmp))
-                print("fw_known: known2=%d blit=%d after_cone=%d "
-                      "fw_dx=%d fw_dy=%d" % (_k2nz, _kcnz_pre, _kcnz_post,
-                                              fw_dx, fw_dy))
-            else:
-                np.bitwise_and(self._kc_tmp, self._fw_cone_mask, out=self._kc_tmp)
-
-            # Use preallocated buffers (clear instead of allocate)
-            self._known_combined[:] = 0
-            _blit(self._known_combined, known1, td_dx)
-            np.maximum(self._known_combined, self._kc_tmp, out=self._known_combined)
-
-            self._obs_combined[:] = 0
-            _blit(self._obs_combined, obs1, td_dx)
-            self._obs_tmp[:] = 0
-            _blit(self._obs_tmp, obs2, fw_dx, fw_dy)
-            np.maximum(self._obs_combined, self._obs_tmp, out=self._obs_combined)
-
-            np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
-            np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
-
-            # Clear robot footprint (multi-box: body + 4 wheels)
-            # Force self-mask to known-free (prevent self-observation as obstacles)
-            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
-                self._obs_combined[y0:y1, x0:x1] = 0
-                self._known_combined[y0:y1, x0:x1] = 255
+                _kc_nz = int(np.count_nonzero(self._known_combined))
+                print("depth_combine: known2=%d combined=%d fw_dx=%d fw_dy=%d td_dx=%d" % (
+                    _k2nz, _kc_nz, fw_dx, fw_dy, td_dx))
 
             _t_obs = time.monotonic()
 
