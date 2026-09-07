@@ -264,14 +264,25 @@ Face recognition scores: james:0.782 (margin=0.215)
 
 ### Confidence Mapping
 
-**User-facing "90%" bar** maps to internal cosine threshold with margin:
+**IMPORTANT**: "Confidence" has different meanings at different layers.
 
-| User confidence | Internal threshold | Margin | Action |
-|-----------------|-------------------|--------|--------|
-| >= 90% | cosine >= 0.60 | + 0.05 margin | Greet normally |
-| < 90% | cosine < 0.60 OR margin fail | - | Prompt for enrollment |
+**Raw cosine similarity** (recognizer internal):
+- Typical ArcFace matches: **0.45–0.75** for known faces
+- Rarely exceeds 0.90 in practice
+- DO NOT compare this directly to a "90%" user-facing bar
 
-This keeps false IDs rare (<1%) while still enrolling uncertain faces.
+**Recognition acceptance** (user-facing):
+| Result | Internal check | User interpretation |
+|--------|----------------|-------------------|
+| **Accepted** | cosine ≥ 0.60 + margin ≥ 0.05 | "Known with ~90% certainty" |
+| **Rejected** | cosine < 0.60 OR margin < 0.05 | "Unknown or uncertain" |
+
+**Enrollment trigger**:
+- Triggers ONLY when `name == "unknown"` (recognition rejected the face)
+- Never compares raw cosine to 0.90 (would trigger on almost every face)
+- Accepted IDs greet normally via SocialFSM
+
+This keeps false accepts rare (<1% FAR) while enrolling truly unknown faces.
 
 ### Timeout Behavior
 
@@ -301,18 +312,21 @@ recognizer = FaceRecognizer(backend="insightface", model_pack="buffalo_l")
 behavior = create_people_behavior(
     speak_fn=your_speak_function,
     recognizer=recognizer,
-    enable_live_enrollment=True,
-    enrollment_confidence_threshold=0.90  # User-facing "90%" bar
+    enable_live_enrollment=True
 )
 
 # In perception loop
+# recognize() returns "unknown" when face rejected by threshold+margin
 results = recognizer.recognize(frame, threshold=0.60, margin=0.05, log_scores=True)
 
 for name, confidence, box in results:
+    # name == "unknown" → triggers enrollment
+    # name != "unknown" → accepted ID, greet normally
+    
     # Handle face with enrollment integration
     action = behavior.on_face_seen(
-        name=name,
-        confidence=confidence,
+        name=name,  # "unknown" or person name
+        confidence=confidence,  # Raw cosine (for logging only)
         box=box,
         image=frame,  # Pass frame for sample collection
         landmarks=landmarks if available else None,
