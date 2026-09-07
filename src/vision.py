@@ -851,10 +851,12 @@ class Vision:
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
+        _stage_times = []  # Track: grab, pose+hazard, rs1_checks, rs2, obs_comb, odom, gmap, safety, render
         _use_cuvslam = (self._cuvslam is not None)
 
         while self._running:
             _t0 = time.monotonic()
+            _t_start = _t0
             self._capture_budget.reset_frame()
 
             try:
@@ -926,6 +928,8 @@ class Vision:
                 self._topdown_hazard_corner_count = 0
                 self._topdown_hazard_edge_count = 0
 
+            _t_hazard = time.monotonic()
+            
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -1034,7 +1038,7 @@ class Vision:
                                            td_dx, c0 + td_dx, c1 + td_dx,
                                            len(nz[0])))
             _t_rs1 = time.monotonic()
-
+            
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
             # DROPPABLE: Can fallback to topdown-only if budget tight
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
@@ -1053,7 +1057,8 @@ class Vision:
                             z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
-            _t_depth = time.monotonic()
+            _t_rs2 = time.monotonic()
+            _t_depth = _t_rs2  # Keep for backwards compat with old logging
 
             # --- Combine into ego-space (obs_combined, known_combined) ---
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
@@ -1371,6 +1376,39 @@ class Vision:
                 self.timestamp = time.time()
             _t_render = time.monotonic()
             _t_end = _t_render
+
+            # === Stage timing collection ===
+            _stage_times.append((
+                (_t_grab - _t_start) * 1000.0,      # grab
+                (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose
+                (_t_rs1 - _t_hazard) * 1000.0,      # rs1_checks (near/overhang/soft + depth_topdown)
+                (_t_rs2 - _t_rs1) * 1000.0,         # rs2_process (GPU depth)
+                (_t_obs - _t_rs2) * 1000.0,         # obs_combine
+                (_t_odom - _t_obs) * 1000.0,        # odom
+                (_t_gmap_up - _t_odom) * 1000.0,    # gmap
+                (_t_safety - _t_gmap_up) * 1000.0,  # safety
+                (_t_render - _t_safety) * 1000.0,   # render
+            ))
+            
+            # Detailed report every 90 frames
+            if len(_stage_times) % 90 == 0 and len(_stage_times) >= 90:
+                recent = np.array(_stage_times[-90:])
+                avg = np.mean(recent, axis=0)
+                p95 = np.percentile(recent, 95, axis=0)
+                total = np.sum(avg)
+                labels = ["grab", "pose+hazard", "rs1_checks", "rs2_gpu", 
+                         "obs_comb", "odom", "gmap", "safety", "render"]
+                print("=" * 80)
+                print(f"CAPTURE TIMING (last 90 frames): TOTAL={total:.1f}ms ({1000/total:.1f} Hz)")
+                print("=" * 80)
+                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%TOTAL':>8s}")
+                print("-" * 80)
+                for i, label in enumerate(labels):
+                    pct = (avg[i] / total) * 100.0
+                    print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                print("=" * 80)
+                print(f"Target: 33.3ms/frame (30 Hz). Current: {total:.1f}ms ({1000/total:.1f} Hz)")
+                print("=" * 80)
 
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
                                 _t_depth - _t_rs1, _t_obs - _t_depth,
