@@ -72,6 +72,9 @@ def main():
             save_kw["save_path"] = None  # viewer stream; skip file
         elif args.rerun_save:
             save_kw["save_path"] = args.rerun_save
+        elif args.rerun_connect:
+            # connect_grpc + rr.save() replaces the sink — skip file when streaming to a viewer
+            save_kw["save_path"] = None
         # else: module default ~/.kevin/rerun/live.rrd
         rerun_logger = KevinRerunLogger(
             enabled=True,

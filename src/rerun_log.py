@@ -60,11 +60,14 @@ class KevinRerunLogger:
                 print("rerun_log: connect_grpc failed: %s" % e)
         if save_path and not spawn:
             # File sink is the headless default (Orin has no local viewer need).
+            # NOTE: rr.save() replaces sinks — do not combine with connect_grpc for live viz.
             try:
                 os.makedirs(os.path.dirname(os.path.expanduser(save_path)) or ".", exist_ok=True)
                 path = os.path.expanduser(save_path)
                 rr.save(path)
                 print("rerun_log: saving %s" % path)
+                if connect_url:
+                    print("rerun_log: WARNING save() may replace connect_grpc sink — prefer save_path=None when streaming")
             except Exception as e:
                 print("rerun_log: save failed: %s" % e)
 
