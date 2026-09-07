@@ -47,6 +47,8 @@ def main():
                         help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
     parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
                         help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
+    parser.add_argument("--wheel-imu-prior", action="store_true",
+                        help="EXPERIMENT: Use wheel+IMU prediction prior (for self-slam-wheel-imu-prior-v0)")
     parser.add_argument("--auto-local", action="store_true",
                         help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI)")
     parser.add_argument("--local-planner", default="vfh", choices=["vfh", "mppi"],
@@ -126,6 +128,7 @@ def main():
         rs2_serial=rs2 or "",
         rgb1_device_id=rgb1,
         slam_backend=args.slam,
+        use_wheel_imu_prior=args.wheel_imu_prior,
     )
     vis.set_wheelbase(wb)
     vis.start()
