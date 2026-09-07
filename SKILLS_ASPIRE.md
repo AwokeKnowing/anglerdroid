@@ -217,10 +217,75 @@ See `AGENTS.md` (placeholder) for coding-agent repair loop:
 
 **NOT included in this scaffold**: actual coding agent implementation, RL training pipeline, sim integration.
 
+## OMNI-EPIC Integration (Curriculum Generation)
+
+**OMNI-EPIC** (Zhang et al., ICLR 2025, arXiv:2405.15568): Foundation model generates sim *environment code + rewards* that are learnable and interesting for current agent skill level (open-ended curriculum).
+
+### Complementary to ASPIRE
+
+- **OMNI-EPIC**: Grows the *training distribution* (curriculum generation in sim)
+- **ASPIRE**: Grows the *skill library* from failures (skill refinement from traces)
+
+Both use FMs + code generation, but for different purposes:
+- OMNI-EPIC → diverse training scenarios (procedural env generation)
+- ASPIRE → skill repair and evolution (coding-agent refinement)
+
+### Kevin Mapping
+
+**Host-sim curriculum generation** (training only, never on Orin 30Hz path):
+
+1. **FM generates scenario code** → `sim_curriculum/<scenario_name>.py`
+   - Doorway pinch (narrow passage, turn clearance)
+   - Dog bed soft (deformable obstacles, compliant contact)
+   - Overhang approach (table underside, mast clearance)
+   - Checkered keepout (visual pattern, hard-stop zones)
+   - Person approach (social distance, dynamic agents)
+
+2. **Reward functions** → `sim_curriculum/rewards/<scenario>.py`
+   - Success: goal reached + constraints satisfied
+   - Failure: collision, keepout entry, social violation
+   - Efficiency: path length, time, smoothness
+
+3. **Train neural mid-layer** in host-sim (i777)
+   - RL policy: obs_map → (v, ω)
+   - Curriculum difficulty ramps with agent skill
+   - Export trained policy as ONNX → deploy to `models/policy.onnx`
+
+4. **Sim-to-real transfer**
+   - Reality gap documented in `docs/sim-reality-gaps.md`
+   - Domain randomization: lighting, noise, dynamics
+   - Real-world fine-tuning via trace-based ASPIRE loop
+
+### Stub: `sim_curriculum/` (TODO)
+
+Placeholder structure for future OMNI-EPIC-inspired curriculum:
+
+```
+sim_curriculum/
+├── README.md              # Curriculum generation pipeline
+├── generator.py           # FM-based scenario code generation (stub)
+├── scenarios/
+│   ├── doorway_pinch.py   # Narrow passage curriculum
+│   ├── dog_bed_soft.py    # Deformable obstacle curriculum
+│   ├── overhang_approach.py  # Overhead clearance curriculum
+│   ├── checkered_keepout.py  # Visual pattern keepout curriculum
+│   └── person_approach.py    # Social distance curriculum
+├── rewards/
+│   ├── base_reward.py     # Common reward components
+│   └── <scenario>_reward.py  # Per-scenario reward functions
+└── train_neural_rl.py     # RL training loop (PPO/SAC)
+```
+
+**Not included in this PR**: actual FM curriculum generator, RL training pipeline, or sim integration. This scaffold focuses on ASPIRE skill library + execution traces for post-deployment learning.
+
+**Future work**: Combine OMNI-EPIC curriculum (pre-training in sim) with ASPIRE skill refinement (post-deployment from real-world traces) for continual learning pipeline.
+
 ## References
 
 - **ASPIRE paper**: arXiv:2607.00272 (Jim Fan, NVIDIA GEAR)
 - **ASPIRE repo**: https://github.com/NVlabs/ASPIRE (manip arms + CaP-X)
+- **OMNI-EPIC paper**: arXiv:2405.15568 (Zhang, Faldor, Cully, Clune, ICLR 2025)
+- **OMNI-EPIC site**: https://omni-epic.vercel.app/ (FM-generated curriculum)
 - **Kevin docs**: `docs/kevin-autonomy-midlayer.md` (existing mid-layer design)
 
 ## Changes Summary
