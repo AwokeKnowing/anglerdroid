@@ -4,6 +4,18 @@ Conversational face recognition for Kevin with enrollment, greetings, and persis
 
 ⚠️ **OFFLINE-SAFE**: This system does NOT control robot driving. Hardware motion stays stopped after the couch crash.
 
+## 🆕 InsightFace Backend (Recommended)
+
+**NEW**: State-of-the-art face recognition using InsightFace buffalo models with 512-D ArcFace embeddings.
+
+**Why upgrade?**
+- **Better quality**: 512-D embeddings (vs 128-D face_recognition)
+- **Higher accuracy**: 0.7-0.9 cosine similarity (vs 0.4-0.5 SFace)
+- **Stricter matching**: Threshold + margin checks reduce false IDs
+- **Fast on Jetson**: ~20ms per face on Orin NX with CUDA
+
+**See**: [`docs/INSIGHTFACE_UPGRADE.md`](../docs/INSIGHTFACE_UPGRADE.md) for model download, setup, and migration guide.
+
 ## Features
 
 - **Face enrollment**: Store known faces with display names
@@ -12,16 +24,34 @@ Conversational face recognition for Kevin with enrollment, greetings, and persis
 - **Conversational greetings**: Contextual greetings based on time of day
 - **Unknown handling**: Ask for names and enroll new people
 - **TTS integration**: Soft volume (10%) using existing speech_io pattern
-- **Multiple backends**: face_recognition (dlib), OpenCV DNN, or Haar cascades
+- **Multiple backends**: 
+  - **insightface** - SOTA 512-D ArcFace (recommended, requires onnxruntime + models)
+  - **face_recognition** - dlib 128-D (good quality, requires build tools)
+  - **opencv-dnn** - OpenCV fallback (basic quality)
+  - **opencv-haar** - Minimal fallback
 
 ## Installation
+
+### InsightFace (Recommended for SOTA quality)
+```bash
+# Install dependencies
+pip install numpy opencv-python pillow onnxruntime-gpu
+
+# Download models (see docs/INSIGHTFACE_UPGRADE.md for links)
+mkdir -p ~/.kevin/faces/models
+# Place w600k_r50.onnx in ~/.kevin/faces/models/
+# Place face_detection_yunet_2023mar.onnx in ~/.kevin/faces/models/
+
+# Use with --backend insightface
+python -m faces.cli enroll "Person" photo.jpg --backend insightface --model-pack buffalo_l
+```
 
 ### Minimal (OpenCV fallback)
 ```bash
 pip install numpy opencv-python pillow
 ```
 
-### Recommended (best quality)
+### Alternative: face_recognition (dlib)
 ```bash
 pip install numpy opencv-python pillow face_recognition
 ```
@@ -108,6 +138,86 @@ Removes a person from the database.
 python -m faces.demo webcam [--camera 0] [--tts stub] [--volume 0.1]
 ```
 Live webcam demo with conversation. Press 'e' to enroll, 'q' to quit.
+
+## 🆕 InsightFace Tools
+
+### Rebuild Embeddings
+Regenerate database.pkl from existing gallery crops using a new backend:
+
+```bash
+# Rebuild with InsightFace buffalo_l (recommended)
+python -m faces.rebuild_embeddings --backend insightface --model-pack buffalo_l
+
+# Rebuild with buffalo_s (lighter, mobile)
+python -m faces.rebuild_embeddings --backend insightface --model-pack buffalo_s
+
+# Other options
+python -m faces.rebuild_embeddings --backend face_recognition
+python -m faces.rebuild_embeddings --gallery /custom/path --no-backup
+```
+
+**Features**:
+- Auto-backup of old database.pkl
+- Re-embeds all existing face crops
+- Shows progress and summary
+
+### Live Enrollment (Domain Gap Mitigation)
+Capture face samples directly from webcam to match robot's viewing conditions:
+
+```bash
+# Enroll new person with 3 live samples
+python -m faces.enroll_live --name "James" --samples 3
+
+# Add more samples to existing person
+python -m faces.enroll_live --name "Erika" --samples 5 --show-scores
+
+# Custom settings
+python -m faces.enroll_live --name "David" \
+  --backend insightface \
+  --model-pack buffalo_l \
+  --min-face-size 100 \
+  --camera 0
+```
+
+**Why use this?**
+- Gallery photos are often phone crops (high res, different lighting)
+- Live robot sees 320x240 webcam at 1-2m distance
+- Domain gap causes lower confidence scores
+- Live crops improve recognition accuracy significantly
+
+**Controls**:
+- `SPACE` - Capture sample
+- `Q` or `ESC` - Cancel enrollment
+- Face must be >= min_face_size pixels
+
+### CLI with InsightFace Backend
+All CLI commands support `--backend` and `--model-pack` flags:
+
+```bash
+# Enroll with InsightFace
+python -m faces.cli enroll "Person" photo.jpg \
+  --backend insightface \
+  --model-pack buffalo_l
+
+# Recognize with stricter matching
+python -m faces.cli recognize photo.jpg \
+  --backend insightface \
+  --threshold 0.60 \
+  --margin 0.05 \
+  --log-scores
+
+# Webcam with InsightFace
+python -m faces.cli webcam \
+  --backend insightface \
+  --threshold 0.65 \
+  --margin 0.08
+```
+
+**New flags**:
+- `--backend` - `auto`, `insightface`, `face_recognition`, `opencv-dnn`, `opencv-haar`
+- `--model-pack` - `buffalo_l` (512-D, best) or `buffalo_s` (mobile)
+- `--margin` - Second-best margin for stricter matching (default: 0.05)
+- `--log-scores` - Print recognition scores for debugging
 
 ## Storage Structure
 
