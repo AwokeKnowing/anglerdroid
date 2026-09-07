@@ -500,6 +500,7 @@ class Vision:
         self._rs2 = None
         self._webcam = None
         self._imu = None  # IMU pipeline for D435i Motion Module
+        self._grab_executor = None  # Persistent ThreadPoolExecutor for camera grabs
 
     @staticmethod
     def _build_obs_mask():
@@ -670,6 +671,10 @@ class Vision:
                 self._cuvslam = None
 
         self._webcam = WebCam(self.rgb1_device_id)
+        
+        # Persistent ThreadPoolExecutor for camera grabs (avoid per-frame creation overhead)
+        self._grab_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3, 
+                                                                     thread_name_prefix="cam_grab")
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -859,21 +864,75 @@ class Vision:
             _t_start = _t0
             self._capture_budget.reset_frame()
 
+            # === Optimized parallel camera grabs ===
+            # RS1 (topdown) and RS2 (forward) are CRITICAL (safety + odom)
+            # Webcam (RGB) is OPTIONAL (just for atlas display)
+            _t_grab_start = time.monotonic()
+            
             try:
-                # Parallel grabs so dual RealSense waits overlap (not sum).
-                _cams = [c for c in (self._webcam, self._rs1, self._rs2) if c]
-                if len(_cams) <= 1:
-                    for c in _cams:
-                        c.grab()
-                else:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(_cams)) as _ex:
-                        list(_ex.map(lambda c: c.grab(), _cams))
+                # Critical cameras: RS1 + RS2 with reduced 50ms timeout
+                critical_cams = [(self._rs1, "RS1"), (self._rs2, "RS2")]
+                critical_cams = [(c, n) for c, n in critical_cams if c is not None]
+                
+                if critical_cams:
+                    futures = []
+                    for cam, name in critical_cams:
+                        # Use reduced timeout for 30 Hz target
+                        future = self._grab_executor.submit(cam.grab, timeout_ms=50)
+                        futures.append((future, name))
+                    
+                    # Wait for critical cameras (max 50ms per camera due to timeout)
+                    for future, name in futures:
+                        try:
+                            future.result(timeout=0.060)  # Give 10ms margin over cam timeout
+                        except concurrent.futures.TimeoutError:
+                            if not hasattr(self, f'_{name}_timeout_n'):
+                                setattr(self, f'_{name}_timeout_n', 0)
+                            setattr(self, f'_{name}_timeout_n', 
+                                   getattr(self, f'_{name}_timeout_n') + 1)
+                            if getattr(self, f'_{name}_timeout_n') % 30 == 1:
+                                print(f"vision: {name} grab timeout (count={getattr(self, f'_{name}_timeout_n')})")
+                
+                # Optional webcam: skip if critical grabs took >20ms
+                _t_critical_done = time.monotonic()
+                _critical_elapsed_ms = (_t_critical_done - _t_grab_start) * 1000.0
+                
+                if self._webcam and _critical_elapsed_ms < 20.0:
+                    # Try webcam with short timeout
+                    webcam_future = self._grab_executor.submit(self._webcam.grab)
+                    try:
+                        webcam_future.result(timeout=0.015)  # 15ms max for webcam
+                    except concurrent.futures.TimeoutError:
+                        # Webcam too slow, skip this frame
+                        if not hasattr(self, '_webcam_skip_n'):
+                            self._webcam_skip_n = 0
+                        self._webcam_skip_n += 1
+                        if self._webcam_skip_n % 30 == 1:
+                            print(f"vision: webcam grab timeout, skipped (count={self._webcam_skip_n})")
+                elif self._webcam:
+                    # Critical grabs already took >20ms, skip webcam entirely
+                    if not hasattr(self, '_webcam_defer_n'):
+                        self._webcam_defer_n = 0
+                    self._webcam_defer_n += 1
+                    
             except Exception as e:
-                # Never let a camera glitch kill the capture thread (blank atlas forever).
+                # Never let a camera glitch kill the capture thread
                 if not getattr(self, '_grab_err_n', 0):
                     print("vision: grab error (continuing): %s" % e)
                 self._grab_err_n = getattr(self, '_grab_err_n', 0) + 1
+                
             _t_grab = time.monotonic()
+            
+            # Detailed grab timing (every 300 frames)
+            if not hasattr(self, '_grab_timing_n'):
+                self._grab_timing_n = 0
+            self._grab_timing_n += 1
+            if self._grab_timing_n % 300 == 0:
+                grab_ms = (_t_grab - _t_grab_start) * 1000.0
+                print(f"vision: grab timing: total={grab_ms:.1f}ms "
+                      f"rs1_ok={getattr(self._rs1, 'ok', False)} "
+                      f"rs2_ok={getattr(self._rs2, 'ok', False)} "
+                      f"webcam_ok={getattr(self._webcam, 'ok', False)}")
 
             # --- Pose update (cuVSLAM or wheel+visual) ---
             if _use_cuvslam:
@@ -1437,6 +1496,8 @@ class Vision:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+        if self._grab_executor:
+            self._grab_executor.shutdown(wait=True, cancel_futures=True)
         if self._rs1:
             self._rs1.stop()
         if self._rs2:

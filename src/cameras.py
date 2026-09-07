@@ -159,17 +159,21 @@ class RSCamera:
         self.ir_right = None
         self.ok = False
 
-    def grab(self):
+    def grab(self, timeout_ms=50):
         """Take the newest frameset without multi-second stalls.
 
-        Prefer poll_for_frames (non-blocking). If empty, wait up to 500ms.
-        150ms was too short under dual-848 USB load (systematic ok=False).
+        Prefer poll_for_frames (non-blocking). If empty, wait up to timeout_ms.
+        
+        Args:
+            timeout_ms: Max wait time if poll returns empty (default 50ms, was 500ms).
+                       Reduced for 30 Hz target (~33ms/frame).
+        
         Never raises — sets ok=False on miss.
         """
         try:
             frames = self._pipe.poll_for_frames()
             if not frames:
-                frames = self._pipe.wait_for_frames(500)
+                frames = self._pipe.wait_for_frames(timeout_ms)
         except Exception:
             self.ok = False
             return False
