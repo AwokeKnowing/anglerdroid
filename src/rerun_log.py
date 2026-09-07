@@ -21,7 +21,7 @@ except (ImportError, TypeError):
     rr = None  # type: ignore
     HAS_RERUN = False
 
-DEFAULT_SAVE = os.path.expanduser("~/.kevin/rerun/live.rrd")
+DEFAULT_SAVE = None  # never unbounded save unless --rerun-save
 
 
 class KevinRerunLogger:
@@ -91,6 +91,7 @@ class KevinRerunLogger:
         safety: Optional[Mapping[str, Any]] = None,
         rs1_mask_overlay: Optional[np.ndarray] = None,
         rs1_trust_mask_overlay: Optional[np.ndarray] = None,
+        robot_footprint_underlay: Optional[np.ndarray] = None,
         robot_footprint_overlay: Optional[np.ndarray] = None,
         force: bool = False,
     ) -> bool:
@@ -139,15 +140,22 @@ class KevinRerunLogger:
                         ]
                     ),
                 )
+            if robot_footprint_underlay is not None:
+                und = np.ascontiguousarray(robot_footprint_underlay)
+                if und.ndim == 3 and und.shape[2] >= 3:
+                    rr.log("vision/robot_foot_underlay", rr.Image(und[:, :, :3]))
             if robot_footprint_overlay is not None:
-                # Multi-box hull self-mask on ego map (body + wheels), 1 cm/px.
+                # Fresh composited RGB each frame (underlay + alpha fills). Not Rerun-alpha.
                 fov = np.ascontiguousarray(robot_footprint_overlay)
                 if fov.ndim == 3 and fov.shape[2] >= 3:
-                    rr.log("vision/robot_foot_overlay", rr.Image(fov))
+                    rr.log("vision/robot_foot_overlay", rr.Image(fov[:, :, :3]))
             if rs1_mask_overlay is not None:
+                # RGBA transparent overlay (A=0 clear, A~50 green/blue fills) over rs1_color.
                 overlay = np.ascontiguousarray(rs1_mask_overlay)
-                if overlay.ndim == 3 and overlay.shape[2] >= 3:
+                if overlay.ndim == 3 and overlay.shape[2] == 4:
                     rr.log("vision/rs1_mask_overlay", rr.Image(overlay))
+                elif overlay.ndim == 3 and overlay.shape[2] >= 3:
+                    rr.log("vision/rs1_mask_overlay", rr.Image(overlay[:, :, :3]))
             if rs1_trust_mask_overlay is not None:
                 # Trust/FOV obs_mask (green + cyan edge).
                 tov = np.ascontiguousarray(rs1_trust_mask_overlay)

@@ -697,6 +697,18 @@ def process_rs1_topdown(verts, out_obs, out_known, work_verts=None,
 
 
 
+
+def _mask_viz_alpha():
+    """Live-tunable fill opacity. Edit ~/.kevin/mask_viz.json {"alpha": 0.2} — no restart."""
+    import json
+    try:
+        with open("/home/jetbot/.kevin/mask_viz.json") as f:
+            a = float(json.load(f).get("alpha", SELF_MASK_VIZ_ALPHA))
+        return max(0.0, min(1.0, a))
+    except Exception:
+        return float(SELF_MASK_VIZ_ALPHA)
+
+
 class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
@@ -721,6 +733,7 @@ class Vision:
         self._pitch_cal_done = False
         self._lock = threading.Lock()
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._viz_obs_premask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._topdown_ok = False
         self._topdown_known_px = 0
         self._topdown_lost_n = 0
@@ -1737,6 +1750,10 @@ class Vision:
             # obs_combined is height-cm (1..100) where obstacles exist
             self._persistent_obs[self._obs_combined > 0] = 255
             self._persistent_height[:] = self._obs_combined.astype(np.uint8, copy=False)
+            # Viz-only: keep pre-selfmask obs so foot overlay can show black robot under translucent fills
+            if getattr(self, '_viz_obs_premask', None) is None or self._viz_obs_premask.shape != self._persistent_obs.shape:
+                self._viz_obs_premask = np.empty_like(self._persistent_obs)
+            np.copyto(self._viz_obs_premask, self._persistent_obs)
             # Clear all self-mask boxes from persistent state (under-robot + ignore zones)
             for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
                 self._persistent_obs[y0:y1, x0:x1] = 0
@@ -1995,125 +2012,60 @@ class Vision:
           - Yellow outline: box edges
           - Cyan line: bumper/crop line at body front (should sit just before obstacles)
         
-        Boxes are rebuilt with scaled dimensions (ROBOT_W/H, WHEEL_HALF, pads × RS1_VIZ_SCALE)
-        for camera-space visualization (ego-map at 1 cm/px; RS1 color has perspective → need
-        scaled geometry). Tune RS1_VIZ_SCALE in robot_config.py to align with actual robot hull.
-        
-        This uses the same dimension-scaling approach as offline mask_tune dumps (scale dimensions,
-        rebuild boxes) NOT corner homothety. Map metric unchanged.
+        Boxes are scaled by RS1_VIZ_SCALE for camera-space visualization (ego-map boxes 
+        are 1 cm/px orthographic; RS1 color has perspective → boxes need scaling to cover 
+        robot hull in camera view). Tune RS1_VIZ_SCALE in robot_config.py to align boxes 
+        with actual robot body + wheels.
         """
         import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
 
-        def scaled_boxes(scale, cx_shift=RS1_VIZ_CX_SHIFT):
-            """Rebuild boxes with scaled dimensions (same logic as robot_config but scaled).
-            
-            Returns (under_robot_boxes, self_ignore_boxes) with scaled geometry.
-            Matches offline mask_tune dump_mask.py scaled_boxes() semantics.
-            """
-            # Scale dimensions
-            rw = int(round(ROBOT_W * scale))
-            rh = int(round(ROBOT_H * scale))
-            wh = int(round(WHEEL_HALF * scale))
-            pad_fwd = int(round(FOOT_PAD_FWD * scale))
-            pad_bwd = int(round(FOOT_PAD_BWD * scale))
-            pad_lat = int(round(FOOT_PAD_LAT * scale))
-            mast_r = int(round(MAST_RADIUS_PX * scale))
-            
-            # Scaled robot center (shifted forward in +x for viz)
-            rcx = RCX + cx_shift
-            rcy = RCY
-            
-            # Body box (scaled dimensions)
-            body_x0 = max(0, rcx - rw // 2 - pad_bwd)
-            body_y0 = max(0, rcy - rh // 2)
-            body_x1 = min(FRAME_W, rcx + rw // 2 + pad_fwd)
-            body_y1 = min(FRAME_H, rcy + rh // 2)
-            
-            # Wheel boxes (4 corners, scaled placement)
-            # Front-left
-            wfl_x0 = max(0, rcx + rw // 2 - 5 - wh)
-            wfl_y0 = max(0, rcy - rh // 2 - pad_lat - wh)
-            wfl_x1 = min(FRAME_W, wfl_x0 + 2 * wh)
-            wfl_y1 = min(FRAME_H, wfl_y0 + 2 * wh)
-            
-            # Front-right
-            wfr_x0 = max(0, rcx + rw // 2 - 5 - wh)
-            wfr_y0 = max(0, rcy + rh // 2 + pad_lat - wh)
-            wfr_x1 = min(FRAME_W, wfr_x0 + 2 * wh)
-            wfr_y1 = min(FRAME_H, wfr_y0 + 2 * wh)
-            
-            # Back-left
-            wbl_x0 = max(0, rcx - rw // 2 + 5 - wh)
-            wbl_y0 = max(0, rcy - rh // 2 - pad_lat - wh)
-            wbl_x1 = min(FRAME_W, wbl_x0 + 2 * wh)
-            wbl_y1 = min(FRAME_H, wbl_y0 + 2 * wh)
-            
-            # Back-right
-            wbr_x0 = max(0, rcx - rw // 2 + 5 - wh)
-            wbr_y0 = max(0, rcy + rh // 2 + pad_lat - wh)
-            wbr_x1 = min(FRAME_W, wbr_x0 + 2 * wh)
-            wbr_y1 = min(FRAME_H, wbr_y0 + 2 * wh)
-            
-            under_boxes = [
-                (body_x0, body_y0, body_x1, body_y1),
-                (wfl_x0, wfl_y0, wfl_x1, wfl_y1),
-                (wfr_x0, wfr_y0, wfr_x1, wfr_y1),
-                (wbl_x0, wbl_y0, wbl_x1, wbl_y1),
-                (wbr_x0, wbr_y0, wbr_x1, wbr_y1),
-            ]
-            
-            # Mast self-ignore: scaled strip around centerline
-            mast_x0 = max(0, rcx - rw // 2 - pad_bwd)
-            mast_y0 = max(0, rcy - mast_r)
-            mast_x1 = min(FRAME_W, rcx + rw // 2 + pad_fwd)
-            mast_y1 = min(FRAME_H, rcy + mast_r)
-            
-            ignore_boxes = [
-                (mast_x0, mast_y0, mast_x1, mast_y1),
-            ]
-            
-            return under_boxes, ignore_boxes
+        def scale_box(x0, y0, x1, y1, scale, cx=RCX + RS1_VIZ_CX_SHIFT, cy=RCY):
+            """Scale box around viz center (cx shifted forward, cy) by scale factor."""
+            xs0 = cx + (x0 - cx) * scale
+            ys0 = cy + (y0 - cy) * scale
+            xs1 = cx + (x1 - cx) * scale
+            ys1 = cy + (y1 - cy) * scale
+            return int(round(xs0)), int(round(ys0)), int(round(xs1)), int(round(ys1))
 
         rgb = self._rs1.color[::-1, ::-1].copy()
         h, w = rgb.shape[:2]
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb
 
-        under_boxes, ignore_boxes = scaled_boxes(RS1_VIZ_SCALE)
-        
-        alpha = SELF_MASK_VIZ_ALPHA
-
-        # Under-robot boxes: green fill at 25% alpha (marked clear+known)
+        # Under-robot / self-ignore fills: alpha from ~/.kevin/mask_viz.json (hot)
         overlay[:, :, 3] = 255
-        green = np.array([0, 255, 0], dtype=np.float32)
-        for x0, y0, x1, y1 in under_boxes:
-            if x1 <= x0 or y1 <= y0:
-                continue
-            # Blend green at alpha over RGB
-            base = rgb[y0:y1, x0:x1].astype(np.float32)
-            blended = base * (1.0 - alpha) + green * alpha
-            overlay[y0:y1, x0:x1, :3] = blended.astype(np.uint8)
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
+        alpha = _mask_viz_alpha()
+        inv = 1.0 - alpha
+        green = np.array([0.0, 255.0, 0.0], dtype=np.float32)
+        blue = np.array([100.0, 100.0, 200.0], dtype=np.float32)
+
+        def tint_rs1(boxes, color):
+            for bx0, by0, bx1, by1 in boxes:
+                x0, y0, x1, y1 = scale_box(bx0, by0, bx1, by1, RS1_VIZ_SCALE)
+                x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
+                y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
+                if x1 <= x0 or y1 <= y0:
+                    continue
+                m = np.zeros((h, w), dtype=bool)
+                m[y0:y1, x0:x1] = True
+                base = overlay[m, :3].astype(np.float32)
+                overlay[m, :3] = (base * inv + color * alpha).astype(np.uint8)
+                cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
+
+        tint_rs1(UNDER_ROBOT_BOXES, green)
+        tint_rs1(SELF_IGNORE_BOXES, blue)
         
-        # Self-ignore boxes: blue fill at 25% alpha (removed from obs, NOT marked clear)
-        blue = np.array([100, 100, 200], dtype=np.float32)  # blue-gray for self-ignore
-        for x0, y0, x1, y1 in ignore_boxes:
-            if x1 <= x0 or y1 <= y0:
-                continue
-            # Blend blue at alpha over RGB (may overlap green, use current overlay state)
-            base = overlay[y0:y1, x0:x1, :3].astype(np.float32)
-            blended = base * (1.0 - alpha) + blue * alpha
-            overlay[y0:y1, x0:x1, :3] = blended.astype(np.uint8)
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
-        
-        # Cyan forward crop line on body floor bumper (first under-robot box)
-        if under_boxes:
-            body_x0, body_y0, body_x1, body_y1 = under_boxes[0]
+        # Cyan forward crop line on first under-robot box (body floor bumper)
+        if UNDER_ROBOT_BOXES:
+            body_bx0, body_by0, body_bx1, body_by1 = UNDER_ROBOT_BOXES[0]
+            body_x0, body_y0, body_x1, body_y1 = scale_box(body_bx0, body_by0, body_bx1, body_by1, RS1_VIZ_SCALE)
+            y0 = max(0, min(h, body_y0))
+            y1 = max(0, min(h, body_y1))
             fx = min(w - 1, max(0, body_x1 - 1))
-            if body_y1 > body_y0:
-                overlay[body_y0:body_y1, fx, :] = [0, 255, 255, 255]  # cyan
+            if y1 > y0:
+                overlay[y0:y1, fx, :] = [0, 255, 255, 255]  # cyan
         return overlay
 
     def get_rs1_trust_mask_overlay(self):
@@ -2303,96 +2255,65 @@ class Vision:
             }
         }
 
-    def get_robot_footprint_overlay(self):
-        """Create ego-map footprint overlay showing multi-box self-mask.
-        
-        Draws robot footprint boxes (body + 4 wheels) on ego obstacle map at
-        1 cm/px scale. This shows the topdown hull approximation used for
-        self-clearing in depth processing.
-        
-        Returns RGB (FRAME_H, FRAME_W, 3) uint8 array showing:
-        - Underlay: ego obstacle map (colorized: gray=free, obstacles=height gradient)
-        - Magenta fill: body box + 4 wheel boxes (self-mask regions)
-        - Yellow outline: forward edge of body box
-        
-        Ego-space viz: 1 px = 1 cm, body ~30 cm wide reads as ~30 px on map.
-        Multi-box footprint covers true robot hull, not just center patch.
-        """
-        # Create colorized ego underlay from obstacle + known maps
+    def get_robot_footprint_underlay(self):
+        """RGB ego map underlay (gray free, black unknown, yellow-red obstacles)."""
         underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
-        
-        # Get current ego maps (use persistent obs + height for richer viz)
-        obs = getattr(self, '_persistent_obs', None)
-        height = getattr(self, '_persistent_height', None)
-        known = getattr(self, '_known_combined', None)
-        
-        if obs is None or height is None or known is None:
-            # Fallback: plain gray if maps not available
-            underlay[:] = [50, 50, 50]
-        else:
-            # Free space: dark gray
-            free_mask = (known > 0) & (obs == 0)
-            underlay[free_mask] = [40, 40, 40]
-            
-            # Unknown: black
-            unknown_mask = (known == 0)
-            underlay[unknown_mask] = [0, 0, 0]
-            
-            # Obstacles: height-based gradient (5 cm = yellow, 100 cm = red)
-            obs_mask = obs > 0
-            if np.any(obs_mask):
+        obs = getattr(self, "_viz_obs_premask", None)
+        if obs is None:
+            obs = getattr(self, "_persistent_obs", None)
+        height = getattr(self, "_persistent_height", None)
+        known = getattr(self, "_known_combined", None)
+        if obs is None or known is None:
+            underlay[:] = (50, 50, 50)
+            return underlay
+        underlay[(known > 0) & (obs == 0)] = (40, 40, 40)
+        underlay[(known == 0) & (obs == 0)] = (0, 0, 0)
+        obs_mask = obs > 0
+        if np.any(obs_mask):
+            if height is not None:
                 h = height.astype(np.float32)
-                h_norm = np.clip((h - 5.0) / 95.0, 0.0, 1.0)  # 5-100 cm → 0-1
-                # Yellow (low) → red (high) gradient
-                underlay[obs_mask, 0] = 255  # R stays high
-                underlay[obs_mask, 1] = (255 * (1.0 - h_norm[obs_mask] * 0.7)).astype(np.uint8)  # G dims
-                underlay[obs_mask, 2] = 0  # B stays zero
-        
-        # Self-mask visualization: distinguish under-robot clear (green) vs self-ignore (blue-gray)
-        # Blend fills at 25% alpha so underlay/map shows through
-        alpha = SELF_MASK_VIZ_ALPHA
-        
-        # Under-robot boxes (wheels + floor): green fill at 25% → marked clear+known
-        green = np.array([0, 180, 0], dtype=np.float32)
-        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
-            base = underlay[y0:y1, x0:x1].astype(np.float32)
-            blended = base * (1.0 - alpha) + green * alpha
-            underlay[y0:y1, x0:x1] = blended.astype(np.uint8)
-        
-        # Self-ignore boxes (mast/body): blue-gray fill at 25% → removed from obs, NOT marked clear
-        blue_gray = np.array([100, 100, 150], dtype=np.float32)
-        for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
-            base = underlay[y0:y1, x0:x1].astype(np.float32)
-            blended = base * (1.0 - alpha) + blue_gray * alpha
-            underlay[y0:y1, x0:x1] = blended.astype(np.uint8)
-        
-        # Cyan forward crop line at bumper (first under-robot box = body floor)
-        if UNDER_ROBOT_BOXES:
-            body_x0, body_y0, body_x1, body_y1 = UNDER_ROBOT_BOXES[0]
-            x1_line = min(body_x1, FRAME_W - 1)
-            underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [0, 255, 255]  # cyan
-        
-        # Yellow outline around all boxes for clarity
-        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
-            # Top edge
-            underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
-            # Bottom edge
-            underlay[max(y1 - 1, 0):y1, x0:x1] = [255, 255, 0]
-            # Left edge
-            underlay[y0:y1, x0:min(x0 + 1, FRAME_W)] = [255, 255, 0]
-            # Right edge
-            underlay[y0:y1, max(x1 - 1, 0):x1] = [255, 255, 0]
-        
-        for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
-            # Top edge
-            underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
-            # Bottom edge
-            underlay[max(y1 - 1, 0):y1, x0:x1] = [255, 255, 0]
-            # Left edge
-            underlay[y0:y1, x0:min(x0 + 1, FRAME_W)] = [255, 255, 0]
-            # Right edge
-            underlay[y0:y1, max(x1 - 1, 0):x1] = [255, 255, 0]
-        
+                h_norm = np.clip((h - 5.0) / 95.0, 0.0, 1.0)
+                underlay[obs_mask, 0] = 255
+                underlay[obs_mask, 1] = (255 * (1.0 - h_norm[obs_mask] * 0.7)).astype(np.uint8)
+                underlay[obs_mask, 2] = 0
+            else:
+                underlay[obs_mask] = (255, 200, 0)
         return underlay
 
+    def get_robot_footprint_overlay(self):
+        """See-through mask: tint underlay pixels (71bda16 style). Ego 1cm/px boxes."""
+        import cv2
+        rgb = self.get_robot_footprint_underlay()
+        if rgb is None:
+            return None
+        out = np.ascontiguousarray(rgb, dtype=np.uint8).copy()
+        h, w = out.shape[:2]
+
+        alpha = _mask_viz_alpha()
+        inv = 1.0 - alpha
+        green = np.array([0.0, 255.0, 0.0], dtype=np.float32)
+        blue = np.array([100.0, 100.0, 200.0], dtype=np.float32)
+
+        def tint(x0, y0, x1, y1, mode):
+            x0, y0 = max(0, int(x0)), max(0, int(y0))
+            x1, y1 = min(w, int(x1)), min(h, int(y1))
+            if x1 <= x0 or y1 <= y0:
+                return
+            m = np.zeros((h, w), dtype=bool)
+            m[y0:y1, x0:x1] = True
+            base = out[m].astype(np.float32)
+            color = green if mode == "green" else blue
+            out[m] = (base * inv + color * alpha).astype(np.uint8)
+            cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 1)
+
+        for box in UNDER_ROBOT_BOXES:
+            tint(*box, "green")
+        for box in SELF_IGNORE_BOXES:
+            tint(*box, "blue")
+
+        if UNDER_ROBOT_BOXES:
+            bx0, by0, bx1, by1 = UNDER_ROBOT_BOXES[0]
+            fx = min(w - 1, max(0, int(bx1) - 1))
+            out[int(by0):int(by1), max(0, fx - 1):min(w, fx + 2)] = (0, 255, 255)
+        return out
 

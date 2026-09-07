@@ -115,4 +115,4 @@ RS1_VIZ_CX_SHIFT = 5          # forward shift in ego +x (pixels) to recenter sca
 # Self-mask overlay visualization opacity
 # Fill alpha for under-robot / self-ignore boxes in both RS1 and ego footprint overlays.
 # Low opacity (~25%) lets underlay/map show through; outlines stay crisp for edges.
-SELF_MASK_VIZ_ALPHA = 0.25    # blend alpha for green/blue fills (0.25 = 25% opacity)
+SELF_MASK_VIZ_ALPHA = 0.20    # blend alpha for green/blue fills (0.20 = 20% opacity); override via ~/.kevin/mask_viz.json
