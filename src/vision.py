@@ -712,6 +712,8 @@ class Vision:
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""
         self._wheelbase = wb
+        if self._odom_thread is not None:
+            self._odom_thread.set_wheelbase(wb)
 
     def start(self):
         if self._running:
@@ -1222,35 +1224,29 @@ class Vision:
             # Capture loop samples latest pose snapshot without blocking odom thread.
             # Visual odometry (future work): can still run here and apply corrections
             # via a thread-safe mechanism, or stay at 30 Hz as "frame-tied" refinement.
-            fused_yaw, fused_fwd = 0.0, 0.0  # Placeholder for future VO corrections
+            fused_yaw, fused_fwd = 0.0, 0.0
             if not _use_cuvslam:
-                # Sample latest pose from odom thread (thread-safe, non-blocking)
-                # Odom thread continuously integrates wheel+IMU at high rate,
-                # capture just reads the latest snapshot for rendering/gmap.
+                # Frame-tied visual odometry → queue into fast odom thread (no double wheel integrate).
+                if self._rs2 and self._rs2.ok and self._odom_thread is not None:
+                    fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
+                    _odom_result = self._gpu.odom_gpu(fw_gray)
+                    if _odom_result is not None:
+                        vis_yaw, vis_fwd, vis_conf = _odom_result
+                        fused_yaw, fused_fwd = vis_yaw, vis_fwd
+                        self._odom_thread.apply_visual_correction(
+                            vis_yaw, vis_fwd, vis_conf)
+
+                # Sample latest pose from odom thread (wheel+IMU @~100Hz + pending VO)
                 if self._odom_thread:
-                    cap_x, cap_y, cap_theta, _ = self._odom_thread.get_pose_snapshot()
+                    cap_x, cap_y, cap_theta, _, using_encoder_feedback = (
+                        self._odom_thread.get_pose_snapshot())
                 else:
-                    # Fallback if odom thread not running (shouldn't happen)
                     cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
-                
-                # Track capture timing for diagnostics
+                    using_encoder_feedback = False
+
                 now = time.monotonic()
-                dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
                 self._last_capture_time = now
-                
-                # TODO: Visual odometry corrections (currently deferred)
-                # Option A: Compute VO here, apply via odom_thread.apply_visual_correction()
-                # Option B: Keep VO "frame-tied" at 30 Hz, accept that wheel+IMU is faster
-                # For now, just note that VO is not applied in this architecture.
-                # To re-enable:
-                # vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
-                # if self._rs2 and self._rs2.ok:
-                #     fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                #     _odom_result = self._gpu.odom_gpu(fw_gray)
-                #     if _odom_result is not None:
-                #         vis_yaw, vis_fwd, vis_conf = _odom_result
-                #         # Apply correction via thread-safe mechanism TBD
-                #         # self._odom_thread.apply_visual_correction(vis_yaw, vis_fwd, vis_conf)
+
             _t_odom = time.monotonic()
 
             if not hasattr(self, '_odom_log_n'):
@@ -1274,17 +1270,10 @@ class Vision:
                         enc_age = (time.monotonic() -
                                    getattr(wb, '_enc_last_good', 0))
                         enc_info = 'enc=%s age=%.1fs' % (enc_ok, enc_age)
-                    print("odom: vl=%.4f vr=%.4f dt=%.4f "
-                          "pose=(%.3f,%.3f,%.1f°) %s"
-                          % (vl, vr, dt,
-                             self._pose.x, self._pose.y,
+                    print("odom: pose=(%.3f,%.3f,%.1f°) enc_fb=%s %s"
+                          % (self._pose.x, self._pose.y,
                              np.degrees(self._pose.theta),
-                             enc_info))
-                if dt > 0.2:
-                    print("vision: slow capture loop dt=%.3fs rs1_ok=%s rs2_ok=%s"
-                          % (dt,
-                             getattr(self._rs1, 'ok', None),
-                             getattr(self._rs2, 'ok', None)))
+                             using_encoder_feedback, enc_info))
 
             # --- Height diagnostic (every 30 frames) ---
             if not hasattr(self, '_hdiag_n'):

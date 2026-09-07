@@ -46,6 +46,12 @@ class OdomThread:
         self._snapshot_y = 0.0
         self._snapshot_theta = 0.0
         self._snapshot_time = 0.0
+        self._snapshot_encoder_ok = False
+        # Latest visual odometry correction from capture (consumed once per odom tick)
+        self._vis_yaw = 0.0
+        self._vis_fwd = 0.0
+        self._vis_conf = 0.0
+        self._vis_pending = False
         
     def start(self):
         """Start the high-rate odometry thread."""
@@ -107,13 +113,18 @@ class OdomThread:
             self._last_update_time = now
             
             # --- 4. Integrate (pose estimator handles fusion) ---
-            # Note: Visual odometry corrections are NOT applied here.
-            # Capture loop can still call pose.update() with visual corrections
-            # or we can add a method to apply corrections from capture.
+            # Consume one pending visual correction from capture (frame-tied VO).
+            with self._lock:
+                if self._vis_pending:
+                    vis_yaw, vis_fwd, vis_conf = (
+                        self._vis_yaw, self._vis_fwd, self._vis_conf)
+                    self._vis_pending = False
+                else:
+                    vis_yaw = vis_fwd = vis_conf = 0.0
             if dt > 0:
                 self._pose.update(
                     vl, vr, dt,
-                    vis_yaw=0.0, vis_fwd=0.0, vis_confidence=0.0,
+                    vis_yaw=vis_yaw, vis_fwd=vis_fwd, vis_confidence=vis_conf,
                     using_encoder_feedback=using_encoder_feedback,
                     imu_yaw_rate=imu_yaw_rate)
             
@@ -123,6 +134,7 @@ class OdomThread:
                 self._snapshot_y = self._pose.y
                 self._snapshot_theta = self._pose.theta
                 self._snapshot_time = time.time()
+                self._snapshot_encoder_ok = using_encoder_feedback
             
             # --- 6. Rate limiting ---
             _loop_count += 1
@@ -138,26 +150,35 @@ class OdomThread:
                 time.sleep(sleep_time)
     
     def get_pose_snapshot(self):
-        """Return latest pose snapshot (x, y, theta, timestamp).
+        """Return latest pose snapshot (x, y, theta, timestamp, encoder_ok).
         
         Thread-safe: can be called from capture loop without blocking odom.
         
         Returns:
-            (x, y, theta, timestamp) tuple
+            (x, y, theta, timestamp, encoder_ok) tuple
         """
         with self._lock:
-            return (self._snapshot_x, self._snapshot_y, 
-                    self._snapshot_theta, self._snapshot_time)
+            return (self._snapshot_x, self._snapshot_y,
+                    self._snapshot_theta, self._snapshot_time,
+                    self._snapshot_encoder_ok)
     
+    def set_wheelbase(self, wheelbase):
+        """Update wheelbase reference (safe if called before/after start)."""
+        self._wheelbase = wheelbase
+
+    def set_imu(self, imu_pipeline):
+        """Update IMU pipeline reference."""
+        self._imu = imu_pipeline
+
     def apply_visual_correction(self, vis_yaw, vis_fwd, vis_confidence):
-        """Apply visual odometry correction to pose (called from capture).
-        
-        This is a placeholder for future refinement. Options:
-        1. Capture calls this to feed corrections to odom thread
-        2. Capture calls pose.update() directly with visual corrections
-        3. Pose estimator becomes lock-free and both threads update it
-        
-        For now, this is a no-op. Visual corrections still happen on capture.
+        """Queue a frame-tied visual odometry correction for the next odom tick.
+
+        Capture computes VO on synced RS2 color and calls this; the high-rate
+        thread consumes it once on the next pose.update so wheels are not
+        double-integrated.
         """
-        # TODO: Implement visual correction feedback if needed
-        pass
+        with self._lock:
+            self._vis_yaw = float(vis_yaw)
+            self._vis_fwd = float(vis_fwd)
+            self._vis_conf = float(vis_confidence)
+            self._vis_pending = True

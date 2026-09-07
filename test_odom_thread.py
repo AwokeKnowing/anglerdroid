@@ -30,20 +30,20 @@ def test_pose_snapshot():
     odom_thread = OdomThread(pose, wheelbase, None, 100.0)
     odom_thread.start()
     time.sleep(0.5)
-    x1, y1, theta1, t1 = odom_thread.get_pose_snapshot()
-    print(f"Snapshot 1: x={x1:.4f}, y={y1:.4f}")
+    x1, y1, theta1, t1, enc1 = odom_thread.get_pose_snapshot()
+    print(f"Snapshot 1: x={x1:.4f}, y={y1:.4f} enc={enc1}")
     wheelbase.vl = 0.15
     wheelbase.vr = 0.10
     time.sleep(0.5)
-    x2, y2, theta2, t2 = odom_thread.get_pose_snapshot()
-    print(f"Snapshot 2: x={x2:.4f}, y={y2:.4f}")
+    x2, y2, theta2, t2, enc2 = odom_thread.get_pose_snapshot()
+    print(f"Snapshot 2: x={x2:.4f}, y={y2:.4f} enc={enc2}")
+    assert enc2 is True
     odom_thread.stop()
     assert x2 > x1, f"Expected x to increase"
     assert t2 > t1, f"Expected timestamp to increase"
     distance = ((x2 - x1)**2 + (y2 - y1)**2)**0.5
     assert distance > 0.01, f"Should have moved >1cm"
     print("✓ Test passed")
-    return True
 
 
 if __name__ == '__main__':
