@@ -391,25 +391,25 @@ def test_empty_cloud():
     print("  ✅ PASS: Empty/invalid clouds handled gracefully")
 
 
-def test_lateral_cone_limits():
-    """Test 12: Overhang outside lateral cone should NOT trigger."""
+def test_lateral_strip_limits():
+    """Test 12: Overhang outside lateral column margins should NOT trigger."""
     print("\n" + "="*70)
-    print("Test 12: Overhang outside lateral cone (X limits)")
+    print("Test 12: Overhang outside lateral strip (column margins)")
     print("="*70)
     
-    # Overhang at 50cm but far left (x=-0.30m, outside default cone x=-0.15 to 0.15)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=-0.30, y_center=0.25, 
-                                 x_extent=0.10, y_extent=0.30, points=500)
+    # Far-left column (default margin excludes col < 30)
+    cloud = make_cloud_for_image_strip(z_distance=0.50, row_center=30, col_center=10,
+                                         row_extent=30, col_extent=20, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Overhang at x=-0.30m (outside lateral cone):")
+    print(f"  Overhang at col~10 (outside lateral margin):")
     print(f"    Triggered: {triggered}")
     print(f"    Overhang count: {count}")
     
-    assert not triggered, "Should NOT trigger for overhang outside lateral cone"
+    assert not triggered, "Should NOT trigger for overhang outside lateral strip margins"
     
-    print("  ✅ PASS: Lateral cone limits work correctly")
+    print("  ✅ PASS: Lateral strip margins work correctly")
 
 
 def test_priority_near_field_closer():
@@ -418,11 +418,10 @@ def test_priority_near_field_closer():
     print("Test 13: Priority - near-field reflex for <30cm objects")
     print("="*70)
     
-    # Object at 25cm (near-field range) - use more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.25, x_center=0.0, y_center=0.25, 
-                                 x_extent=0.28, y_extent=0.30, points=300)
+    # Object at 25cm in forward strip — overhang band is 30-70cm, so overhang must stay off
+    cloud = make_cloud_for_image_strip(z_distance=0.25, row_center=30, col_center=160,
+                                         row_extent=30, col_extent=100, points=300)
     
-    # Check both detectors
     ovh_triggered, ovh_count, _ = check_topdown_overhang_approach(cloud)
     nf_triggered, nf_count, _ = check_topdown_near_field(cloud)
     
@@ -430,8 +429,7 @@ def test_priority_near_field_closer():
     print(f"    Overhang approach: triggered={ovh_triggered}, count={ovh_count}")
     print(f"    Near-field: triggered={nf_triggered}, count={nf_count} (after clipping)")
     
-    # 25cm is borderline - might trigger overhang if near_m=0.30
-    # Key is near-field MUST trigger
+    assert not ovh_triggered, "Overhang must NOT trigger below 30cm (near-field owns that band)"
     assert nf_triggered, f"Near-field MUST trigger at 25cm (got {nf_count} points after clipping)"
     
     print("  ✅ PASS: Near-field handles close objects")
@@ -495,6 +493,7 @@ def run_all_tests():
         test_house_bot_integration,
         test_noise_filtering,
         test_empty_cloud,
+        test_lateral_strip_limits,
         test_mast_self_geometry_rejection,  # CRITICAL: strip-based regression test
         test_priority_near_field_closer,
     ]
