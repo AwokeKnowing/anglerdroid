@@ -166,11 +166,16 @@ def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
     return triggered, close_count, min_z
 
 
-def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70, 
-                                     forward_cone_x_min=-0.15, forward_cone_x_max=0.15,
-                                     forward_cone_y_min=0.15, forward_cone_y_max=0.40,
-                                     min_pixels=80):
-    """Check if top-down camera sees an overhang (table underside) in forward approach cone.
+def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
+                                     forward_strip_row_min=10, forward_strip_row_max=50,
+                                     lateral_col_margin=30,
+                                     min_pixels=80,
+                                     out_h=FRAME_H, out_w=FRAME_W):
+    """Check if top-down camera sees an overhang (table underside) in forward image strip.
+
+    Uses a STRIP-BASED ROI in the RS1 depth image frame, not a 3D cone filter.
+    The forward strip naturally excludes mast/self-geometry, which appears in the
+    center/rear of the topdown image.
 
     Detects elevated structures (table undersides, shelves) at medium distance (30-70cm)
     in the forward approach region. This provides EARLIER warning than near-field reflex,
@@ -180,23 +185,24 @@ def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
         verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
         near_m: Near distance threshold in metres (default 0.30m = 30cm).
         far_m: Far distance threshold in metres (default 0.70m = 70cm).
-        forward_cone_x_min: Left edge of forward cone in metres (default -0.15m).
-        forward_cone_x_max: Right edge of forward cone in metres (default 0.15m).
-        forward_cone_y_min: Near edge of forward cone in metres (default 0.15m, ahead of mast/self).
-        forward_cone_y_max: Far edge of forward cone in metres (default 0.40m).
-        min_pixels: Minimum number of points to trigger (filters noise).
+        forward_strip_row_min: Top edge of forward strip in image (default 10, after 180° rotation).
+        forward_strip_row_max: Bottom edge of forward strip in image (default 50, after 180° rotation).
+        lateral_col_margin: Margin from image edges in columns (default 30px).
+        min_pixels: Minimum number of overhang pixels to trigger (filters noise).
+        out_h: Image height (default FRAME_H = 240).
+        out_w: Image width (default FRAME_W = 320).
 
     Returns:
         (triggered: bool, overhang_count: int, median_z: float)
-        triggered: True if enough overhang points detected.
-        overhang_count: Number of points in approach cone at overhang distance.
-        median_z: Median Z value of overhang points, or inf if none.
+        triggered: True if enough overhang pixels detected in forward strip.
+        overhang_count: Number of pixels in forward strip at overhang distance.
+        median_z: Median Z value of overhang pixels, or inf if none.
 
     Note:
-        RS1 coordinate system: +X right, +Y forward (away from robot), +Z toward camera.
-        Forward cone is ahead of robot nose (positive Y), centered in X.
-        The forward cone starts at Y=0.15m (not 0.05m) to reject mast/self-geometry
-        near the robot body, which was causing false positives on live runs.
+        RS1 image after 180° rotation: top of image (low row indices) = forward region.
+        Forward strip rows 10-50 correspond to ~0.10-0.40m ahead of robot center.
+        Mast/self-geometry appears in center/rear (rows >80), outside forward strip.
+        This strip-based ROI naturally avoids mast false positives.
     """
     if len(verts) == 0:
         return False, 0, float('inf')
@@ -208,15 +214,35 @@ def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
     y = verts[:, 1]
     z = verts[:, 2]
     
-    # Valid depth + forward cone + overhang distance range
-    valid = (
-        (z > 0.01) &  # Valid depth
-        (z >= near_m) & (z <= far_m) &  # Overhang distance (30-70cm)
-        (x >= forward_cone_x_min) & (x <= forward_cone_x_max) &  # Lateral cone
-        (y >= forward_cone_y_min) & (y <= forward_cone_y_max)  # Forward cone
+    # Filter for valid depth and overhang Z range
+    valid_z = (z > 0.01) & (z >= near_m) & (z <= far_m)
+    
+    if not np.any(valid_z):
+        return False, 0, float('inf')
+    
+    # Project valid overhang points to image coordinates
+    v_overhang = verts[valid_z]
+    scale = np.float32(1.0 / TD_PX_SIZE)
+    center = np.float32([out_w * 0.5, out_h * 0.5])
+    
+    # p = [col, row] in image before 180° rotation
+    p = v_overhang[:, :2] * scale + center
+    cols, rows = p[:, 0], p[:, 1]
+    
+    # After 180° rotation: (row, col) → (out_h - 1 - row, out_w - 1 - col)
+    # So forward region (large Y, large row) → top of rotated image (small row)
+    rows_rotated = out_h - 1 - rows
+    cols_rotated = out_w - 1 - cols
+    
+    # Check if points fall in forward strip ROI (after rotation)
+    in_strip = (
+        (rows_rotated >= forward_strip_row_min) &
+        (rows_rotated <= forward_strip_row_max) &
+        (cols_rotated >= lateral_col_margin) &
+        (cols_rotated < out_w - lateral_col_margin)
     )
     
-    overhang_z = z[valid]
+    overhang_z = v_overhang[in_strip, 2]
     
     if len(overhang_z) == 0:
         return False, 0, float('inf')

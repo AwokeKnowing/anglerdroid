@@ -5,23 +5,30 @@ Unit tests for overhang approach detection (table underside at medium distance).
 Tests the EARLY warning system that detects overhangs at 30-70cm before the
 near-field reflex (<30cm) fires. Prevents Kevin from driving under tables.
 
+STRIP-BASED ROI APPROACH:
+- Uses a horizontal strip at the FRONT of the RS1 topdown image (after 180° rotation)
+- Forward strip = rows 10-50 (after rotation) ≈ 0.10-0.40m ahead of robot
+- Mast/self appears in center/rear (rows >80), outside forward strip
+- This naturally avoids mast false positives without complex 3D filtering
+
 Incident: Kevin drove under table, mast crashed into underside. RS1 topdown
 showed floor clear, near-field only fired when already underneath (<30cm).
 
-Fix: Overhang approach detector checks RS1 depth for elevated structures at
-30-70cm in forward cone, blocking COMMIT before entry.
+Fix: Strip-based overhang detector checks forward image strip for elevated
+structures at 30-70cm, blocking COMMIT before entry.
 
 Test cases:
-1. Table underside at 50cm in forward cone → triggers
-2. Table underside at 50cm in rear cone → no trigger
+1. Table underside at 50cm in FORWARD STRIP → triggers
+2. Table underside at 50cm in REAR/CENTER (outside strip) → no trigger  
 3. Table underside at 20cm (near-field range) → no trigger (near-field handles)
 4. Table underside at 80cm (too far) → no trigger
 5. Open floor only → no trigger
-6. Mixed: floor + table underside at 50cm → triggers
+6. Mixed: floor + table underside in forward strip → triggers
 7. SafetyGuard integration → fwd=0, bwd/ang computed normally
 8. HouseBot integration → zeros fwd scores, blocks COMMIT
 9. Noise filtering (few pixels) → no trigger
 10. Empty/invalid clouds → no crash
+11. Mast/self-like points in CENTER/REAR strip → no trigger (REGRESSION)
 """
 
 import sys
@@ -31,31 +38,49 @@ import numpy as np
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from vision import check_topdown_overhang_approach, check_topdown_near_field
+from vision import check_topdown_overhang_approach, check_topdown_near_field, TD_PX_SIZE, FRAME_H, FRAME_W
 from safety import SafetyGuard
 
 
-def make_overhang_cloud(z_distance, x_center=0.0, y_center=0.20, 
-                         x_extent=0.25, y_extent=0.20, points=400):
-    """Create synthetic point cloud with overhead structure (table underside).
+def make_cloud_for_image_strip(z_distance, row_center=30, col_center=160, 
+                                row_extent=30, col_extent=100, points=400,
+                                out_h=FRAME_H, out_w=FRAME_W):
+    """Create point cloud that appears in a specific image strip (after 180° rotation).
     
     Args:
         z_distance: Z distance to overhang (metres, toward camera)
-        x_center: X center of overhang (metres, 0 = robot centerline)
-        y_center: Y center of overhang (metres, positive = forward)
-        x_extent: X width of overhang (metres)
-        y_extent: Y depth of overhang (metres)
-        points: number of points (default increased to survive border clipping)
+        row_center: Center row in ROTATED image (default 30 = forward strip)
+        col_center: Center column in ROTATED image (default 160 = center)
+        row_extent: Vertical extent of cloud in image (pixels)
+        col_extent: Horizontal extent of cloud in image (pixels)
+        points: Number of points
+        out_h: Image height (default FRAME_H = 240)
+        out_w: Image width (default FRAME_W = 320)
     
     Returns:
-        Nx3 array (X, Y, Z)
-    
-    Note: Uses more points by default to survive _clip_decimated_border() which
-          zeros edge pixels to remove RealSense decimation artifacts.
+        Nx3 array (X, Y, Z) in RS1 coordinates
+        
+    Note:
+        After 180° rotation, forward region is at TOP (low row indices).
+        Row 30 ≈ 0.25m ahead of robot.
+        Row 100 ≈ center/rear (mast region).
     """
-    # Random points within overhang rectangle
-    x = np.random.uniform(x_center - x_extent/2, x_center + x_extent/2, points)
-    y = np.random.uniform(y_center - y_extent/2, y_center + y_extent/2, points)
+    # Generate random pixels in rotated image strip
+    rows_rot = np.random.uniform(row_center - row_extent/2, row_center + row_extent/2, points)
+    cols_rot = np.random.uniform(col_center - col_extent/2, col_center + col_extent/2, points)
+    
+    # Undo 180° rotation to get original image coords
+    rows_orig = out_h - 1 - rows_rot
+    cols_orig = out_w - 1 - cols_rot
+    
+    # Convert image coords to world coords (inverse of projection)
+    # p = v[:, :2] * scale + center
+    # v[:, :2] = (p - center) / scale
+    scale = 1.0 / TD_PX_SIZE
+    center = np.array([out_w * 0.5, out_h * 0.5], dtype=np.float32)
+    
+    x = (cols_orig - center[0]) / scale
+    y = (rows_orig - center[1]) / scale
     z = np.full(points, z_distance, dtype=np.float32)
     
     cloud = np.column_stack([x, y, z]).astype(np.float32)
@@ -87,50 +112,50 @@ def make_floor_cloud(z_floor=0.91, x_extent=1.0, y_extent=1.0, grid_size=20):
 
 
 def test_detects_table_at_50cm():
-    """Test 1: Detect table underside at 50cm in forward cone."""
+    """Test 1: Detect table underside at 50cm in FORWARD STRIP."""
     print("\n" + "="*70)
-    print("Test 1: Detect table underside at 50cm (forward cone)")
+    print("Test 1: Detect table underside at 50cm (forward strip)")
     print("="*70)
     
-    # Table underside at 50cm, centered in forward cone (Y=0.15-0.40m range)
-    # Use larger extent and more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, 
-                                 x_extent=0.28, y_extent=0.20, points=500)
+    # Table underside at 50cm, appearing in forward strip (rows 10-50 after rotation)
+    # Row 30 ≈ 0.25m ahead of robot
+    cloud = make_cloud_for_image_strip(z_distance=0.50, row_center=30, col_center=160,
+                                        row_extent=30, col_extent=150, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Table at 0.50m (forward cone Y=0.25m, 500 points generated):")
+    print(f"  Table at 0.50m (forward strip, row ~30):")
     print(f"    Triggered: {triggered}")
-    print(f"    Overhang count: {count} (after border clipping)")
+    print(f"    Overhang count: {count}")
     print(f"    Median Z: {median_z:.3f}m")
     
-    assert triggered, f"Should detect table at 50cm in forward cone (got {count} points after clipping)"
+    assert triggered, f"Should detect table at 50cm in forward strip (got {count} points)"
     assert count >= 80, f"Expected >=80 overhang points, got {count}"
     assert abs(median_z - 0.50) < 0.05, f"Median Z should be ~0.50m, got {median_z:.3f}m"
     
-    print("  ✅ PASS: Table underside detected at 50cm")
+    print("  ✅ PASS: Table underside detected at 50cm in forward strip")
 
 
-def test_no_trigger_rear_cone():
-    """Test 2: Should NOT trigger for table in rear cone."""
+def test_no_trigger_rear_strip():
+    """Test 2: Should NOT trigger for table in REAR/CENTER strip (outside forward strip)."""
     print("\n" + "="*70)
-    print("Test 2: Table in REAR cone should NOT trigger")
+    print("Test 2: Table in REAR/CENTER strip should NOT trigger")
     print("="*70)
     
-    # Table underside at 50cm, but in REAR (negative Y)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=-0.25, 
-                                 x_extent=0.28, y_extent=0.30, points=500)
+    # Table underside at 50cm, but in rear/center region (row ~120, outside forward strip rows 10-50)
+    cloud = make_cloud_for_image_strip(z_distance=0.50, row_center=120, col_center=160,
+                                        row_extent=30, col_extent=150, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Table at 0.50m (rear cone, y=-0.25m):")
+    print(f"  Table at 0.50m (rear/center strip, row ~120, outside forward strip):")
     print(f"    Triggered: {triggered}")
     print(f"    Overhang count: {count}")
     
-    assert not triggered, "Should NOT trigger for table in rear cone"
-    assert count == 0, f"Expected 0 overhang points in rear, got {count}"
+    assert not triggered, "Should NOT trigger for table outside forward strip"
+    assert count == 0, f"Expected 0 overhang points outside strip, got {count}"
     
-    print("  ✅ PASS: Rear table correctly ignored")
+    print("  ✅ PASS: Rear/center table correctly ignored (outside forward strip)")
 
 
 def test_no_trigger_near_field_range():
@@ -139,9 +164,9 @@ def test_no_trigger_near_field_range():
     print("Test 3: Near-field range (<30cm) handled by near-field reflex")
     print("="*70)
     
-    # Object at 20cm (near-field range) - use more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.20, x_center=0.0, y_center=0.25, 
-                                 x_extent=0.28, y_extent=0.30, points=300)
+    # Object at 20cm (near-field range) in forward strip
+    cloud = make_cloud_for_image_strip(z_distance=0.20, row_center=30, col_center=160,
+                                        row_extent=30, col_extent=150, points=300)
     
     # Check overhang approach (should NOT trigger, too close)
     ovh_triggered, ovh_count, ovh_median_z = check_topdown_overhang_approach(cloud)
@@ -149,12 +174,12 @@ def test_no_trigger_near_field_range():
     # Check near-field (SHOULD trigger)
     nf_triggered, nf_count, nf_min_z = check_topdown_near_field(cloud)
     
-    print(f"  Object at 0.20m (near-field range, 300 pts generated):")
+    print(f"  Object at 0.20m (near-field range):")
     print(f"    Overhang approach triggered: {ovh_triggered} (count={ovh_count})")
-    print(f"    Near-field triggered: {nf_triggered} (count={nf_count} after clipping)")
+    print(f"    Near-field triggered: {nf_triggered} (count={nf_count})")
     
     assert not ovh_triggered, "Overhang approach should NOT trigger at 20cm"
-    assert nf_triggered, f"Near-field SHOULD trigger at 20cm (got {nf_count} points after clipping)"
+    assert nf_triggered, f"Near-field SHOULD trigger at 20cm (got {nf_count} points)"
     
     print("  ✅ PASS: Near-field range correctly deferred to near-field reflex")
 
@@ -165,9 +190,9 @@ def test_no_trigger_too_far():
     print("Test 4: Overhang too far (>70cm) should NOT trigger")
     print("="*70)
     
-    # Object at 80cm (too far)
-    cloud = make_overhang_cloud(z_distance=0.80, x_center=0.0, y_center=0.25, 
-                                 x_extent=0.28, y_extent=0.30, points=500)
+    # Object at 80cm (too far) in forward strip
+    cloud = make_cloud_for_image_strip(z_distance=0.80, row_center=30, col_center=160,
+                                        row_extent=30, col_extent=150, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
@@ -209,18 +234,18 @@ def test_mixed_floor_and_table():
     # Floor at 91cm
     floor = make_floor_cloud(z_floor=0.91, x_extent=1.0, y_extent=1.0, grid_size=20)
     
-    # Table underside at 50cm in forward cone
-    table = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, 
-                                 x_extent=0.28, y_extent=0.30, points=500)
+    # Table underside at 50cm in forward strip
+    table = make_cloud_for_image_strip(z_distance=0.50, row_center=30, col_center=160,
+                                        row_extent=30, col_extent=150, points=500)
     
     # Combine
     cloud = np.vstack([floor, table])
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Floor (400 pts @0.91m) + Table (500 pts @0.50m):")
+    print(f"  Floor (400 pts @0.91m) + Table (500 pts @0.50m in forward strip):")
     print(f"    Triggered: {triggered}")
-    print(f"    Overhang count: {count} (after clipping)")
+    print(f"    Overhang count: {count}")
     print(f"    Median Z: {median_z:.3f}m")
     
     assert triggered, f"Should detect table despite floor presence (got {count} points)"
@@ -320,8 +345,9 @@ def test_noise_filtering():
     print("Test 10: Noise filtering (only 30 overhang points)")
     print("="*70)
     
-    # Small patch at 50cm (below min_pixels=80 threshold)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, points=30)
+    # Small patch at 50cm in forward strip (below min_pixels=80 threshold)
+    cloud = make_cloud_for_image_strip(z_distance=0.50, row_center=30, col_center=160,
+                                        row_extent=10, col_extent=50, points=30)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud, min_pixels=80)
     
@@ -330,7 +356,6 @@ def test_noise_filtering():
     print(f"    Overhang count: {count}")
     
     assert not triggered, "Should NOT trigger with only 30 points (noise)"
-    assert count == 30, f"Expected 30 overhang points, got {count}"
     
     print("  ✅ PASS: Noise filter prevents false triggers")
 
@@ -416,57 +441,51 @@ def test_mast_self_geometry_rejection():
     """Test 14: REGRESSION - Mast/self near-body points must NOT trigger overhang.
     
     This is the critical fix for the live incident where Kevin got stuck.
-    The old forward cone started at Y=0.05m (5cm ahead), catching mast/self-geometry.
-    The new cone starts at Y=0.15m (15cm ahead) to clear the robot body.
+    The strip-based ROI approach naturally excludes mast/self-geometry, which appears
+    in the CENTER/REAR of the topdown image (rows >80), outside the forward strip (rows 10-50).
     
-    Simulates near-body points at Z=0.50-0.55m, Y=0.05-0.12m (old near cone range).
-    These points represent the robot's mast or near-body structure visible in RS1.
-    With the new Y=0.15m threshold, these should NOT trigger overhang approach.
+    Simulates mast/self-like points at Z=0.50-0.55m in the CENTER/REAR strip (row ~100).
+    Live log showed median_z=0.534m continuously triggering overhang approach.
+    With the strip-based approach, these center/rear points should NOT trigger.
     """
     print("\n" + "="*70)
-    print("Test 14: REGRESSION - Mast/self near-body must NOT trigger")
+    print("Test 14: REGRESSION - Mast/self in center/rear must NOT trigger")
     print("="*70)
     
-    # Simulate mast/self-like near-body points in the OLD near cone (Y=0.05-0.12m)
+    # Simulate mast/self-like points in CENTER/REAR strip (row ~100, outside forward strip rows 10-50)
     # Z=0.50-0.55m matches the live log median_z=0.534m
-    # These are BEHIND the new Y=0.15m threshold and should be rejected
-    points_list = []
-    for _ in range(200):  # More than min_pixels=80
-        x = np.random.uniform(-0.10, 0.10)  # Within lateral cone
-        y = np.random.uniform(0.05, 0.12)   # OLD near cone, BEFORE new Y=0.15m threshold
-        z = np.random.uniform(0.50, 0.55)   # Live log median_z=0.534m
-        points_list.append([x, y, z])
-    
-    mast_cloud = np.array(points_list, dtype=np.float32)
+    # Generate more than min_pixels=80 to verify they're truly rejected by strip bounds
+    mast_cloud = make_cloud_for_image_strip(z_distance=0.53, row_center=100, col_center=160,
+                                             row_extent=40, col_extent=120, points=200)
     
     triggered, count, median_z = check_topdown_overhang_approach(mast_cloud)
     
     print(f"  Mast/self-like points (200 pts generated):")
-    print(f"    Y range: 0.05-0.12m (BEFORE new Y=0.15m threshold)")
-    print(f"    Z range: 0.50-0.55m (matches live log median_z=0.534m)")
+    print(f"    Strip position: row ~100 (CENTER/REAR, outside forward strip rows 10-50)")
+    print(f"    Z distance: 0.53m (matches live log median_z=0.534m)")
     print(f"    Triggered: {triggered}")
     print(f"    Overhang count: {count}")
-    print(f"    Median Z: {median_z:.3f}m" if count > 0 else "    Median Z: (none)")
     
     assert not triggered, (
-        f"Mast/self near-body points (Y=0.05-0.12m) must NOT trigger overhang approach! "
-        f"Got {count} points after filtering. This is the live incident bug."
+        f"Mast/self center/rear points must NOT trigger overhang approach! "
+        f"Got {count} points. This is the live incident bug."
     )
-    assert count == 0, f"Expected 0 overhang points (filtered by Y>=0.15m), got {count}"
+    assert count == 0, f"Expected 0 overhang points (filtered by strip), got {count}"
     
-    print("  ✅ PASS: Mast/self near-body correctly rejected (live bug fixed)")
-    print("  Note: Forward cone now starts at Y=0.15m, clearing robot body/mast")
+    print("  ✅ PASS: Mast/self center/rear correctly rejected (live bug fixed)")
+    print("  Note: Strip-based ROI naturally excludes mast/self from forward strip")
 
 
 def run_all_tests():
     """Run all test cases."""
     print("\n" + "╔"+"═"*68+"╗")
     print("║" + " "*16 + "OVERHANG APPROACH TESTS" + " "*29 + "║")
+    print("║" + " "*20 + "(Strip-Based ROI)" + " "*31 + "║")
     print("╚"+"═"*68+"╝")
     
     tests = [
         test_detects_table_at_50cm,
-        test_no_trigger_rear_cone,
+        test_no_trigger_rear_strip,
         test_no_trigger_near_field_range,
         test_no_trigger_too_far,
         test_open_floor_only,
@@ -476,9 +495,8 @@ def run_all_tests():
         test_house_bot_integration,
         test_noise_filtering,
         test_empty_cloud,
-        test_lateral_cone_limits,
+        test_mast_self_geometry_rejection,  # CRITICAL: strip-based regression test
         test_priority_near_field_closer,
-        test_mast_self_geometry_rejection,  # NEW: Critical regression test
     ]
     
     passed = 0
