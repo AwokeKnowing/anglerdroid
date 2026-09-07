@@ -129,35 +129,116 @@ def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
     return v
 
 
+def check_topdown_all_in_one(verts, out_h=FRAME_H, out_w=FRAME_W,
+                             near_threshold_m=0.30, near_min_pixels=50,
+                             overhang_near_m=0.30, overhang_far_m=0.70,
+                             overhang_row_min=10, overhang_row_max=50,
+                             soft_near_m=0.35, soft_far_m=1.00,
+                             soft_min_height_cm=5.0, soft_max_height_cm=30.0,
+                             soft_row_min=10, soft_row_max=80,
+                             lateral_col_margin=30,
+                             soft_min_pixels=100, overhang_min_pixels=80,
+                             floor_clip_m=TD_FLOOR_CLIP):
+    """Combined topdown checks: near-field, overhang, soft-low in single pass.
+    
+    OPTIMIZED: Iterates over verts ONCE instead of 3+ separate passes.
+    
+    Returns: dict with all check results
+    """
+    result = {
+        'near_field': False, 'near_close_count': 0, 'near_min_z': float('inf'),
+        'overhang': False, 'overhang_count': 0, 'overhang_median_z': float('inf'),
+        'soft_low': False, 'soft_low_count': 0, 'soft_low_median_height': float('inf'),
+    }
+    
+    if len(verts) == 0:
+        return result
+    
+    verts = _clip_decimated_border(verts)
+    x = verts[:, 0]
+    y = verts[:, 1]
+    z = verts[:, 2]
+    
+    # Valid depth filter (shared)
+    valid = z > 0.01
+    if not np.any(valid):
+        return result
+    
+    z_valid = z[valid]
+    result['near_min_z'] = float(np.min(z_valid))
+    
+    # === Near-field check (any Z < threshold) ===
+    near_mask = valid & (z < near_threshold_m)
+    result['near_close_count'] = int(np.sum(near_mask))
+    result['near_field'] = result['near_close_count'] >= near_min_pixels
+    
+    # === Overhang and soft-low checks (require image projection) ===
+    # Filter for medium-range valid depth
+    mid_range = valid & (z >= overhang_near_m) & (z <= soft_far_m)
+    
+    if np.any(mid_range):
+        v_mid = verts[mid_range]
+        z_mid = v_mid[:, 2]
+        
+        # Project to image coordinates (before 180° rotation)
+        scale = np.float32(1.0 / TD_PX_SIZE)
+        center = np.float32([out_w * 0.5, out_h * 0.5])
+        p = v_mid[:, :2] * scale + center
+        cols, rows = p[:, 0], p[:, 1]
+        
+        # After 180° rotation: (row, col) → (out_h - 1 - row, out_w - 1 - col)
+        rows_rot = out_h - 1 - rows
+        cols_rot = out_w - 1 - cols
+        
+        # Overhang: 30-70cm range, forward strip rows 10-50
+        ovh_range = (z_mid >= overhang_near_m) & (z_mid <= overhang_far_m)
+        ovh_strip = (
+            (rows_rot >= overhang_row_min) & (rows_rot <= overhang_row_max) &
+            (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
+        )
+        ovh_mask = ovh_range & ovh_strip
+        
+        if np.any(ovh_mask):
+            ovh_z = z_mid[ovh_mask]
+            result['overhang_count'] = len(ovh_z)
+            result['overhang_median_z'] = float(np.median(ovh_z))
+            result['overhang'] = result['overhang_count'] >= overhang_min_pixels
+        
+        # Soft-low: 35cm-1m range, height 5-30cm, forward strip rows 10-80
+        soft_range = (z_mid >= soft_near_m) & (z_mid <= soft_far_m)
+        height_cm = (floor_clip_m - z_mid) * 100.0
+        soft_height = (height_cm >= soft_min_height_cm) & (height_cm <= soft_max_height_cm)
+        soft_strip = (
+            (rows_rot >= soft_row_min) & (rows_rot <= soft_row_max) &
+            (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
+        )
+        soft_mask = soft_range & soft_height & soft_strip
+        
+        if np.any(soft_mask):
+            soft_heights = height_cm[soft_mask]
+            result['soft_low_count'] = len(soft_heights)
+            result['soft_low_median_height'] = float(np.median(soft_heights))
+            result['soft_low'] = result['soft_low_count'] >= soft_min_pixels
+    
+    return result
+
+
 def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
-    """Check if top-down camera sees a close object (near-field hazard reflex).
-
-    Detects table undersides, hands, or any object closer than threshold_m
-    to the RS1 camera. This is a REFLEX that runs BEFORE floor-obstacle logic.
-
-    Args:
-        verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
-        threshold_m: Distance threshold in metres (default 0.30m = 30cm).
-        min_pixels: Minimum number of close points to trigger (filters noise).
-
-    Returns:
-        (triggered: bool, close_count: int, min_z: float)
-        triggered: True if enough close points detected.
-        close_count: Number of points closer than threshold.
-        min_z: Minimum (closest) Z value in metres, or inf if no valid points.
+    """DEPRECATED: Use check_topdown_all_in_one for better performance.
+    
+    Check if top-down camera sees a close object (near-field hazard reflex).
     """
     if len(verts) == 0:
         return False, 0, float('inf')
 
     verts = _clip_decimated_border(verts)
     z = verts[:, 2]
-    valid = z > 0.01  # Filter out zero/invalid depth
+    valid = z > 0.01
     z_valid = z[valid]
 
     if len(z_valid) == 0:
         return False, 0, float('inf')
 
-    # Count points closer than threshold
     close_mask = z_valid < threshold_m
     close_count = int(np.sum(close_mask))
     min_z = float(np.min(z_valid))
