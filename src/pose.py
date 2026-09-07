@@ -46,6 +46,11 @@ AGREEMENT_FACTOR    = 8.0     # max ratio: |vis_delta| / |wheel_delta|
 AGREEMENT_ABS_YAW   = 0.03    # rad — visual can disagree by at most this
 AGREEMENT_ABS_FWD   = 0.01    # m   — even when wheels say zero
 
+# ── IMU fusion ─────────────────────────────────────────────────
+IMU_YAW_WEIGHT_BASE = 0.15    # base weight for IMU yaw rate (when visual ok)
+IMU_YAW_WEIGHT_FALLBACK = 0.50  # weight when visual weak/lost
+IMU_VIS_CONF_THRESH = 0.20    # below this, boost IMU weight
+
 # ── Kalman noise ───────────────────────────────────────────────────
 # Wheel odom process noise (1-sigma, scales with magnitude + floor).
 # Higher Q_YAW_SCALE = trust wheels less for yaw → more visual correction.
@@ -116,8 +121,9 @@ class PoseEstimator:
                dt: float,
                vis_yaw: float, vis_fwd: float,
                vis_confidence: float = 0.0,
-               using_encoder_feedback: bool = True):
-        """Fuse wheel + visual odom, integrate, record history.
+               using_encoder_feedback: bool = True,
+               imu_yaw_rate: float = 0.0):
+        """Fuse wheel + visual odom + IMU, integrate, record history.
 
         Args:
             v_left_mps, v_right_mps: Wheel velocities
@@ -126,6 +132,7 @@ class PoseEstimator:
             vis_confidence: Visual confidence [0-1]
             using_encoder_feedback: True if wheel velocities from encoders, 
                                     False if from commanded velocity
+            imu_yaw_rate: IMU gyro yaw rate (rad/s, body frame Z-axis)
         
         Returns (fused_yaw, fused_fwd) for map warping.
         """
@@ -156,6 +163,19 @@ class PoseEstimator:
             self._wheel_only_frames += 1
             if gate_reason == 'agreement':
                 self._excessive_disagreement_count += 1
+        
+        # ── 3b. Blend in IMU yaw rate (if available) ──
+        if abs(imu_yaw_rate) > 1e-6 and dt > 0:
+            dtheta_imu = imu_yaw_rate * dt
+            
+            # Adaptive weight: boost IMU when visual confidence is low
+            if vis_ok and vis_confidence >= IMU_VIS_CONF_THRESH:
+                imu_weight = IMU_YAW_WEIGHT_BASE
+            else:
+                imu_weight = IMU_YAW_WEIGHT_FALLBACK
+            
+            # Complementary blend: dtheta_fused = (1-w)*dtheta + w*dtheta_imu
+            dtheta = (1.0 - imu_weight) * dtheta + imu_weight * dtheta_imu
 
         # ── 4. Integrate into global pose ──
         self.theta += dtheta

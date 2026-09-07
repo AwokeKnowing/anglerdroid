@@ -33,6 +33,7 @@ from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
 from slam import PoseGraphSLAM
 from checkered_mat import TopdownHazardDetector
+from imu import IMUPipeline
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -382,6 +383,7 @@ class Vision:
         self._rs1 = None
         self._rs2 = None
         self._webcam = None
+        self._imu = None  # IMU pipeline for D435i Motion Module
 
     @staticmethod
     def _build_obs_mask():
@@ -526,11 +528,25 @@ class Vision:
             self._thread.start()
             return
 
+        # IMU pipeline (separate from depth/color to avoid frame starvation)
+        # Initialize BEFORE cuVSLAM so we can pass it to the tracker
+        if self.rs2_serial:
+            try:
+                self._imu = IMUPipeline(self.rs2_serial)
+                if self._imu.ok:
+                    print("vision: IMU pipeline active (gyro 200 Hz, accel 250 Hz)")
+            except Exception as e:
+                print("vision: IMU init failed (%s) — pose fusion will use wheel+visual only" % e)
+                self._imu = None
+        
         if self._slam_backend == 'cuvslam':
             try:
                 from cuvslam_tracker import CuVSLAMTracker
                 rs2_profile = self._rs2.profile if self._rs2 else None
-                self._cuvslam = CuVSLAMTracker(rs2_profile=rs2_profile)
+                # Pass IMU pipeline to cuVSLAM for stereo-inertial mode
+                self._cuvslam = CuVSLAMTracker(
+                    rs2_profile=rs2_profile,
+                    imu_pipeline=self._imu if self._imu and self._imu.ok else None)
                 print("vision: cuVSLAM backend active")
             except Exception as e:
                 print("vision: cuVSLAM init failed (%s) — falling back to self" % e)
@@ -949,10 +965,19 @@ class Vision:
                     vl, vr = self._wheelbase.get_wheel_velocities_mps()
                 else:
                     vl, vr = 0.0, 0.0
+                
+                # Grab IMU data (non-blocking, separate pipeline)
+                imu_yaw_rate = 0.0
+                if self._imu and self._imu.ok:
+                    if self._imu.grab():
+                        # Transform gyro from camera frame to body frame, extract Z (yaw rate)
+                        _, _, imu_yaw_rate = self._imu.get_angular_velocity_body(
+                            camera_pitch_deg=FW_PITCH_DEG + 90.0)  # FW_PITCH_DEG is already -64.4
 
                 fused_yaw, fused_fwd = self._pose.update(
                     vl, vr, dt, vis_yaw, vis_fwd, vis_conf,
-                    using_encoder_feedback=using_encoder_feedback)
+                    using_encoder_feedback=using_encoder_feedback,
+                    imu_yaw_rate=imu_yaw_rate)
             _t_odom = time.monotonic()
 
             if not hasattr(self, '_odom_log_n'):
@@ -1206,6 +1231,8 @@ class Vision:
             self._rs1.stop()
         if self._rs2:
             self._rs2.stop()
+        if self._imu:
+            self._imu.stop()
         if self._webcam:
             self._webcam.stop()
         print("vision: stopped")

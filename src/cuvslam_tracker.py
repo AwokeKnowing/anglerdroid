@@ -36,6 +36,15 @@ DEFAULT_BASELINE = 0.05
 
 HISTORY_SIZE = 300
 
+# IMU calibration (D435i default noise parameters)
+# These are approximate; for production use, calibrate per device using Kalibr:
+# https://github.com/ethz-asl/kalibr/wiki/IMU-Noise-Model
+IMU_GYRO_NOISE_DENSITY = 6.067e-03      # rad/(s*sqrt(Hz))
+IMU_GYRO_RANDOM_WALK = 3.621e-05        # rad/(s^2*sqrt(Hz))
+IMU_ACCEL_NOISE_DENSITY = 3.362e-02     # m/(s^2*sqrt(Hz))
+IMU_ACCEL_RANDOM_WALK = 9.826e-04       # m/(s^3*sqrt(Hz))
+IMU_FREQUENCY = 200.0                    # Hz (gyro rate)
+
 
 class CuVSLAMTracker:
     """cuVSLAM stereo visual SLAM — drop-in pose source for the vision pipeline.
@@ -47,7 +56,17 @@ class CuVSLAMTracker:
     def __init__(self, rs2_profile=None,
                  camera_height=CAMERA_HEIGHT_M,
                  camera_setback=CAMERA_SETBACK_M,
-                 camera_pitch_deg=CAMERA_PITCH_DEG):
+                 camera_pitch_deg=CAMERA_PITCH_DEG,
+                 imu_pipeline=None):
+        """Initialize cuVSLAM tracker with optional IMU integration.
+        
+        Args:
+            rs2_profile: RealSense pipeline profile for intrinsics
+            camera_height: Camera height above floor (m)
+            camera_setback: Camera setback from robot center (m)
+            camera_pitch_deg: Camera pitch angle (degrees, positive = nose down)
+            imu_pipeline: Optional IMUPipeline for stereo-inertial mode
+        """
         if not HAS_CUVSLAM:
             raise ImportError(
                 "cuvslam not installed. Requires Python 3.10+, CUDA 12+. "
@@ -56,6 +75,8 @@ class CuVSLAMTracker:
         self._cam_h = camera_height
         self._cam_setback = camera_setback
         self._cam_pitch_deg = camera_pitch_deg
+        self._imu = imu_pipeline
+        self._use_imu = (imu_pipeline is not None and imu_pipeline.ok)
 
         t0 = time.monotonic()
         cuvslam.warm_up_gpu()
@@ -67,7 +88,27 @@ class CuVSLAMTracker:
         else:
             self._setup_defaults()
 
+        # Configure IMU if available
+        if self._use_imu:
+            imu_cal = cuvslam.ImuCalibration(
+                gyroscope_noise_density=IMU_GYRO_NOISE_DENSITY,
+                gyroscope_random_walk=IMU_GYRO_RANDOM_WALK,
+                accelerometer_noise_density=IMU_ACCEL_NOISE_DENSITY,
+                accelerometer_random_walk=IMU_ACCEL_RANDOM_WALK,
+                frequency=IMU_FREQUENCY,
+            )
+            # Add IMU to rig (sensor index 0)
+            # IMU calibration sets extrinsics relative to rig frame
+            self._rig.set_imu_calibration(0, imu_cal)
+            
+            odom_mode = cuvslam.Tracker.OdometryMode.Inertial
+            print("cuvslam: stereo-inertial mode enabled")
+        else:
+            odom_mode = cuvslam.Tracker.OdometryMode.Multicamera
+            print("cuvslam: stereo-only mode (no IMU)")
+
         odom_cfg = cuvslam.Tracker.OdometryConfig(
+            odometry_mode=odom_mode,
             horizontal_stereo_camera=True,
             async_sba=True,
             enable_observations_export=False,
@@ -80,6 +121,7 @@ class CuVSLAMTracker:
         )
 
         self._tracker = cuvslam.Tracker(self._rig, odom_cfg, slam_cfg)
+        self._last_imu_timestamp_ns = 0
 
         self.x = 0.0
         self.y = 0.0
@@ -166,6 +208,51 @@ class CuVSLAMTracker:
 
     # ── tracking ────────────────────────────────────────────────────
 
+    def _register_imu_measurements(self, camera_timestamp_ns):
+        """Register IMU measurements up to camera timestamp.
+        
+        IMU must be registered BEFORE the corresponding image frame.
+        Polls IMU at high rate (200 Hz) and registers all measurements
+        between last camera frame and current camera frame.
+        """
+        if not self._use_imu or not self._imu or not self._imu.ok:
+            return
+        
+        # Poll IMU multiple times to get high-frequency samples
+        # Camera at ~30 Hz, IMU at 200 Hz → expect ~6-7 IMU samples per frame
+        imu_count = 0
+        for _ in range(20):  # Max 20 polls per camera frame
+            if not self._imu.grab():
+                break
+            
+            # Convert IMU data to cuVSLAM format
+            # IMU frame: X-right, Y-down, Z-forward (RealSense convention)
+            # cuVSLAM expects same convention as rig frame
+            imu_timestamp_ns = int(self._imu.timestamp * 1e9)
+            
+            # Only register measurements up to (but not after) camera timestamp
+            if imu_timestamp_ns > camera_timestamp_ns:
+                break
+            
+            # Skip duplicate timestamps
+            if imu_timestamp_ns <= self._last_imu_timestamp_ns:
+                continue
+            
+            imu_meas = cuvslam.ImuMeasurement(
+                timestamp_ns=imu_timestamp_ns,
+                linear_accelerations=self._imu.accel.tolist(),  # m/s²
+                angular_velocities=self._imu.gyro.tolist(),     # rad/s
+            )
+            
+            self._tracker.register_imu_measurement(0, imu_meas)  # sensor index 0
+            self._last_imu_timestamp_ns = imu_timestamp_ns
+            imu_count += 1
+        
+        if imu_count == 0 and self._frame_count > 10:
+            if not hasattr(self, '_imu_warn_logged'):
+                print("cuvslam: warning - no IMU measurements between frames")
+                self._imu_warn_logged = True
+
     def track(self, ir_left, ir_right, timestamp_ns):
         """Process a stereo IR frame pair and update pose.
 
@@ -181,6 +268,10 @@ class CuVSLAMTracker:
         self._prev_x = self.x
         self._prev_y = self.y
         self._prev_theta = self.theta
+
+        # Register IMU measurements before image frame (required for VIO)
+        if self._use_imu:
+            self._register_imu_measurements(timestamp_ns)
 
         pose_est, slam_pose = self._tracker.track(
             timestamp_ns, [ir_left, ir_right])
