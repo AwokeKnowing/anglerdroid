@@ -208,3 +208,6 @@ faces/**/database.pkl
 # Face embeddings database (never commit)
 database.pkl
 **/database.pkl
+
+# ASPIRE trace logs
+traces/
