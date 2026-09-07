@@ -112,6 +112,7 @@ class SafetyGuard:
         self._path = []
         self._tick = 0
         self._topdown_near_field = False
+        self._checkered_mat_detected = False
         self._near_field_reason = None
 
     @property
@@ -136,35 +137,53 @@ class SafetyGuard:
         return self._topdown_near_field
 
     @property
+    def checkered_mat_detected(self):
+        """True when checkered mat detector triggered (ego-frame vision-based)."""
+        return self._checkered_mat_detected
+
+    @property
     def near_field_reason(self):
         """Diagnostic string when near-field reflex is active, None otherwise."""
         return self._near_field_reason
 
     # ── per-frame update ──
 
-    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False):
+    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False,
+               checkered_mat_detected=False):
         """Feed per-frame odometry. Computes directional scales.
 
         height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
         topdown_near_field: True when top-down camera sees object <30cm overhead.
                            Triggers immediate forward stop; reverse allowed if bwd_clear.
+        checkered_mat_detected: True when checkered door mat is detected under/near robot.
+                               Triggers immediate forward stop; reverse allowed if bwd_clear.
         """
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
         self._topdown_near_field = topdown_near_field
+        self._checkered_mat_detected = checkered_mat_detected
 
-        # ── Near-field reflex: overhead object <30cm from top-down camera ──
-        # This is a REFLEX that runs BEFORE floor-obstacle logic. Table undersides,
-        # hands, or anything within ~30cm of the mast camera triggers immediate
-        # forward stop. Unlike total immobilize, reverse is still allowed if rear clear.
-        # This prevents driving under tables where the floor looks clear but the
-        # mast will crash into the underside.
+        # ── Near-field reflexes: overhead object or checkered mat ──
+        # These are REFLEXES that run BEFORE floor-obstacle logic.
+        # - topdown_near_field: Table undersides, hands, or anything within ~30cm
+        #   of the mast camera triggers immediate forward stop.
+        # - checkered_mat_detected: Vision-based ego-frame detector sees checkered
+        #   door mat under/near robot, triggers immediate forward stop.
+        # Unlike total immobilize, reverse is still allowed if rear clear.
+        # This prevents driving under tables or onto designated keep-out mats.
         if topdown_near_field:
             self._near_field_reason = "topdown_near_field"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
             if self._tick % 10 == 0:
                 print("safety: NEAR-FIELD REFLEX — topdown sees close object (<30cm), "
+                      "fwd=0.0, computing bwd/ang normally")
+        elif checkered_mat_detected:
+            self._near_field_reason = "checkered_mat_detected"
+            # Zero forward immediately (reflex); bwd/ang computed normally below
+            self._fwd_scale = 0.0
+            if self._tick % 10 == 0:
+                print("safety: CHECKERED MAT REFLEX — vision detected checkered mat under/near robot, "
                       "fwd=0.0, computing bwd/ang normally")
         else:
             self._near_field_reason = None
@@ -193,9 +212,9 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        # Apply clearance scales. Near-field reflex already zeroed fwd_scale above;
+        # Apply clearance scales. Near-field reflexes already zeroed fwd_scale above;
         # don't override it. Backward and angular are always computed from obstacles.
-        if not topdown_near_field:
+        if not topdown_near_field and not checkered_mat_detected:
             self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
         if fwd_clear < 10 and self._tick % 5 == 0:
