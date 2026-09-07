@@ -61,13 +61,31 @@ class TestCANResilience(unittest.TestCase):
         # Mock time.sleep to speed up tests
         self.sleep_patcher = patch('wheelbase.time.sleep')
         self.mock_sleep = self.sleep_patcher.start()
+
+        self._wbs = []
+        self.gamepad_patcher = patch('wheelbase.WheelBase._init_gamepad', return_value=None)
+        self.gamepad_patcher.start()
+        self.mock_left.get_vbus_voltage.return_value = 41.0
+        self.mock_right.get_vbus_voltage.return_value = 41.0
+        # Extra ODriveAxisCAN constructions beyond left/right
+        self.mock_odrive_cls.side_effect = [self.mock_left, self.mock_right] + [
+            Mock(get_vbus_voltage=Mock(return_value=41.0)) for _ in range(8)
+        ]
         
     def tearDown(self):
         """Clean up patches."""
+        for wb in getattr(self, '_wbs', []):
+            try:
+                wb.running = False
+                wb._can_bus_failed = True
+                wb._twist_for_params = None
+            except Exception:
+                pass
         self.can_patcher.stop()
         self.subprocess_patcher.stop()
         self.odrive_patcher.stop()
         self.sleep_patcher.stop()
+        self.gamepad_patcher.stop()
         
     def test_set_wheel_vels_can_error(self):
         """Test that CanOperationError during set_wheel_vels is caught."""
@@ -75,6 +93,7 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Simulate CAN failure on set_velocity
         self.mock_left.set_velocity.side_effect = CanOperationError("No such device")
@@ -100,6 +119,7 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Simulate CAN failure on set_velocity
         self.mock_left.set_velocity.side_effect = CanOperationError("No such device")
@@ -123,27 +143,24 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
-        
-        # Start a twist_for command
-        wb.twist_for(0.3, 0.0, duration_secs=2.0, ramp_in_secs=0.0, ramp_out_secs=0.0)
-        
-        # Wait a bit for the loop to start
-        time.sleep(0.1)
-        
-        # Simulate CAN failure on the next set_velocity
-        self.mock_left.set_velocity.side_effect = CanOperationError("Network is down")
-        
-        # Wait for the loop to encounter the error
-        time.sleep(0.2)
-        
-        # Wheelbase should be marked as failed
-        self.assertTrue(wb._can_bus_failed)
-        
-        # twist_for should have been canceled
-        self.assertFalse(wb.is_twist_for_active())
-        
-        # Subsequent motion commands should be no-ops
-        wb.twist(0.1, 0.0)  # Should not raise
+        self._wbs.append(wb)
+        wb._is_closed_loop = True
+        wb._is_idle = False
+
+        # Real sleep so the daemon twist_for loop can run (setUp mocks sleep)
+        self.sleep_patcher.stop()
+        try:
+            self.mock_left.set_velocity.side_effect = CanOperationError("Network is down")
+            wb.twist_for(0.3, 0.0, duration_secs=1.0, ramp_in_secs=0.0, ramp_out_secs=0.0)
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not wb._can_bus_failed:
+                time.sleep(0.05)
+            self.assertTrue(wb._can_bus_failed)
+            self.assertFalse(wb.is_twist_for_active())
+            wb.twist(0.1, 0.0)  # Should not raise
+        finally:
+            self.sleep_patcher = patch('wheelbase.time.sleep')
+            self.mock_sleep = self.sleep_patcher.start()
         
     def test_can_error_during_reengage(self):
         """Test CanOperationError during motor re-engagement from idle."""
@@ -151,6 +168,7 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Put wheelbase in idle state
         wb._is_closed_loop = False
@@ -173,14 +191,15 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Track calls to stop commands
         stop_calls = []
         
         def track_set_velocity(vel):
             stop_calls.append(('set_velocity', vel))
-            if len(stop_calls) > 1:  # Fail after first successful call
-                raise CanOperationError("Bus gone")
+            # Fail immediately so set_wheel_vels raises (left is first call)
+            raise CanOperationError("Bus gone")
         
         self.mock_left.set_velocity.side_effect = track_set_velocity
         
@@ -202,6 +221,7 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Put in closed-loop state
         wb._is_closed_loop = True
@@ -210,11 +230,16 @@ class TestCANResilience(unittest.TestCase):
         # Simulate CAN error in feed_watchdog
         self.mock_left.feed_watchdog.side_effect = CanOperationError("Connection lost")
         
-        # Let the watchdog feeder run once
-        time.sleep(0.6)
-        
-        # Should mark as failed without crashing
-        self.assertTrue(wb._can_bus_failed)
+        # Real sleep: feeder loop sleeps 0.5s (setUp mocks sleep)
+        self.sleep_patcher.stop()
+        try:
+            deadline = time.time() + 2.0
+            while time.time() < deadline and not wb._can_bus_failed:
+                time.sleep(0.05)
+            self.assertTrue(wb._can_bus_failed)
+        finally:
+            self.sleep_patcher = patch('wheelbase.time.sleep')
+            self.mock_sleep = self.sleep_patcher.start()
         
     def test_errno_6_osserror_simulation(self):
         """Test handling of OSError errno 6 (No such device or address)."""
@@ -222,6 +247,7 @@ class TestCANResilience(unittest.TestCase):
         
         # Create wheelbase instance
         wb = WheelBase(can_interface="can0")
+        self._wbs.append(wb)
         
         # Simulate OSError errno 6 wrapped in CanOperationError
         error = OSError(6, "No such device or address")
