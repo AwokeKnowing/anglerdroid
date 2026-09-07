@@ -1000,12 +1000,19 @@ class Vision:
                 self._slam_unlock_logged = False
             
             if immobilize:
+                # STUCK: kill forward only so HouseBot RECOVER can reverse/turn off a lip.
+                # TOPDOWN LOST / other hard immobilize: freeze all axes.
                 self._safety._fwd_scale = 0.0
-                self._safety._bwd_scale = 0.0
-                self._safety._ang_scale = 0.0
+                stuck_only = bool(immobilize_reason and immobilize_reason.startswith("STUCK"))
+                if not stuck_only:
+                    self._safety._bwd_scale = 0.0
+                    self._safety._ang_scale = 0.0
                 # Log first immobilization and periodically
                 if not hasattr(self, '_immobilize_warned') or self._immobilize_warned != immobilize_reason:
-                    print(f"⚠️  vision: {immobilize_reason} — autonomous motion disabled")
+                    if stuck_only:
+                        print(f"⚠️  vision: {immobilize_reason} — fwd disabled; reverse/turn allowed for recover")
+                    else:
+                        print(f"⚠️  vision: {immobilize_reason} — autonomous motion disabled")
                     self._immobilize_warned = immobilize_reason
             else:
                 self._immobilize_warned = None
@@ -1145,9 +1152,9 @@ class Vision:
         """True when robot is stuck (wheels spinning but not moving).
         
         CRITICAL SAFETY: When stuck:
-        - Autonomous motion should stop
-        - Do NOT keep commanding forward
-        - Try recovery (reverse/turn)
+        - Forward scale is forced to 0 (no more digging into the lip)
+        - Reverse/turn stay available for HouseBot RECOVER
+        - SLAM/gmap updates are skipped while stuck
         """
         return self._pose.is_stuck if hasattr(self._pose, 'is_stuck') else False
     
