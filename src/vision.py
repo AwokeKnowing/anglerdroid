@@ -1866,6 +1866,32 @@ class Vision:
         cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         return overlay
 
+    def get_rs1_trust_mask_overlay(self):
+        """Semi-transparent overlay of the trust/FOV obs_mask on RS1 RGB (ego-aligned).
+
+        Green tint = region we trust when sensors say clear. Cyan edge = mask boundary.
+        Separate from get_rs1_mask_overlay() which shows the robot FOOT self-clear.
+        """
+        import cv2
+        if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
+            return None
+        if getattr(self, '_obs_mask', None) is None:
+            return None
+
+        rgb = self._rs1.color[::-1, ::-1].copy()
+        h, w = rgb.shape[:2]
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        overlay[:, :, :3] = rgb
+
+        valid = self._obs_mask > 0
+        overlay[valid, 1] = np.clip(rgb[valid, 1].astype(np.int16) + 70, 0, 255).astype(np.uint8)
+        overlay[:, :, 3] = np.where(valid, 110, 0)
+
+        edges = cv2.Canny(self._obs_mask, 50, 150) > 0
+        overlay[edges] = [0, 255, 255, 255]  # cyan boundary
+        return overlay
+
+
     
     @property
     def topdown_depth_ok(self):
