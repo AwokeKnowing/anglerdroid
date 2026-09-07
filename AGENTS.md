@@ -101,6 +101,7 @@ on device whenever changing it. Goal is **60 fps** when physics allows —
 - `JAMES_ARCHITECTURE.md` — 30 Hz vs ~3 Hz extras split
 - `LOOP_HARDENING_SUMMARY.md` / `CAPTURE_FPS.md` — budget shedding notes
 - `skills/checkered_mat_keepout.md` — brown border @ 3 Hz + named keepout
+- `docs/APRILTAG_LANDMARKS.md` — AprilTag landmark reloc stub (~3 Hz extras)
 
 ---
 
