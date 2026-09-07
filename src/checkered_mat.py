@@ -106,11 +106,12 @@ class TopdownHazardDetector:
         self._history_size = 3
         self._detection_history = []
     
-    def check(self, rgb_frame):
+    def check(self, rgb_frame, fast_mode=False):
         """Check if floor hazard (bump or checkered mat) is visible in topdown RGB.
         
         Args:
             rgb_frame: HxWx3 uint8 RGB image (PRIMARY: RS1 color / topdown RealSense RGB)
+            fast_mode: If True, use aggressive optimizations (downsample, skip expensive checks)
         
         Returns:
             (triggered: bool, reason: str or None)
@@ -136,6 +137,12 @@ class TopdownHazardDetector:
         # Crop to forward region (near/forward area in topdown view)
         forward_region = rgb_frame[:forward_h, :, :]
         
+        # OPTIMIZATION: Downsample 2x in fast mode (320x240 → 160x120)
+        # Reduces OpenCV processing by 4x with minimal detection quality loss
+        if fast_mode:
+            forward_region = cv2.resize(forward_region, None, fx=0.5, fy=0.5, 
+                                       interpolation=cv2.INTER_AREA)
+        
         # Convert to grayscale for detection
         gray = cv2.cvtColor(forward_region, cv2.COLOR_RGB2GRAY)
         
@@ -145,9 +152,13 @@ class TopdownHazardDetector:
         found, corners = cv2.findChessboardCorners(gray, pattern_size, self._flags)
         
         if found and corners is not None:
-            # Refine corner positions for better accuracy
-            corners_refined = cv2.cornerSubPix(
-                gray, corners, (11, 11), (-1, -1), self._criteria)
+            # OPTIMIZATION: Skip cornerSubPix in fast mode (saves 5-10ms, minor accuracy loss)
+            if fast_mode:
+                corners_refined = corners
+            else:
+                # Refine corner positions for better accuracy
+                corners_refined = cv2.cornerSubPix(
+                    gray, corners, (11, 11), (-1, -1), self._criteria)
             
             self.corner_count = len(corners_refined)
             
@@ -172,7 +183,8 @@ class TopdownHazardDetector:
             
             # Bump = continuous horizontal line with strong edges spanning width
             # Require: (1) high % of width covered, (2) multiple consecutive rows
-            width_thresh = w * 0.6  # At least 60% of image width (conservative, avoid noise)
+            # Note: w is scaled if fast_mode (160 vs 320), threshold adjusts automatically
+            width_thresh = forward_region.shape[1] * 0.6  # At least 60% of width
             strong_rows = row_edge_counts >= width_thresh
             
             # Count consecutive runs of strong rows (bump = at least 2-3 consecutive rows)

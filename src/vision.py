@@ -967,44 +967,61 @@ class Vision:
             # Detects wood bump (threshold/lip) and checkered floor mat in forward region.
             # Note: RS1 color is rotated 180° ([::-1, ::-1]) so forward region is at TOP of image.
             #
-            # PERFORMANCE: Hazard detection is EXPENSIVE (~40-50ms due to findChessboardCorners).
-            # Floor hazards are STATIC, so we only need to check every few frames (10 Hz is plenty).
-            # Check every 3rd frame to reduce from ~44ms to ~15ms amortized overhead.
+            # PERFORMANCE CRITICAL: Hazard detection is EXPENSIVE (~34ms on Kevin).
+            # Floor hazards are STATIC → aggressive frame skipping + sticky state.
+            # Strategy:
+            #   - Check every 10th frame (3 Hz at 30 fps) with fast_mode (downsample 2x, skip cornerSubPix)
+            #   - Sticky state: once triggered, stays ON for 30 frames (1 sec) before rechecking
+            #   - Amortized overhead: 34ms / 10 = ~3.4ms (down from 34ms every frame)
             if not hasattr(self, '_hazard_check_counter'):
                 self._hazard_check_counter = 0
+                self._hazard_sticky_frames = 0  # Frames remaining in sticky triggered state
             self._hazard_check_counter += 1
-            HAZARD_CHECK_INTERVAL = 3  # Check every 3rd frame (10 Hz at 30 fps)
+            HAZARD_CHECK_INTERVAL = 10  # Check every 10th frame (3 Hz at 30 fps)
+            HAZARD_STICKY_FRAMES = 30   # Stay triggered for 30 frames (1 sec @ 30 Hz)
             
             if self._rs1 and self._rs1.ok and self._rs1.color is not None:
-                if self._hazard_check_counter % HAZARD_CHECK_INTERVAL == 0:
-                    # RS1 is mounted upside-down → rotate 180° for correct orientation
+                # Sticky state: if hazard triggered, stay triggered for N frames before rechecking
+                if self._hazard_sticky_frames > 0:
+                    self._hazard_sticky_frames -= 1
+                    # Keep existing hazard state (don't recheck yet)
+                elif self._hazard_check_counter % HAZARD_CHECK_INTERVAL == 0:
+                    # Time to check: use fast_mode (downsample 2x, skip cornerSubPix)
                     rs1_rgb_rotated = self._rs1.color[::-1, ::-1]
-                    hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(rs1_rgb_rotated)
+                    hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(
+                        rs1_rgb_rotated, fast_mode=True)
+                    
+                    # Update state
+                    prev_triggered = self._topdown_hazard
                     self._topdown_hazard = hazard_triggered
                     self._topdown_hazard_reason = hazard_reason
                     self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
                     self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
-                    if hazard_triggered and not hasattr(self, '_topdown_hazard_log_n'):
-                        self._topdown_hazard_log_n = 0
-                    if hazard_triggered:
+                    
+                    # If newly triggered, enter sticky state
+                    if hazard_triggered and not prev_triggered:
+                        self._hazard_sticky_frames = HAZARD_STICKY_FRAMES
+                        if not hasattr(self, '_topdown_hazard_log_n'):
+                            self._topdown_hazard_log_n = 0
                         self._topdown_hazard_log_n += 1
-                        if self._topdown_hazard_log_n == 1 or self._topdown_hazard_log_n % 30 == 0:
-                            print("vision: TOPDOWN HAZARD REFLEX triggered — "
-                                  "reason=%s corners=%d edges=%d (RS1 topdown RGB, fwd=0)"
-                                  % (hazard_reason, self._topdown_hazard_corner_count,
-                                     self._topdown_hazard_edge_count))
-                    else:
-                        if hasattr(self, '_topdown_hazard_log_n') and self._topdown_hazard_log_n > 0:
-                            print("vision: TOPDOWN HAZARD REFLEX cleared — "
-                                  "corners=%d edges=%d (after %d frames)"
-                                  % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
-                                     self._topdown_hazard_log_n))
+                        print("vision: TOPDOWN HAZARD REFLEX triggered — "
+                              "reason=%s corners=%d edges=%d (RS1 topdown RGB, fwd=0, sticky=%d frames)"
+                              % (hazard_reason, self._topdown_hazard_corner_count,
+                                 self._topdown_hazard_edge_count, HAZARD_STICKY_FRAMES))
+                    elif not hazard_triggered and prev_triggered:
+                        # Cleared
+                        print("vision: TOPDOWN HAZARD REFLEX cleared — "
+                              "corners=%d edges=%d (after %d detections)"
+                              % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
+                                 getattr(self, '_topdown_hazard_log_n', 0)))
+                        if hasattr(self, '_topdown_hazard_log_n'):
                             self._topdown_hazard_log_n = 0
             else:
                 self._topdown_hazard = False
                 self._topdown_hazard_reason = None
                 self._topdown_hazard_corner_count = 0
                 self._topdown_hazard_edge_count = 0
+                self._hazard_sticky_frames = 0
 
             _t_hazard = time.monotonic()
             
