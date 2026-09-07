@@ -26,8 +26,7 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
 ### Past wizardry (do not casually undo)
 - RealSense depth **decimation**: **measure verts on device**. On current JP/librealsense,
   `RS_DECIMATE_MAG=3` produced ~45k verts (≈3×3 blocks). Mag=8 → ~6k verts (old docstring).
-  On this JP6 stack mag is **linear** (mag=3≈45k verts, mag=8≈6.5k). Bake-off: numpy stride+deproject ~0.6ms vs SDK mag3 pc ~3ms.
-  Changing it requires on-device re-benchmark (goal 60fps).
+  On this JP6 stack mag is **linear** (mag=3≈45k verts, mag=8≈6.5k). Numpy can beat SDK pc on CPU ms, but **detail metric above gates any mag change**. Default stays mag=3 until GSD/ego-fill probe says otherwise.
 
 ### Hardware-first (GPU > CPU NumPy)
 A “numpy algorithm” is a *shape*, not a placement. On Orin prefer **CuPy /
@@ -35,6 +34,29 @@ CUDA / ModernGL** (or other GPU-resident ops already in `gpu_render`) for
 decimate / project / join / morph so pixels never bounce through CPU caches
 for convenience. Architect for silicon: ARM cores, GPU, ISP/USB bandwidth —
 measure each.
+
+
+### Depth detail metric (decimate is NOT “fewer verts = win”)
+Obstacle safety projects depth into an ego grid at **`EGO_PX_SIZE = 1 cm/px`**.
+Chasing a tiny pointcloud is wrong if we punch holes in that grid or starve
+reflex pixel counts (`near_min_pixels`, `soft_min_pixels`).
+
+**Stick-to targets (local sensing, top-down RS1):**
+1. **GSD ≤ ego cell** out to the reflex horizon that matters — soft-low to
+   ~1.0 m, overhang to ~0.7 m, near-field <0.3 m. Practical bar:
+   ground sampling ≤ **1 cm at 1 m** (≈ ≤1.5 cm at 1.5 m). Rough JP6 map:
+   mag3 ≈ 0.6 cm @1 m; mag4 ≈ 0.7; mag5 ≈ 0.9; mag6 ≈ 1.1; **mag8 ≈ 1.5 (fails bar)**.
+2. **Ego fill** — in the valid FOV footprint, median hits/occupied-cell ≥ 1
+   and hole fraction low enough that thin legs / dog-bed edges still fire
+   soft-low / near reflexes (compare hit counts vs mag3 baseline on the same scene).
+3. **GPU capacity is secondary** — ModernGL scatter into 320×240 is cheap once
+   verts are on GPU; CPU deproject/topdown and reflex min_pixels are the real
+   limits. Prefer early GPU-resident downsample that **preserves GSD**, not
+   arbitrary vert starvation.
+
+Only lower `RS_DECIMATE_MAG` after an on-device probe reports GSD + ego-fill +
+reflex counts for the candidate vs the current baseline. Speed is a constraint
+under that metric, not the objective.
 
 ### Decimate: measure, don’t assume
 James has seen **numpy decimate beat the RealSense SDK filter** on Orin in

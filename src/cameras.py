@@ -14,7 +14,7 @@ except ImportError:
 from robot_config import FRAME_W, FRAME_H
 RS_DEPTH_W, RS_DEPTH_H = 848, 480
 RGB_CAP_W, RGB_CAP_H = 640, 480
-RS_DECIMATE_MAG = 8  # ~6.5k verts on JP6 (mag=3 was ~45k); measured bake-off 2026-09-07
+RS_DECIMATE_MAG = 3  # detail-first default (~45k verts on JP6). Do NOT drop mag for speed alone — see AGENTS.md Depth detail metric. Env override OK for bake-offs.
 
 
 def _set_sensor_opt(sensor, option, value):
