@@ -18,7 +18,7 @@ ROBOT_W = 30                  # front-back (x direction)
 ROBOT_H = 42                  # side-to-side (y direction)
 ROBOT_CX_OFF = -78            # x offset from crosshair center
 
-FOOT_PAD_FWD = 8              # extra clear pixels forward (self-reflection + mast-inflate ghosts)
+FOOT_PAD_FWD = 3              # was 8; ~5cm less forward clear so we can approach obstacles (1cm/px)
 FOOT_PAD_BWD = 10             # extra clear pixels backward (self-observation margin)
 FOOT_PAD_LAT = 4              # extra clear pixels lateral (mast-inflate ghosts on spin)
 
