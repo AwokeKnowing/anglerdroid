@@ -29,7 +29,7 @@ from robot_config import (FRAME_W, FRAME_H,
                           WHEEL_RADIUS_M, WHEELBASE_M,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
-                          FOOTPRINT_BOXES)
+                          FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -966,8 +966,7 @@ class Vision:
 
         mask[cone] = 255
 
-        # Clear robot footprint (multi-box: body + 4 wheels approximate hull)
-        # Force-set to known+free in capture loop to prevent self-observation
+        # Clear all self-mask regions (under-robot + self-ignore) from obs_mask
         for x0, y0, x1, y1 in FOOTPRINT_BOXES:
             mask[y0:y1, x0:x1] = 0
         return mask, fw_cone
@@ -1577,17 +1576,23 @@ class Vision:
                 np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
                 np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-                # Clear robot footprint (multi-box: body + 4 wheels)
-                for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                # Self-mask: under-robot clear (wheels+floor → obs=0, known=255)
+                for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
                     self._obs_combined[y0:y1, x0:x1] = 0
                     self._known_combined[y0:y1, x0:x1] = 255
+                # Self-mask: ignore zones (mast self-hits → obs=0, do NOT force known-clear)
+                for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
+                    self._obs_combined[y0:y1, x0:x1] = 0
             
-            # Clear robot footprint (multi-box: body + 4 wheels)
-            # Force self-mask to known-free (prevent self-observation as obstacles)
-            # NOTE: CPU fallback already cleared footprint; GPU path needs post-clear
-            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            # Self-mask: under-robot clear (wheels+floor → known-free, prevent self-observation)
+            # NOTE: CPU fallback already cleared; GPU path needs post-clear
+            for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
                 self._obs_combined[y0:y1, x0:x1] = 0
                 self._known_combined[y0:y1, x0:x1] = 255
+            # Self-mask: ignore zones (mast/body self-reflection → remove from obs, do NOT mark clear)
+            # We can't see through ourselves; leaving known unchanged prevents force-clearing real obstacles
+            for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
+                self._obs_combined[y0:y1, x0:x1] = 0
             
             # Diagnostic logging (rate-limited)
             if not hasattr(self, '_kdiag_n'):
@@ -1729,8 +1734,11 @@ class Vision:
             # obs_combined is height-cm (1..100) where obstacles exist
             self._persistent_obs[self._obs_combined > 0] = 255
             self._persistent_height[:] = self._obs_combined.astype(np.uint8, copy=False)
-            # Clear robot footprint (multi-box: body + 4 wheels)
-            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            # Clear all self-mask boxes from persistent state (under-robot + ignore zones)
+            for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+                self._persistent_obs[y0:y1, x0:x1] = 0
+                self._persistent_height[y0:y1, x0:x1] = 0
+            for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
                 self._persistent_obs[y0:y1, x0:x1] = 0
                 self._persistent_height[y0:y1, x0:x1] = 0
 
@@ -1992,26 +2000,39 @@ class Vision:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb
 
-        # Multi-box hull approx (body + wheels). Full RGB underlay; red tint on boxes.
+        # Under-robot boxes: green tint (marked clear+known)
         overlay[:, :, 3] = 255
-        body_fwd = None
-        for bx0, by0, bx1, by1 in FOOTPRINT_BOXES:
+        for bx0, by0, bx1, by1 in UNDER_ROBOT_BOXES:
             x0 = max(0, min(w, bx0)); x1 = max(0, min(w, bx1))
             y0 = max(0, min(h, by0)); y1 = max(0, min(h, by1))
             if x1 <= x0 or y1 <= y0:
                 continue
             m = np.zeros((h, w), dtype=bool)
             m[y0:y1, x0:x1] = True
-            overlay[m, 0] = np.clip(rgb[m, 0].astype(np.int16) + 120, 0, 255).astype(np.uint8)
-            overlay[m, 1] = (rgb[m, 1].astype(np.int16) * 2 // 5).astype(np.uint8)
+            overlay[m, 0] = (rgb[m, 0].astype(np.int16) * 2 // 5).astype(np.uint8)
+            overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + 120, 0, 255).astype(np.uint8)  # green
             overlay[m, 2] = (rgb[m, 2].astype(np.int16) * 2 // 5).astype(np.uint8)
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
-            if body_fwd is None:
-                body_fwd = (y0, y1, x1)
-        if body_fwd is not None:
-            y0, y1, x1 = body_fwd
+        
+        # Self-ignore boxes: blue tint (removed from obs, NOT marked clear)
+        for bx0, by0, bx1, by1 in SELF_IGNORE_BOXES:
+            x0 = max(0, min(w, bx0)); x1 = max(0, min(w, bx1))
+            y0 = max(0, min(h, by0)); y1 = max(0, min(h, by1))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            m = np.zeros((h, w), dtype=bool)
+            m[y0:y1, x0:x1] = True
+            overlay[m, 0] = (rgb[m, 0].astype(np.int16) * 2 // 5).astype(np.uint8)
+            overlay[m, 1] = (rgb[m, 1].astype(np.int16) * 2 // 5).astype(np.uint8)
+            overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + 120, 0, 255).astype(np.uint8)  # blue
+            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
+        
+        # Cyan forward crop line on first under-robot box (body floor bumper)
+        if UNDER_ROBOT_BOXES:
+            body_x0, body_y0, body_x1, body_y1 = UNDER_ROBOT_BOXES[0]
+            y0, y1, x1 = body_y0, body_y1, body_x1
             fx = min(w - 1, max(0, x1 - 1))
-            overlay[y0:y1, fx, :] = [255, 255, 0, 255]
+            overlay[y0:y1, fx, :] = [0, 255, 255, 255]  # cyan
         return overlay
 
     def get_rs1_trust_mask_overlay(self):
@@ -2246,19 +2267,37 @@ class Vision:
                 underlay[obs_mask, 1] = (255 * (1.0 - h_norm[obs_mask] * 0.7)).astype(np.uint8)  # G dims
                 underlay[obs_mask, 2] = 0  # B stays zero
         
-        # Draw all footprint boxes (body + 4 wheels) with magenta fill
-        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
-            underlay[y0:y1, x0:x1, 0] = 200  # R
-            underlay[y0:y1, x0:x1, 1] = 0    # G
-            underlay[y0:y1, x0:x1, 2] = 200  # B (magenta)
+        # Self-mask visualization: distinguish under-robot clear (green) vs self-ignore (blue-gray)
+        # Under-robot boxes (wheels + floor): green fill → marked clear+known
+        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+            underlay[y0:y1, x0:x1, 0] = 0    # R
+            underlay[y0:y1, x0:x1, 1] = 180  # G (green)
+            underlay[y0:y1, x0:x1, 2] = 0    # B
         
-        # Draw bright yellow forward edge on body box (first box in FOOTPRINT_BOXES)
-        body_x0, body_y0, body_x1, body_y1 = FOOTPRINT_BOXES[0]
-        x1_line = min(body_x1, FRAME_W - 1)
-        underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
+        # Self-ignore boxes (mast/body): blue-gray fill → removed from obs, NOT marked clear
+        for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
+            underlay[y0:y1, x0:x1, 0] = 100  # R
+            underlay[y0:y1, x0:x1, 1] = 100  # G
+            underlay[y0:y1, x0:x1, 2] = 150  # B (blue-gray)
         
-        # Draw yellow outline around all boxes for clarity
-        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+        # Cyan forward crop line at bumper (first under-robot box = body floor)
+        if UNDER_ROBOT_BOXES:
+            body_x0, body_y0, body_x1, body_y1 = UNDER_ROBOT_BOXES[0]
+            x1_line = min(body_x1, FRAME_W - 1)
+            underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [0, 255, 255]  # cyan
+        
+        # Yellow outline around all boxes for clarity
+        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+            # Top edge
+            underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
+            # Bottom edge
+            underlay[max(y1 - 1, 0):y1, x0:x1] = [255, 255, 0]
+            # Left edge
+            underlay[y0:y1, x0:min(x0 + 1, FRAME_W)] = [255, 255, 0]
+            # Right edge
+            underlay[y0:y1, max(x1 - 1, 0):x1] = [255, 255, 0]
+        
+        for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
             # Top edge
             underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
             # Bottom edge

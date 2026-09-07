@@ -70,14 +70,33 @@ FOOT_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT)
 FOOT_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
 FOOT_Y1 = min(FRAME_H, RCY + ROBOT_H // 2 + FOOT_PAD_LAT)
 
-# Helper: iterate all footprint boxes (body + 4 wheels) for clearing/viz
-FOOTPRINT_BOXES = [
-    (BODY_X0, BODY_Y0, BODY_X1, BODY_Y1),        # body
-    (WHEEL_FL_X0, WHEEL_FL_Y0, WHEEL_FL_X1, WHEEL_FL_Y1),  # front-left
-    (WHEEL_FR_X0, WHEEL_FR_Y0, WHEEL_FR_X1, WHEEL_FR_Y1),  # front-right
-    (WHEEL_BL_X0, WHEEL_BL_Y0, WHEEL_BL_X1, WHEEL_BL_Y1),  # back-left
-    (WHEEL_BR_X0, WHEEL_BR_Y0, WHEEL_BR_X1, WHEEL_BR_Y1),  # back-right
+# Self-mask semantics (James map metric):
+# 1. UNDER_ROBOT_BOXES: floor under chassis/wheels footprint → mark clear+known (obs=0, known=255)
+# 2. SELF_IGNORE_BOXES: robot body/mast self-hits → strip from obstacles but do NOT force known-clear
+#    (obs=0, leave known unchanged — we can't see through ourselves)
+
+# Under-robot clear zones: wheels + body floor (excluding mast column to avoid clearing real obstacles)
+UNDER_ROBOT_BOXES = [
+    (BODY_X0, BODY_Y0, BODY_X1, BODY_Y1),        # body floor
+    (WHEEL_FL_X0, WHEEL_FL_Y0, WHEEL_FL_X1, WHEEL_FL_Y1),  # front-left wheel
+    (WHEEL_FR_X0, WHEEL_FR_Y0, WHEEL_FR_X1, WHEEL_FR_Y1),  # front-right wheel
+    (WHEEL_BL_X0, WHEEL_BL_Y0, WHEEL_BL_X1, WHEEL_BL_Y1),  # back-left wheel
+    (WHEEL_BR_X0, WHEEL_BR_Y0, WHEEL_BR_X1, WHEEL_BR_Y1),  # back-right wheel
 ]
+
+# Self-ignore zones: mast column (vertical strip around robot centerline)
+# Mast self-reflection shows as fake obstacles → remove from obs but do NOT mark known-clear
+MAST_SELF_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
+MAST_SELF_Y0 = max(0, RCY - MAST_RADIUS_PX)
+MAST_SELF_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
+MAST_SELF_Y1 = min(FRAME_H, RCY + MAST_RADIUS_PX)
+
+SELF_IGNORE_BOXES = [
+    (MAST_SELF_X0, MAST_SELF_Y0, MAST_SELF_X1, MAST_SELF_Y1),  # mast column
+]
+
+# Legacy: combined footprint (all boxes) for backward compat with viz code
+FOOTPRINT_BOXES = UNDER_ROBOT_BOXES + SELF_IGNORE_BOXES
 
 
 # Mast / tall payload: floor can look free under a table while the mast hits the top.
