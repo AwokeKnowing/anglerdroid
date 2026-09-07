@@ -122,6 +122,11 @@ class RSCamera:
 
         self._pipe = rs.pipeline()
         self.profile = self._pipe.start(cfg)
+        
+        # CRITICAL: Disable frame alignment! We don't need temporally synchronized depth+color.
+        # Frame alignment forces wait for matching pairs, adding 10-40ms latency per grab.
+        # Pre-reinstall: 60 fps. Post-reinstall with alignment: 11 Hz. This is the root cause.
+        # We process depth and color independently, so we want the NEWEST frames ASAP.
         # Discard a few frames while AE/laser settle — avoids first-grab timeouts.
         for _ in range(5):
             try:
@@ -130,9 +135,10 @@ class RSCamera:
                 break
 
         # Keep only the newest frames — a deep RS queue is a classic multi-second lag source.
+        # Queue size = 1 ensures poll_for_frames() always returns the NEWEST frame.
         try:
             for sens in self.profile.get_device().sensors:
-                _set_sensor_opt(sens, rs.option.frames_queue_size, 2)
+                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
         except Exception:
             pass
         sensor = self.profile.get_device().first_depth_sensor()
@@ -159,14 +165,21 @@ class RSCamera:
         self.ir_right = None
         self.ok = False
 
-    def grab(self, timeout_ms=50):
+    def grab(self, timeout_ms=5):
         """Take the newest frameset without multi-second stalls.
 
-        Prefer poll_for_frames (non-blocking). If empty, wait up to timeout_ms.
+        CRITICAL FOR 30 Hz: With queue_size=1 and 30 Hz streams, frames arrive every 33ms.
+        poll_for_frames() should succeed immediately if a frame is ready.
+        If no frame ready, timeout_ms=5ms gives a brief grace period before giving up.
+        
+        Pre-reinstall this ran at 60 fps. Post-reinstall regression to 11 Hz was caused by:
+          1. Frame alignment enabled (forced sync wait for depth+color pairs)
+          2. Large queue allowing stale frames
+          3. Long wait timeout (500ms) masking the alignment stall
         
         Args:
-            timeout_ms: Max wait time if poll returns empty (default 50ms, was 500ms).
-                       Reduced for 30 Hz target (~33ms/frame).
+            timeout_ms: Max wait if poll returns empty (default 5ms, was 50ms).
+                       At 30 Hz, frames arrive every 33ms. If poll misses, 5ms grace is enough.
         
         Never raises — sets ok=False on miss.
         """
@@ -225,7 +238,13 @@ class WebCam:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            print("cameras: webcam opened (%dx%d MJPG -> %dx%d)" % (RGB_CAP_W, RGB_CAP_H, FRAME_W, FRAME_H))
+            
+            # Verify actual configuration achieved
+            actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            actual_fps = int(self._cap.get(cv2.CAP_PROP_FPS))
+            print("cameras: webcam opened (requested=%dx%d@%d, actual=%dx%d@%d, MJPG -> %dx%d)" 
+                  % (RGB_CAP_W, RGB_CAP_H, 30, actual_w, actual_h, actual_fps, FRAME_W, FRAME_H))
         else:
             if self._cap:
                 self._cap.release()
@@ -236,7 +255,11 @@ class WebCam:
         self.ok = False
 
     def grab(self):
-        """Block until next frame. Fills self.color."""
+        """Grab the newest frame without blocking indefinitely.
+        
+        With BUFFERSIZE=1 and 30 fps (33ms/frame), cap.read() should return immediately
+        with the newest frame. If the webcam is slow or disconnected, fail fast.
+        """
         if not self._cap or not self._cap.isOpened():
             self.ok = False
             return False

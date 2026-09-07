@@ -877,14 +877,16 @@ class Vision:
                 if critical_cams:
                     futures = []
                     for cam, name in critical_cams:
-                        # Use reduced timeout for 30 Hz target
-                        future = self._grab_executor.submit(cam.grab, timeout_ms=50)
+                        # Use 5ms timeout: at 30 Hz, frames arrive every 33ms.
+                        # With queue_size=1, poll should succeed immediately if frame ready.
+                        # 5ms grace period is enough; longer waits indicate config issues.
+                        future = self._grab_executor.submit(cam.grab)  # Uses default timeout_ms=5
                         futures.append((future, name))
                     
-                    # Wait for critical cameras (max 50ms per camera due to timeout)
+                    # Wait for critical cameras (max 5ms per camera + margin)
                     for future, name in futures:
                         try:
-                            future.result(timeout=0.060)  # Give 10ms margin over cam timeout
+                            future.result(timeout=0.010)  # 10ms margin over 5ms cam timeout
                         except concurrent.futures.TimeoutError:
                             if not hasattr(self, f'_{name}_timeout_n'):
                                 setattr(self, f'_{name}_timeout_n', 0)
@@ -957,30 +959,40 @@ class Vision:
             # PRIMARY SOURCE: RS1 color (top-down RealSense RGB / rgbd1), NOT webcam.
             # Detects wood bump (threshold/lip) and checkered floor mat in forward region.
             # Note: RS1 color is rotated 180° ([::-1, ::-1]) so forward region is at TOP of image.
+            #
+            # PERFORMANCE: Hazard detection is EXPENSIVE (~40-50ms due to findChessboardCorners).
+            # Floor hazards are STATIC, so we only need to check every few frames (10 Hz is plenty).
+            # Check every 3rd frame to reduce from ~44ms to ~15ms amortized overhead.
+            if not hasattr(self, '_hazard_check_counter'):
+                self._hazard_check_counter = 0
+            self._hazard_check_counter += 1
+            HAZARD_CHECK_INTERVAL = 3  # Check every 3rd frame (10 Hz at 30 fps)
+            
             if self._rs1 and self._rs1.ok and self._rs1.color is not None:
-                # RS1 is mounted upside-down → rotate 180° for correct orientation
-                rs1_rgb_rotated = self._rs1.color[::-1, ::-1]
-                hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(rs1_rgb_rotated)
-                self._topdown_hazard = hazard_triggered
-                self._topdown_hazard_reason = hazard_reason
-                self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
-                self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
-                if hazard_triggered and not hasattr(self, '_topdown_hazard_log_n'):
-                    self._topdown_hazard_log_n = 0
-                if hazard_triggered:
-                    self._topdown_hazard_log_n += 1
-                    if self._topdown_hazard_log_n == 1 or self._topdown_hazard_log_n % 30 == 0:
-                        print("vision: TOPDOWN HAZARD REFLEX triggered — "
-                              "reason=%s corners=%d edges=%d (RS1 topdown RGB, fwd=0)"
-                              % (hazard_reason, self._topdown_hazard_corner_count,
-                                 self._topdown_hazard_edge_count))
-                else:
-                    if hasattr(self, '_topdown_hazard_log_n') and self._topdown_hazard_log_n > 0:
-                        print("vision: TOPDOWN HAZARD REFLEX cleared — "
-                              "corners=%d edges=%d (after %d frames)"
-                              % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
-                                 self._topdown_hazard_log_n))
+                if self._hazard_check_counter % HAZARD_CHECK_INTERVAL == 0:
+                    # RS1 is mounted upside-down → rotate 180° for correct orientation
+                    rs1_rgb_rotated = self._rs1.color[::-1, ::-1]
+                    hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(rs1_rgb_rotated)
+                    self._topdown_hazard = hazard_triggered
+                    self._topdown_hazard_reason = hazard_reason
+                    self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
+                    self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
+                    if hazard_triggered and not hasattr(self, '_topdown_hazard_log_n'):
                         self._topdown_hazard_log_n = 0
+                    if hazard_triggered:
+                        self._topdown_hazard_log_n += 1
+                        if self._topdown_hazard_log_n == 1 or self._topdown_hazard_log_n % 30 == 0:
+                            print("vision: TOPDOWN HAZARD REFLEX triggered — "
+                                  "reason=%s corners=%d edges=%d (RS1 topdown RGB, fwd=0)"
+                                  % (hazard_reason, self._topdown_hazard_corner_count,
+                                     self._topdown_hazard_edge_count))
+                    else:
+                        if hasattr(self, '_topdown_hazard_log_n') and self._topdown_hazard_log_n > 0:
+                            print("vision: TOPDOWN HAZARD REFLEX cleared — "
+                                  "corners=%d edges=%d (after %d frames)"
+                                  % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
+                                     self._topdown_hazard_log_n))
+                            self._topdown_hazard_log_n = 0
             else:
                 self._topdown_hazard = False
                 self._topdown_hazard_reason = None
