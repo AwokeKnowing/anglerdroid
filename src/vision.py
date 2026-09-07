@@ -1826,38 +1826,44 @@ class Vision:
             )
     
     def get_rs1_mask_overlay(self):
-        """Create semi-transparent overlay of obs_mask on RS1 topdown RGB.
-        
-        Returns RGBA (H, W, 4) uint8 array showing:
-        - RGB background: RS1 topdown color (carpet, floor texture, box visible)
-        - Green tint where mask is valid (observation region)
-        - Bright cyan border at mask edge (to see where it stops vs real obstacles)
-        
-        This helps visualize where the mask clips relative to real obstacles like the box.
+        """Semi-transparent overlay of the *robot self-clear footprint* (FOOT_*) on RS1 RGB.
+
+        This is the mask that zeros obstacles / forces known-free under the robot body
+        (not the trust/FOV obs_mask). Returns RGBA (H,W,4):
+          - RGB: RS1 topdown (180°-flipped to ego)
+          - Magenta tint: FOOT rectangle (self-masked region)
+          - Bright yellow line: FOOT forward edge (FOOT_X1) — should sit at bumper,
+            just before real obstacles like the cardboard box
         """
+        import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
-        
-        # RS1 color needs 180° rotation to match ego frame (same as obs/known)
+
         rgb = self._rs1.color[::-1, ::-1].copy()
         h, w = rgb.shape[:2]
-        
-        # Create RGBA overlay with semi-transparent green tint over valid region
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        overlay[:, :, :3] = rgb  # RGB channels from camera
-        
-        # Valid region: semi-transparent green tint (easier to see than white)
-        valid_mask = self._obs_mask > 0
-        overlay[valid_mask, 1] = np.clip(rgb[valid_mask, 1].astype(np.int16) + 60, 0, 255).astype(np.uint8)
-        overlay[:, :, 3] = np.where(valid_mask, 120, 0)
-        
-        # Draw bright cyan border at mask edge (makes boundary vs box super obvious)
-        # Sobel-like edge detection on the binary mask
-        import cv2
-        edges = cv2.Canny(self._obs_mask, 50, 150)
-        edge_px = edges > 0
-        overlay[edge_px] = [0, 255, 255, 255]  # Bright cyan, fully opaque
-        
+        overlay[:, :, :3] = rgb
+
+        x0 = max(0, min(w, FOOT_X0))
+        x1 = max(0, min(w, FOOT_X1))
+        y0 = max(0, min(h, FOOT_Y0))
+        y1 = max(0, min(h, FOOT_Y1))
+        if x1 <= x0 or y1 <= y0:
+            return overlay
+
+        foot = np.zeros((h, w), dtype=np.uint8)
+        foot[y0:y1, x0:x1] = 255
+        m = foot > 0
+        # Magenta-ish tint over robot self-mask
+        overlay[m, 0] = np.clip(rgb[m, 0].astype(np.int16) + 90, 0, 255).astype(np.uint8)
+        overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + 90, 0, 255).astype(np.uint8)
+        overlay[:, :, 3] = np.where(m, 140, 0)
+
+        # Bright yellow forward edge (column FOOT_X1-1)
+        fx = min(w - 1, max(0, x1 - 1))
+        overlay[y0:y1, fx, :] = [255, 255, 0, 255]
+        # Outline full foot rect
+        cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         return overlay
 
     
