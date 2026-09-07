@@ -1,4 +1,4 @@
-# Checkered Floor Mat Hard-Stop (Ego/Vision Reflex)
+# Topdown Floor Hazard Hard-Stop (RS1 RGB Reflex)
 
 **Status:** Implemented  
 **Date:** 2026-09-07
@@ -7,22 +7,30 @@
 
 ## Problem
 
-Kevin (the robot) was driving onto a checkered floor mat by the door that should be a no-go zone. Map-frame keepout disks were attempted but rejected because **the robot has no usable SLAM** — map-based keepouts are useless without reliable pose estimation.
+Kevin (the robot) was:
+1. Getting **stuck spinning wheels** on a wood bump/threshold (zero movement, wheels spinning ~30s)
+2. Driving onto a **checkered floor mat** by the door (door mat area)
+
+Map-frame keepout disks were attempted but rejected because **the robot has no usable SLAM** — map-based keepouts are useless without reliable pose estimation.
 
 ---
 
 ## Solution
 
-Implement a **sensor-frame (ego/vision) reflex** that detects the checkered mat using RGB vision and triggers a forward hard-stop **without requiring SLAM or map pose**.
+Implement a **sensor-frame (ego/vision) reflex** using **RS1 top-down RealSense RGB** that detects TWO hazards and triggers forward hard-stop **without requiring SLAM or map pose**:
+
+1. **Wood bump / threshold** (edge detection) — where wheels get stuck spinning
+2. **Checkered floor mat pattern** (corner detection) — door mat area
 
 ### Key Design Points
 
-1. **RGB Primary Source**: **MUST use webcam RGB (Vision frames[0])** — NOT RealSense depth/color as primary
-2. **Sensor Frame Detection**: Detects checkerboard patterns in ego frame (no SLAM/map pose)
-3. **Bottom Region Focus**: Analyzes only the bottom portion of the camera view (where floor/mat is visible)
-4. **Forward Hard-Stop**: When mat detected → `fwd_scale = 0.0`
-5. **Escape Capability**: Reverse and turning still allowed if rear/sides are clear
-6. **Tunable Parameters**: Checkerboard size, detection region, and sensitivity are configurable
+1. **RGB Primary Source**: **RS1 color (top-down RealSense RGB / rgbd1)** — NOT webcam
+2. **Dual Hazard Detection**: Detects BOTH bump (edge) AND checkered pattern (corners)
+3. **Forward Region Focus**: Analyzes forward portion of topdown view (where robot will drive)
+4. **RS1 Rotation**: RS1 mounted upside-down → rotate 180° for correct orientation
+5. **Forward Hard-Stop**: When bump OR mat detected → `fwd_scale = 0.0`
+6. **Escape Capability**: Reverse and turning still allowed if rear/sides are clear
+7. **Tunable Parameters**: Checkerboard size, bump threshold, detection region configurable
 
 ---
 
@@ -70,10 +78,11 @@ The checkered mat detector runs in the vision capture loop **before** depth-base
 for cam in [webcam, rs1, rs2]:
     cam.grab()
 
-# 2. Check for checkered mat (RGB reflex)
-# PRIMARY SOURCE: Webcam RGB (frames[0]), NOT RealSense
-if webcam.ok and webcam.color is not None:
-    mat_triggered = checkered_mat_detector.check(webcam.color)  # frames[0]
+# 2. Check for topdown hazards (RGB reflex)
+# PRIMARY SOURCE: RS1 color (topdown RealSense RGB), NOT webcam
+if rs1.ok and rs1.color is not None:
+    rs1_rgb_rotated = rs1.color[::-1, ::-1]  # Rotate 180° (mounted upside-down)
+    hazard_triggered, reason = topdown_hazard_detector.check(rs1_rgb_rotated)
     # Logging and state tracking...
 
 # 3. Process depth cameras (RS1 topdown, RS2 forward)
