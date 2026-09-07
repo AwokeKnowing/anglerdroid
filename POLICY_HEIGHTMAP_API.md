@@ -164,3 +164,6 @@ Current implementation uses CPU numpy arrays with minimal readback overhead. Fut
 ---
 
 **Summary**: This API provides a clean, Tesla FSD-style labeled heightmap observation for neural/MPPI policies at 30 Hz. Current implementation uses CPU numpy (~0.5ms), with clear path to GPU zero-copy tensors when the policy stack is ready.
+
+## Buffer lifetime
+`get_policy_observation()` returns **preallocated buffers**. Contents are valid until the next call; copy if you need to retain a frame.

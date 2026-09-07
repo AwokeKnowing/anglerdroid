@@ -747,6 +747,12 @@ class Vision:
         self._k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         # Mag=3 → ~45k verts; size for mag=1 headroom so copyto never reallocs
         self._rs1_work_verts = np.zeros((848 * 480 // 1, 3), dtype=np.float32)
+        # Policy observation double-buffers (copyto; no per-call alloc)
+        self._policy_ego_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_ego_known = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_ego_persistent = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_ego_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_global_proj = np.full((FRAME_H, FRAME_W), 128, dtype=np.uint8)
         self._z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
         self._k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
         self._kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -1898,118 +1904,59 @@ class Vision:
         return float(getattr(self, '_soft_low_obstacle_median_height', float('inf')))
     
     def get_policy_observation(self):
-        """Get labeled heightmap observation for neural/MPPI policy (Tesla FSD-style).
-        
-        Returns dict with structured heightmap layers (or None if not ready):
-        {
-            'ego_obs': (H, W) uint8 — ego-space obstacle heights in cm
-                       0 = known free (floor detected this frame)
-                       1-100 = obstacle height above floor in cm
-                       Capped at 100 cm for numerical stability
-            
-            'ego_known': (H, W) uint8 — ego-space observation mask
-                         0 = unobserved (no depth data, blind spot)
-                         255 = known (observed this frame)
-            
-            'ego_persistent': (H, W) uint8 — persistent obstacle mask
-                              0 = free (known + no obstacle, or outside robot footprint)
-                              255 = obstacle (current frame or SLAM history)
-                              Includes obstacles projected from global map
-            
-            'ego_height': (H, W) uint8 — persistent obstacle heights
-                          Height in cm (0-100), fused from current + history
-            
-            'global_projected_conf': (H, W) uint8 — global map confidence in ego frame
-                                     0-89 = obstacle (high confidence occupied)
-                                     90-190 = unknown (unobserved or uncertain)
-                                     191-255 = free (high confidence traversable)
-                                     Projected from SLAM global map to current ego pose
-            
+        """Labeled ego heightmap for neural/MPPI policy (Tesla FSD-style).
+
+        Returns a dict of uint8 layers + metadata, or None if topdown is not OK.
+        Arrays are references to preallocated buffers — valid until the next call.
+        See POLICY_HEIGHTMAP_API.md.
+        """
+        # Snapshot ego layers under lock (copyto into prealloc; no fresh alloc).
+        with self._lock:
+            if not getattr(self, '_topdown_ok', False):
+                return None
+            np.copyto(self._policy_ego_obs, self._obs_combined)
+            np.copyto(self._policy_ego_known, self._known_combined)
+            np.copyto(self._policy_ego_persistent, self._persistent_obs)
+            np.copyto(self._policy_ego_height, self._persistent_height)
+            pose_x = float(self._pose.x)
+            pose_y = float(self._pose.y)
+            pose_theta = float(self._pose.theta)
+            topdown_ok = bool(self._topdown_ok)
+            slam_locked = bool(self._slam_locked)
+            ts_cap = float(self.timestamp)
+
+        # Global projection outside lock (GPU; may take ~0.3ms).
+        rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
+        rcy_f = float(CROSSHAIR_CY)
+        global_proj = self._gpu.gmap_project_gpu(
+            pose_x, pose_y, pose_theta,
+            rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+        if global_proj is None:
+            self._policy_global_proj.fill(128)
+        else:
+            np.copyto(self._policy_global_proj, global_proj)
+
+        return {
+            'ego_obs': self._policy_ego_obs,
+            'ego_known': self._policy_ego_known,
+            'ego_persistent': self._policy_ego_persistent,
+            'ego_height': self._policy_ego_height,
+            'global_projected_conf': self._policy_global_proj,
             'metadata': {
-                'ego_h': int, 'ego_w': int,              # heightmap shape (240, 320)
-                'ego_px_size': float,                    # metres per pixel (0.01 = 1cm)
-                'robot_cx': int, 'robot_cy': int,        # robot center in ego frame
-                'robot_footprint': tuple,                # (x0, y0, x1, y1) cleared region
-                'timestamp_capture': float,              # time.time() of capture
-                'timestamp_mono': float,                 # time.monotonic() of capture
-                'topdown_ok': bool,                      # RS1 depth working
-                'slam_locked': bool,                     # SLAM pose reliable
-                'pose_x': float, 'pose_y': float, 'pose_theta': float,  # world-frame pose
+                'ego_h': FRAME_H,
+                'ego_w': FRAME_W,
+                'ego_px_size': float(TD_PX_SIZE),
+                'robot_cx': int(CROSSHAIR_CX + ROBOT_CX_OFF),
+                'robot_cy': int(CROSSHAIR_CY),
+                'robot_footprint': (FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1),
+                'timestamp_capture': ts_cap,
+                'timestamp_mono': time.monotonic(),
+                'topdown_ok': topdown_ok,
+                'slam_locked': slam_locked,
+                'pose_x': pose_x,
+                'pose_y': pose_y,
+                'pose_theta': pose_theta,
             }
         }
-        
-        Layer semantics:
-        - **ego_obs + ego_known**: Current frame obstacle detection (reactive, 30 Hz)
-          Use for immediate safety reflexes and local collision avoidance.
-        
-        - **ego_persistent + ego_height**: Fused current + SLAM history obstacles
-          Use for short-horizon planning (~1-2m) where obstacles persist.
-        
-        - **global_projected_conf**: SLAM global map projected to ego frame
-          Use for longer-horizon planning where global context matters.
-          Only trust when metadata['slam_locked'] == True.
-        
-        Integration notes:
-        - Call this at 30 Hz after vision frame update
-        - All arrays are CPU numpy uint8 (GPU zero-copy future work when CuPy ready)
-        - Robot footprint (x0:x1, y0:y1) is forced free in all layers
-        - When topdown_ok=False, all motion should stop (safety critical)
-        - When slam_locked=False, only use ego layers (global unreliable)
-        
-        Neural policy design (north star):
-        - Input: Stack [ego_obs, ego_known, ego_persistent, global_projected_conf]
-        - Output: Velocity commands or MPPI cost weights
-        - Architecture: Process ego layers for reactive, global for predictive
-        - Training: Sim-to-real transfer via domain randomization of sensor noise
-        
-        Performance:
-        - Current: ~0.5ms (ego arrays already in RAM, global projection ~0.3ms)
-        - No hot-path allocations (returns references to persistent buffers)
-        - Future: GPU-resident tensors via CuPy/PyTorch DLPack when available
-        """
-        with self._lock:
-            if not self._topdown_ok:
-                # Safety: no depth = no reliable observation
-                return None
-            
-            # Ego-space current frame (reactive)
-            ego_obs = self._obs_combined.copy()          # (H, W) uint8, 0=free, 1-100=height
-            ego_known = self._known_combined.copy()      # (H, W) uint8, 0=unknown, 255=known
-            
-            # Ego-space persistent (fused current + history)
-            ego_persistent = self._persistent_obs.copy()  # (H, W) uint8, binary mask
-            ego_height = self._persistent_height.copy()   # (H, W) uint8, height in cm
-            
-            # Global map projected to current ego frame (SLAM history)
-            rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
-            rcy_f = float(CROSSHAIR_CY)
-            global_proj = self._gpu.gmap_project_gpu(
-                self._pose.x, self._pose.y, self._pose.theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
-            
-            if global_proj is None:
-                # Fallback: unknown everywhere
-                global_proj = np.full((FRAME_H, FRAME_W), 128, dtype=np.uint8)
-            
-            return {
-                'ego_obs': ego_obs,
-                'ego_known': ego_known,
-                'ego_persistent': ego_persistent,
-                'ego_height': ego_height,
-                'global_projected_conf': global_proj,
-                'metadata': {
-                    'ego_h': FRAME_H,
-                    'ego_w': FRAME_W,
-                    'ego_px_size': float(TD_PX_SIZE),
-                    'robot_cx': int(CROSSHAIR_CX + ROBOT_CX_OFF),
-                    'robot_cy': int(CROSSHAIR_CY),
-                    'robot_footprint': (FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1),
-                    'timestamp_capture': self.timestamp,
-                    'timestamp_mono': time.monotonic(),
-                    'topdown_ok': self._topdown_ok,
-                    'slam_locked': self._slam_locked,
-                    'pose_x': self._pose.x,
-                    'pose_y': self._pose.y,
-                    'pose_theta': self._pose.theta,
-                }
-            }
+
+
