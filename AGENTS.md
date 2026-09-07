@@ -50,6 +50,14 @@ for convenience. Architect for silicon: ARM cores, GPU, ISP/USB bandwidth —
 measure each.
 
 
+
+### Policy feed: labeled heightmap @ 30 Hz (FSD-style)
+The product of the critical path is a **clean labeled ego heightmap** every
+frame for the neural policy — not a pretty CPU atlas. Prefer GPU-resident
+depth→heightmap (and later VO/viz on GPU). 30 Hz is enough; 60 Hz is headroom.
+RS1 map work ~12 ms inside the 33 ms budget is fine; spend the remaining ~20 ms
+on grab/sync, forward depth, safety, and policy I/O — ideally also on GPU.
+
 ### Depth detail metric (decimate is NOT “fewer verts = win”)
 Obstacle safety projects depth into an ego grid at **`EGO_PX_SIZE = 1 cm/px`**.
 Chasing a tiny pointcloud is wrong if we punch holes in that grid or starve
