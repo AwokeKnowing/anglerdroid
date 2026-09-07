@@ -765,6 +765,7 @@ class Vision:
         self._slam_lock_reason = "not_initialized"
         self._slam_lock_lost_at = 0.0
         self._slam_lock_warnings = 0
+        self._slam_start_time = time.time()  # Track when SLAM started
 
         from gpu_render import GPURenderer
         self._gpu = GPURenderer(MAP_W, MAP_H, ATLAS_W, ATLAS_H)
@@ -861,12 +862,13 @@ class Vision:
         return mask
     
     def _update_slam_lock_status(self):
-        """Update SLAM lock status based on encoder health and tracking quality.
+        """Update SLAM lock status based on encoder health, tracking quality, and SLAM initialization.
         
         SLAM is considered "locked" when:
-        1. Encoders are working (enc_ok=True, age <1s)
-        2. Visual odometry accepting frames OR wheel-only is acceptable
-        3. Top-down depth is working
+        1. SLAM backend has initialized (created >= 2 keyframes, running >= 2s)
+        2. Encoders are working (enc_ok=True, age <1s)
+        3. Visual odometry accepting frames OR wheel-only is acceptable
+        4. Top-down depth is working
         
         When NOT locked:
         - Map-frame features are unreliable (keepouts, navigation)
@@ -874,6 +876,24 @@ class Vision:
         - Operator must be clearly warned
         """
         reasons = []
+        
+        # Check SLAM backend initialization (must have keyframes before lock is possible)
+        slam_initialized = False
+        elapsed_s = time.time() - self._slam_start_time
+        slam_stats = self._global_map.stats()
+        keyframe_count = slam_stats.get('keyframes', 0)
+        
+        MIN_KEYFRAMES = 2      # Need at least 2 keyframes (one edge)
+        MIN_ELAPSED_S = 2.0    # Need at least 2 seconds of operation
+        
+        if keyframe_count < MIN_KEYFRAMES:
+            reasons.append(f"init_kf_{keyframe_count}/{MIN_KEYFRAMES}")
+            slam_initialized = False
+        elif elapsed_s < MIN_ELAPSED_S:
+            reasons.append(f"init_time_{elapsed_s:.1f}s/{MIN_ELAPSED_S:.0f}s")
+            slam_initialized = False
+        else:
+            slam_initialized = True
         
         # Check encoder health
         enc_ok = False
@@ -901,9 +921,11 @@ class Vision:
         if not self._topdown_ok:
             reasons.append("topdown_lost")
         
-        # Determine lock status
+        # Determine lock status (ALL conditions must pass)
         was_locked = self._slam_locked
-        self._slam_locked = enc_ok and (visual_ok or time_since_visual < 5.0) and self._topdown_ok
+        self._slam_locked = (slam_initialized and enc_ok and 
+                            (visual_ok or time_since_visual < 5.0) and 
+                            self._topdown_ok)
         self._slam_lock_reason = ", ".join(reasons) if reasons else "ok"
         
         # Log state changes
@@ -915,7 +937,7 @@ class Vision:
         elif not was_locked and self._slam_locked:
             downtime = time.monotonic() - self._slam_lock_lost_at if self._slam_lock_lost_at > 0 else 0
             print(f"🟢 SLAM LOCKED (was unlocked {downtime:.1f}s)")
-            print(f"   ✓ Encoders working, tracking quality good")
+            print(f"   ✓ SLAM initialized ({keyframe_count} keyframes), encoders working, tracking quality good")
 
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""

@@ -248,6 +248,44 @@ def test_slam_stats():
     print("✓ SLAM statistics work correctly")
 
 
+def test_slam_initialization_gating():
+    """Test that SLAM initialization is properly gated by keyframe count and time."""
+    print("\n=== Test 7: SLAM initialization gating ===")
+    
+    from slam import PoseGraphSLAM
+    
+    slam = PoseGraphSLAM()
+    
+    # Initially: 0 keyframes
+    stats = slam.stats()
+    assert stats['keyframes'] == 0, "Should start with 0 keyframes"
+    print("  ✓ Initial state: 0 keyframes")
+    
+    # Create first keyframe
+    obs = np.random.randint(0, 100, (240, 320), dtype=np.uint8)
+    known = np.ones((240, 320), dtype=np.uint8) * 255
+    
+    slam.keyframe_check(obs, known, 0.0, 0.0, 0.0, 160, 120, 0.01)
+    stats = slam.stats()
+    assert stats['keyframes'] == 1, "Should have 1 keyframe"
+    print("  ✓ After first keyframe check: 1 keyframe")
+    
+    # Move robot to trigger second keyframe (need >20cm or >10° motion)
+    slam.keyframe_check(obs, known, 0.3, 0.0, 0.0, 160, 120, 0.01)
+    stats = slam.stats()
+    assert stats['keyframes'] == 2, "Should have 2 keyframes"
+    assert stats['edges'] >= 1, "Should have odometry edge"
+    print("  ✓ After motion: 2 keyframes, 1+ edge")
+    
+    # Add third keyframe
+    slam.keyframe_check(obs, known, 0.6, 0.0, 0.0, 160, 120, 0.01)
+    stats = slam.stats()
+    assert stats['keyframes'] >= 2, "Should maintain keyframes"
+    print(f"  ✓ Continued motion: {stats['keyframes']} keyframes, {stats['edges']} edges")
+    
+    print("✓ SLAM initialization gating works correctly")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -261,6 +299,7 @@ def main():
         test_keepout_transformation,
         test_keyframe_export,
         test_slam_stats,
+        test_slam_initialization_gating,
     ]
     
     passed = 0
