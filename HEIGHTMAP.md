@@ -225,3 +225,6 @@ python3 scripts/run_vision_smoke.py
 
 **Status**: Implemented, pending on-device verification.
 **Next**: Run Kevin smoke, paste timing, merge if p95 < 33.3ms.
+
+## Soft-low
+Dog bed / cushions are ordinary heightmap obstacles. A separate soft-low CPU pass is not required on the GPU path; past issues were empty-frame nav bugs.

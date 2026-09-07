@@ -1266,7 +1266,9 @@ class Vision:
                     _rs1_sparse = process_rs1_sparse_reflexes(
                         self._rs1.verts, work_verts=self._rs1_work_verts)
                     
-                    # Soft-low: TODO derive from GPU heightmap forward strip if equivalent
+                    # Soft-low not needed on GPU path: dog bed shows as normal
+                    # heightmap obstacle. Prior "soft-low" pain was empty-frame nav,
+                    # not missing a special detector (James 2026-09-07).
                     _rs1 = {
                         'near_field': _rs1_sparse['near_field'],
                         'near_close_count': _rs1_sparse['near_close_count'],
@@ -1274,7 +1276,7 @@ class Vision:
                         'overhang': _rs1_sparse['overhang'],
                         'overhang_count': _rs1_sparse['overhang_count'],
                         'overhang_median_z': _rs1_sparse['overhang_median_z'],
-                        'soft_low': False,  # TODO: derive from GPU heightmap
+                        'soft_low': False,
                         'soft_low_count': 0,
                         'soft_low_median_height': float('inf'),
                     }
@@ -1292,7 +1294,7 @@ class Vision:
                 self._overhang_approach_median_z = _rs1['overhang_median_z']
                 self._topdown_soft_low_obstacle = _rs1['soft_low']
                 self._soft_low_obstacle_count = _rs1['soft_low_count']
-                self._topdown_soft_low_obstacle_median_height = _rs1['soft_low_median_height']
+                self._soft_low_obstacle_median_height = _rs1['soft_low_median_height']
                 # Rate-limited reflex logs (every 90 frames while sticky)
                 if _rs1['near_field']:
                     self._near_field_log_n = getattr(self, '_near_field_log_n', 0) + 1
