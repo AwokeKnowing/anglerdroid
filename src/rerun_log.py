@@ -89,6 +89,7 @@ class KevinRerunLogger:
         obs: Optional[np.ndarray] = None,
         height_cm: Optional[np.ndarray] = None,
         safety: Optional[Mapping[str, Any]] = None,
+        rs1_mask_overlay: Optional[np.ndarray] = None,
         force: bool = False,
     ) -> bool:
         """Log a tick. Returns True if this call actually wrote entities."""
@@ -136,6 +137,13 @@ class KevinRerunLogger:
                         ]
                     ),
                 )
+            if rs1_mask_overlay is not None:
+                # Semi-transparent mask overlay on top of RS1 topdown RGB.
+                # Shows the valid observation area (white=valid, transparent=clipped).
+                # Helps visualize/tune forward approach margin.
+                overlay = np.ascontiguousarray(rs1_mask_overlay)
+                if overlay.ndim == 3 and overlay.shape[2] == 4:
+                    rr.log("vision/rs1_mask_overlay", rr.Image(overlay))
             return True
         except Exception as e:
             # Never let logging take down the 30 Hz loop.

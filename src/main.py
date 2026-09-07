@@ -219,6 +219,10 @@ def main():
                     rgb = rs1 = rs2 = None
                     if frames is not None and len(frames) >= 3:
                         rgb, rs1, rs2 = frames[0], frames[1], frames[2]
+                    # Generate mask overlay (semi-transparent, shows valid obs region)
+                    mask_overlay = None
+                    if rerun_logger.due:
+                        mask_overlay = vis.get_rs1_mask_overlay()
                     rerun_logger.maybe_log(
                         ts=ts,
                         atlas=atlas,
@@ -232,6 +236,7 @@ def main():
                             "bwd": getattr(vis, "safety_bwd_scale", 1.0),
                             "ang": getattr(vis, "safety_ang_scale", 1.0),
                         },
+                        rs1_mask_overlay=mask_overlay,
                     )
 
             # Propagate debug flags from UI to vision
