@@ -6,12 +6,19 @@ Detect and avoid checkered mat zones that mark:
 - Off-limits spaces (human work areas)
 - Furniture protection zones
 
+**Special case: Door mat** (`checkered_door` keepout)
+- Black/white checkered mat by front door marks high RL stuck risk zone
+- Detection runs at ~3fps in vision extras loop (NOT in 30Hz capture)
+- Named keepout `checkered_door` persists in map for path planning avoidance
+- RL policy should learn to avoid this zone (high stuck reward penalty)
+
 Uses RS1 top-down RGB pattern recognition for immediate hard-stop reflex.
 
 ## Preconditions
 - RS1 top-down RGB camera operational
-- Checkered pattern detector enabled in vision pipeline
+- Checkered pattern detector enabled in vision extras loop (~3fps)
 - `topdown_hazard` reflex active in safety layer
+- SLAM locked for persistent keepout marking (optional, reflex works without)
 
 ## Procedure
 1. **Detection phase**
@@ -42,10 +49,12 @@ Uses RS1 top-down RGB pattern recognition for immediate hard-stop reflex.
 - **Already on mat**: stuck in keepout → stuck recovery prioritizes reverse
 
 ## Integration Points
-- **checkered_mat.py**: pattern detection algorithm (RS1 RGB)
+- **vision.py**: `_vision_extras_loop()` runs RGB detections at ~3fps (separate from 30Hz capture)
+- **checkered_mat.py**: pattern detection algorithm (RS1 RGB, NO findChessboardCorners in 30Hz loop)
 - **safety.py**: `topdown_hazard` flag, hard-stop reflex
-- **keepouts.py**: map-frame keepout polygons (persistent avoidance)
+- **keepouts.py**: map-frame keepout polygons (persistent avoidance, e.g. `checkered_door`)
 - **local_executive**: path planning must avoid keepout zones
+- **neural_rl.py**: RL policy learns stuck risk penalty for `checkered_door` zone
 
 ## Trace Markers
 ```json

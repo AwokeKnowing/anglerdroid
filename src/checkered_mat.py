@@ -7,17 +7,23 @@ Detects floor hazards in RS1 top-down RealSense RGB view (sensor frame):
 Triggers forward hard-stop (fwd_scale=0) when bump or checkered detected.
 This is a REFLEX that works WITHOUT SLAM or map-based keepouts.
 
+**ARCHITECTURE NOTE (James):**
+  - This detector runs in vision._vision_extras_loop() at ~3fps
+  - NOT called from 30Hz capture loop (zero findChessboardCorners in capture path)
+  - Door checkered mat → named keepout `checkered_door` + RL stuck risk
+  - Depth reflexes (near/overhang/soft-low) stay on 30Hz
+
 Design:
     - PRIMARY SOURCE: RS1 color (top-down RealSense RGB / rgbd1)
     - Detects bump via edge detection in near/forward region
-    - Detects checkerboard via OpenCV corner detection
+    - Detects checkerboard via OpenCV corner detection (~3fps, NOT 30Hz)
     - Analyzes forward region of topdown view (where robot will drive)
     - Detection → fwd_scale=0, allows reverse/turn if rear is clear
     - Tunable thresholds for both bump and checkerboard
 
 Typical use:
     detector = TopdownHazardDetector()
-    triggered, reason = detector.check(rs1_color_frame)  # RS1 topdown RGB
+    triggered, reason = detector.check(rs1_color_frame)  # RS1 topdown RGB @ 3fps
     if triggered:
         fwd_scale = 0.0  # Stop forward motion
 """

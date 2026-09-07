@@ -577,6 +577,8 @@ class Vision:
 
         self._running = False
         self._thread = None
+        self._extras_running = False
+        self._extras_thread = None
         self._rs1 = None
         self._rs2 = None
         self._webcam = None
@@ -757,7 +759,14 @@ class Vision:
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
+        
+        # Start vision extras loop (~3fps) for RGB-based detections
+        self._extras_running = True
+        self._extras_thread = threading.Thread(target=self._vision_extras_loop, daemon=True)
+        self._extras_thread.start()
+        
         print("vision: capture thread started (slam=%s)" % self._slam_backend)
+        print("vision: extras thread started (~3fps RGB detections)")
 
     def _render_side_view(self):
         """Render a side-view cross-section showing height vs forward distance.
@@ -931,6 +940,82 @@ class Vision:
                 self.timestamp = time.time()
             time.sleep(max(0, interval - (time.monotonic() - t0)))
 
+    def _vision_extras_loop(self):
+        """Vision extras loop (~3fps): RGB-based detections ONLY.
+        
+        This loop handles RGB image detections that do NOT need 30Hz:
+          - Checkered/bump chessboard (TopdownHazardDetector on RS1 RGB)
+          - Face detection (future: optional i777 detection stream)
+          - Gesture recognition (future)
+        
+        Depth-based reflexes (near/overhang/soft-low) stay on 30Hz capture loop.
+        
+        Architecture notes (James):
+          - 30Hz capture MUST get fresh RS+RGB frames; processing finishes before next frame
+          - RGB detections are NOT in capture — separate ~3fps loop, optionally i777
+          - Door checkered floor = named keepout `checkered_door` + RL stuck risk
+          - Depth reflexes (near/overhang/soft-low) stay on 30Hz
+        """
+        EXTRAS_FPS = 3.0
+        interval = 1.0 / EXTRAS_FPS
+        
+        print("vision_extras: started at %.1f fps (RGB detections only)" % EXTRAS_FPS)
+        
+        while self._extras_running:
+            t0 = time.monotonic()
+            
+            try:
+                # Check for topdown hazards: bump + checkered mat (RGB-based reflex, works without SLAM)
+                # PRIMARY SOURCE: RS1 color (top-down RealSense RGB / rgbd1), NOT webcam.
+                # Detects wood bump (threshold/lip) and checkered floor mat in forward region.
+                # Note: RS1 color is rotated 180° ([::-1, ::-1]) so forward region is at TOP of image.
+                if self._rs1 and self._rs1.ok and self._rs1.color is not None:
+                    # RS1 is mounted upside-down → rotate 180° for correct orientation
+                    rs1_rgb_rotated = self._rs1.color[::-1, ::-1]
+                    hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(rs1_rgb_rotated)
+                    self._topdown_hazard = hazard_triggered
+                    self._topdown_hazard_reason = hazard_reason
+                    self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
+                    self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
+                    
+                    if hazard_triggered and not hasattr(self, '_topdown_hazard_log_n'):
+                        self._topdown_hazard_log_n = 0
+                    if hazard_triggered:
+                        self._topdown_hazard_log_n += 1
+                        if self._topdown_hazard_log_n == 1 or self._topdown_hazard_log_n % 10 == 0:
+                            print("vision_extras: TOPDOWN HAZARD REFLEX triggered — "
+                                  "reason=%s corners=%d edges=%d (RS1 topdown RGB @ 3fps)"
+                                  % (hazard_reason, self._topdown_hazard_corner_count,
+                                     self._topdown_hazard_edge_count))
+                    else:
+                        if hasattr(self, '_topdown_hazard_log_n') and self._topdown_hazard_log_n > 0:
+                            print("vision_extras: TOPDOWN HAZARD REFLEX cleared — "
+                                  "corners=%d edges=%d (after %d checks)"
+                                  % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
+                                     self._topdown_hazard_log_n))
+                            self._topdown_hazard_log_n = 0
+                else:
+                    self._topdown_hazard = False
+                    self._topdown_hazard_reason = None
+                    self._topdown_hazard_corner_count = 0
+                    self._topdown_hazard_edge_count = 0
+                
+                # TODO (optional): Add i777 detection stream integration here
+                # - Face detection
+                # - Gesture recognition
+                # - Other RGB-based high-level detections
+                
+            except Exception as e:
+                if not getattr(self, '_extras_err_n', 0):
+                    print("vision_extras: error (continuing): %s" % e)
+                self._extras_err_n = getattr(self, '_extras_err_n', 0) + 1
+            
+            # Throttle to ~3fps
+            elapsed = time.monotonic() - t0
+            sleep_time = interval - elapsed
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
@@ -977,39 +1062,9 @@ class Vision:
                 cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
                 pose_src = self._pose
 
-            # Check for topdown hazards: bump + checkered mat (RGB-based reflex, works without SLAM)
-            # PRIMARY SOURCE: RS1 color (top-down RealSense RGB / rgbd1), NOT webcam.
-            # Detects wood bump (threshold/lip) and checkered floor mat in forward region.
-            # Note: RS1 color is rotated 180° ([::-1, ::-1]) so forward region is at TOP of image.
-            if self._rs1 and self._rs1.ok and self._rs1.color is not None:
-                # RS1 is mounted upside-down → rotate 180° for correct orientation
-                rs1_rgb_rotated = self._rs1.color[::-1, ::-1]
-                hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(rs1_rgb_rotated)
-                self._topdown_hazard = hazard_triggered
-                self._topdown_hazard_reason = hazard_reason
-                self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
-                self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
-                if hazard_triggered and not hasattr(self, '_topdown_hazard_log_n'):
-                    self._topdown_hazard_log_n = 0
-                if hazard_triggered:
-                    self._topdown_hazard_log_n += 1
-                    if self._topdown_hazard_log_n == 1 or self._topdown_hazard_log_n % 30 == 0:
-                        print("vision: TOPDOWN HAZARD REFLEX triggered — "
-                              "reason=%s corners=%d edges=%d (RS1 topdown RGB, fwd=0)"
-                              % (hazard_reason, self._topdown_hazard_corner_count,
-                                 self._topdown_hazard_edge_count))
-                else:
-                    if hasattr(self, '_topdown_hazard_log_n') and self._topdown_hazard_log_n > 0:
-                        print("vision: TOPDOWN HAZARD REFLEX cleared — "
-                              "corners=%d edges=%d (after %d frames)"
-                              % (self._topdown_hazard_corner_count, self._topdown_hazard_edge_count,
-                                 self._topdown_hazard_log_n))
-                        self._topdown_hazard_log_n = 0
-            else:
-                self._topdown_hazard = False
-                self._topdown_hazard_reason = None
-                self._topdown_hazard_corner_count = 0
-                self._topdown_hazard_edge_count = 0
+            # NOTE: RGB-based topdown hazard detection (checkered/bump) moved to _vision_extras_loop (~3fps)
+            # This ensures 30Hz capture loop has zero findChessboardCorners calls (James architecture)
+            # Depth reflexes (near/overhang/soft-low) stay here at 30Hz
 
             _t_hazard = time.monotonic()
             
@@ -1463,7 +1518,7 @@ class Vision:
             # === Stage timing collection ===
             _stage_times.append((
                 (_t_grab - _t_start) * 1000.0,      # grab
-                (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose
+                (_t_hazard - _t_grab) * 1000.0,     # pose (RGB hazard moved to extras loop)
                 (_t_rs1 - _t_hazard) * 1000.0,      # rs1_checks (near/overhang/soft + depth_topdown)
                 (_t_rs2 - _t_rs1) * 1000.0,         # rs2_process (GPU depth)
                 (_t_obs - _t_rs2) * 1000.0,         # obs_combine
@@ -1479,7 +1534,7 @@ class Vision:
                 avg = np.mean(recent, axis=0)
                 p95 = np.percentile(recent, 95, axis=0)
                 total = np.sum(avg)
-                labels = ["grab", "pose+hazard", "rs1_checks", "rs2_gpu", 
+                labels = ["grab", "pose", "rs1_checks", "rs2_gpu", 
                          "obs_comb", "odom", "gmap", "safety", "render"]
                 print("=" * 80)
                 print(f"CAPTURE TIMING (last 90 frames): TOTAL={total:.1f}ms ({1000/total:.1f} Hz)")
@@ -1525,8 +1580,11 @@ class Vision:
                 pass
             self._grab_pool = None
         self._running = False
+        self._extras_running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+        if self._extras_thread:
+            self._extras_thread.join(timeout=2.0)
         if self._rs1:
             self._rs1.stop()
         if self._rs2:
