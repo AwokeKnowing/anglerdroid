@@ -13,11 +13,13 @@ import house_bot as house_bot_mod
 import people_live as people_live_mod
 
 from rerun_log import KevinRerunLogger, available as rerun_available
+from loop_timing import FrameBudget
 
 
 TARGET_FPS = 30
 LOOP_DT = 1.0 / TARGET_FPS
 BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 fps
+SHED_THRESHOLD = 0.85  # Shed droppable stages if >85% of budget used
 
 
 def main():
@@ -158,15 +160,20 @@ def main():
         people.start()
 
     print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
-    print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
+    print("  budget=%.1f ms/frame | shed threshold=%.0f%% | every 90 frames: fps, avg process_ms, stage breakdown, sheds" % (BUDGET_MS, SHED_THRESHOLD * 100))
     frame_id = 0
     last_report = time.monotonic()
     last_slam_status = time.monotonic()
     process_sum = 0.0
     wait_sum = 0.0
+    
+    # Frame budget for per-stage timing and shedding
+    budget = FrameBudget(budget_ms=BUDGET_MS, shed_threshold=SHED_THRESHOLD)
+    
     try:
         while True:
             loop_start = time.monotonic()
+            budget.reset_frame()
             
             # Periodic SLAM lock status (every 10 seconds)
             if loop_start - last_slam_status >= 10.0:
@@ -185,41 +192,44 @@ def main():
                     print(f"   🚨 WHEELS SPINNING BUT NOT MOVING — immobilized")
                 last_slam_status = loop_start
 
-            # Get latest atlas only (no frame copies)
-            atlas, ts = tools.get_atlas()
-            if atlas is not None:
-                u.send_atlas(atlas)
+            # Get latest atlas only (no frame copies) - CRITICAL PATH
+            with budget.stage("atlas"):
+                atlas, ts = tools.get_atlas()
+                if atlas is not None:
+                    u.send_atlas(atlas)
 
 
-            if rerun_logger.enabled:
-                # Throttled RGB + ego obs/height; atlas when present.
-                frames = None
-                obs = getattr(vis, "_persistent_obs", None)
-                height = getattr(vis, "_persistent_height", None)
-                # Only copy camera frames on log ticks (every_n gate inside logger
-                # still needs the arrays — peek counter via force=False path).
-                if rerun_logger.due:
-                    try:
-                        frames, _atlas2, _ts2 = tools.get_frames()
-                    except Exception:
-                        frames = None
-                rgb = rs1 = rs2 = None
-                if frames is not None and len(frames) >= 3:
-                    rgb, rs1, rs2 = frames[0], frames[1], frames[2]
-                rerun_logger.maybe_log(
-                    ts=ts,
-                    atlas=atlas,
-                    rgb=rgb,
-                    rs1=rs1,
-                    rs2=rs2,
-                    obs=obs,
-                    height_cm=height,
-                    safety={
-                        "fwd": getattr(vis, "safety_fwd_scale", 1.0),
-                        "bwd": getattr(vis, "safety_bwd_scale", 1.0),
-                        "ang": getattr(vis, "safety_ang_scale", 1.0),
-                    },
-                )
+            # Rerun logging - DROPPABLE (skip if over budget)
+            if rerun_logger.enabled and budget.should_run("rerun"):
+                with budget.stage("rerun"):
+                    # Throttled RGB + ego obs/height; atlas when present.
+                    frames = None
+                    obs = getattr(vis, "_persistent_obs", None)
+                    height = getattr(vis, "_persistent_height", None)
+                    # Only copy camera frames on log ticks (every_n gate inside logger
+                    # still needs the arrays — peek counter via force=False path).
+                    if rerun_logger.due:
+                        try:
+                            frames, _atlas2, _ts2 = tools.get_frames()
+                        except Exception:
+                            frames = None
+                    rgb = rs1 = rs2 = None
+                    if frames is not None and len(frames) >= 3:
+                        rgb, rs1, rs2 = frames[0], frames[1], frames[2]
+                    rerun_logger.maybe_log(
+                        ts=ts,
+                        atlas=atlas,
+                        rgb=rgb,
+                        rs1=rs1,
+                        rs2=rs2,
+                        obs=obs,
+                        height_cm=height,
+                        safety={
+                            "fwd": getattr(vis, "safety_fwd_scale", 1.0),
+                            "bwd": getattr(vis, "safety_bwd_scale", 1.0),
+                            "ang": getattr(vis, "safety_ang_scale", 1.0),
+                        },
+                    )
 
             # Propagate debug flags from UI to vision
             vis.debug_depth = u.debug_flags.get("depth", False)
@@ -228,145 +238,148 @@ def main():
                 vis.request_calibration()
             vis._gpu.clear_vis = u.debug_flags.get("clear_vis", False)
 
-            # Safety override — directional scaling (fwd / bwd / angular independent)
-            if wb is not None:
-                wb.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
-                                     vis.safety_ang_scale)
+            # Safety override — directional scaling (fwd / bwd / angular independent) - CRITICAL
+            with budget.stage("safety"):
+                if wb is not None:
+                    wb.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
+                                         vis.safety_ang_scale)
 
-            # Gamepad + watchdog
-            wb = tools.get_wheelbase()
-            gamepad_active = False
-            if wb is not None:
-                wb._check_gamepad_health()
-                left_tps = 0.0
-                right_tps = 0.0
-                if wb.gamepad is not None:
-                    vels = wb.gamepad.diffDrive()
-                    left_norm = vels.get("left", 0.0)
-                    right_norm = vels.get("right", 0.0)
-                    if abs(left_norm) < 0.08:
-                        left_norm = 0.0
-                    if abs(right_norm) < 0.08:
-                        right_norm = 0.0
-                    left_tps = left_norm * 0.5
-                    right_tps = right_norm * 0.5
-                gamepad_active = abs(left_tps) > 0 or abs(right_tps) > 0
+            # Gamepad + local planner + navigator - CRITICAL PATH
+            with budget.stage("planner"):
+                wb = tools.get_wheelbase()
+                gamepad_active = False
+                if wb is not None:
+                    wb._check_gamepad_health()
+                    left_tps = 0.0
+                    right_tps = 0.0
+                    if wb.gamepad is not None:
+                        vels = wb.gamepad.diffDrive()
+                        left_norm = vels.get("left", 0.0)
+                        right_norm = vels.get("right", 0.0)
+                        if abs(left_norm) < 0.08:
+                            left_norm = 0.0
+                        if abs(right_norm) < 0.08:
+                            right_norm = 0.0
+                        left_tps = left_norm * 0.5
+                        right_tps = right_norm * 0.5
+                    gamepad_active = abs(left_tps) > 0 or abs(right_tps) > 0
 
-                if gamepad_active:
-                    wb.cancel_twist_for()
-                    navigator.clear_goal()
-                    try:
-                        tools.set_wheel_vels(left_tps, right_tps)
-                    except RuntimeError as e:
-                        if "CAN bus failed" in str(e):
-                            print(f"main: {e} — shutting down")
-                            break
-                        raise
-                elif not wb.is_twist_for_active():
-                    twist = None
-                    if args.auto_local and local_executive.is_active():
-                        pose = getattr(vis, "_pose", None)
-                        px = py = pth = None
-                        if pose is not None:
-                            px, py, pth = pose.x, pose.y, pose.theta
-                        # VFH uses atlas quadrant; MPPI uses ego persistent_obs
-                        obs = getattr(vis, "_persistent_obs", None)
-                        twist = local_executive.tick(
-                            atlas, px, py, pth, obs_map=obs)
-                    if twist is None and atlas is not None:
-                        twist = navigator.compute_twist(atlas)
-                    if twist is not None:
-                        if not getattr(vis, "topdown_depth_ok", True):
-                            wb.cancel_twist_for()
-                            tools.twist(0.0, 0.0)
+                    if gamepad_active:
+                        wb.cancel_twist_for()
+                        navigator.clear_goal()
+                        try:
+                            tools.set_wheel_vels(left_tps, right_tps)
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
+                    elif not wb.is_twist_for_active():
+                        twist = None
+                        if args.auto_local and local_executive.is_active():
+                            pose = getattr(vis, "_pose", None)
+                            px = py = pth = None
+                            if pose is not None:
+                                px, py, pth = pose.x, pose.y, pose.theta
+                            # VFH uses atlas quadrant; MPPI uses ego persistent_obs
+                            obs = getattr(vis, "_persistent_obs", None)
+                            twist = local_executive.tick(
+                                atlas, px, py, pth, obs_map=obs)
+                        if twist is None and atlas is not None:
+                            twist = navigator.compute_twist(atlas)
+                        if twist is not None:
+                            if not getattr(vis, "topdown_depth_ok", True):
+                                wb.cancel_twist_for()
+                                tools.twist(0.0, 0.0)
+                            else:
+                                try:
+                                    tools.twist(twist[0], twist[1])
+                                except RuntimeError as e:
+                                    if "CAN bus failed" in str(e):
+                                        print(f"main: {e} — shutting down")
+                                        break
+                                    raise
                         else:
                             try:
-                                tools.twist(twist[0], twist[1])
+                                tools.set_wheel_vels(0.0, 0.0)
                             except RuntimeError as e:
                                 if "CAN bus failed" in str(e):
                                     print(f"main: {e} — shutting down")
                                     break
                                 raise
-                    else:
-                        try:
-                            tools.set_wheel_vels(0.0, 0.0)
-                        except RuntimeError as e:
-                            if "CAN bus failed" in str(e):
-                                print(f"main: {e} — shutting down")
-                                break
-                            raise
 
-            # Tool calls from agent (only act if gamepad is idle)
-            if not gamepad_active:
-                pending = tools.get_pending_tool_calls()
-                for call in pending:
-                    name = call.get("name")
-                    cargs = call.get("args", {})
-                    if name == "twist_for":
-                        fwd = cargs.get("forward_mps", 0)
-                        ang = cargs.get("angular_rads", 0)
-                        dur = cargs.get("duration_secs", 2.0)
-                        sf = wb._safety_fwd if fwd > 0 else wb._safety_bwd if fwd < 0 else 1.0
-                        print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
-                            fwd, ang, dur, sf, wb._safety_ang))
-                        navigator.clear_goal()
-                        try:
-                            tools.twist_for(
-                                fwd, ang,
-                                duration_secs=dur,
-                                ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
-                                ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
-                            )
-                        except RuntimeError as e:
-                            if "CAN bus failed" in str(e):
-                                print(f"main: {e} — shutting down")
-                                break
-                            raise
-                    elif name == "stop":
-                        if wb:
-                            wb.cancel_twist_for()
-                        local_executive.clear()
-                        navigator.clear_goal()
-                        tools.stop()
-                    elif name == "navigate":
-                        local_executive.clear()
-                        hdg = cargs.get("heading_deg")
-                        if hdg is not None:
-                            navigator.set_goal(float(hdg))
-                        else:
+            # Tool calls from agent (only act if gamepad is idle) - DROPPABLE
+            if not gamepad_active and budget.should_run("tool_calls"):
+                with budget.stage("tool_calls"):
+                    pending = tools.get_pending_tool_calls()
+                    for call in pending:
+                        name = call.get("name")
+                        cargs = call.get("args", {})
+                        if name == "twist_for":
+                            fwd = cargs.get("forward_mps", 0)
+                            ang = cargs.get("angular_rads", 0)
+                            dur = cargs.get("duration_secs", 2.0)
+                            sf = wb._safety_fwd if fwd > 0 else wb._safety_bwd if fwd < 0 else 1.0
+                            print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
+                                fwd, ang, dur, sf, wb._safety_ang))
                             navigator.clear_goal()
-                    elif name == "goto_xy":
-                        if not args.auto_local:
-                            print("exec: goto_xy ignored (pass --auto-local)")
-                        else:
-                            local_executive.set_goal_xy(cargs.get("x", 0.0), cargs.get("y", 0.0))
-                            print("exec: goto_xy(%.2f, %.2f)" % (float(cargs.get("x", 0)), float(cargs.get("y", 0))))
-                    elif name == "wander":
-                        if not args.auto_local:
-                            print("exec: wander ignored (pass --auto-local)")
-                        else:
-                            local_executive.set_wander()
-                            print("exec: wander")
-                    elif name == "local_stop":
-                        local_executive.clear()
-                        navigator.clear_goal()
-                        tools.stop()
-                    elif name == "twist":
-                        try:
-                            tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
-                        except RuntimeError as e:
-                            if "CAN bus failed" in str(e):
-                                print(f"main: {e} — shutting down")
-                                break
-                            raise
-                    elif name == "set_wheel_vels":
-                        try:
-                            tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
-                        except RuntimeError as e:
-                            if "CAN bus failed" in str(e):
-                                print(f"main: {e} — shutting down")
-                                break
-                            raise
+                            try:
+                                tools.twist_for(
+                                    fwd, ang,
+                                    duration_secs=dur,
+                                    ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
+                                    ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
+                                )
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+                        elif name == "stop":
+                            if wb:
+                                wb.cancel_twist_for()
+                            local_executive.clear()
+                            navigator.clear_goal()
+                            tools.stop()
+                        elif name == "navigate":
+                            local_executive.clear()
+                            hdg = cargs.get("heading_deg")
+                            if hdg is not None:
+                                navigator.set_goal(float(hdg))
+                            else:
+                                navigator.clear_goal()
+                        elif name == "goto_xy":
+                            if not args.auto_local:
+                                print("exec: goto_xy ignored (pass --auto-local)")
+                            else:
+                                local_executive.set_goal_xy(cargs.get("x", 0.0), cargs.get("y", 0.0))
+                                print("exec: goto_xy(%.2f, %.2f)" % (float(cargs.get("x", 0)), float(cargs.get("y", 0))))
+                        elif name == "wander":
+                            if not args.auto_local:
+                                print("exec: wander ignored (pass --auto-local)")
+                            else:
+                                local_executive.set_wander()
+                                print("exec: wander")
+                        elif name == "local_stop":
+                            local_executive.clear()
+                            navigator.clear_goal()
+                            tools.stop()
+                        elif name == "twist":
+                            try:
+                                tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+                        elif name == "set_wheel_vels":
+                            try:
+                                tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
 
             # Throttle to 30 fps
             process_sec = time.monotonic() - loop_start
@@ -387,6 +400,26 @@ def main():
                 process_sum = 0.0
                 wait_sum = 0.0
                 last_report = now
+                
+                # Get lifetime stats for stage breakdown and shed counts
+                lifetime = budget.get_lifetime_stats()
+                stage_counts = lifetime.get("stage_counts", {})
+                shed_counts = lifetime.get("shed_counts", {})
+                
+                # Format stage timing info
+                stage_info = []
+                for stage in ["atlas", "safety", "planner", "rerun", "tool_calls"]:
+                    count = stage_counts.get(stage, 0)
+                    if count > 0:
+                        stage_info.append("%s=%d" % (stage, count))
+                
+                # Format shed info
+                shed_info = ""
+                if shed_counts:
+                    shed_parts = ["%s=%d" % (k, v) for k, v in sorted(shed_counts.items())]
+                    shed_info = "  shed:[%s]" % ",".join(shed_parts)
+                
+                # Navigation info
                 nav_info = ""
                 hdg = navigator.get_goal()
                 if hdg is not None:
@@ -394,8 +427,10 @@ def main():
                 st = local_executive.status()
                 if st.get("active"):
                     nav_info += "  local=%s" % st.get("mode")
+                
                 print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)%s" % (
                     actual_fps, avg_process, avg_wait, BUDGET_MS, nav_info))
+                print("    stages:[%s]%s" % (",".join(stage_info), shed_info))
     except KeyboardInterrupt:
         pass
     finally:
