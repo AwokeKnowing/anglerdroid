@@ -451,6 +451,13 @@ class WheelBase:
                     vl = (-vl_raw if self.invert_left else vl_raw) * circ
                     vr = vr_raw * circ
                     return vl, vr
+                else:
+                    # Log when encoder data goes stale during motion
+                    if not getattr(self, '_enc_stale_warned', False) and (
+                        abs(self._last_sent_left or 0.0) > 0.01 or 
+                        abs(self._last_sent_right or 0.0) > 0.01):
+                        print("⚠️  encoder: data stale (age=%.2fs), falling back to commanded vel" % age)
+                        self._enc_stale_warned = True
         # Fallback: commanded velocity
         sl = self._last_sent_left
         sr = self._last_sent_right
@@ -466,6 +473,18 @@ class WheelBase:
     def battery_pct(self):
         """Cached battery percentage (updated every ~5s in encoder thread)."""
         return self._batt_pct
+    
+    def get_encoder_health(self):
+        """Return encoder health metrics for diagnostics."""
+        with self._enc_lock:
+            age = time.monotonic() - self._enc_last_good if self._enc_last_good > 0 else float('inf')
+            return {
+                'encoder_ok': self._enc_ok,
+                'age_s': age,
+                'consecutive_fails': self._enc_consec_fails,
+                'mode': 'native_can' if self._enc_native else 'sdo',
+                'native_fails': self._enc_native_fails,
+            }
 
     def _start_encoder_reader(self):
         self._enc_vel = [0.0, 0.0]    # [left_tps, right_tps] from encoder
@@ -524,6 +543,9 @@ class WheelBase:
                             mode = "native CAN" if self._enc_native else "SDO"
                             print("encoder: reading actual wheel velocities "
                                   "(%s)" % mode)
+                        # Clear stale warning flag when we recover
+                        if hasattr(self, '_enc_stale_warned'):
+                            self._enc_stale_warned = False
                     _sdo_fail_count = 0
                 else:
                     with self._enc_lock:

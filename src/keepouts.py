@@ -8,7 +8,18 @@ Kind-aware paint (matches mppi_costmap OBS_THRESH=100):
   soft / floor_mat → value 90  (soft prefer cost, not hard hit)
   hard             → value 200 (hard obstacle)
 
-Marks are session-local until we have a persistent map origin.
+## Session persistence strategy
+
+Keepouts are stored in map frame relative to the session origin. When SLAM
+performs loop closure and shifts poses, keepouts must be transformed to stay
+aligned with the corrected map.
+
+Call `transform_disks(dx, dy, dtheta)` after loop closure to update all disk
+positions. Alternatively, for long-term persistence, consider:
+  - Saving keepouts with visual/geometric anchors for re-detection
+  - Using a persistent world frame with SLAM relocalization
+  - Recording keepout positions relative to fixed landmarks
+
 File: ~/.kevin/keepouts.json
 Pose for CLI mark: ~/.kevin/latest_pose.json (written by paint_ego).
 """
@@ -245,6 +256,52 @@ def paint_ego(obs: np.ndarray, pose_xy_yaw: Tuple[float, float, float], value: i
 
 def list_marks() -> List[dict]:
     return list(load().get("disks_map_m") or [])
+
+
+def transform_disks(dx: float, dy: float, dtheta: float) -> dict:
+    """Transform all keepout disks by (dx, dy, dtheta) to account for loop closure.
+    
+    Args:
+        dx, dy: Translation in metres (map frame)
+        dtheta: Rotation in radians (map frame)
+    
+    Returns:
+        Updated keepouts data dict
+        
+    This should be called after SLAM loop closure with the pose correction
+    applied to keyframes, so keepouts stay aligned with the corrected map.
+    """
+    data = load(force=True)
+    disks = list(data.get("disks_map_m") or [])
+    if not disks:
+        return data
+    
+    ct = math.cos(dtheta)
+    st = math.sin(dtheta)
+    
+    for d in disks:
+        x, y = float(d["x"]), float(d["y"])
+        # Apply rotation then translation
+        x_new = ct * x - st * y + dx
+        y_new = st * x + ct * y + dy
+        d["x"] = x_new
+        d["y"] = y_new
+    
+    data["disks_map_m"] = disks
+    save(data)
+    print("keepouts: transformed %d disks by (%.3f, %.3f, %.2f°)" % 
+          (len(disks), dx, dy, math.degrees(dtheta)))
+    return data
+
+
+def clear_all_disks() -> dict:
+    """Clear all keepout disks (for session reset / manual cleanup)."""
+    data = load(force=True)
+    n = len(data.get("disks_map_m") or [])
+    data["disks_map_m"] = []
+    save(data)
+    print("keepouts: cleared %d disks" % n)
+    return data
 
 
 def _self_test() -> None:

@@ -1771,16 +1771,36 @@ class GPURenderer:
         data = self._gm_proj_fbo.read(components=1, alignment=1)
         return np.frombuffer(data, dtype=np.uint8).reshape(eh, ew).copy()
 
-    def gmap_reset(self):
-        """Reset GPU map textures to unknown (for SLAM rebuild)."""
+    def gmap_reset(self, cpu_conf_map=None, cpu_height_map=None):
+        """Reset or sync GPU map textures (for SLAM rebuild / loop closure).
+        
+        Args:
+            cpu_conf_map: Optional (H, W) uint8 CPU confidence map to upload.
+            cpu_height_map: Optional (H, W) uint8 CPU height map to upload.
+            If both are None, resets to unknown state.
+        """
         if not self._gm_gl_ready:
             return
-        init_conf = np.full(self._gm_mw * self._gm_mh, 128, dtype=np.uint8)
-        init_hmap = np.zeros(self._gm_mw * self._gm_mh, dtype=np.uint8)
+        
+        if cpu_conf_map is not None and cpu_height_map is not None:
+            # Upload SLAM-rebuilt CPU maps to GPU
+            if cpu_conf_map.shape != (self._gm_mh, self._gm_mw):
+                print("gmap_reset: shape mismatch, expected (%d,%d) got %s" % 
+                      (self._gm_mh, self._gm_mw, cpu_conf_map.shape))
+                return
+            conf_bytes = cpu_conf_map.astype(np.uint8).tobytes()
+            hmap_bytes = cpu_height_map.astype(np.uint8).tobytes()
+        else:
+            # Reset to unknown (original behavior)
+            init_conf = np.full(self._gm_mw * self._gm_mh, 128, dtype=np.uint8)
+            init_hmap = np.zeros(self._gm_mw * self._gm_mh, dtype=np.uint8)
+            conf_bytes = init_conf.tobytes()
+            hmap_bytes = init_hmap.tobytes()
+        
         for t in self._gm_conf:
-            t.write(init_conf.tobytes())
+            t.write(conf_bytes)
         for t in self._gm_hmap:
-            t.write(init_hmap.tobytes())
+            t.write(hmap_bytes)
         self._gm_n = 0
 
     # ── Obstacle contour tracing ─────────────────────────────────

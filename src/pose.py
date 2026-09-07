@@ -19,6 +19,7 @@ Maintains a circular buffer of 900 world-space positions for trajectory.
 """
 
 import math
+import time
 import cv2
 import numpy as np
 
@@ -84,10 +85,22 @@ class PoseEstimator:
         self._hy   = np.zeros(HISTORY_SIZE, dtype=np.float64)
         self._hlen = 0
         self._hidx = 0
+        
+        # Tracking loss / quality metrics
+        self._visual_accepted = 0
+        self._visual_rejected = 0
+        self._wheel_only_frames = 0
+        self._last_visual_time = 0.0
+        self._excessive_disagreement_count = 0
 
     def reset(self):
         self.x = self.y = self.theta = 0.0
         self._hlen = self._hidx = 0
+        self._visual_accepted = 0
+        self._visual_rejected = 0
+        self._wheel_only_frames = 0
+        self._last_visual_time = 0.0
+        self._excessive_disagreement_count = 0
 
     # ── main entry point ───────────────────────────────────────────
 
@@ -109,7 +122,7 @@ class PoseEstimator:
         ds_w     = v * dt * LINEAR_SLIP_SCALE
 
         # ── 2. Gate visual odometry ──
-        vis_ok = self._gate_visual(
+        vis_ok, gate_reason = self._gate_visual(
             dtheta_w, ds_w, v, omega, dt,
             vis_yaw, vis_fwd, vis_confidence)
 
@@ -118,8 +131,14 @@ class PoseEstimator:
             r_scale = 1.0 / max(vis_confidence, 0.1)
             dtheta, ds = self._fuse(dtheta_w, ds_w,
                                     vis_yaw, vis_fwd, r_scale)
+            self._visual_accepted += 1
+            self._last_visual_time = time.time()
         else:
             dtheta, ds = dtheta_w, ds_w
+            self._visual_rejected += 1
+            self._wheel_only_frames += 1
+            if gate_reason == 'agreement':
+                self._excessive_disagreement_count += 1
 
         # ── 4. Integrate into global pose ──
         self.theta += dtheta
@@ -141,20 +160,23 @@ class PoseEstimator:
     @staticmethod
     def _gate_visual(dtheta_w, ds_w, v, omega, dt,
                      vis_yaw, vis_fwd, vis_confidence):
-        """Return True only if visual odom passes all gates."""
+        """Return (ok, reason) tuple. ok=True only if visual odom passes all gates.
+        
+        Reason codes: 'no_data', 'confidence', 'physics', 'stationary', 'agreement'
+        """
         have_vis = abs(vis_yaw) > 1e-8 or abs(vis_fwd) > 1e-8
         if not have_vis:
-            return False
+            return False, 'no_data'
 
         # Gate 1: confidence too low
         if vis_confidence < MIN_VIS_CONFIDENCE:
-            return False
+            return False, 'confidence'
 
         # Gate 2: physical plausibility
         max_ds     = MAX_SPEED_MPS * dt * PHYS_MARGIN
         max_dtheta = MAX_OMEGA_RPS * dt * PHYS_MARGIN
         if abs(vis_fwd) > max_ds or abs(vis_yaw) > max_dtheta:
-            return False
+            return False, 'physics'
 
         # Gate 3: stationary — wheels say stopped, vision must agree
         wheel_still = (abs(v) < STATIONARY_THRESH and
@@ -162,24 +184,24 @@ class PoseEstimator:
         if wheel_still:
             if (abs(vis_fwd) > AGREEMENT_ABS_FWD or
                     abs(vis_yaw) > AGREEMENT_ABS_YAW):
-                return False
+                return False, 'stationary'
 
         # Gate 4: agreement — vision shouldn't wildly disagree with wheels
         if abs(dtheta_w) > 1e-6:
             if abs(vis_yaw) > AGREEMENT_FACTOR * abs(dtheta_w) + AGREEMENT_ABS_YAW:
-                return False
+                return False, 'agreement'
         else:
             if abs(vis_yaw) > AGREEMENT_ABS_YAW:
-                return False
+                return False, 'agreement'
 
         if abs(ds_w) > 1e-6:
             if abs(vis_fwd) > AGREEMENT_FACTOR * abs(ds_w) + AGREEMENT_ABS_FWD:
-                return False
+                return False, 'agreement'
         else:
             if abs(vis_fwd) > AGREEMENT_ABS_FWD:
-                return False
+                return False, 'agreement'
 
-        return True
+        return True, None
 
     # ── Kalman fusion ──────────────────────────────────────────────
 
@@ -283,3 +305,25 @@ class PoseEstimator:
         cv2.rectangle(img, (0, 0), (sz - 1, sz - 1), (80, 80, 80), 1)
 
         return img
+    
+    # ── Tracking quality metrics ───────────────────────────────────
+    
+    def get_tracking_quality(self):
+        """Return tracking quality metrics for diagnostics.
+        
+        Returns dict with:
+          - visual_accept_rate: fraction of frames with accepted visual odom
+          - wheel_only_rate: fraction of frames using wheel-only
+          - time_since_visual: seconds since last visual correction
+          - excessive_disagreement: count of agreement gate failures
+        """
+        import time
+        total = max(self._visual_accepted + self._visual_rejected, 1)
+        return {
+            'visual_accept_rate': self._visual_accepted / total,
+            'wheel_only_rate': self._wheel_only_frames / total,
+            'time_since_visual': time.time() - self._last_visual_time if self._last_visual_time > 0 else float('inf'),
+            'excessive_disagreement': self._excessive_disagreement_count,
+            'visual_accepted': self._visual_accepted,
+            'visual_rejected': self._visual_rejected,
+        }

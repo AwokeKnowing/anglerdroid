@@ -834,6 +834,14 @@ class Vision:
                 obs_combined, known_combined,
                 cap_x, cap_y, cap_theta,
                 rcx_f, rcy_f, float(TD_PX_SIZE))
+            
+            # Sync GPU map after loop closure rebuild
+            if self._global_map.needs_gpu_sync():
+                cpu_map, cpu_height = self._global_map.get_cpu_map()
+                self._gpu.gmap_reset(cpu_map, cpu_height)
+                self._global_map.clear_gpu_sync_flag()
+                print("vision: GPU gmap synchronized after loop closure")
+            
             _t_gmap_up = time.monotonic()
 
             ego_proj = self._gpu.gmap_project_gpu(

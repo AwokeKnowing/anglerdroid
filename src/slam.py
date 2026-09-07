@@ -14,6 +14,7 @@ API so it can be dropped in wherever GlobalMap was used.
 """
 
 import math
+import os
 import time
 
 import cv2
@@ -255,6 +256,11 @@ class PoseGraphSLAM:
 
         self._loop_count = 0
         self._kf_since_mem_check = 0
+        
+        # Loop closure metrics for tracking loss detection
+        self._last_loop_closure_shift = 0.0
+        self._last_loop_closure_time = 0.0
+        self._needs_gpu_sync = False  # Flag to signal GPU map needs rebuild
 
     # ── SlamBackend interface ───────────────────────────────────────
 
@@ -413,6 +419,10 @@ class PoseGraphSLAM:
 
         t1 = time.monotonic()
 
+        # Track loop closure for metrics
+        self._last_loop_closure_shift = max_shift
+        self._last_loop_closure_time = t1
+
         if max_shift < 0.005:
             print("slam: optimisation converged, max_shift=%.4fm (%.1fms, skip rebuild)"
                   % (max_shift, (t1 - t0) * 1000))
@@ -482,6 +492,9 @@ class PoseGraphSLAM:
               "keyframes=%d  edges=%d  loops=%d" %
               ((t1 - t0) * 1000, (t2 - t1) * 1000, max_shift,
                len(self._keyframes), len(self._edges), self._loop_count))
+        
+        # Signal that GPU map needs to be synchronized
+        self._needs_gpu_sync = True
 
     # ── Memory management ───────────────────────────────────────────
 
@@ -556,4 +569,84 @@ class PoseGraphSLAM:
             'edges': len(self._edges),
             'loop_closures': self._loop_count,
             'memory_mb': self._estimate_memory() / 1e6,
+            'last_loop_shift_m': self._last_loop_closure_shift,
+            'needs_gpu_sync': self._needs_gpu_sync,
         }
+    
+    def needs_gpu_sync(self):
+        """Check if GPU map needs to be synchronized after loop closure."""
+        return self._needs_gpu_sync
+    
+    def clear_gpu_sync_flag(self):
+        """Clear GPU sync flag after synchronization is complete."""
+        self._needs_gpu_sync = False
+    
+    def get_cpu_map(self):
+        """Get CPU-side map for GPU synchronization."""
+        return self._gmap._map.copy(), self._gmap._height_map.copy()
+    
+    # ── Keyframe export for reconstruction ─────────────────────────
+    
+    def export_keyframes(self, path: str, include_data: bool = True):
+        """Export keyframes to JSON for offline reconstruction / Rerun replay.
+        
+        Args:
+            path: Output file path (.json)
+            include_data: If True, include observation thumbnails (base64)
+        
+        Exports:
+          - Keyframe poses (x, y, theta)
+          - Timestamps
+          - Descriptor data
+          - Optional: observation thumbnails for visualization
+        """
+        import json
+        import base64
+        
+        export = {
+            'version': 1,
+            'timestamp': time.time(),
+            'keyframes': [],
+            'edges': [],
+            'loop_closures': self._loop_count,
+        }
+        
+        for kf in self._keyframes:
+            kf_data = {
+                'id': int(kf.id),
+                'x': float(kf.x),
+                'y': float(kf.y),
+                'theta': float(kf.theta),
+                'timestamp': float(kf.timestamp),
+                'cx': float(kf.cx),
+                'cy': float(kf.cy),
+                'px_size': float(kf.px_size),
+            }
+            
+            if include_data and kf.thumb is not None:
+                # Export thumbnail as base64 PNG
+                import cv2
+                _, buf = cv2.imencode('.png', kf.thumb)
+                kf_data['thumb_png_base64'] = base64.b64encode(buf).decode('ascii')
+            
+            export['keyframes'].append(kf_data)
+        
+        # Export edges (connectivity)
+        for e in self._edges:
+            export['edges'].append({
+                'from': int(e[0]),
+                'to': int(e[1]),
+                'dx': float(e[2]),
+                'dy': float(e[3]),
+                'dtheta': float(e[4]),
+                'is_loop': bool(np.allclose(e[5], LOOP_INFO)),
+            })
+        
+        with open(path, 'w') as f:
+            json.dump(export, f, indent=2)
+        
+        print("slam: exported %d keyframes, %d edges to %s (%.1f KB)" % 
+              (len(self._keyframes), len(self._edges), path, 
+               os.path.getsize(path) / 1024.0))
+        
+        return path
