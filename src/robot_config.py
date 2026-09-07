@@ -14,6 +14,8 @@ WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0   # ~0.08565
 WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
 
 # Robot footprint on costmap (pixels). Robot faces RIGHT in ego frame.
+# Body width ~30 cm (do not change without measuring). Wheels get separate
+# lateral pads (FOOT_PAD_LAT) for clear; viz may show them as corner boxes.
 ROBOT_W = 30                  # front-back (x direction)
 ROBOT_H = 42                  # side-to-side (y direction)
 ROBOT_CX_OFF = -78            # x offset from crosshair center
