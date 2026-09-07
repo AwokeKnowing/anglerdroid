@@ -1815,6 +1815,10 @@ class GPURenderer:
         Returns:
             (obs_combined, known_combined) tuple of uint8 (H, W) or None
         """
+        # Orin measurement 2026-09-07: upload+MRT readback ~2.5ms vs CPU blit ~0.6ms.
+        # Keep the shader path for a future GPU-resident combine (no readback).
+        if not getattr(self, '_dc_force_enable', False):
+            return None
         if not self.available or not getattr(self, '_dc_configured', False):
             return None
         if not self._gl_ready:
@@ -1827,45 +1831,51 @@ class GPURenderer:
                 import traceback; traceback.print_exc()
                 return None
         
-        t0 = time.monotonic()
-        
-        # Upload input textures
-        self._dc_obs1_tex.write(obs1.tobytes())
-        self._dc_known1_tex.write(known1.tobytes())
-        self._dc_obs2_tex.write(obs2.tobytes())
-        self._dc_known2_tex.write(known2.tobytes())
-        
-        # Set offsets
-        self._dc_prog['u_td_offset'].value = td_offset
-        self._dc_prog['u_fw_offset'].value = fw_offset
-        
-        # Bind textures
-        self._dc_obs1_tex.use(location=0)
-        self._dc_known1_tex.use(location=1)
-        self._dc_obs2_tex.use(location=2)
-        self._dc_known2_tex.use(location=3)
-        self._dc_obs_mask_tex.use(location=4)
-        self._dc_fw_cone_tex.use(location=5)
-        
-        # Render
-        self._ctx.disable(moderngl.DEPTH_TEST)
-        self._dc_out_fbo.use()
-        self._dc_vao.render(moderngl.TRIANGLE_STRIP)
-        
-        # Readback
-        obs_data = self._dc_obs_out_tex.read(components=1, alignment=1)
-        known_data = self._dc_known_out_tex.read(components=1, alignment=1)
-        
-        oh, ow = self._dc_out_h, self._dc_out_w
-        obs_combined = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
-        known_combined = np.frombuffer(known_data, dtype=np.uint8).reshape(oh, ow).copy()
-        
-        self._dc_n += 1
-        t1 = time.monotonic()
-        if self._dc_n <= 3 or self._dc_n % 100 == 0:
-            print("gpu_depth_combine: %.1fms" % ((t1 - t0) * 1e3))
-        
-        return obs_combined, known_combined
+        try:
+            t0 = time.monotonic()
+            
+            # Upload input textures
+            self._dc_obs1_tex.write(obs1.tobytes())
+            self._dc_known1_tex.write(known1.tobytes())
+            self._dc_obs2_tex.write(obs2.tobytes())
+            self._dc_known2_tex.write(known2.tobytes())
+            
+            # Set offsets
+            self._dc_prog['u_td_offset'].value = td_offset
+            self._dc_prog['u_fw_offset'].value = fw_offset
+            
+            # Bind textures
+            self._dc_obs1_tex.use(location=0)
+            self._dc_known1_tex.use(location=1)
+            self._dc_obs2_tex.use(location=2)
+            self._dc_known2_tex.use(location=3)
+            self._dc_obs_mask_tex.use(location=4)
+            self._dc_fw_cone_tex.use(location=5)
+            
+            # Render
+            self._ctx.disable(moderngl.DEPTH_TEST)
+            self._dc_out_fbo.use()
+            self._dc_vao.render(moderngl.TRIANGLE_STRIP)
+            
+            # Readback via FBO (Texture.read has no components= on this ModernGL)
+            obs_data = self._dc_out_fbo.read(components=1, attachment=0, alignment=1)
+            known_data = self._dc_out_fbo.read(components=1, attachment=1, alignment=1)
+            
+            oh, ow = self._dc_out_h, self._dc_out_w
+            obs_combined = np.frombuffer(obs_data, dtype=np.uint8).reshape(oh, ow).copy()
+            known_combined = np.frombuffer(known_data, dtype=np.uint8).reshape(oh, ow).copy()
+            
+            self._dc_n += 1
+            t1 = time.monotonic()
+            if self._dc_n <= 3 or self._dc_n % 100 == 0:
+                print("gpu_depth_combine: %.1fms" % ((t1 - t0) * 1e3))
+            
+            return obs_combined, known_combined
+        except Exception as e:
+            if not getattr(self, '_dc_fail_logged', False):
+                self._dc_fail_logged = True
+                print("gpu_render: depth_combine failed (CPU fallback): %s" % e)
+            return None
 
     # ── GPU visual odometry ─────────────────────────────────────
 
