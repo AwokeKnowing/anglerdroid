@@ -1095,6 +1095,17 @@ class Vision:
                     vl, vr = self._wheelbase.get_wheel_velocities_mps()
                 else:
                     vl, vr = 0.0, 0.0
+
+                # Encoder feedback flag for pose stuck-detection / SLAM gating.
+                # False when no wheelbase or encoders unhealthy/stale.
+                using_encoder_feedback = False
+                if self._wheelbase is not None:
+                    try:
+                        health = self._wheelbase.get_encoder_health()
+                        using_encoder_feedback = bool(
+                            health.get('encoder_ok') and health.get('age_s', 99) < 1.0)
+                    except Exception:
+                        using_encoder_feedback = False
                 
                 # Grab IMU data (non-blocking, separate pipeline)
                 imu_yaw_rate = 0.0
