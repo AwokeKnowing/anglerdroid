@@ -183,6 +183,14 @@ class LiveEnrollmentManager:
         # Face was recognized (accepted by threshold + margin)?
         if name != "unknown":
             return False
+
+        # Ignore speck detections (false faces while driving / far clutter).
+        try:
+            _x, _y, w, h = box
+            if min(int(w), int(h)) < 60 or (int(w) * int(h)) < 5000:
+                return False
+        except Exception:
+            return False
         
         # Cooldown active for this face?
         if not self._should_prompt(box, t):

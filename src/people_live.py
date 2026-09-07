@@ -44,6 +44,22 @@ def _drive_armed() -> bool:
 
 
 
+
+def _robot_is_moving(speed_eps: float = 0.04) -> bool:
+    """True if recent wheel speeds suggest translating or turning."""
+    try:
+        import tools
+        wb = tools.get_wheelbase()
+        if wb is not None:
+            vl = abs(float(getattr(wb, "_last_sent_left", 0.0) or 0.0))
+            vr = abs(float(getattr(wb, "_last_sent_right", 0.0) or 0.0))
+            if max(vl, vr) > speed_eps:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 class PeopleLive:
     """Social layer: RGB face greets + listen for name-call / dirs."""
 
@@ -343,8 +359,10 @@ class PeopleLive:
                     PeopleLive.social_hold_until = now + 2.5
             
             # Handle unknown faces with live enrollment (PeopleBehaviorStub)
+            # Never start/ask while driving or turning — face the person first, hold still.
             enrollment_actions = []
-            if self._pb is not None:
+            moving = _robot_is_moving()
+            if self._pb is not None and not moving:
                 # Get landmarks for InsightFace if available
                 try:
                     detections = self._cm.recognizer.detect_faces_with_landmarks(img)
@@ -372,14 +390,26 @@ class PeopleLive:
                         speak=True
                     )
                     
-                    if action and action.kind in ("enrollment_prompt", "enrollment_collecting", 
-                                                   "enrollment_complete", "enrollment_timeout"):
+                    if action and action.kind in ("enrollment_prompt", "enrollment_collecting",
+                                                   "enrollment_complete", "enrollment_timeout",
+                                                   "enrollment_name_received", "enrollment_failed"):
                         enrollment_actions.append(action)
                         print("people_live: enrollment %s for box=%s" % (action.kind, box))
-            
+                        if action.kind == "enrollment_prompt":
+                            PeopleLive.social_priority = True
+                            PeopleLive.social_hold_until = now + 18.0
+                            try:
+                                import local_executive
+                                local_executive.cancel()
+                            except Exception:
+                                pass
+                        elif action.kind in ("enrollment_complete", "enrollment_timeout", "enrollment_failed"):
+                            PeopleLive.social_hold_until = now + 1.0
+
             if faces or fsm_actions or enrollment_actions:
+                ids = ["%s:%.2f" % (n, c) for n, c, _b in faces]
                 print(
-                    "people_live: tick#%d faces=%d fsm_actions=%d enrollment_actions=%d unknowns=%d rgb=%sx%s"
+                    "people_live: tick#%d faces=%d fsm_actions=%d enrollment_actions=%d unknowns=%d ids=%s rgb=%sx%s"
                     % (
                         self._n_tick,
                         len(faces),
@@ -395,8 +425,6 @@ class PeopleLive:
             print("people_live: face tick err %s" % e)
             import traceback
             traceback.print_exc()
-        except Exception as e:
-            print("people_live: face tick err %s" % e)
 
     def _tick_listen(self):
         if speech_io.is_speaking() or PeopleLive.social_priority:
