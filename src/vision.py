@@ -19,6 +19,7 @@ import math
 import threading
 import concurrent.futures
 import time
+from typing import Optional
 import numpy as np
 import cv2
 
@@ -38,6 +39,7 @@ from slam import PoseGraphSLAM
 from checkered_mat import TopdownHazardDetector
 from imu import IMUPipeline
 from odom_thread import OdomThread
+from apriltag_landmarks import AprilTagLandmarkDetector, AprilTagDetection
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -734,6 +736,9 @@ class Vision:
         self._topdown_hazard_corner_count = 0
         self._topdown_hazard_edge_count = 0
         self._topdown_hazard_detector = TopdownHazardDetector()
+        self._apriltag_detector = None  # Lazy init in extras loop (avoid blocking startup)
+        self._apriltag_detections = []  # Latest detections from extras loop
+        self._apriltag_last_seen = {}  # {landmark_name: monotonic_time}
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._cuvslam = None
@@ -1203,9 +1208,12 @@ class Vision:
     def _vision_extras_loop(self):
         """~3 Hz side loop: RGB image detections off the 30Hz critical path.
 
-        Chessboard / bump RGB, faces, gestures belong here (or on i777).
+        Chessboard / bump RGB, faces, gestures, AprilTags belong here (or on i777).
         Sticky results feed self._topdown_hazard* for safety. Named keepout
         `checkered_door` is the primary avoid for the door mat.
+        
+        AprilTag landmarks provide absolute pose for SLAM relocalization when
+        tracking is lost. Detections are stored in self._apriltag_detections.
         """
         interval = 1.0 / 3.0
         while getattr(self, '_extras_running', False) and getattr(self, '_running', False):
@@ -1214,23 +1222,63 @@ class Vision:
                 color = None
                 if self._rs1 and self._rs1.ok and self._rs1.color is not None:
                     color = self._rs1.color.copy()
-                if color is not None and getattr(self, '_topdown_hazard_detector', None) is not None:
-                    rs1_rgb_rotated = color[::-1, ::-1]
-                    hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(
-                        rs1_rgb_rotated)
-                    self._topdown_hazard = hazard_triggered
-                    self._topdown_hazard_reason = hazard_reason
-                    self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
-                    self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
-                    n = getattr(self, '_extras_hazard_log_n', 0)
-                    if hazard_triggered and (n % 9 == 0):
-                        print("vision-extras: hazard=%s corners=%d edges=%d (3Hz)"
-                              % (hazard_reason, self._topdown_hazard_corner_count,
-                                 self._topdown_hazard_edge_count))
-                    self._extras_hazard_log_n = n + 1
+                
+                if color is not None:
+                    # Checkered mat hazard detection (existing)
+                    if getattr(self, '_topdown_hazard_detector', None) is not None:
+                        rs1_rgb_rotated = color[::-1, ::-1]
+                        hazard_triggered, hazard_reason = self._topdown_hazard_detector.check(
+                            rs1_rgb_rotated)
+                        self._topdown_hazard = hazard_triggered
+                        self._topdown_hazard_reason = hazard_reason
+                        self._topdown_hazard_corner_count = self._topdown_hazard_detector.corner_count
+                        self._topdown_hazard_edge_count = self._topdown_hazard_detector.edge_count
+                        n = getattr(self, '_extras_hazard_log_n', 0)
+                        if hazard_triggered and (n % 9 == 0):
+                            print("vision-extras: hazard=%s corners=%d edges=%d (3Hz)"
+                                  % (hazard_reason, self._topdown_hazard_corner_count,
+                                     self._topdown_hazard_edge_count))
+                        self._extras_hazard_log_n = n + 1
+                    
+                    # AprilTag landmark detection (new)
+                    if self._apriltag_detector is None:
+                        # Lazy init to avoid blocking startup
+                        self._apriltag_detector = AprilTagLandmarkDetector(debug=False)
+                    
+                    # Get RS1 color camera intrinsics (320x240 RGB)
+                    camera_matrix = self._get_rs1_color_intrinsics()
+                    if camera_matrix is not None:
+                        rs1_rgb_rotated = color[::-1, ::-1]
+                        detections = self._apriltag_detector.detect_and_localize(
+                            rs1_rgb_rotated, camera_matrix
+                        )
+                        
+                        if detections:
+                            self._apriltag_detections = detections
+                            now = time.monotonic()
+                            for det in detections:
+                                if det.landmark_name:
+                                    self._apriltag_last_seen[det.landmark_name] = now
+                            
+                            # Log first detection and periodically
+                            n = getattr(self, '_extras_apriltag_log_n', 0)
+                            if n == 0 or n % 9 == 0:
+                                for det in detections[:2]:  # Log top 2
+                                    if det.landmark_name:
+                                        print("vision-extras: apriltag %s (id=%d) "
+                                              "pose=(%.2f, %.2f, %.1f°) conf=%.2f (3Hz)"
+                                              % (det.landmark_name, det.tag_id,
+                                                 det.world_x, det.world_y,
+                                                 math.degrees(det.world_theta),
+                                                 det.confidence))
+                            self._extras_apriltag_log_n = n + 1
+                        else:
+                            self._apriltag_detections = []
             except Exception as e:
                 if not getattr(self, '_extras_err_n', 0):
                     print("vision-extras error: %s" % e)
+                    import traceback
+                    traceback.print_exc()
                 self._extras_err_n = getattr(self, '_extras_err_n', 0) + 1
             dt = time.monotonic() - t0
             time.sleep(max(0.0, interval - dt))
@@ -2060,6 +2108,50 @@ class Vision:
                 'pose_theta': pose_theta,
             }
         }
+
+    def _get_rs1_color_intrinsics(self) -> Optional[np.ndarray]:
+        """Extract RS1 color camera intrinsics as 3x3 matrix.
+        
+        Returns None if RS1 not available or intrinsics unavailable.
+        Cached after first call (intrinsics don't change during run).
+        """
+        if not hasattr(self, '_rs1_color_intrinsics_cache'):
+            self._rs1_color_intrinsics_cache = None
+            
+            if self._rs1 and hasattr(self._rs1, 'profile'):
+                try:
+                    import pyrealsense2 as rs
+                    color_stream = self._rs1.profile.get_stream(rs.stream.color)
+                    intr = color_stream.as_video_stream_profile().get_intrinsics()
+                    
+                    # Build OpenCV-style camera matrix
+                    K = np.array([
+                        [intr.fx, 0, intr.ppx],
+                        [0, intr.fy, intr.ppy],
+                        [0, 0, 1]
+                    ], dtype=np.float64)
+                    
+                    self._rs1_color_intrinsics_cache = K
+                except Exception as e:
+                    print("vision: RS1 intrinsics extraction failed: %s" % e)
+        
+        return self._rs1_color_intrinsics_cache
+    
+    def get_apriltag_detections(self) -> list[AprilTagDetection]:
+        """Get latest AprilTag landmark detections from extras loop.
+        
+        Returns empty list if no tags detected. Results updated at ~3 Hz.
+        Use this API for SLAM relocalization when tracking is lost.
+        """
+        return list(self._apriltag_detections)
+    
+    def get_apriltag_last_seen(self, landmark_name: str) -> Optional[float]:
+        """Get monotonic timestamp when landmark was last seen.
+        
+        Returns None if landmark never seen. Useful for checking if a
+        landmark is stale (e.g. > 5s since last detection).
+        """
+        return self._apriltag_last_seen.get(landmark_name)
 
     def get_robot_footprint_overlay(self):
         """Create ego-map footprint overlay showing multi-box self-mask.
