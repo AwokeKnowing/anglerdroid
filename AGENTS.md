@@ -27,6 +27,13 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
 - RealSense depth **decimation**: `RS_DECIMATE_MAG = 3` means **2³ = 8×** (SDK log2).
   That yields the tuned ~6k-vert cloud — not “mag 3 vs mag 8.” Changing it requires
   on-device re-benchmark.
+### Decimate: measure, don’t assume
+James has seen **numpy decimate beat the RealSense SDK filter** on Orin in
+some configs. Treat SDK vs numpy as a bake-off: benchmark grab+pc+downstream
+on device whenever changing it. Goal is **60 fps** when physics allows —
+33.3 ms is the *floor* we refuse to miss, not the ambition.
+
+
 - Pre-allocated buffers, queue size 1, poll-then-short-wait grabs.
 - GPU path in `gpu_render.py` for forward depth / odom / gmap / atlas.
 
