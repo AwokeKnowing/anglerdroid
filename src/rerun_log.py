@@ -184,24 +184,40 @@ class KevinRerunLogger:
         
         robot_footprint_underlay = log_job.get("robot_footprint_underlay")
         if robot_footprint_underlay is not None:
-            und = np.ascontiguousarray(robot_footprint_underlay)
-            if und.ndim == 3 and und.shape[2] >= 3:
-                rr.log("vision/robot_foot_underlay", rr.Image(und[:, :, :3]))
+                pass  # do not log underlay — stacks over/under overlay and kills image-2 look
         
         robot_footprint_overlay = log_job.get("robot_footprint_overlay")
         if robot_footprint_overlay is not None:
-            fov = np.ascontiguousarray(robot_footprint_overlay)
-            # RGB only — avoid dual RGBA entities stacking opaque in the same view
-            rgb_o = fov[:, :, :3] if (fov.ndim == 3 and fov.shape[2] >= 3) else fov
-            rr.log("vision/robot_foot_overlay", rr.Image(rgb_o))
-            rr.log("vision/depth_self_mask", rr.Image(rgb_o))
+                fov = np.ascontiguousarray(robot_footprint_overlay)
+                rgb_o = fov[:, :, :3] if (fov.ndim == 3 and fov.shape[2] >= 3) else fov
+                rr.log("vision/robot_foot_overlay", rr.Image(rgb_o))
+                if (self._n // max(1, self.every_n)) % 8 == 0:
+                    try:
+                        import cv2
+                        path = "/home/jetbot/.kevin/overlays/live_foot.png"
+                        bgr = cv2.cvtColor(np.ascontiguousarray(rgb_o), cv2.COLOR_RGB2BGR)
+                        big = cv2.resize(bgr, (rgb_o.shape[1]*3, rgb_o.shape[0]*3), interpolation=cv2.INTER_NEAREST)
+                        cv2.imwrite(path, big)
+                        # also dump underlay alone for hole check
+                        und = None
+                    except Exception as _e:
+                        pass
+                # Periodic PNG dump for Doctor visual verify (~every 3s at 8Hz throttle ≈ every 24 logs)
+                if (self._n // max(1, self.every_n)) % 24 == 0:
+                    try:
+                        import cv2
+                        path = "/home/jetbot/.kevin/overlays/live_foot.png"
+                        bgr = cv2.cvtColor(rgb_o, cv2.COLOR_RGB2BGR)
+                        big = cv2.resize(bgr, (rgb_o.shape[1]*3, rgb_o.shape[0]*3), interpolation=cv2.INTER_NEAREST)
+                        cv2.imwrite(path, big)
+                    except Exception:
+                        pass
 
         rs1_mask_overlay = log_job.get("rs1_mask_overlay")
         if rs1_mask_overlay is not None:
-            overlay = np.ascontiguousarray(rs1_mask_overlay)
-            rgb_o = overlay[:, :, :3] if (overlay.ndim == 3 and overlay.shape[2] >= 3) else overlay
-            rr.log("vision/rs1_mask_overlay", rr.Image(rgb_o))
-            rr.log("vision/rs1_depth_mask", rr.Image(rgb_o))
+                overlay = np.ascontiguousarray(rs1_mask_overlay)
+                rgb_o = overlay[:, :, :3] if (overlay.ndim == 3 and overlay.shape[2] >= 3) else overlay
+                rr.log("vision/rs1_mask_overlay", rr.Image(rgb_o))
 
         rs1_trust_mask_overlay = log_job.get("rs1_trust_mask_overlay")
         if rs1_trust_mask_overlay is not None:
