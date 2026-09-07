@@ -28,7 +28,8 @@ from robot_config import (FRAME_W, FRAME_H,
                           CROSSHAIR_CX, CROSSHAIR_CY, EGO_PX_SIZE,
                           WHEEL_RADIUS_M, WHEELBASE_M,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
-                          RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1)
+                          RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
+                          FOOTPRINT_BOXES)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -842,8 +843,10 @@ class Vision:
 
         mask[cone] = 255
 
-        # Clear robot footprint (force-set to known+free in capture loop)
-        mask[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+        # Clear robot footprint (multi-box: body + 4 wheels approximate hull)
+        # Force-set to known+free in capture loop to prevent self-observation
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            mask[y0:y1, x0:x1] = 0
         return mask, fw_cone
 
     @staticmethod
@@ -1450,8 +1453,11 @@ class Vision:
             np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
             np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-            self._obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
-            self._known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
+            # Clear robot footprint (multi-box: body + 4 wheels)
+            # Force self-mask to known-free (prevent self-observation as obstacles)
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                self._obs_combined[y0:y1, x0:x1] = 0
+                self._known_combined[y0:y1, x0:x1] = 255
 
             _t_obs = time.monotonic()
 
@@ -1583,8 +1589,10 @@ class Vision:
             # obs_combined is height-cm (1..100) where obstacles exist
             self._persistent_obs[self._obs_combined > 0] = 255
             self._persistent_height[:] = self._obs_combined.astype(np.uint8, copy=False)
-            self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
-            self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+            # Clear robot footprint (multi-box: body + 4 wheels)
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                self._persistent_obs[y0:y1, x0:x1] = 0
+                self._persistent_height[y0:y1, x0:x1] = 0
 
             # ── Check SLAM lock status (encoder + tracking quality) ───
             self._update_slam_lock_status()
@@ -1844,26 +1852,26 @@ class Vision:
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb
 
-        x0 = max(0, min(w, FOOT_X0))
-        x1 = max(0, min(w, FOOT_X1))
-        y0 = max(0, min(h, FOOT_Y0))
-        y1 = max(0, min(h, FOOT_Y1))
-        if x1 <= x0 or y1 <= y0:
-            return overlay
-
-        foot = np.zeros((h, w), dtype=np.uint8)
-        foot[y0:y1, x0:x1] = 255
-        m = foot > 0
-        # Magenta-ish tint over robot self-mask
-        overlay[m, 0] = np.clip(rgb[m, 0].astype(np.int16) + 90, 0, 255).astype(np.uint8)
-        overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + 90, 0, 255).astype(np.uint8)
-        overlay[:, :, 3] = np.where(m, 140, 0)
-
-        # Bright yellow forward edge (column FOOT_X1-1)
-        fx = min(w - 1, max(0, x1 - 1))
-        overlay[y0:y1, fx, :] = [255, 255, 0, 255]
-        # Outline full foot rect
-        cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
+        # Multi-box hull approx (body + wheels). Full RGB underlay; red tint on boxes.
+        overlay[:, :, 3] = 255
+        body_fwd = None
+        for bx0, by0, bx1, by1 in FOOTPRINT_BOXES:
+            x0 = max(0, min(w, bx0)); x1 = max(0, min(w, bx1))
+            y0 = max(0, min(h, by0)); y1 = max(0, min(h, by1))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            m = np.zeros((h, w), dtype=bool)
+            m[y0:y1, x0:x1] = True
+            overlay[m, 0] = np.clip(rgb[m, 0].astype(np.int16) + 120, 0, 255).astype(np.uint8)
+            overlay[m, 1] = (rgb[m, 1].astype(np.int16) * 2 // 5).astype(np.uint8)
+            overlay[m, 2] = (rgb[m, 2].astype(np.int16) * 2 // 5).astype(np.uint8)
+            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
+            if body_fwd is None:
+                body_fwd = (y0, y1, x1)
+        if body_fwd is not None:
+            y0, y1, x1 = body_fwd
+            fx = min(w - 1, max(0, x1 - 1))
+            overlay[y0:y1, fx, :] = [255, 255, 0, 255]
         return overlay
 
     def get_rs1_trust_mask_overlay(self):
@@ -2052,5 +2060,74 @@ class Vision:
                 'pose_theta': pose_theta,
             }
         }
+
+    def get_robot_footprint_overlay(self):
+        """Create ego-map footprint overlay showing multi-box self-mask.
+        
+        Draws robot footprint boxes (body + 4 wheels) on ego obstacle map at
+        1 cm/px scale. This shows the topdown hull approximation used for
+        self-clearing in depth processing.
+        
+        Returns RGB (FRAME_H, FRAME_W, 3) uint8 array showing:
+        - Underlay: ego obstacle map (colorized: gray=free, obstacles=height gradient)
+        - Magenta fill: body box + 4 wheel boxes (self-mask regions)
+        - Yellow outline: forward edge of body box
+        
+        Ego-space viz: 1 px = 1 cm, body ~30 cm wide reads as ~30 px on map.
+        Multi-box footprint covers true robot hull, not just center patch.
+        """
+        # Create colorized ego underlay from obstacle + known maps
+        underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        
+        # Get current ego maps (use persistent obs + height for richer viz)
+        obs = getattr(self, '_persistent_obs', None)
+        height = getattr(self, '_persistent_height', None)
+        known = getattr(self, '_known_combined', None)
+        
+        if obs is None or height is None or known is None:
+            # Fallback: plain gray if maps not available
+            underlay[:] = [50, 50, 50]
+        else:
+            # Free space: dark gray
+            free_mask = (known > 0) & (obs == 0)
+            underlay[free_mask] = [40, 40, 40]
+            
+            # Unknown: black
+            unknown_mask = (known == 0)
+            underlay[unknown_mask] = [0, 0, 0]
+            
+            # Obstacles: height-based gradient (5 cm = yellow, 100 cm = red)
+            obs_mask = obs > 0
+            if np.any(obs_mask):
+                h = height.astype(np.float32)
+                h_norm = np.clip((h - 5.0) / 95.0, 0.0, 1.0)  # 5-100 cm → 0-1
+                # Yellow (low) → red (high) gradient
+                underlay[obs_mask, 0] = 255  # R stays high
+                underlay[obs_mask, 1] = (255 * (1.0 - h_norm[obs_mask] * 0.7)).astype(np.uint8)  # G dims
+                underlay[obs_mask, 2] = 0  # B stays zero
+        
+        # Draw all footprint boxes (body + 4 wheels) with magenta fill
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            underlay[y0:y1, x0:x1, 0] = 200  # R
+            underlay[y0:y1, x0:x1, 1] = 0    # G
+            underlay[y0:y1, x0:x1, 2] = 200  # B (magenta)
+        
+        # Draw bright yellow forward edge on body box (first box in FOOTPRINT_BOXES)
+        body_x0, body_y0, body_x1, body_y1 = FOOTPRINT_BOXES[0]
+        x1_line = min(body_x1, FRAME_W - 1)
+        underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
+        
+        # Draw yellow outline around all boxes for clarity
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            # Top edge
+            underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
+            # Bottom edge
+            underlay[max(y1 - 1, 0):y1, x0:x1] = [255, 255, 0]
+            # Left edge
+            underlay[y0:y1, x0:min(x0 + 1, FRAME_W)] = [255, 255, 0]
+            # Right edge
+            underlay[y0:y1, max(x1 - 1, 0):x1] = [255, 255, 0]
+        
+        return underlay
 
 

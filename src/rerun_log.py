@@ -91,6 +91,7 @@ class KevinRerunLogger:
         safety: Optional[Mapping[str, Any]] = None,
         rs1_mask_overlay: Optional[np.ndarray] = None,
         rs1_trust_mask_overlay: Optional[np.ndarray] = None,
+        robot_footprint_overlay: Optional[np.ndarray] = None,
         force: bool = False,
     ) -> bool:
         """Log a tick. Returns True if this call actually wrote entities."""
@@ -138,17 +139,19 @@ class KevinRerunLogger:
                         ]
                     ),
                 )
+            if robot_footprint_overlay is not None:
+                # Multi-box hull self-mask on ego map (body + wheels), 1 cm/px.
+                fov = np.ascontiguousarray(robot_footprint_overlay)
+                if fov.ndim == 3 and fov.shape[2] >= 3:
+                    rr.log("vision/robot_foot_overlay", rr.Image(fov))
             if rs1_mask_overlay is not None:
-                # Robot FOOT self-clear footprint (magenta + yellow edge).
                 overlay = np.ascontiguousarray(rs1_mask_overlay)
-                if overlay.ndim == 3 and overlay.shape[2] == 4:
-                    rr.log("vision/robot_foot_overlay", rr.Image(overlay))
-                    # Keep old path for existing layouts
+                if overlay.ndim == 3 and overlay.shape[2] >= 3:
                     rr.log("vision/rs1_mask_overlay", rr.Image(overlay))
             if rs1_trust_mask_overlay is not None:
                 # Trust/FOV obs_mask (green + cyan edge).
                 tov = np.ascontiguousarray(rs1_trust_mask_overlay)
-                if tov.ndim == 3 and tov.shape[2] == 4:
+                if tov.ndim == 3 and tov.shape[2] >= 3:
                     rr.log("vision/rs1_trust_mask_overlay", rr.Image(tov))
             return True
         except Exception as e:
