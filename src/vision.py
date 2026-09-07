@@ -22,6 +22,8 @@ import time
 import numpy as np
 import cv2
 
+from loop_timing import FrameBudget
+
 from robot_config import (FRAME_W, FRAME_H,
                           CROSSHAIR_CX, CROSSHAIR_CY, EGO_PX_SIZE,
                           WHEEL_RADIUS_M, WHEELBASE_M,
@@ -129,116 +131,35 @@ def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
     return v
 
 
-def check_topdown_all_in_one(verts, out_h=FRAME_H, out_w=FRAME_W,
-                             near_threshold_m=0.30, near_min_pixels=50,
-                             overhang_near_m=0.30, overhang_far_m=0.70,
-                             overhang_row_min=10, overhang_row_max=50,
-                             soft_near_m=0.35, soft_far_m=1.00,
-                             soft_min_height_cm=5.0, soft_max_height_cm=30.0,
-                             soft_row_min=10, soft_row_max=80,
-                             lateral_col_margin=30,
-                             soft_min_pixels=100, overhang_min_pixels=80,
-                             floor_clip_m=TD_FLOOR_CLIP):
-    """Combined topdown checks: near-field, overhang, soft-low in single pass.
-    
-    OPTIMIZED: Iterates over verts ONCE instead of 3+ separate passes.
-    
-    Returns: dict with all check results
-    """
-    result = {
-        'near_field': False, 'near_close_count': 0, 'near_min_z': float('inf'),
-        'overhang': False, 'overhang_count': 0, 'overhang_median_z': float('inf'),
-        'soft_low': False, 'soft_low_count': 0, 'soft_low_median_height': float('inf'),
-    }
-    
-    if len(verts) == 0:
-        return result
-    
-    verts = _clip_decimated_border(verts)
-    x = verts[:, 0]
-    y = verts[:, 1]
-    z = verts[:, 2]
-    
-    # Valid depth filter (shared)
-    valid = z > 0.01
-    if not np.any(valid):
-        return result
-    
-    z_valid = z[valid]
-    result['near_min_z'] = float(np.min(z_valid))
-    
-    # === Near-field check (any Z < threshold) ===
-    near_mask = valid & (z < near_threshold_m)
-    result['near_close_count'] = int(np.sum(near_mask))
-    result['near_field'] = result['near_close_count'] >= near_min_pixels
-    
-    # === Overhang and soft-low checks (require image projection) ===
-    # Filter for medium-range valid depth
-    mid_range = valid & (z >= overhang_near_m) & (z <= soft_far_m)
-    
-    if np.any(mid_range):
-        v_mid = verts[mid_range]
-        z_mid = v_mid[:, 2]
-        
-        # Project to image coordinates (before 180° rotation)
-        scale = np.float32(1.0 / TD_PX_SIZE)
-        center = np.float32([out_w * 0.5, out_h * 0.5])
-        p = v_mid[:, :2] * scale + center
-        cols, rows = p[:, 0], p[:, 1]
-        
-        # After 180° rotation: (row, col) → (out_h - 1 - row, out_w - 1 - col)
-        rows_rot = out_h - 1 - rows
-        cols_rot = out_w - 1 - cols
-        
-        # Overhang: 30-70cm range, forward strip rows 10-50
-        ovh_range = (z_mid >= overhang_near_m) & (z_mid <= overhang_far_m)
-        ovh_strip = (
-            (rows_rot >= overhang_row_min) & (rows_rot <= overhang_row_max) &
-            (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
-        )
-        ovh_mask = ovh_range & ovh_strip
-        
-        if np.any(ovh_mask):
-            ovh_z = z_mid[ovh_mask]
-            result['overhang_count'] = len(ovh_z)
-            result['overhang_median_z'] = float(np.median(ovh_z))
-            result['overhang'] = result['overhang_count'] >= overhang_min_pixels
-        
-        # Soft-low: 35cm-1m range, height 5-30cm, forward strip rows 10-80
-        soft_range = (z_mid >= soft_near_m) & (z_mid <= soft_far_m)
-        height_cm = (floor_clip_m - z_mid) * 100.0
-        soft_height = (height_cm >= soft_min_height_cm) & (height_cm <= soft_max_height_cm)
-        soft_strip = (
-            (rows_rot >= soft_row_min) & (rows_rot <= soft_row_max) &
-            (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
-        )
-        soft_mask = soft_range & soft_height & soft_strip
-        
-        if np.any(soft_mask):
-            soft_heights = height_cm[soft_mask]
-            result['soft_low_count'] = len(soft_heights)
-            result['soft_low_median_height'] = float(np.median(soft_heights))
-            result['soft_low'] = result['soft_low_count'] >= soft_min_pixels
-    
-    return result
-
-
 def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
-    """DEPRECATED: Use check_topdown_all_in_one for better performance.
-    
-    Check if top-down camera sees a close object (near-field hazard reflex).
+    """Check if top-down camera sees a close object (near-field hazard reflex).
+
+    Detects table undersides, hands, or any object closer than threshold_m
+    to the RS1 camera. This is a REFLEX that runs BEFORE floor-obstacle logic.
+
+    Args:
+        verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
+        threshold_m: Distance threshold in metres (default 0.30m = 30cm).
+        min_pixels: Minimum number of close points to trigger (filters noise).
+
+    Returns:
+        (triggered: bool, close_count: int, min_z: float)
+        triggered: True if enough close points detected.
+        close_count: Number of points closer than threshold.
+        min_z: Minimum (closest) Z value in metres, or inf if no valid points.
     """
     if len(verts) == 0:
         return False, 0, float('inf')
 
     verts = _clip_decimated_border(verts)
     z = verts[:, 2]
-    valid = z > 0.01
+    valid = z > 0.01  # Filter out zero/invalid depth
     z_valid = z[valid]
 
     if len(z_valid) == 0:
         return False, 0, float('inf')
 
+    # Count points closer than threshold
     close_mask = z_valid < threshold_m
     close_count = int(np.sum(close_mask))
     min_z = float(np.min(z_valid))
@@ -563,6 +484,15 @@ class Vision:
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
+
+        # Capture loop budget for 30 Hz frame timing
+        CAPTURE_BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 Hz
+        CAPTURE_SHED_THRESHOLD = 0.85  # Shed droppable stages if >85% budget used
+        self._capture_budget = FrameBudget(
+            budget_ms=CAPTURE_BUDGET_MS,
+            shed_threshold=CAPTURE_SHED_THRESHOLD,
+            use_capture_priorities=True
+        )
 
         self._running = False
         self._thread = None
@@ -921,10 +851,13 @@ class Vision:
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
+        _stage_times = []  # Track: grab, pose+hazard, rs1_checks, rs2, obs_comb, odom, gmap, safety, render
         _use_cuvslam = (self._cuvslam is not None)
 
         while self._running:
             _t0 = time.monotonic()
+            _t_start = _t0
+            self._capture_budget.reset_frame()
 
             try:
                 # Parallel grabs so dual RealSense waits overlap (not sum).
@@ -995,6 +928,8 @@ class Vision:
                 self._topdown_hazard_corner_count = 0
                 self._topdown_hazard_edge_count = 0
 
+            _t_hazard = time.monotonic()
+            
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -1103,23 +1038,27 @@ class Vision:
                                            td_dx, c0 + td_dx, c1 + td_dx,
                                            len(nz[0])))
             _t_rs1 = time.monotonic()
-
+            
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
+            # DROPPABLE: Can fallback to topdown-only if budget tight
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             _raw_scatter = None
             _dbg = self.debug_depth
-            if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                if getattr(self, '_pitch_cal_request', False):
-                    self._calibrate_rs2_pitch(self._rs2.verts)
-                rs2_clean = _clip_decimated_border(self._rs2.verts)
-                _gpu_result = self._gpu.depth_forward_gpu(
-                    rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
-                if _gpu_result is not None:
-                    z2, k2, _raw_scatter = _gpu_result
+            if self._capture_budget.should_run("rs2_process"):
+                with self._capture_budget.stage("rs2_process"):
+                    if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
+                        if getattr(self, '_pitch_cal_request', False):
+                            self._calibrate_rs2_pitch(self._rs2.verts)
+                        rs2_clean = _clip_decimated_border(self._rs2.verts)
+                        _gpu_result = self._gpu.depth_forward_gpu(
+                            rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                        if _gpu_result is not None:
+                            z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
-            _t_depth = time.monotonic()
+            _t_rs2 = time.monotonic()
+            _t_depth = _t_rs2  # Keep for backwards compat with old logging
 
             # --- Combine into ego-space (obs_combined, known_combined) ---
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
@@ -1268,27 +1207,30 @@ class Vision:
                     skip_slam_update = True
                     skip_reason = "stuck"
             
-            if not skip_slam_update:
-                self._gpu.gmap_update_gpu(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE),
-                    free_range_mask=self._free_range_mask)
-                self._global_map.keyframe_check(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE))
-                
-                # Sync GPU map after loop closure rebuild
-                if self._global_map.needs_gpu_sync():
-                    cpu_map, cpu_height = self._global_map.get_cpu_map()
-                    self._gpu.gmap_reset(cpu_map, cpu_height)
-                    self._global_map.clear_gpu_sync_flag()
-                    print("vision: GPU gmap synchronized after loop closure")
+            # GMAP updates - DROPPABLE (expensive GPU ops, non-safety-critical)
+            if not skip_slam_update and self._capture_budget.should_run("gmap"):
+                with self._capture_budget.stage("gmap"):
+                    self._gpu.gmap_update_gpu(
+                        obs_combined, known_combined,
+                        cap_x, cap_y, cap_theta,
+                        rcx_f, rcy_f, float(TD_PX_SIZE),
+                        free_range_mask=self._free_range_mask)
+                    self._global_map.keyframe_check(
+                        obs_combined, known_combined,
+                        cap_x, cap_y, cap_theta,
+                        rcx_f, rcy_f, float(TD_PX_SIZE))
+                    
+                    # Sync GPU map after loop closure rebuild
+                    if self._global_map.needs_gpu_sync():
+                        cpu_map, cpu_height = self._global_map.get_cpu_map()
+                        self._gpu.gmap_reset(cpu_map, cpu_height)
+                        self._global_map.clear_gpu_sync_flag()
+                        print("vision: GPU gmap synchronized after loop closure")
             else:
                 # Log skip first time and periodically
                 if not hasattr(self, '_slam_skip_warned') or self._slam_skip_warned != skip_reason:
-                    print(f"⚠️  SLAM update skipped: {skip_reason} (pose not ground truth)")
+                    if skip_slam_update:
+                        print(f"⚠️  SLAM update skipped: {skip_reason} (pose not ground truth)")
                     self._slam_skip_warned = skip_reason
             
             _t_gmap_up = time.monotonic()
@@ -1435,6 +1377,39 @@ class Vision:
             _t_render = time.monotonic()
             _t_end = _t_render
 
+            # === Stage timing collection ===
+            _stage_times.append((
+                (_t_grab - _t_start) * 1000.0,      # grab
+                (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose
+                (_t_rs1 - _t_hazard) * 1000.0,      # rs1_checks (near/overhang/soft + depth_topdown)
+                (_t_rs2 - _t_rs1) * 1000.0,         # rs2_process (GPU depth)
+                (_t_obs - _t_rs2) * 1000.0,         # obs_combine
+                (_t_odom - _t_obs) * 1000.0,        # odom
+                (_t_gmap_up - _t_odom) * 1000.0,    # gmap
+                (_t_safety - _t_gmap_up) * 1000.0,  # safety
+                (_t_render - _t_safety) * 1000.0,   # render
+            ))
+            
+            # Detailed report every 90 frames
+            if len(_stage_times) % 90 == 0 and len(_stage_times) >= 90:
+                recent = np.array(_stage_times[-90:])
+                avg = np.mean(recent, axis=0)
+                p95 = np.percentile(recent, 95, axis=0)
+                total = np.sum(avg)
+                labels = ["grab", "pose+hazard", "rs1_checks", "rs2_gpu", 
+                         "obs_comb", "odom", "gmap", "safety", "render"]
+                print("=" * 80)
+                print(f"CAPTURE TIMING (last 90 frames): TOTAL={total:.1f}ms ({1000/total:.1f} Hz)")
+                print("=" * 80)
+                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%TOTAL':>8s}")
+                print("-" * 80)
+                for i, label in enumerate(labels):
+                    pct = (avg[i] / total) * 100.0
+                    print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                print("=" * 80)
+                print(f"Target: 33.3ms/frame (30 Hz). Current: {total:.1f}ms ({1000/total:.1f} Hz)")
+                print("=" * 80)
+
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
                                 _t_depth - _t_rs1, _t_obs - _t_depth,
                                 _t_odom - _t_obs, _t_gmap_up - _t_odom,
@@ -1442,9 +1417,21 @@ class Vision:
                                 _t_end - _t_safety))
             if len(_loop_times) % 300 == 0:
                 avg = np.mean(_loop_times[-300:], axis=0) * 1000
+                total_avg = sum(avg)
+                
+                # Get budget stats
+                lifetime = self._capture_budget.get_lifetime_stats()
+                shed_counts = lifetime.get("shed_counts", {})
+                
+                # Build shed info
+                shed_info = ""
+                if shed_counts:
+                    shed_parts = ["%s=%d" % (k, v) for k, v in sorted(shed_counts.items())]
+                    shed_info = "  shed:[%s]" % ",".join(shed_parts)
+                
                 print("capture: grab=%.1f rs1=%.1f rs2=%.1f obs=%.1f odom=%.1f "
                       "gmap=%.1f safety=%.1f render=%.1f "
-                      "TOTAL=%.1fms" % (*avg, sum(avg)))
+                      "TOTAL=%.1fms (budget %.1fms @ 30Hz)%s" % (*avg, total_avg, 33.3, shed_info))
 
     def stop(self):
         self._running = False
