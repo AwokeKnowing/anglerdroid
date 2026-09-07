@@ -14,7 +14,7 @@ except ImportError:
 from robot_config import FRAME_W, FRAME_H
 RS_DEPTH_W, RS_DEPTH_H = 848, 480
 RGB_CAP_W, RGB_CAP_H = 640, 480
-RS_DECIMATE_MAG = 3
+RS_DECIMATE_MAG = 3  # librealsense log2: 3 => 2**3 = 8x (every 8th)
 
 
 def _set_sensor_opt(sensor, option, value):
@@ -99,7 +99,7 @@ def _open_rgb_capture(device_id):
 class RSCamera:
     """RealSense D435: depth 848x480 -> decimated pointcloud + color 320x240.
 
-    With decimate_mag=8 the pointcloud has only 106x60 = 6360 vertices,
+    With decimate_mag=3 (=8x) the pointcloud has only 106x60 = 6360 vertices,
     making downstream numpy processing trivial (<1 ms).
     Set compute_pointcloud=False for cameras that only provide color.
     Set capture_ir=True to also capture stereo IR frames (for cuVSLAM).

@@ -24,9 +24,9 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
    phase. Prefer persistent worker pools over creating pools/threads per frame.
 
 ### Past wizardry (do not casually undo)
-- RealSense depth **decimation** was tuned so pointclouds are tiny and downstream
-  work is trivial (docstring historically aimed at mag≈8 → ~6k verts). If you
-  change `RS_DECIMATE_MAG`, **re-benchmark** capture timing on device.
+- RealSense depth **decimation**: `RS_DECIMATE_MAG = 3` means **2³ = 8×** (SDK log2).
+  That yields the tuned ~6k-vert cloud — not “mag 3 vs mag 8.” Changing it requires
+  on-device re-benchmark.
 - Pre-allocated buffers, queue size 1, poll-then-short-wait grabs.
 - GPU path in `gpu_render.py` for forward depth / odom / gmap / atlas.
 
