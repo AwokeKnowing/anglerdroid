@@ -127,6 +127,44 @@ def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
     return v
 
 
+def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
+    """Check if top-down camera sees a close object (near-field hazard reflex).
+
+    Detects table undersides, hands, or any object closer than threshold_m
+    to the RS1 camera. This is a REFLEX that runs BEFORE floor-obstacle logic.
+
+    Args:
+        verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
+        threshold_m: Distance threshold in metres (default 0.30m = 30cm).
+        min_pixels: Minimum number of close points to trigger (filters noise).
+
+    Returns:
+        (triggered: bool, close_count: int, min_z: float)
+        triggered: True if enough close points detected.
+        close_count: Number of points closer than threshold.
+        min_z: Minimum (closest) Z value in metres, or inf if no valid points.
+    """
+    if len(verts) == 0:
+        return False, 0, float('inf')
+
+    verts = _clip_decimated_border(verts)
+    z = verts[:, 2]
+    valid = z > 0.01  # Filter out zero/invalid depth
+    z_valid = z[valid]
+
+    if len(z_valid) == 0:
+        return False, 0, float('inf')
+
+    # Count points closer than threshold
+    close_mask = z_valid < threshold_m
+    close_count = int(np.sum(close_mask))
+    min_z = float(np.min(z_valid))
+
+    triggered = close_count >= min_pixels
+
+    return triggered, close_count, min_z
+
+
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     """RS1 (top-down camera) pointcloud → (obs, known) via orthographic projection.
 
@@ -207,6 +245,9 @@ class Vision:
         self._topdown_known_px = 0
         self._topdown_lost_n = 0
         self._persistent_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._topdown_near_field = False
+        self._near_field_close_count = 0
+        self._near_field_min_z = float('inf')
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._cuvslam = None
@@ -561,7 +602,33 @@ class Vision:
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
+                # Check for near-field hazard (table underside, hand, etc.) FIRST
+                # This is a REFLEX that triggers before floor-obstacle logic.
+                triggered, close_count, min_z = check_topdown_near_field(self._rs1.verts)
+                self._topdown_near_field = triggered
+                self._near_field_close_count = close_count
+                self._near_field_min_z = min_z
+                if triggered and not hasattr(self, '_near_field_log_n'):
+                    self._near_field_log_n = 0
+                if triggered:
+                    self._near_field_log_n += 1
+                    if self._near_field_log_n == 1 or self._near_field_log_n % 30 == 0:
+                        print("vision: NEAR-FIELD REFLEX triggered — "
+                              "close_px=%d min_z=%.3fm (table/hand <30cm from topdown)"
+                              % (close_count, min_z))
+                else:
+                    if hasattr(self, '_near_field_log_n') and self._near_field_log_n > 0:
+                        print("vision: NEAR-FIELD REFLEX cleared — "
+                              "close_px=%d min_z=%.3fm (after %d frames)"
+                              % (close_count, min_z, self._near_field_log_n))
+                        self._near_field_log_n = 0
+                
                 z1, k1 = depth_topdown(self._rs1.verts)
+            else:
+                self._topdown_near_field = False
+                self._near_field_close_count = 0
+                self._near_field_min_z = float('inf')
+                
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
             # Top-down depth is ground truth for open-space. No valid known
@@ -744,7 +811,8 @@ class Vision:
             self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
-                                height_cm=self._persistent_height)
+                                height_cm=self._persistent_height,
+                                topdown_near_field=self._topdown_near_field)
             if not self._topdown_ok:
                 # Hard immobilize: no top-down depth reading.
                 self._safety._fwd_scale = 0.0
@@ -880,3 +948,18 @@ class Vision:
     @property
     def safety_throttled(self):
         return self._safety.is_throttled
+
+    @property
+    def topdown_near_field(self):
+        """True when top-down camera detected a close object (<30cm) overhead."""
+        return bool(getattr(self, '_topdown_near_field', False))
+
+    @property
+    def near_field_close_count(self):
+        """Number of close pixels when near-field reflex is active."""
+        return int(getattr(self, '_near_field_close_count', 0))
+
+    @property
+    def near_field_min_z(self):
+        """Minimum (closest) Z distance in metres when near-field detected."""
+        return float(getattr(self, '_near_field_min_z', float('inf')))

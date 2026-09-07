@@ -111,6 +111,8 @@ class SafetyGuard:
         self._throttled = False
         self._path = []
         self._tick = 0
+        self._topdown_near_field = False
+        self._near_field_reason = None
 
     @property
     def is_throttled(self):
@@ -128,15 +130,44 @@ class SafetyGuard:
     def ang_scale(self):
         return self._ang_scale
 
+    @property
+    def topdown_near_field(self):
+        """True when top-down camera detected a close object (<30cm) overhead."""
+        return self._topdown_near_field
+
+    @property
+    def near_field_reason(self):
+        """Diagnostic string when near-field reflex is active, None otherwise."""
+        return self._near_field_reason
+
     # ── per-frame update ──
 
-    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None):
+    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False):
         """Feed per-frame odometry. Computes directional scales.
 
         height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
+        topdown_near_field: True when top-down camera sees object <30cm overhead.
+                           Triggers immediate forward stop; reverse allowed if bwd_clear.
         """
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
+        self._topdown_near_field = topdown_near_field
+
+        # ── Near-field reflex: overhead object <30cm from top-down camera ──
+        # This is a REFLEX that runs BEFORE floor-obstacle logic. Table undersides,
+        # hands, or anything within ~30cm of the mast camera triggers immediate
+        # forward stop. Unlike total immobilize, reverse is still allowed if rear clear.
+        # This prevents driving under tables where the floor looks clear but the
+        # mast will crash into the underside.
+        if topdown_near_field:
+            self._near_field_reason = "topdown_near_field"
+            # Zero forward immediately (reflex); bwd/ang computed normally below
+            self._fwd_scale = 0.0
+            if self._tick % 10 == 0:
+                print("safety: NEAR-FIELD REFLEX — topdown sees close object (<30cm), "
+                      "fwd=0.0, computing bwd/ang normally")
+        else:
+            self._near_field_reason = None
 
         # Mast/overhang-aware occupancy (tables: floor free, top hits mast)
         obs_map = build_safety_occ(obs_map, height_cm)
@@ -162,7 +193,10 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        self._fwd_scale = _clearance_scale(fwd_clear)
+        # Apply clearance scales. Near-field reflex already zeroed fwd_scale above;
+        # don't override it. Backward and angular are always computed from obstacles.
+        if not topdown_near_field:
+            self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
         if fwd_clear < 10 and self._tick % 5 == 0:
             print("safety: fwd_clear=%d bwd_clear=%d fwd_scale=%.2f "
