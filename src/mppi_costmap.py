@@ -144,15 +144,17 @@ class MppiCostmapPlanner:
         """
         # Policy observation dict (preferred path)
         if isinstance(obs_input, dict):
-            ego_height = obs_input.get('ego_height')
-            ego_known = obs_input.get('ego_known')
-            if ego_height is not None and ego_known is not None:
-                # Use height-based obstacles where known
-                return np.asarray(ego_height, dtype=np.uint8), ego_height
-            # Fallback: use ego_persistent as binary mask
             ego_pers = obs_input.get('ego_persistent')
+            ego_height = obs_input.get('ego_height')
             if ego_pers is not None:
-                return np.asarray(ego_pers, dtype=np.uint8), None
+                obs = np.asarray(ego_pers, dtype=np.uint8)
+                height = (np.asarray(ego_height, dtype=np.uint8)
+                          if ego_height is not None else None)
+                return obs, height
+            # Fallback: height alone → binary from height>=5cm
+            if ego_height is not None:
+                h = np.asarray(ego_height, dtype=np.uint8)
+                return ((h >= 5).astype(np.uint8) * 255), h
         
         # Legacy array path (backward compat)
         arr = MppiCostmapPlanner._extract_obs_map(obs_input)

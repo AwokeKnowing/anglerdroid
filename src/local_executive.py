@@ -15,6 +15,7 @@ Never blocks. Capture/map thread stays untouched.
 from __future__ import annotations
 
 import math
+import numpy as np
 import keepouts
 import threading
 import time
@@ -180,10 +181,13 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
     # Paint keepouts onto ego map (only if SLAM locked)
     try:
         if isinstance(mppi_input, dict):
-            # Modify ego_persistent layer in-place (keepouts are persistent obstacles)
+            # Paint keepouts onto a copy — policy buffers are shared/prealloc
             ego_pers = mppi_input.get('ego_persistent')
             if ego_pers is not None:
-                mppi_input['ego_persistent'] = keepouts.paint_ego(ego_pers, pose, slam_locked=slam_locked)
+                painted = keepouts.paint_ego(
+                    np.array(ego_pers, copy=True), pose, slam_locked=slam_locked)
+                mppi_input = dict(mppi_input)
+                mppi_input['ego_persistent'] = painted
         else:
             # Legacy array path
             mppi_input = keepouts.paint_ego(mppi_input, pose, slam_locked=slam_locked)
