@@ -1677,12 +1677,12 @@ class Vision:
                         svh, svw = sv.shape[:2]
                         atlas[FRAME_H:FRAME_H + svh, ATLAS_W - svw:ATLAS_W] = sv
 
-                    # Update frames and atlas under lock
                     with self._lock:
                         self.frames[0][:] = rgb1
                         self.frames[1][:] = rgbd1
                         self.frames[2][:] = rgbd2
-                        self.atlas[:] = atlas
+                        if atlas is not None:
+                            self.atlas[:] = atlas
                         self.timestamp = time.time()
             else:
                 # Render skipped — only update timestamp (atlas/frames stay stale)

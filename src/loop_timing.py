@@ -112,8 +112,11 @@ class FrameBudget:
         if priority == self.CRITICAL:
             return True
         
-        # Droppable stage - check budget
-        if self.budget_exceeded():
+        # Droppable: use wall elapsed as well as summed stage() times.
+        # Capture often times stages with monotonic stamps instead of stage(),
+        # so accumulated_ms alone stays ~0 and never sheds.
+        used = max(self.accumulated_ms, self.elapsed_ms())
+        if used >= self.shed_ms:
             self.shed_counts[stage_name] = self.shed_counts.get(stage_name, 0) + 1
             return False
         
