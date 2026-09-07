@@ -91,20 +91,38 @@ def test_face_greet_hours_gate():
         cooldown_seconds=60.0,
     )
     # Outside window → no speak
-    action = stub.on_face_seen("James", hour=3, now=100.0)
+    action = stub.on_face_seen(
+        name="James",
+        confidence=0.95,
+        box=(100, 100, 80, 80),
+        hour=3,
+        now=100.0
+    )
     assert action is not None
     assert action.meta.get("skipped") == "outside_greet_hours"
     assert action.utterance == ""
     assert spoken == []
 
     # Inside window → greet
-    action = stub.on_face_seen("James", hour=9, now=200.0)
+    action = stub.on_face_seen(
+        name="James",
+        confidence=0.95,
+        box=(100, 100, 80, 80),
+        hour=9,
+        now=200.0
+    )
     assert action.kind == "greet"
     assert "James" in action.utterance
     assert len(spoken) == 1
 
     # Cooldown
-    action2 = stub.on_face_seen("James", hour=9, now=210.0)
+    action2 = stub.on_face_seen(
+        name="James",
+        confidence=0.95,
+        box=(100, 100, 80, 80),
+        hour=9,
+        now=210.0
+    )
     assert action2.meta.get("skipped") == "cooldown"
     assert len(spoken) == 1
     print("✅ test_face_greet_hours_gate passed")
