@@ -255,7 +255,13 @@ def main():
                 if gamepad_active:
                     wb.cancel_twist_for()
                     navigator.clear_goal()
-                    tools.set_wheel_vels(left_tps, right_tps)
+                    try:
+                        tools.set_wheel_vels(left_tps, right_tps)
+                    except RuntimeError as e:
+                        if "CAN bus failed" in str(e):
+                            print(f"main: {e} — shutting down")
+                            break
+                        raise
                 elif not wb.is_twist_for_active():
                     twist = None
                     if args.auto_local and local_executive.is_active():
@@ -274,9 +280,21 @@ def main():
                             wb.cancel_twist_for()
                             tools.twist(0.0, 0.0)
                         else:
-                            tools.twist(twist[0], twist[1])
+                            try:
+                                tools.twist(twist[0], twist[1])
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
                     else:
-                        tools.set_wheel_vels(0.0, 0.0)
+                        try:
+                            tools.set_wheel_vels(0.0, 0.0)
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
 
             # Tool calls from agent (only act if gamepad is idle)
             if not gamepad_active:
@@ -292,12 +310,18 @@ def main():
                         print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
                             fwd, ang, dur, sf, wb._safety_ang))
                         navigator.clear_goal()
-                        tools.twist_for(
-                            fwd, ang,
-                            duration_secs=dur,
-                            ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
-                            ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
-                        )
+                        try:
+                            tools.twist_for(
+                                fwd, ang,
+                                duration_secs=dur,
+                                ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
+                                ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
+                            )
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
                     elif name == "stop":
                         if wb:
                             wb.cancel_twist_for()
@@ -328,9 +352,21 @@ def main():
                         navigator.clear_goal()
                         tools.stop()
                     elif name == "twist":
-                        tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                        try:
+                            tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
                     elif name == "set_wheel_vels":
-                        tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
+                        try:
+                            tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
 
             # Throttle to 30 fps
             process_sec = time.monotonic() - loop_start
