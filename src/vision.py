@@ -1981,4 +1981,92 @@ class Vision:
             }
         }
 
+    def get_robot_footprint_overlay(self):
+        """Create semi-transparent red footprint overlay on RS1 top-down color.
+        
+        Draws robot body + wheel boxes ON the live RS1 color image (camera space),
+        NOT ego-map space. Matches the physical robot size in the camera view.
+        
+        Returns RGB (rs1_h, rs1_w, 3) uint8 array showing:
+        - RGB background: RS1 topdown color (robot, floor, obstacles visible)
+        - Semi-transparent red tint: robot body + 4 wheel boxes
+        - Body ~30 cm wide, wheels as separate corner pads
+        
+        Camera-space viz: footprint matches how big robot looks in RS1 color view.
+        """
+        if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
+            return None
+        
+        # RS1 color after 180° rotation to match ego orientation
+        rgb = self._rs1.color[::-1, ::-1].copy()
+        h_rs1, w_rs1 = rgb.shape[:2]
+        
+        # Compute scale from ego (320×240) to RS1 camera resolution (e.g., 848×480)
+        scale_x = float(w_rs1) / float(FRAME_W)  # e.g., 848/320 = 2.65
+        scale_y = float(h_rs1) / float(FRAME_H)  # e.g., 480/240 = 2.0
+        
+        # Transform ego footprint coordinates to RS1 camera coordinates
+        # Body rectangle (excluding wheel pads for now)
+        body_x0 = int((RCX - ROBOT_W // 2) * scale_x)
+        body_y0 = int((RCY - ROBOT_H // 2) * scale_y)
+        body_x1 = int((RCX + ROBOT_W // 2) * scale_x)
+        body_y1 = int((RCY + ROBOT_H // 2) * scale_y)
+        
+        # Clip to image bounds
+        body_x0 = max(0, body_x0)
+        body_y0 = max(0, body_y0)
+        body_x1 = min(w_rs1, body_x1)
+        body_y1 = min(h_rs1, body_y1)
+        
+        # Four wheel boxes at corners (each wheel is ~8-10 cm diameter, add margin)
+        # Wheel positions relative to body center in ego space (scaled to RS1)
+        wheel_half = int(10 * scale_x)  # ~10 cm wheel radius + margin in RS1 pixels
+        
+        # Front-left wheel
+        fl_x0 = int((RCX + ROBOT_W // 2 - 5) * scale_x) - wheel_half
+        fl_y0 = int((RCY - ROBOT_H // 2) * scale_y) - wheel_half
+        fl_x1 = fl_x0 + 2 * wheel_half
+        fl_y1 = fl_y0 + 2 * wheel_half
+        
+        # Front-right wheel
+        fr_x0 = int((RCX + ROBOT_W // 2 - 5) * scale_x) - wheel_half
+        fr_y0 = int((RCY + ROBOT_H // 2) * scale_y) - wheel_half
+        fr_x1 = fr_x0 + 2 * wheel_half
+        fr_y1 = fr_y0 + 2 * wheel_half
+        
+        # Back-left wheel
+        bl_x0 = int((RCX - ROBOT_W // 2 + 5) * scale_x) - wheel_half
+        bl_y0 = int((RCY - ROBOT_H // 2) * scale_y) - wheel_half
+        bl_x1 = bl_x0 + 2 * wheel_half
+        bl_y1 = bl_y0 + 2 * wheel_half
+        
+        # Back-right wheel
+        br_x0 = int((RCX - ROBOT_W // 2 + 5) * scale_x) - wheel_half
+        br_y0 = int((RCY + ROBOT_H // 2) * scale_y) - wheel_half
+        br_x1 = br_x0 + 2 * wheel_half
+        br_y1 = br_y0 + 2 * wheel_half
+        
+        # Apply semi-transparent red tint (blend factor ~0.4 for visibility)
+        def apply_red_tint(img, r0, c0, r1, c1, alpha=0.4):
+            r0, r1 = max(0, r0), min(img.shape[0], r1)
+            c0, c1 = max(0, c0), min(img.shape[1], c1)
+            if r1 <= r0 or c1 <= c0:
+                return
+            region = img[r0:r1, c0:c1].astype(np.float32)
+            region[:, :, 0] = np.clip(region[:, :, 0] * (1 - alpha) + 255 * alpha, 0, 255)
+            region[:, :, 1] = region[:, :, 1] * (1 - alpha)
+            region[:, :, 2] = region[:, :, 2] * (1 - alpha)
+            img[r0:r1, c0:c1] = region.astype(np.uint8)
+        
+        # Draw body rectangle with red tint
+        apply_red_tint(rgb, body_y0, body_x0, body_y1, body_x1, alpha=0.35)
+        
+        # Draw four wheel boxes with red tint
+        apply_red_tint(rgb, fl_y0, fl_x0, fl_y1, fl_x1, alpha=0.35)
+        apply_red_tint(rgb, fr_y0, fr_x0, fr_y1, fr_x1, alpha=0.35)
+        apply_red_tint(rgb, bl_y0, bl_x0, bl_y1, bl_x1, alpha=0.35)
+        apply_red_tint(rgb, br_y0, br_x0, br_y1, br_x1, alpha=0.35)
+        
+        return rgb
+
 

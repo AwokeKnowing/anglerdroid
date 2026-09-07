@@ -219,6 +219,10 @@ def main():
                     rgb = rs1 = rs2 = None
                     if frames is not None and len(frames) >= 3:
                         rgb, rs1, rs2 = frames[0], frames[1], frames[2]
+                    # Generate robot footprint overlay (ego-map space, 1 cm/px scale)
+                    foot_overlay = None
+                    if rerun_logger.due:
+                        foot_overlay = vis.get_robot_footprint_overlay()
                     rerun_logger.maybe_log(
                         ts=ts,
                         atlas=atlas,
@@ -232,6 +236,7 @@ def main():
                             "bwd": getattr(vis, "safety_bwd_scale", 1.0),
                             "ang": getattr(vis, "safety_ang_scale", 1.0),
                         },
+                        robot_foot_overlay=foot_overlay,
                     )
 
             # Propagate debug flags from UI to vision

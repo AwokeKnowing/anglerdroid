@@ -89,6 +89,7 @@ class KevinRerunLogger:
         obs: Optional[np.ndarray] = None,
         height_cm: Optional[np.ndarray] = None,
         safety: Optional[Mapping[str, Any]] = None,
+        robot_foot_overlay: Optional[np.ndarray] = None,
         force: bool = False,
     ) -> bool:
         """Log a tick. Returns True if this call actually wrote entities."""
@@ -136,6 +137,13 @@ class KevinRerunLogger:
                         ]
                     ),
                 )
+            if robot_foot_overlay is not None:
+                # Ego-map footprint overlay: magenta robot body + yellow forward edge.
+                # Drawn in ego-map space (320×240 @ 1 cm/px) so body ~30 cm reads as ~30 px.
+                # Compare footprint size vs obstacles on same coordinate system.
+                overlay = np.ascontiguousarray(robot_foot_overlay)
+                if overlay.ndim == 3 and overlay.shape[2] == 3:
+                    rr.log("vision/robot_foot_overlay", rr.Image(overlay))
             return True
         except Exception as e:
             # Never let logging take down the 30 Hz loop.
