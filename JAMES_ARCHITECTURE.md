@@ -68,7 +68,11 @@ These remain in the capture loop:
 # vision.py
 class Vision:
     def start(self):
-        # 30Hz capture loop
+        # High-rate odom thread (~100-200 Hz): wheel+IMU integration
+        self._odom_thread = threading.Thread(target=self._odom_loop, daemon=True)
+        self._odom_thread.start()
+        
+        # 30Hz capture loop: wait for synced frames, sample pose, depth reflexes
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
         
@@ -77,16 +81,26 @@ class Vision:
         self._extras_thread.start()
 ```
 
+### Odom Loop (~100-200Hz)
+```python
+def _odom_loop(self):
+    # 1. Read wheel velocities (non-blocking)
+    # 2. Grab IMU yaw rate (non-blocking, separate pipeline)
+    # 3. Integrate wheel + IMU into pose
+    # 4. Publish latest pose snapshot (lock-free or mutex)
+    # High-rate loop ensures fresh odometry even when capture is slow
+```
+
 ### Capture Loop (30Hz)
 ```python
 def _capture_loop(self):
-    # 1. Grab frames (parallel)
-    # 2. Pose update
+    # 1. Wait for synced frames (RealSense poll/wait) - BLOCKS HERE
+    # 2. Sample latest pose from odom thread (lock-free read)
     # 3. RS1 depth checks (near/overhang/soft-low) - DEPTH ONLY
-    # 4. RS2 forward depth
+    # 4. RS2 forward depth (GPU)
     # 5. Combine obstacles
-    # 6. Odometry
-    # 7. Global map
+    # 6. Visual odometry correction (optional, may still run on capture)
+    # 7. Global map (consumes pose from odom thread)
     # 8. Safety
     # 9. Render
 ```
