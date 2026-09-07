@@ -143,7 +143,7 @@ class SafetyGuard:
     # ── per-frame update ──
 
     def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False, 
-               topdown_overhang_approach=False, topdown_hazard=False):
+               topdown_overhang_approach=False, topdown_hazard=False, topdown_soft_low_obstacle=False):
         """Feed per-frame odometry. Computes directional scales.
 
         height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
@@ -153,16 +153,30 @@ class SafetyGuard:
                                   Triggers immediate forward stop; reverse allowed if bwd_clear.
         topdown_hazard: True when RS1 topdown RGB detects bump or checkered mat.
                        Triggers immediate forward stop; reverse allowed if bwd_clear.
+        topdown_soft_low_obstacle: True when RS1 topdown depth detects soft low obstacle (dog bed, cushion).
+                                  Attenuates forward motion (scale 0.3) rather than full stop.
         """
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
         self._topdown_near_field = topdown_near_field
 
+        # ── Soft low obstacle reflex: dog bed / cushion detection (depth-based) ──
+        # Detects LOW soft obstacles (5-30cm height) at medium distance (35cm-1m).
+        # Unlike hard-stop reflexes above, this ATTENUATES forward motion (scale ~0.3)
+        # rather than zeroing it, allowing slow careful approach. Reverse/angular normal.
+        # Priority: soft low obstacle is weakest reflex, checked first so hard reflexes override.
+        if topdown_soft_low_obstacle:
+            self._near_field_reason = "topdown_soft_low_obstacle"
+            # Attenuate forward to cautious crawl speed (not full stop)
+            self._fwd_scale = 0.3
+            if self._tick % 10 == 0:
+                print("safety: SOFT LOW OBSTACLE REFLEX — RS1 depth sees dog bed/cushion, "
+                      "fwd=0.3 (attenuated), computing bwd/ang normally")
         # ── Topdown hazard reflex: RS1 RGB bump/checkered detection (sensor frame) ──
         # This is an EGO/VISION REFLEX that works WITHOUT SLAM or map-based keepouts.
         # Detects wood bump (threshold/lip) and checkered mat in RS1 topdown RGB.
         # Reverse is still allowed if rear clear (escape capability).
-        if topdown_hazard:
+        elif topdown_hazard:
             self._near_field_reason = "topdown_hazard"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
@@ -220,10 +234,10 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        # Apply clearance scales. Topdown reflexes (hazard, overhang_approach, near_field) already
-        # zeroed fwd_scale above; don't override it. Backward and angular are always
+        # Apply clearance scales. Topdown reflexes (hazard, overhang_approach, near_field, soft_low_obstacle)
+        # already set fwd_scale above; don't override it. Backward and angular are always
         # computed from obstacles.
-        if not (topdown_near_field or topdown_overhang_approach or topdown_hazard):
+        if not (topdown_near_field or topdown_overhang_approach or topdown_hazard or topdown_soft_low_obstacle):
             self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
         if fwd_clear < 10 and self._tick % 5 == 0:

@@ -166,6 +166,108 @@ def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
     return triggered, close_count, min_z
 
 
+def check_topdown_soft_low_obstacle(verts, 
+                                     near_m=0.35, far_m=1.00,
+                                     min_height_cm=5.0, max_height_cm=30.0,
+                                     forward_strip_row_min=10, forward_strip_row_max=80,
+                                     lateral_col_margin=30,
+                                     min_pixels=100,
+                                     out_h=FRAME_H, out_w=FRAME_W,
+                                     floor_clip_m=TD_FLOOR_CLIP):
+    """Check if top-down camera sees soft low obstacles (dog bed, cushions) in forward region.
+
+    Detects LOW-HEIGHT positive obstacles (above floor but below table/mast height) that
+    existing reflexes miss. Dog beds, cushions, soft furniture typically 5-30cm high.
+
+    This fills the gap between:
+    - Near-field reflex (objects <30cm from camera, any height)
+    - Overhang approach (elevated structures 30-70cm ahead at table height)
+    - Floor classification (objects <5cm treated as floor noise)
+
+    Args:
+        verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
+        near_m: Near distance threshold in metres (default 0.35m, after near-field zone).
+        far_m: Far distance threshold in metres (default 1.00m, local sensing range).
+        min_height_cm: Minimum obstacle height in cm above floor (default 5cm, above noise).
+        max_height_cm: Maximum obstacle height in cm above floor (default 30cm, below table).
+        forward_strip_row_min: Top edge of forward strip in image (default 10, after 180° rotation).
+        forward_strip_row_max: Bottom edge of forward strip in image (default 80, wider than overhang).
+        lateral_col_margin: Margin from image edges in columns (default 30px).
+        min_pixels: Minimum number of low obstacle pixels to trigger (filters noise).
+        out_h: Image height (default FRAME_H = 240).
+        out_w: Image width (default FRAME_W = 320).
+        floor_clip_m: Floor detection threshold in metres (default TD_FLOOR_CLIP).
+
+    Returns:
+        (triggered: bool, low_obs_count: int, median_height_cm: float)
+        triggered: True if enough soft low obstacle pixels detected in forward strip.
+        low_obs_count: Number of pixels matching low obstacle criteria.
+        median_height_cm: Median height in cm of low obstacle pixels, or inf if none.
+
+    Note:
+        RS1 image after 180° rotation: top of image (low row indices) = forward region.
+        This detector runs AFTER near-field and overhang checks.
+        Height computed as (floor_clip_m - z) * 100 cm.
+    """
+    if len(verts) == 0:
+        return False, 0, float('inf')
+
+    verts = _clip_decimated_border(verts)
+    
+    # Extract coordinates
+    x = verts[:, 0]
+    y = verts[:, 1]
+    z = verts[:, 2]
+    
+    # Filter for valid depth in detection range (after near-field, before far)
+    valid_z = (z > 0.01) & (z >= near_m) & (z <= far_m)
+    
+    if not np.any(valid_z):
+        return False, 0, float('inf')
+    
+    # Compute height above floor in cm
+    height_cm = (floor_clip_m - z) * 100.0
+    
+    # Filter for low obstacle height band (above floor noise, below table/mast)
+    low_obs_mask = valid_z & (height_cm >= min_height_cm) & (height_cm <= max_height_cm)
+    
+    if not np.any(low_obs_mask):
+        return False, 0, float('inf')
+    
+    # Project low obstacle points to image coordinates
+    v_low_obs = verts[low_obs_mask]
+    scale = np.float32(1.0 / TD_PX_SIZE)
+    center = np.float32([out_w * 0.5, out_h * 0.5])
+    
+    # p = [col, row] in image before 180° rotation
+    p = v_low_obs[:, :2] * scale + center
+    cols, rows = p[:, 0], p[:, 1]
+    
+    # After 180° rotation: (row, col) → (out_h - 1 - row, out_w - 1 - col)
+    rows_rotated = out_h - 1 - rows
+    cols_rotated = out_w - 1 - cols
+    
+    # Check if points fall in forward strip ROI (after rotation)
+    in_strip = (
+        (rows_rotated >= forward_strip_row_min) &
+        (rows_rotated <= forward_strip_row_max) &
+        (cols_rotated >= lateral_col_margin) &
+        (cols_rotated < out_w - lateral_col_margin)
+    )
+    
+    low_obs_heights = height_cm[low_obs_mask][in_strip]
+    
+    if len(low_obs_heights) == 0:
+        return False, 0, float('inf')
+    
+    low_obs_count = len(low_obs_heights)
+    median_height_cm = float(np.median(low_obs_heights))
+    
+    triggered = low_obs_count >= min_pixels
+    
+    return triggered, low_obs_count, median_height_cm
+
+
 def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
                                      forward_strip_row_min=10, forward_strip_row_max=50,
                                      lateral_col_margin=30,
@@ -341,6 +443,9 @@ class Vision:
         self._topdown_overhang_approach = False
         self._overhang_approach_count = 0
         self._overhang_approach_median_z = float('inf')
+        self._topdown_soft_low_obstacle = False
+        self._soft_low_obstacle_count = 0
+        self._soft_low_obstacle_median_height = float('inf')
         self._topdown_hazard = False
         self._topdown_hazard_reason = None
         self._topdown_hazard_corner_count = 0
@@ -839,6 +944,28 @@ class Vision:
                               % (ovh_count, ovh_median_z, self._overhang_approach_log_n))
                         self._overhang_approach_log_n = 0
                 
+                # Check for soft low obstacles (dog bed, cushions, soft furniture)
+                # Detects LOW obstacles (5-30cm height) at medium distance (35cm-1m).
+                # Fills gap between near-field and overhang: soft ground-level hazards.
+                soft_low_triggered, soft_low_count, soft_low_height = check_topdown_soft_low_obstacle(self._rs1.verts)
+                self._topdown_soft_low_obstacle = soft_low_triggered
+                self._soft_low_obstacle_count = soft_low_count
+                self._soft_low_obstacle_median_height = soft_low_height
+                if soft_low_triggered and not hasattr(self, '_soft_low_obstacle_log_n'):
+                    self._soft_low_obstacle_log_n = 0
+                if soft_low_triggered:
+                    self._soft_low_obstacle_log_n += 1
+                    if self._soft_low_obstacle_log_n == 1 or self._soft_low_obstacle_log_n % 30 == 0:
+                        print("vision: SOFT LOW OBSTACLE detected — "
+                              "low_obs_px=%d median_h=%.1fcm (dog bed / cushion ahead, attenuate fwd)"
+                              % (soft_low_count, soft_low_height))
+                else:
+                    if hasattr(self, '_soft_low_obstacle_log_n') and self._soft_low_obstacle_log_n > 0:
+                        print("vision: SOFT LOW OBSTACLE cleared — "
+                              "low_obs_px=%d median_h=%.1fcm (after %d frames)"
+                              % (soft_low_count, soft_low_height, self._soft_low_obstacle_log_n))
+                        self._soft_low_obstacle_log_n = 0
+                
                 z1, k1 = depth_topdown(self._rs1.verts)
             else:
                 self._topdown_near_field = False
@@ -847,6 +974,9 @@ class Vision:
                 self._topdown_overhang_approach = False
                 self._overhang_approach_count = 0
                 self._overhang_approach_median_z = float('inf')
+                self._topdown_soft_low_obstacle = False
+                self._soft_low_obstacle_count = 0
+                self._soft_low_obstacle_median_height = float('inf')
                 
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
@@ -1067,7 +1197,8 @@ class Vision:
                                 height_cm=self._persistent_height,
                                 topdown_near_field=self._topdown_near_field,
                                 topdown_overhang_approach=self._topdown_overhang_approach,
-                                topdown_hazard=self._topdown_hazard)
+                                topdown_hazard=self._topdown_hazard,
+                                topdown_soft_low_obstacle=self._topdown_soft_low_obstacle)
             
             # Hard immobilize conditions (CRITICAL SAFETY ONLY)
             # Philosophy: Immobilize only for immediate safety hazards.
@@ -1313,3 +1444,18 @@ class Vision:
     def overhang_approach_median_z(self):
         """Median Z distance in metres of overhang approach points."""
         return float(getattr(self, '_overhang_approach_median_z', float('inf')))
+
+    @property
+    def topdown_soft_low_obstacle(self):
+        """True when top-down camera detected soft low obstacle (dog bed, cushion) ahead."""
+        return bool(getattr(self, '_topdown_soft_low_obstacle', False))
+
+    @property
+    def soft_low_obstacle_count(self):
+        """Number of low obstacle pixels when soft low obstacle is detected."""
+        return int(getattr(self, '_soft_low_obstacle_count', 0))
+
+    @property
+    def soft_low_obstacle_median_height(self):
+        """Median height in cm of soft low obstacle points."""
+        return float(getattr(self, '_soft_low_obstacle_median_height', float('inf')))
