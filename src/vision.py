@@ -168,7 +168,7 @@ def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
 
 def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70, 
                                      forward_cone_x_min=-0.15, forward_cone_x_max=0.15,
-                                     forward_cone_y_min=0.05, forward_cone_y_max=0.40,
+                                     forward_cone_y_min=0.15, forward_cone_y_max=0.40,
                                      min_pixels=80):
     """Check if top-down camera sees an overhang (table underside) in forward approach cone.
 
@@ -182,7 +182,7 @@ def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
         far_m: Far distance threshold in metres (default 0.70m = 70cm).
         forward_cone_x_min: Left edge of forward cone in metres (default -0.15m).
         forward_cone_x_max: Right edge of forward cone in metres (default 0.15m).
-        forward_cone_y_min: Near edge of forward cone in metres (default 0.05m, ahead of robot nose).
+        forward_cone_y_min: Near edge of forward cone in metres (default 0.15m, ahead of mast/self).
         forward_cone_y_max: Far edge of forward cone in metres (default 0.40m).
         min_pixels: Minimum number of points to trigger (filters noise).
 
@@ -195,6 +195,8 @@ def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70,
     Note:
         RS1 coordinate system: +X right, +Y forward (away from robot), +Z toward camera.
         Forward cone is ahead of robot nose (positive Y), centered in X.
+        The forward cone starts at Y=0.15m (not 0.05m) to reject mast/self-geometry
+        near the robot body, which was causing false positives on live runs.
     """
     if len(verts) == 0:
         return False, 0, float('inf')

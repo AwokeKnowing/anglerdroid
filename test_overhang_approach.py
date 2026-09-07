@@ -92,14 +92,14 @@ def test_detects_table_at_50cm():
     print("Test 1: Detect table underside at 50cm (forward cone)")
     print("="*70)
     
-    # Table underside at 50cm, centered in forward cone
+    # Table underside at 50cm, centered in forward cone (Y=0.15-0.40m range)
     # Use larger extent and more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.20, 
-                                 x_extent=0.28, y_extent=0.30, points=500)
+    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, 
+                                 x_extent=0.28, y_extent=0.20, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Table at 0.50m (forward cone, 500 points generated):")
+    print(f"  Table at 0.50m (forward cone Y=0.25m, 500 points generated):")
     print(f"    Triggered: {triggered}")
     print(f"    Overhang count: {count} (after border clipping)")
     print(f"    Median Z: {median_z:.3f}m")
@@ -118,12 +118,12 @@ def test_no_trigger_rear_cone():
     print("="*70)
     
     # Table underside at 50cm, but in REAR (negative Y)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=-0.20, 
+    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=-0.25, 
                                  x_extent=0.28, y_extent=0.30, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
     
-    print(f"  Table at 0.50m (rear cone, y=-0.20m):")
+    print(f"  Table at 0.50m (rear cone, y=-0.25m):")
     print(f"    Triggered: {triggered}")
     print(f"    Overhang count: {count}")
     
@@ -140,7 +140,7 @@ def test_no_trigger_near_field_range():
     print("="*70)
     
     # Object at 20cm (near-field range) - use more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.20, x_center=0.0, y_center=0.20, 
+    cloud = make_overhang_cloud(z_distance=0.20, x_center=0.0, y_center=0.25, 
                                  x_extent=0.28, y_extent=0.30, points=300)
     
     # Check overhang approach (should NOT trigger, too close)
@@ -166,7 +166,7 @@ def test_no_trigger_too_far():
     print("="*70)
     
     # Object at 80cm (too far)
-    cloud = make_overhang_cloud(z_distance=0.80, x_center=0.0, y_center=0.20, 
+    cloud = make_overhang_cloud(z_distance=0.80, x_center=0.0, y_center=0.25, 
                                  x_extent=0.28, y_extent=0.30, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
@@ -210,7 +210,7 @@ def test_mixed_floor_and_table():
     floor = make_floor_cloud(z_floor=0.91, x_extent=1.0, y_extent=1.0, grid_size=20)
     
     # Table underside at 50cm in forward cone
-    table = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.20, 
+    table = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, 
                                  x_extent=0.28, y_extent=0.30, points=500)
     
     # Combine
@@ -321,7 +321,7 @@ def test_noise_filtering():
     print("="*70)
     
     # Small patch at 50cm (below min_pixels=80 threshold)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.20, points=30)
+    cloud = make_overhang_cloud(z_distance=0.50, x_center=0.0, y_center=0.25, points=30)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud, min_pixels=80)
     
@@ -373,7 +373,7 @@ def test_lateral_cone_limits():
     print("="*70)
     
     # Overhang at 50cm but far left (x=-0.30m, outside default cone x=-0.15 to 0.15)
-    cloud = make_overhang_cloud(z_distance=0.50, x_center=-0.30, y_center=0.20, 
+    cloud = make_overhang_cloud(z_distance=0.50, x_center=-0.30, y_center=0.25, 
                                  x_extent=0.10, y_extent=0.30, points=500)
     
     triggered, count, median_z = check_topdown_overhang_approach(cloud)
@@ -394,7 +394,7 @@ def test_priority_near_field_closer():
     print("="*70)
     
     # Object at 25cm (near-field range) - use more points to survive border clipping
-    cloud = make_overhang_cloud(z_distance=0.25, x_center=0.0, y_center=0.20, 
+    cloud = make_overhang_cloud(z_distance=0.25, x_center=0.0, y_center=0.25, 
                                  x_extent=0.28, y_extent=0.30, points=300)
     
     # Check both detectors
@@ -410,6 +410,52 @@ def test_priority_near_field_closer():
     assert nf_triggered, f"Near-field MUST trigger at 25cm (got {nf_count} points after clipping)"
     
     print("  ✅ PASS: Near-field handles close objects")
+
+
+def test_mast_self_geometry_rejection():
+    """Test 14: REGRESSION - Mast/self near-body points must NOT trigger overhang.
+    
+    This is the critical fix for the live incident where Kevin got stuck.
+    The old forward cone started at Y=0.05m (5cm ahead), catching mast/self-geometry.
+    The new cone starts at Y=0.15m (15cm ahead) to clear the robot body.
+    
+    Simulates near-body points at Z=0.50-0.55m, Y=0.05-0.12m (old near cone range).
+    These points represent the robot's mast or near-body structure visible in RS1.
+    With the new Y=0.15m threshold, these should NOT trigger overhang approach.
+    """
+    print("\n" + "="*70)
+    print("Test 14: REGRESSION - Mast/self near-body must NOT trigger")
+    print("="*70)
+    
+    # Simulate mast/self-like near-body points in the OLD near cone (Y=0.05-0.12m)
+    # Z=0.50-0.55m matches the live log median_z=0.534m
+    # These are BEHIND the new Y=0.15m threshold and should be rejected
+    points_list = []
+    for _ in range(200):  # More than min_pixels=80
+        x = np.random.uniform(-0.10, 0.10)  # Within lateral cone
+        y = np.random.uniform(0.05, 0.12)   # OLD near cone, BEFORE new Y=0.15m threshold
+        z = np.random.uniform(0.50, 0.55)   # Live log median_z=0.534m
+        points_list.append([x, y, z])
+    
+    mast_cloud = np.array(points_list, dtype=np.float32)
+    
+    triggered, count, median_z = check_topdown_overhang_approach(mast_cloud)
+    
+    print(f"  Mast/self-like points (200 pts generated):")
+    print(f"    Y range: 0.05-0.12m (BEFORE new Y=0.15m threshold)")
+    print(f"    Z range: 0.50-0.55m (matches live log median_z=0.534m)")
+    print(f"    Triggered: {triggered}")
+    print(f"    Overhang count: {count}")
+    print(f"    Median Z: {median_z:.3f}m" if count > 0 else "    Median Z: (none)")
+    
+    assert not triggered, (
+        f"Mast/self near-body points (Y=0.05-0.12m) must NOT trigger overhang approach! "
+        f"Got {count} points after filtering. This is the live incident bug."
+    )
+    assert count == 0, f"Expected 0 overhang points (filtered by Y>=0.15m), got {count}"
+    
+    print("  ✅ PASS: Mast/self near-body correctly rejected (live bug fixed)")
+    print("  Note: Forward cone now starts at Y=0.15m, clearing robot body/mast")
 
 
 def run_all_tests():
@@ -432,6 +478,7 @@ def run_all_tests():
         test_empty_cloud,
         test_lateral_cone_limits,
         test_priority_near_field_closer,
+        test_mast_self_geometry_rejection,  # NEW: Critical regression test
     ]
     
     passed = 0
