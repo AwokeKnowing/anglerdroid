@@ -6,13 +6,14 @@ This is a REFLEX that works WITHOUT SLAM or map-based keepouts.
 
 Design:
     - Uses OpenCV checkerboard corner detection on RGB frames
+    - PRIMARY SOURCE: Webcam RGB (Vision frames[0])
     - Analyzes only the BOTTOM region of the image (where floor/mat is visible)
     - Detection → fwd_scale=0, allows reverse/turn if rear is clear
     - Tunable thresholds for checkerboard size and detection sensitivity
 
 Typical use:
     detector = CheckeredMatDetector()
-    triggered = detector.check(rgb_frame)
+    triggered = detector.check(webcam_rgb_frame)  # frames[0]
     if triggered:
         fwd_scale = 0.0  # Stop forward motion
 """
@@ -90,7 +91,7 @@ class CheckeredMatDetector:
         """Check if checkered mat is visible in RGB frame.
         
         Args:
-            rgb_frame: HxWx3 uint8 RGB image (from webcam or RealSense color)
+            rgb_frame: HxWx3 uint8 RGB image (PRIMARY: webcam Vision frames[0])
         
         Returns:
             triggered: bool, True if mat detected (forward hard-stop)

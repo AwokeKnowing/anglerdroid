@@ -17,11 +17,11 @@ Implement a **sensor-frame (ego/vision) reflex** that detects the checkered mat 
 
 ### Key Design Points
 
-1. **Sensor Frame Detection**: Uses RGB camera (webcam or RealSense color) to detect checkerboard patterns
-2. **Bottom Region Focus**: Analyzes only the bottom portion of the camera view (where floor/mat is visible)
-3. **Forward Hard-Stop**: When mat detected → `fwd_scale = 0.0`
-4. **Escape Capability**: Reverse and turning still allowed if rear/sides are clear
-5. **No SLAM Dependency**: Works purely in ego/sensor frame, no map pose required
+1. **RGB Primary Source**: **MUST use webcam RGB (Vision frames[0])** — NOT RealSense depth/color as primary
+2. **Sensor Frame Detection**: Detects checkerboard patterns in ego frame (no SLAM/map pose)
+3. **Bottom Region Focus**: Analyzes only the bottom portion of the camera view (where floor/mat is visible)
+4. **Forward Hard-Stop**: When mat detected → `fwd_scale = 0.0`
+5. **Escape Capability**: Reverse and turning still allowed if rear/sides are clear
 6. **Tunable Parameters**: Checkerboard size, detection region, and sensitivity are configurable
 
 ---
@@ -31,7 +31,7 @@ Implement a **sensor-frame (ego/vision) reflex** that detects the checkered mat 
 ### Detection Pipeline
 
 ```
-RGB Frame (webcam/RealSense color)
+Webcam RGB Frame (Vision frames[0]) ← PRIMARY SOURCE
     ↓
 Extract bottom region (default: bottom 50% of image)
     ↓
@@ -47,6 +47,8 @@ Temporal filtering (3-frame history, majority vote)
     ↓
 Trigger flag → Safety system
 ```
+
+**Important**: Uses **webcam RGB only** (not RealSense depth/color). Depth is optional secondary source (not implemented yet).
 
 ### Integration with Safety System
 
@@ -69,8 +71,9 @@ for cam in [webcam, rs1, rs2]:
     cam.grab()
 
 # 2. Check for checkered mat (RGB reflex)
+# PRIMARY SOURCE: Webcam RGB (frames[0]), NOT RealSense
 if webcam.ok and webcam.color is not None:
-    mat_triggered = checkered_mat_detector.check(webcam.color)
+    mat_triggered = checkered_mat_detector.check(webcam.color)  # frames[0]
     # Logging and state tracking...
 
 # 3. Process depth cameras (RS1 topdown, RS2 forward)

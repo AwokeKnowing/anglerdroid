@@ -604,6 +604,7 @@ class Vision:
                 pose_src = self._pose
 
             # Check for checkered mat (RGB-based reflex, works without SLAM)
+            # PRIMARY SOURCE: Webcam RGB (frames[0]), NOT RealSense depth/color.
             # Detects checkered floor mat and triggers forward hard-stop.
             if self._webcam and self._webcam.ok and self._webcam.color is not None:
                 mat_triggered = self._checkered_mat_detector.check(self._webcam.color)
