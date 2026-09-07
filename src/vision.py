@@ -30,6 +30,13 @@ from robot_config import (FRAME_W, FRAME_H,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1)
 from cameras import RSCamera, WebCam, HAS_RS
+
+if HAS_RS:
+    try:
+        import pyrealsense2 as rs
+    except ImportError:
+        HAS_RS = False
+
 from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
@@ -1479,6 +1486,25 @@ class Vision:
                     print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
                 print("=" * 80)
                 print(f"Target: 33.3ms/frame (30 Hz). Current: {total:.1f}ms ({1000/total:.1f} Hz)")
+                print("=" * 80)
+                
+                # Log camera exposure to verify 30 Hz compatibility (exposure must be <33ms)
+                try:
+                    if self._rs1:
+                        sensor = self._rs1.profile.get_device().first_depth_sensor()
+                        exp_us = sensor.get_option(rs.option.exposure)
+                        gain = sensor.get_option(rs.option.gain)
+                        print(f"RS1 exposure: {exp_us/1000:.1f}ms, gain: {gain:.0f} (target: exp≤20ms for 30Hz)")
+                except Exception:
+                    pass
+                try:
+                    if self._rs2:
+                        sensor = self._rs2.profile.get_device().first_depth_sensor()
+                        exp_us = sensor.get_option(rs.option.exposure)
+                        gain = sensor.get_option(rs.option.gain)
+                        print(f"RS2 exposure: {exp_us/1000:.1f}ms, gain: {gain:.0f} (target: exp≤20ms for 30Hz)")
+                except Exception:
+                    pass
                 print("=" * 80)
 
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,

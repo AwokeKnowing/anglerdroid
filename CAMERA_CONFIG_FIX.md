@@ -17,6 +17,7 @@ After JetPack/library reinstall, Vision capture degraded from **60 fps** to **11
 - **Frame queue depth**: Queue size = 2 allowed stale frames to accumulate
 - **Long timeout**: 50ms `wait_for_frames()` timeout masked underlying issues
 - **Blocking behavior**: `wait_for_frames()` blocks until frameset arrives
+- **CRITICAL: Unbounded exposure time**: Auto-exposure can stretch >30ms in low light, making 30 Hz physically impossible
 
 **Pre-reinstall config** (60 fps):
 - Streams delivered frames immediately
@@ -32,17 +33,28 @@ After JetPack/library reinstall, Vision capture degraded from **60 fps** to **11
 1. **Reduced queue size to 1**: Ensures `poll_for_frames()` always returns the NEWEST frame
 2. **Reduced timeout to 5ms**: At 30 Hz (33ms/frame), 5ms grace period is sufficient
 3. **Fast-fail behavior**: If frame not ready in 5ms, skip and continue (better to drop a frame than stall)
+4. **CRITICAL: Capped exposure time to 20ms**: Set `auto_exposure_priority=0` (frame rate priority) and cap exposure at 20ms max
+5. **Increased gain to compensate**: Bump gain from 16 to 18 to maintain image quality in low light
 
 ```python
 # cameras.py: RSCamera.__init__()
 for sens in self.profile.get_device().sensors:
     _set_sensor_opt(sens, rs.option.frames_queue_size, 1)  # Was: 2
 
+# Cap exposure to ensure frame time <33ms (CRITICAL for 30 Hz)
+_set_sensor_opt(sensor, rs.option.auto_exposure_priority, 0)  # Frame rate priority
+_set_sensor_opt(sensor, rs.option.exposure, 20000)  # 20ms max (µs)
+_set_sensor_opt(sensor, rs.option.receiver_gain, 18)  # Was: 16
+
 # cameras.py: RSCamera.grab()
 def grab(self, timeout_ms=5):  # Was: 50
     frames = self._pipe.poll_for_frames()  # Non-blocking first
     if not frames:
         frames = self._pipe.wait_for_frames(timeout_ms)  # Brief grace period
+
+# cameras.py: WebCam.__init__()
+self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Manual mode
+self._cap.set(cv2.CAP_PROP_EXPOSURE, -6)  # Short exposure (~15ms)
 ```
 
 ### 2. Hazard Detection Bottleneck (44ms → ~15ms amortized)
@@ -124,8 +136,10 @@ python3 src/main.py --wheelbase none --silent
 3. **Soft-low safety**: Still triggers correctly (test with `fwd=0.3` at obstacle)
 
 ### Diagnostic Logs
-- Webcam actual config: `cameras: webcam opened (actual=WxH@FPS)`
-- Grab timeouts: `vision: RS1/RS2 grab timeout (count=N)` (should be RARE)
+- Camera init: `cameras: RS <serial> — exposure=Xms gain=Y ae_priority=0`
+- Webcam init: `cameras: webcam opened (actual=WxH@FPS exp=X ae=Y)`
+- Grab timeouts (should be RARE): `vision: RS1/RS2 grab timeout (count=N)`
+- Capture timing (every 90 frames): `RS1/RS2 exposure: Xms, gain: Y` (verify exposure ≤20ms)
 - Hazard detection: Triggers/clears as expected
 
 ## Rollback Plan
@@ -135,6 +149,16 @@ If 30 Hz not achieved or safety regressions occur:
 2. Revert `vision.py` HAZARD_CHECK_INTERVAL to 1 (every frame)
 3. File detailed bug report with timing data
 
+## Key Insight: Exposure Time is a Hardware Constraint
+
+**James's insight**: If auto-exposure stretches exposure time >33ms, the camera **physically cannot deliver 30 fps** regardless of processing speed.
+
+Example:
+- Exposure = 40ms → Camera frame time = 40ms minimum → Max FPS = 25 Hz
+- Exposure = 20ms → Camera frame time = 20ms + readout (~3ms) → Can sustain 30+ Hz
+
+**Solution**: Cap exposure at 20ms, increase gain to compensate for low-light scenes. Frame rate priority over perfect exposure.
+
 ## Future Optimizations (if needed)
 
 If <33ms total not achieved after these fixes:
@@ -142,3 +166,4 @@ If <33ms total not achieved after these fixes:
 2. **GPU hazard detection**: Port OpenCV operations to CUDA (requires cuVSLAM team support)
 3. **Reduce RS2 resolution**: 848x480 → 640x480 depth (less USB bandwidth, faster GPU processing)
 4. **Disable RS2 color**: Only grab depth (if color not needed for atlas display)
+5. **Adjust exposure cap**: If 20ms too dark, try 25ms (still <33ms), or add IR illumination

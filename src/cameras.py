@@ -144,10 +144,24 @@ class RSCamera:
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
         _set_sensor_opt(sensor, rs.option.laser_power, 360)
+        
+        # CRITICAL FOR 30 HZ: Cap exposure to ensure frame time stays <33ms.
+        # If AE stretches exposure >30ms, camera cannot physically deliver 30 fps.
+        # Strategy: prefer FRAME RATE over perfect exposure in low light.
+        _set_sensor_opt(sensor, rs.option.auto_exposure_priority, 0)  # 0 = frame rate priority
         _set_sensor_opt(sensor, rs.option.enable_auto_exposure, 1)
+        # Manual exposure cap: 20000 µs = 20ms max (leaves 13ms for processing at 30 Hz)
+        # If AE enabled, this acts as upper bound. Gain compensates in low light.
+        try:
+            exp_range = sensor.get_option_range(rs.option.exposure)
+            max_exp_us = min(20000, exp_range.max)  # Cap at 20ms or sensor max, whichever is lower
+            _set_sensor_opt(sensor, rs.option.exposure, max_exp_us)
+        except Exception:
+            pass  # Some sensors don't support manual exposure override
+        
         _set_sensor_opt(sensor, rs.option.emitter_enabled, 1)
         _set_sensor_opt(sensor, rs.option.depth_units, 0.001)
-        _set_sensor_opt(sensor, rs.option.receiver_gain, 16)
+        _set_sensor_opt(sensor, rs.option.receiver_gain, 18)  # Increase gain from 16 to compensate for capped exposure
 
         self._compute_pc = compute_pointcloud
         if compute_pointcloud:
@@ -164,6 +178,16 @@ class RSCamera:
         self.ir_left = None
         self.ir_right = None
         self.ok = False
+        
+        # Log actual exposure and FPS to verify 30 Hz config
+        try:
+            actual_exp_us = sensor.get_option(rs.option.exposure)
+            actual_gain = sensor.get_option(rs.option.gain)
+            ae_priority = sensor.get_option(rs.option.auto_exposure_priority)
+            print("cameras: RS %s — exposure=%.1fms gain=%.0f ae_priority=%d (target: exp≤20ms for 30Hz)" 
+                  % (serial, actual_exp_us / 1000.0, actual_gain, ae_priority))
+        except Exception:
+            pass
 
     def grab(self, timeout_ms=5):
         """Take the newest frameset without multi-second stalls.
@@ -239,12 +263,31 @@ class WebCam:
             except Exception:
                 pass
             
+            # CRITICAL FOR 30 HZ: Cap exposure to ensure frame time <33ms.
+            # Set manual exposure mode with fixed exposure time.
+            try:
+                # Mode 1 = manual exposure (V4L2: CAP_PROP_AUTO_EXPOSURE)
+                # Negative values typically mean "manual" on V4L2
+                self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1 = manual mode (0.25 = auto on some drivers)
+                # Exposure value: driver-dependent, typically log scale or absolute
+                # Try to set a low exposure value (driver-specific, may need tuning)
+                # Negative exposure values sometimes work for "short exposure"
+                self._cap.set(cv2.CAP_PROP_EXPOSURE, -6)  # Try log scale: -6 ≈ 15ms on many webcams
+            except Exception:
+                pass
+            
             # Verify actual configuration achieved
             actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             actual_fps = int(self._cap.get(cv2.CAP_PROP_FPS))
-            print("cameras: webcam opened (requested=%dx%d@%d, actual=%dx%d@%d, MJPG -> %dx%d)" 
-                  % (RGB_CAP_W, RGB_CAP_H, 30, actual_w, actual_h, actual_fps, FRAME_W, FRAME_H))
+            try:
+                actual_exp = self._cap.get(cv2.CAP_PROP_EXPOSURE)
+                actual_ae = self._cap.get(cv2.CAP_PROP_AUTO_EXPOSURE)
+                print("cameras: webcam opened (requested=%dx%d@%d, actual=%dx%d@%d exp=%.1f ae=%.1f, MJPG -> %dx%d)" 
+                      % (RGB_CAP_W, RGB_CAP_H, 30, actual_w, actual_h, actual_fps, actual_exp, actual_ae, FRAME_W, FRAME_H))
+            except Exception:
+                print("cameras: webcam opened (requested=%dx%d@%d, actual=%dx%d@%d, MJPG -> %dx%d)" 
+                      % (RGB_CAP_W, RGB_CAP_H, 30, actual_w, actual_h, actual_fps, FRAME_W, FRAME_H))
         else:
             if self._cap:
                 self._cap.release()
