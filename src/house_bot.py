@@ -328,8 +328,15 @@ class HouseBot:
         except Exception:
             fwd_scale = 1.0
         topdown_ok = bool(getattr(vis, "topdown_depth_ok", True))
+        overhang_approach = bool(getattr(vis, "topdown_overhang_approach", False))
         if not topdown_ok:
             # No top-down depth ⇒ do not claim open space; stop divert chatter.
+            fwd_scale = 0.0
+            scores["fwd_near"] = 0.0
+            scores["fwd_mid"] = 0.0
+        elif overhang_approach:
+            # Overhang detected ahead (30-70cm) ⇒ treat as blocked forward.
+            # This is the EARLY warning that prevents commit before near-field fires.
             fwd_scale = 0.0
             scores["fwd_near"] = 0.0
             scores["fwd_mid"] = 0.0

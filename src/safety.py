@@ -142,12 +142,15 @@ class SafetyGuard:
 
     # ── per-frame update ──
 
-    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False, topdown_hazard=False):
+    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False, 
+               topdown_overhang_approach=False, topdown_hazard=False):
         """Feed per-frame odometry. Computes directional scales.
 
         height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
         topdown_near_field: True when top-down camera sees object <30cm overhead.
                            Triggers immediate forward stop; reverse allowed if bwd_clear.
+        topdown_overhang_approach: True when top-down camera sees overhang at 30-70cm ahead.
+                                  Triggers immediate forward stop; reverse allowed if bwd_clear.
         topdown_hazard: True when RS1 topdown RGB detects bump or checkered mat.
                        Triggers immediate forward stop; reverse allowed if bwd_clear.
         """
@@ -165,6 +168,17 @@ class SafetyGuard:
             self._fwd_scale = 0.0
             if self._tick % 10 == 0:
                 print("safety: TOPDOWN HAZARD REFLEX — RS1 RGB sees bump/checkered, "
+                      "fwd=0.0, computing bwd/ang normally")
+        # ── Overhang approach reflex: overhead structure at 30-70cm ahead ──
+        # EARLY warning (30-70cm) before near-field (<30cm). Detects table undersides,
+        # shelves, or elevated structures in forward approach cone. Stops forward
+        # BEFORE committing to drive under overhangs. Reverse still allowed if clear.
+        elif topdown_overhang_approach:
+            self._near_field_reason = "topdown_overhang_approach"
+            # Zero forward immediately (reflex); bwd/ang computed normally below
+            self._fwd_scale = 0.0
+            if self._tick % 10 == 0:
+                print("safety: OVERHANG APPROACH REFLEX — topdown sees overhang (30-70cm ahead), "
                       "fwd=0.0, computing bwd/ang normally")
         # ── Near-field reflex: overhead object <30cm from top-down camera ──
         # This is a REFLEX that runs BEFORE floor-obstacle logic. Table undersides,
@@ -206,10 +220,10 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        # Apply clearance scales. Near-field reflexes (topdown hazard, topdown depth) already
+        # Apply clearance scales. Topdown reflexes (hazard, overhang_approach, near_field) already
         # zeroed fwd_scale above; don't override it. Backward and angular are always
         # computed from obstacles.
-        if not (topdown_near_field or topdown_hazard):
+        if not (topdown_near_field or topdown_overhang_approach or topdown_hazard):
             self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
         if fwd_clear < 10 and self._tick % 5 == 0:

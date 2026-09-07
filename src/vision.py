@@ -166,6 +166,67 @@ def check_topdown_near_field(verts, threshold_m=0.30, min_pixels=50):
     return triggered, close_count, min_z
 
 
+def check_topdown_overhang_approach(verts, near_m=0.30, far_m=0.70, 
+                                     forward_cone_x_min=-0.15, forward_cone_x_max=0.15,
+                                     forward_cone_y_min=0.05, forward_cone_y_max=0.40,
+                                     min_pixels=80):
+    """Check if top-down camera sees an overhang (table underside) in forward approach cone.
+
+    Detects elevated structures (table undersides, shelves) at medium distance (30-70cm)
+    in the forward approach region. This provides EARLIER warning than near-field reflex,
+    allowing the robot to stop BEFORE committing to drive under overhangs.
+
+    Args:
+        verts: Nx3 point cloud from RS1 (X, Y, Z in metres, Z toward camera).
+        near_m: Near distance threshold in metres (default 0.30m = 30cm).
+        far_m: Far distance threshold in metres (default 0.70m = 70cm).
+        forward_cone_x_min: Left edge of forward cone in metres (default -0.15m).
+        forward_cone_x_max: Right edge of forward cone in metres (default 0.15m).
+        forward_cone_y_min: Near edge of forward cone in metres (default 0.05m, ahead of robot nose).
+        forward_cone_y_max: Far edge of forward cone in metres (default 0.40m).
+        min_pixels: Minimum number of points to trigger (filters noise).
+
+    Returns:
+        (triggered: bool, overhang_count: int, median_z: float)
+        triggered: True if enough overhang points detected.
+        overhang_count: Number of points in approach cone at overhang distance.
+        median_z: Median Z value of overhang points, or inf if none.
+
+    Note:
+        RS1 coordinate system: +X right, +Y forward (away from robot), +Z toward camera.
+        Forward cone is ahead of robot nose (positive Y), centered in X.
+    """
+    if len(verts) == 0:
+        return False, 0, float('inf')
+
+    verts = _clip_decimated_border(verts)
+    
+    # Extract coordinates
+    x = verts[:, 0]
+    y = verts[:, 1]
+    z = verts[:, 2]
+    
+    # Valid depth + forward cone + overhang distance range
+    valid = (
+        (z > 0.01) &  # Valid depth
+        (z >= near_m) & (z <= far_m) &  # Overhang distance (30-70cm)
+        (x >= forward_cone_x_min) & (x <= forward_cone_x_max) &  # Lateral cone
+        (y >= forward_cone_y_min) & (y <= forward_cone_y_max)  # Forward cone
+    )
+    
+    overhang_z = z[valid]
+    
+    if len(overhang_z) == 0:
+        return False, 0, float('inf')
+    
+    overhang_count = len(overhang_z)
+    median_z = float(np.median(overhang_z))
+    
+    triggered = overhang_count >= min_pixels
+    
+    return triggered, overhang_count, median_z
+
+
 def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
     """RS1 (top-down camera) pointcloud → (obs, known) via orthographic projection.
 
@@ -249,6 +310,9 @@ class Vision:
         self._topdown_near_field = False
         self._near_field_close_count = 0
         self._near_field_min_z = float('inf')
+        self._topdown_overhang_approach = False
+        self._overhang_approach_count = 0
+        self._overhang_approach_median_z = float('inf')
         self._topdown_hazard = False
         self._topdown_hazard_reason = None
         self._topdown_hazard_corner_count = 0
@@ -726,11 +790,35 @@ class Vision:
                               % (close_count, min_z, self._near_field_log_n))
                         self._near_field_log_n = 0
                 
+                # Check for overhang approach (table underside at medium distance)
+                # Provides EARLY warning before near-field reflex (30-70cm vs <30cm).
+                ovh_triggered, ovh_count, ovh_median_z = check_topdown_overhang_approach(self._rs1.verts)
+                self._topdown_overhang_approach = ovh_triggered
+                self._overhang_approach_count = ovh_count
+                self._overhang_approach_median_z = ovh_median_z
+                if ovh_triggered and not hasattr(self, '_overhang_approach_log_n'):
+                    self._overhang_approach_log_n = 0
+                if ovh_triggered:
+                    self._overhang_approach_log_n += 1
+                    if self._overhang_approach_log_n == 1 or self._overhang_approach_log_n % 30 == 0:
+                        print("vision: OVERHANG APPROACH detected — "
+                              "ovh_px=%d median_z=%.3fm (table/shelf ahead 30-70cm, blocks COMMIT)"
+                              % (ovh_count, ovh_median_z))
+                else:
+                    if hasattr(self, '_overhang_approach_log_n') and self._overhang_approach_log_n > 0:
+                        print("vision: OVERHANG APPROACH cleared — "
+                              "ovh_px=%d median_z=%.3fm (after %d frames)"
+                              % (ovh_count, ovh_median_z, self._overhang_approach_log_n))
+                        self._overhang_approach_log_n = 0
+                
                 z1, k1 = depth_topdown(self._rs1.verts)
             else:
                 self._topdown_near_field = False
                 self._near_field_close_count = 0
                 self._near_field_min_z = float('inf')
+                self._topdown_overhang_approach = False
+                self._overhang_approach_count = 0
+                self._overhang_approach_median_z = float('inf')
                 
             obs1 = z1[::-1, ::-1]
             known1 = k1[::-1, ::-1]
@@ -950,6 +1038,7 @@ class Vision:
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height,
                                 topdown_near_field=self._topdown_near_field,
+                                topdown_overhang_approach=self._topdown_overhang_approach,
                                 topdown_hazard=self._topdown_hazard)
             
             # Hard immobilize conditions (CRITICAL SAFETY ONLY)
@@ -1181,3 +1270,18 @@ class Vision:
     def near_field_min_z(self):
         """Minimum (closest) Z distance in metres when near-field detected."""
         return float(getattr(self, '_near_field_min_z', float('inf')))
+
+    @property
+    def topdown_overhang_approach(self):
+        """True when top-down camera detected an overhang approach (30-70cm) ahead."""
+        return bool(getattr(self, '_topdown_overhang_approach', False))
+
+    @property
+    def overhang_approach_count(self):
+        """Number of overhang pixels when overhang approach is detected."""
+        return int(getattr(self, '_overhang_approach_count', 0))
+
+    @property
+    def overhang_approach_median_z(self):
+        """Median Z distance in metres of overhang approach points."""
+        return float(getattr(self, '_overhang_approach_median_z', float('inf')))
