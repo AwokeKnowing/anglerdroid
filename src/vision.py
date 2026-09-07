@@ -36,6 +36,7 @@ from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MA
 from slam import PoseGraphSLAM
 from checkered_mat import TopdownHazardDetector
 from imu import IMUPipeline
+from odom_thread import OdomThread
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -578,6 +579,7 @@ class Vision:
 
         self._running = False
         self._thread = None
+        self._odom_thread = None  # High-rate wheel+IMU integration thread
         self._rs1 = None
         self._rs2 = None
         self._webcam = None
@@ -755,6 +757,15 @@ class Vision:
         self._grab_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=3, thread_name_prefix="camgrab")
 
+        # Start high-rate odometry thread BEFORE capture loop
+        # This ensures pose is continuously updated even if capture is slow
+        self._odom_thread = OdomThread(
+            pose_estimator=self._pose,
+            wheelbase=self._wheelbase,
+            imu_pipeline=self._imu,
+            target_hz=100.0)
+        self._odom_thread.start()
+
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
@@ -762,6 +773,7 @@ class Vision:
         self._extras_thread = threading.Thread(
             target=self._vision_extras_loop, name="vision-extras", daemon=True)
         self._extras_thread.start()
+        print("vision: odom thread started (target 100 Hz, wheel+IMU integration)")
         print("vision: extras thread started (~3 Hz RGB hazards/faces side loop)")
         print("vision: capture thread started (slam=%s)" % self._slam_backend)
 
@@ -999,7 +1011,7 @@ class Vision:
                 self._grab_err_n = getattr(self, '_grab_err_n', 0) + 1
             _t_grab = time.monotonic()
 
-            # --- Pose update (cuVSLAM or wheel+visual) ---
+            # --- Pose update (cuVSLAM or wheel+visual from odom thread) ---
             if _use_cuvslam:
                 fused_yaw, fused_fwd = 0.0, 0.0
                 if (self._rs2 and self._rs2.ok
@@ -1015,7 +1027,7 @@ class Vision:
                 pose_src = self._cuvslam
                 self._last_capture_time = time.monotonic()
             else:
-                cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
+                # Defer pose snapshot to after odometry section (below)
                 pose_src = self._pose
 
             # RGB image hazards (checkered door mat, bump edges, faces, gestures)
@@ -1192,46 +1204,39 @@ class Vision:
             _t_obs = time.monotonic()
 
             # --- Odometry (self-made stack only; cuVSLAM handled above) ---
+            # NEW ARCHITECTURE: Wheel+IMU integration happens on dedicated odom thread (~100-200 Hz).
+            # Capture loop samples latest pose snapshot without blocking odom thread.
+            # Visual odometry (future work): can still run here and apply corrections
+            # via a thread-safe mechanism, or stay at 30 Hz as "frame-tied" refinement.
+            fused_yaw, fused_fwd = 0.0, 0.0  # Placeholder for future VO corrections
             if not _use_cuvslam:
-                vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
-                if self._rs2 and self._rs2.ok:
-                    fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                    _odom_result = self._gpu.odom_gpu(fw_gray)
-                    if _odom_result is not None:
-                        vis_yaw, vis_fwd, vis_conf = _odom_result
-
+                # Sample latest pose from odom thread (thread-safe, non-blocking)
+                # Odom thread continuously integrates wheel+IMU at high rate,
+                # capture just reads the latest snapshot for rendering/gmap.
+                if self._odom_thread:
+                    cap_x, cap_y, cap_theta, _ = self._odom_thread.get_pose_snapshot()
+                else:
+                    # Fallback if odom thread not running (shouldn't happen)
+                    cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
+                
+                # Track capture timing for diagnostics
                 now = time.monotonic()
                 dt = (now - self._last_capture_time) if self._last_capture_time else 0.0
                 self._last_capture_time = now
-
-                if self._wheelbase is not None:
-                    vl, vr = self._wheelbase.get_wheel_velocities_mps()
-                else:
-                    vl, vr = 0.0, 0.0
-
-                # Encoder feedback flag for pose stuck-detection / SLAM gating.
-                # False when no wheelbase or encoders unhealthy/stale.
-                using_encoder_feedback = False
-                if self._wheelbase is not None:
-                    try:
-                        health = self._wheelbase.get_encoder_health()
-                        using_encoder_feedback = bool(
-                            health.get('encoder_ok') and health.get('age_s', 99) < 1.0)
-                    except Exception:
-                        using_encoder_feedback = False
                 
-                # Grab IMU data (non-blocking, separate pipeline)
-                imu_yaw_rate = 0.0
-                if self._imu and self._imu.ok:
-                    if self._imu.grab():
-                        # Transform gyro from camera frame to body frame, extract Z (yaw rate)
-                        _, _, imu_yaw_rate = self._imu.get_angular_velocity_body(
-                            camera_pitch_deg=FW_PITCH_DEG + 90.0)  # FW_PITCH_DEG is already -64.4
-
-                fused_yaw, fused_fwd = self._pose.update(
-                    vl, vr, dt, vis_yaw, vis_fwd, vis_conf,
-                    using_encoder_feedback=using_encoder_feedback,
-                    imu_yaw_rate=imu_yaw_rate)
+                # TODO: Visual odometry corrections (currently deferred)
+                # Option A: Compute VO here, apply via odom_thread.apply_visual_correction()
+                # Option B: Keep VO "frame-tied" at 30 Hz, accept that wheel+IMU is faster
+                # For now, just note that VO is not applied in this architecture.
+                # To re-enable:
+                # vis_yaw, vis_fwd, vis_conf = 0.0, 0.0, 0.0
+                # if self._rs2 and self._rs2.ok:
+                #     fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
+                #     _odom_result = self._gpu.odom_gpu(fw_gray)
+                #     if _odom_result is not None:
+                #         vis_yaw, vis_fwd, vis_conf = _odom_result
+                #         # Apply correction via thread-safe mechanism TBD
+                #         # self._odom_thread.apply_visual_correction(vis_yaw, vis_fwd, vis_conf)
             _t_odom = time.monotonic()
 
             if not hasattr(self, '_odom_log_n'):
@@ -1545,6 +1550,8 @@ class Vision:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+        if self._odom_thread:
+            self._odom_thread.stop()
         if self._rs1:
             self._rs1.stop()
         if self._rs2:
