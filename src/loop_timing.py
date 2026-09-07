@@ -61,7 +61,7 @@ class FrameBudget:
         "odom": DROPPABLE,          # Odometry update (throttleable with wheelbase=None)
         "gmap": DROPPABLE,          # Global map SLAM updates (expensive, non-safety-critical)
         "safety_update": CRITICAL,  # Safety scale computation (must run)
-        "render": CRITICAL,         # Atlas render for main loop (needed by UI)
+        "render": DROPPABLE,        # Atlas render (viz for humans/i777, not policy-critical)
     }
     
     def __init__(self, budget_ms: float, shed_threshold: float = 0.85, use_capture_priorities: bool = False):
