@@ -562,6 +562,10 @@ class Vision:
             floor_clip=float(FW_FLOOR_CLIP),
             height_clip=float(FW_HEIGHT_CLIP),
             out_h=FRAME_W, out_w=FRAME_H)
+        self._gpu.configure_depth_topdown(
+            px_size=float(TD_PX_SIZE),
+            floor_clip=float(TD_FLOOR_CLIP),
+            out_h=FRAME_H, out_w=FRAME_W)
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
@@ -1091,7 +1095,13 @@ class Vision:
                               % (soft_low_count, soft_low_height, self._soft_low_obstacle_log_n))
                         self._soft_low_obstacle_log_n = 0
                 
-                z1, k1 = depth_topdown(self._rs1.verts)
+                # RS1 topdown depth → (obs, known): try GPU first, fall back to CPU
+                rs1_clean = _clip_decimated_border(self._rs1.verts)
+                _gpu_topdown_result = self._gpu.depth_topdown_gpu(rs1_clean)
+                if _gpu_topdown_result is not None:
+                    z1, k1 = _gpu_topdown_result
+                else:
+                    z1, k1 = depth_topdown(self._rs1.verts)
             else:
                 self._topdown_near_field = False
                 self._near_field_close_count = 0
