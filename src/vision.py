@@ -30,7 +30,7 @@ from robot_config import (FRAME_W, FRAME_H,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
                           FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES,
-                          RS1_VIZ_SCALE)
+                          RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -2002,8 +2002,8 @@ class Vision:
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
 
-        def scale_box(x0, y0, x1, y1, scale, cx=RCX, cy=RCY):
-            """Scale box around robot center (cx, cy) by scale factor."""
+        def scale_box(x0, y0, x1, y1, scale, cx=RCX + RS1_VIZ_CX_SHIFT, cy=RCY):
+            """Scale box around viz center (cx shifted forward, cy) by scale factor."""
             xs0 = cx + (x0 - cx) * scale
             ys0 = cy + (y0 - cy) * scale
             xs1 = cx + (x1 - cx) * scale

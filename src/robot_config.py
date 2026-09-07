@@ -107,6 +107,7 @@ FOOTPRINT_BOXES = UNDER_ROBOT_BOXES + SELF_IGNORE_BOXES
 # RS1 camera-space visualization scale
 # Ego-map boxes (1 cm/px orthographic) need scaling when drawn on RS1 color (perspective camera).
 # RS1 color shows ~wider FOV with varying GSD; scale ~3–4× makes boxes cover robot hull + wheels.
-# Tune this constant live in Rerun to align green/blue boxes with robot body in vision/rs1_mask_overlay.
+# Tune these constants live in Rerun to align green/blue boxes with robot body in vision/rs1_mask_overlay.
 # Map metric (UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES) stays unchanged; this is viz-only.
-RS1_VIZ_SCALE = 3.0           # scale ego boxes for RS1 color overlay (tune vs live footage)
+RS1_VIZ_SCALE = 3.5           # scale ego boxes for RS1 color overlay (3.5 from mask_tune dumps)
+RS1_VIZ_CX_SHIFT = 5          # forward shift in ego +x (pixels) to recenter scaled boxes on hull
