@@ -10,7 +10,7 @@ This is a REFLEX that works WITHOUT SLAM or map-based keepouts.
 Design:
     - PRIMARY SOURCE: RS1 color (top-down RealSense RGB / rgbd1)
     - Detects bump via edge detection in near/forward region
-    - Detects checkerboard via OpenCV corner detection
+    - Detects door mat via brown border around checkered area (HSV); chessboard corners deprecated
     - Analyzes forward region of topdown view (where robot will drive)
     - Detection → fwd_scale=0, allows reverse/turn if rear is clear
     - Tunable thresholds for both bump and checkerboard
@@ -24,6 +24,48 @@ Typical use:
 
 import cv2
 import numpy as np
+
+
+def detect_brown_border(rgb_roi, min_brown_frac=0.02, min_contour_area=400):
+    """Detect dark-brown transition strip / frame around door checkered mat.
+
+    Returns (detected: bool, score: float, brown_px: int).
+    Cheap HSV mask + contour; for ~3Hz extras loop, not 30Hz capture.
+    """
+    if rgb_roi is None or rgb_roi.size == 0:
+        return False, 0.0, 0
+    hsv = cv2.cvtColor(rgb_roi, cv2.COLOR_RGB2HSV)
+    # Wood / dark brown border on tan carpet (tuned for household door mat photo)
+    lower = np.array([5, 40, 25], dtype=np.uint8)
+    upper = np.array([25, 200, 140], dtype=np.uint8)
+    mask = cv2.inRange(hsv, lower, upper)
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    brown_px = int(np.count_nonzero(mask))
+    frac = brown_px / float(mask.size)
+    if frac < min_brown_frac:
+        return False, frac, brown_px
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not cnts:
+        return False, frac, brown_px
+    best = 0.0
+    h, w = mask.shape[:2]
+    for c in cnts:
+        area = cv2.contourArea(c)
+        if area < min_contour_area:
+            continue
+        x, y, bw, bh = cv2.boundingRect(c)
+        if bw < 8 or bh < 8:
+            continue
+        extent = area / float(max(1, bw * bh))
+        aspect = max(bw, bh) / float(min(bw, bh))
+        width_cov = bw / float(w)
+        score = width_cov * (1.0 + 0.3 * min(aspect, 8) / 8.0) * (0.5 + 0.5 * extent)
+        if score > best:
+            best = score
+    detected = best >= 0.25 and frac >= min_brown_frac
+    return detected, float(best), brown_px
 
 
 # ── Default parameters ──
@@ -136,32 +178,17 @@ class TopdownHazardDetector:
         # Crop to forward region (near/forward area in topdown view)
         forward_region = rgb_frame[:forward_h, :, :]
         
-        # Convert to grayscale for detection
+        # ── 1. Brown border around door checkered mat (preferred cue) ──
+        # Photo cue: dark brown transition strip framing black/white squares on carpet.
+        # Cheap HSV — for ~3Hz extras loop. Named keepout checkered_door is still primary.
+        border_hit, border_score, brown_px = detect_brown_border(forward_region)
+        self.corner_count = brown_px  # reuse field as brown pixel count for logs
+        self.detection_confidence = min(1.0, border_score)
+        checkered_detected = border_hit
+
         gray = cv2.cvtColor(forward_region, cv2.COLOR_RGB2GRAY)
-        
-        # ── 1. Check for CHECKERED MAT (corner detection) FIRST ──
-        # Checkerboard has priority over bump (both have edges, but checkerboard is more specific)
-        pattern_size = (self.checkerboard_cols, self.checkerboard_rows)
-        found, corners = cv2.findChessboardCorners(gray, pattern_size, self._flags)
-        
-        if found and corners is not None:
-            # Refine corner positions for better accuracy
-            corners_refined = cv2.cornerSubPix(
-                gray, corners, (11, 11), (-1, -1), self._criteria)
-            
-            self.corner_count = len(corners_refined)
-            
-            # Confidence based on corner count vs expected
-            expected_corners = self.checkerboard_rows * self.checkerboard_cols
-            self.detection_confidence = min(1.0, self.corner_count / expected_corners)
-            
-            # Trigger if we found enough corners
-            checkered_detected = self.corner_count >= self.min_corners
-        else:
-            self.corner_count = 0
-            checkered_detected = False
-        
-        # ── 2. Check for BUMP (edge detection) ONLY if no checkerboard ──
+
+        # ── 2. Check for BUMP (edge detection) ONLY if no brown border ──
         # Wood bump / threshold shows as strong horizontal edges in topdown view
         if not checkered_detected:
             edges = cv2.Canny(gray, self.bump_edge_thresh, self.bump_edge_thresh * 2)
@@ -195,7 +222,7 @@ class TopdownHazardDetector:
         # ── 3. Combine detections with temporal filtering ──
         # Priority: checkerboard > bump
         detected_now = checkered_detected or bump_detected
-        reason_now = 'checkered' if checkered_detected else ('bump' if bump_detected else None)
+        reason_now = ('brown_border' if checkered_detected else ('bump' if bump_detected else None))
         
         # Temporal filtering: require consistent detection to reduce flicker
         self._detection_history.append(detected_now)
