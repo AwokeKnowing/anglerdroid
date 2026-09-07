@@ -140,27 +140,57 @@ def _rolling_point_toward(gx, gy, rx, ry, lookahead_m):
 
 
 def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
-    """MPPI backend: uses ego-space obs_map (vis._persistent_obs)."""
+    """MPPI backend: uses policy observation from Vision.get_policy_observation().
+    
+    Falls back to legacy obs_map (vis._persistent_obs) if policy obs unavailable.
+    """
     global _dbg, _active, _mode
 
     mppi = _ensure_mppi()
     if pose_x is None or pose_y is None:
         return None
-    if obs_map is None:
-        # Empty free map keeps planner ticking (open-space geometric bias)
-        import numpy as np
-        from robot_config import FRAME_H, FRAME_W
-        obs_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    
+    # Try to get policy observation (labeled heightmap layers)
+    policy_obs = None
+    slam_locked = False
+    try:
+        vis = tools.get_vision()
+        if vis:
+            policy_obs = vis.get_policy_observation()
+            slam_locked = vis.slam_locked
+    except Exception as e:
+        print("local_executive: get_policy_observation failed: %s" % e)
+    
+    # Choose input: policy obs dict (preferred) or legacy array (fallback)
+    if policy_obs is not None and policy_obs.get('metadata', {}).get('topdown_ok'):
+        # Use policy observation (contains ego_height for graduated costing)
+        mppi_input = policy_obs
+        using_policy_obs = True
+    else:
+        # Fallback: legacy _persistent_obs array
+        if obs_map is None:
+            import numpy as np
+            from robot_config import FRAME_H, FRAME_W
+            obs_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        mppi_input = obs_map
+        using_policy_obs = False
 
     pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
+    
+    # Paint keepouts onto ego map (only if SLAM locked)
     try:
-        # Pass slam_locked status to keepouts (critical: don't trust map-frame keepouts if SLAM unlocked)
-        vis = tools.get_vision()
-        slam_locked = vis.slam_locked if vis else False
-        obs_map = keepouts.paint_ego(obs_map, pose, slam_locked=slam_locked)
+        if isinstance(mppi_input, dict):
+            # Modify ego_persistent layer in-place (keepouts are persistent obstacles)
+            ego_pers = mppi_input.get('ego_persistent')
+            if ego_pers is not None:
+                mppi_input['ego_persistent'] = keepouts.paint_ego(ego_pers, pose, slam_locked=slam_locked)
+        else:
+            # Legacy array path
+            mppi_input = keepouts.paint_ego(mppi_input, pose, slam_locked=slam_locked)
     except Exception as e:
         print("keepouts: paint skip %s" % e)
-    cmd = mppi.tick(obs_map, pose, 0.033)
+    
+    cmd = mppi.tick(mppi_input, pose, 0.033)
     with _lock:
         if not mppi.is_active():
             _active = False
@@ -172,6 +202,8 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
                 "planner": "mppi",
                 "cmd": cmd,
                 "mppi_ms": mppi.get_debug_state().get("tick_ms"),
+                "using_policy_obs": using_policy_obs,
+                "using_heightmap": mppi.get_debug_state().get("using_heightmap", False),
             }
     if cmd is None:
         return None

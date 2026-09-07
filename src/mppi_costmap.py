@@ -131,6 +131,34 @@ class MppiCostmapPlanner:
     # ── Map helpers ───────────────────────────────────────────────────────
 
     @staticmethod
+    def _extract_layers(obs_input):
+        """Extract obstacle and height layers from policy obs dict or legacy array.
+        
+        Returns: (obs_map, height_map) where:
+          - obs_map: (H,W) uint8 binary obstacle mask (0=free, >0=obstacle)
+          - height_map: (H,W) uint8 obstacle heights in cm (0-100), or None if unavailable
+        
+        Accepts:
+          - dict (policy obs): uses ego_height + ego_known for graduated costing
+          - array (legacy): falls back to binary obstacle map (no height info)
+        """
+        # Policy observation dict (preferred path)
+        if isinstance(obs_input, dict):
+            ego_height = obs_input.get('ego_height')
+            ego_known = obs_input.get('ego_known')
+            if ego_height is not None and ego_known is not None:
+                # Use height-based obstacles where known
+                return np.asarray(ego_height, dtype=np.uint8), ego_height
+            # Fallback: use ego_persistent as binary mask
+            ego_pers = obs_input.get('ego_persistent')
+            if ego_pers is not None:
+                return np.asarray(ego_pers, dtype=np.uint8), None
+        
+        # Legacy array path (backward compat)
+        arr = MppiCostmapPlanner._extract_obs_map(obs_input)
+        return arr, None
+
+    @staticmethod
     def _extract_obs_map(obs_map: np.ndarray) -> np.ndarray:
         """Return 2D uint8 ego obstacle map (H,W). Prefer already-cropped ego.
 
@@ -230,11 +258,15 @@ class MppiCostmapPlanner:
         U[:, :, 1] = np.clip(U[:, :, 1], -self.w_max, self.w_max)
         return U
 
-    def _mppi_rollout_batch(self, U, x0, obs_map, subgoal):
+    def _mppi_rollout_batch(self, U, x0, obs_map, subgoal, height_map=None):
         """Fully vectorized unicycle rollout + cost on ego costmap.
 
         Integration is in world frame from x0; obstacle lookup converts each
         world state into ego pixels relative to x0 (robot at RCX,RCY facing +x).
+        
+        When height_map is provided (ego_height from policy obs), uses graduated
+        height-based costing: taller obstacles = higher cost. This naturally
+        handles dog beds and soft-low obstacles without a separate detector.
         """
         n_samples, n_steps, _ = U.shape
         dt = self.dt
@@ -252,6 +284,7 @@ class MppiCostmapPlanner:
         h, w_map = obs_map.shape[:2]
         # Flat view for fast gather
         obs_flat = obs_map.ravel()
+        height_flat = height_map.ravel() if height_map is not None else None
 
         x0x, x0y, x0th = float(x0[0]), float(x0[1]), float(x0[2])
         cos0 = math.cos(x0th)
@@ -293,11 +326,27 @@ class MppiCostmapPlanner:
             vals = obs_flat[idx_safe].astype(np.float32)
 
             obs_cost = np.zeros(n_samples, dtype=np.float32)
-            hit = inb & (vals > OBS_THRESH)
-            soft = inb & (~hit) & (vals > 50)
-            obs_cost[hit] = self.w_obs
-            obs_cost[soft] = (vals[soft] / 100.0) * (self.w_obs * 0.15)
-            obs_cost[~inb] = self.w_oob
+            
+            # Height-based graduated costing (when available)
+            if height_flat is not None:
+                heights = height_flat[idx_safe].astype(np.float32)
+                # Graduated cost: 5-30cm (dog bed) → medium cost, >30cm → high cost
+                # Cost increases with height, capped at full obstacle cost
+                low_obs = inb & (heights >= 5.0) & (heights < 30.0)
+                med_obs = inb & (heights >= 30.0) & (heights < 60.0)
+                high_obs = inb & (heights >= 60.0)
+                
+                obs_cost[low_obs] = (heights[low_obs] / 30.0) * (self.w_obs * 0.3)  # 0-30% cost
+                obs_cost[med_obs] = self.w_obs * 0.5  # 50% cost for table-height
+                obs_cost[high_obs] = self.w_obs  # Full cost for tall obstacles
+                obs_cost[~inb] = self.w_oob
+            else:
+                # Legacy binary costing (backward compat)
+                hit = inb & (vals > OBS_THRESH)
+                soft = inb & (~hit) & (vals > 50)
+                obs_cost[hit] = self.w_obs
+                obs_cost[soft] = (vals[soft] / 100.0) * (self.w_obs * 0.15)
+                obs_cost[~inb] = self.w_oob
 
             # Smoothness / control effort
             dv = vk - prev_v
@@ -342,6 +391,8 @@ class MppiCostmapPlanner:
     def tick(self, obs_map: np.ndarray, pose: tuple, dt: float, soft_scales=None):
         """Run LIVE MPPI when active. Returns {'fwd_mps','ang_rads'} or None.
 
+        obs_map: legacy array OR policy observation dict from Vision.get_policy_observation()
+        
         soft_scales: optional dict with float keys soft_cost_fwd / soft_cost_bwd /
         soft_cost_ang in [0,1]. When provided, adds directional soft prefer cost
         to sample costs from first-step controls (weights 0.6/0.6/0.2). Default
@@ -370,7 +421,10 @@ class MppiCostmapPlanner:
             return None
 
         subgoal = self._compute_subgoal(goal, pose_t)
-        ego = self._extract_obs_map(obs_map)
+        
+        # Extract obstacle + height layers (policy obs dict or legacy array)
+        ego, height = self._extract_layers(obs_map)
+        using_heightmap = (height is not None)
 
         # If nearly stuck against obstacle ahead, bias reverse into warm-start
         ahead = ego[max(0, RCY - 8):min(ego.shape[0], RCY + 8),
@@ -379,7 +433,7 @@ class MppiCostmapPlanner:
             self._u_prev[:, 0] = -0.05
 
         U = self._mppi_sample_trajectories(self._u_prev, self.n_samples, self.n_steps)
-        S, X = self._mppi_rollout_batch(U, pose_t, ego, subgoal)
+        S, X = self._mppi_rollout_batch(U, pose_t, ego, subgoal, height_map=height)
 
         soft_cost_applied = False
         if soft_scales is not None:
@@ -423,6 +477,7 @@ class MppiCostmapPlanner:
             'live': True,
             'dist_goal': dist,
             'soft_cost_applied': soft_cost_applied,
+            'using_heightmap': using_heightmap,
         })
 
         return {'fwd_mps': v_star, 'ang_rads': w_star}
@@ -487,7 +542,14 @@ if __name__ == "__main__":
 
     S, X = le._mppi_rollout_batch(U, (0.0, 0.0, 0.0), obs_map, (0.8, 0.0))
     assert S.shape == (32,) and X.shape == (32, le.n_steps, 3)
-    print("    ✓ _mppi_rollout_batch (vectorized)")
+    print("    ✓ _mppi_rollout_batch (vectorized, no height)")
+
+    # Test height-based costing
+    height_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    height_map[RCY - 20:RCY + 20, RCX + 60:RCX + 80] = 20  # 20cm dog bed
+    S_h, X_h = le._mppi_rollout_batch(U, (0.0, 0.0, 0.0), obs_map, (0.8, 0.0), height_map=height_map)
+    assert S_h.shape == (32,) and X_h.shape == (32, le.n_steps, 3)
+    print("    ✓ _mppi_rollout_batch (vectorized, with height)")
 
     ww = le._mppi_compute_weights(S)
     assert abs(ww.sum() - 1.0) < 1e-5
@@ -500,6 +562,32 @@ if __name__ == "__main__":
     atlas = np.zeros((480, 640, 3), dtype=np.uint8)
     extracted = le._extract_obs_map(atlas)
     assert extracted.shape == (240, 320)
+
+    # Test policy observation dict path (new heightmap API)
+    print("\n  Testing policy observation dict integration...")
+    policy_obs = {
+        'ego_height': height_map,
+        'ego_known': np.ones((FRAME_H, FRAME_W), dtype=np.uint8) * 255,
+        'ego_persistent': obs_map,
+    }
+    ego_ext, height_ext = le._extract_layers(policy_obs)
+    assert ego_ext.shape == (FRAME_H, FRAME_W)
+    assert height_ext is not None and height_ext.shape == (FRAME_H, FRAME_W)
+    print("    ✓ _extract_layers (policy obs dict)")
+
+    # Test legacy array path (backward compat)
+    ego_leg, height_leg = le._extract_layers(obs_map)
+    assert ego_leg.shape == (FRAME_H, FRAME_W)
+    assert height_leg is None  # No height info in legacy path
+    print("    ✓ _extract_layers (legacy array)")
+
+    # Test MPPI with policy obs dict
+    le3 = MppiCostmapPlanner(n_samples=64, horizon_sec=0.8)
+    le3.set_goal(1.0, 0.0)
+    cmd_policy = le3.tick(policy_obs, pose, 0.033)
+    assert cmd_policy is not None
+    assert le3.get_debug_state().get('using_heightmap') is True
+    print("    ✓ tick with policy obs dict (heightmap costing)")
 
     # Optional soft_scales path: default OFF identical; when set, marks debug.
     le2 = MppiCostmapPlanner(n_samples=64, horizon_sec=0.8)
@@ -515,6 +603,7 @@ if __name__ == "__main__":
     assert le2.get_debug_state().get('soft_cost_applied') is True
     print("    ✓ optional soft_scales (default OFF / directional ON)")
     le2.cancel()
+    le3.cancel()
 
     print("\n✓ All unit tests passed — LIVE NumPy MPPI (mppi-costmap-v0)")
     print("  measured tick p95=%.2f ms" % float(np.percentile(lat, 95)))
