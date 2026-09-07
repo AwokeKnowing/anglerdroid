@@ -687,6 +687,50 @@ out vec4 fc;
 void main() { fc = vec4(texture(u_src, gl_FragCoord.xy * u_inv).r); }
 """
 
+# ── GPU topdown depth (RS1) shaders ──────────────────────────────
+
+_VERT_SCATTER_TOPDOWN = """
+#version 330
+uniform float u_scale;
+uniform vec2  u_offset;
+uniform float u_floor_clip;
+uniform vec2  u_fbo_sz;
+in vec3 in_v;
+flat out float v_h;
+void main() {
+    v_h = 0.0;
+    gl_PointSize = 1.0;
+    vec3 p = in_v;
+    if (p.z <= 0.01 || any(isnan(p)) || any(isinf(p))) {
+        gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+    }
+    
+    // Orthographic project XY to pixel coords
+    vec2 px = p.xy * u_scale + u_offset;
+    vec2 ndc = px / u_fbo_sz * 2.0 - 1.0;
+    
+    // Height encoding: floor vs obstacle
+    float enc;
+    if (p.z >= u_floor_clip) {
+        enc = 1.0;  // floor (known, free)
+    } else {
+        float height_cm = (u_floor_clip - p.z) * 100.0;
+        enc = clamp(height_cm, 1.0, 100.0) + 1.0;  // obstacle height + 1
+    }
+    
+    // Depth for tallest-wins: higher enc = closer to camera (larger depth)
+    gl_Position = vec4(ndc, enc / 52.0 - 1.0, 1.0);
+    v_h = enc;
+}
+"""
+
+_FRAG_SCATTER_TOPDOWN = """
+#version 330
+flat in float v_h;
+out vec4 fc;
+void main() { fc = vec4(v_h / 255.0, 0.0, 0.0, 1.0); }
+"""
+
 # ── Global-map evidence-update shader (MRT: conf + hmap) ────────
 
 _FRAG_GMAP_UPDATE = """
@@ -1047,6 +1091,25 @@ class GPURenderer:
         self._df_configured = True
         self._df_gl_ready = False
 
+    # ── Depth-topdown configuration (RS1 heightmap) ────────────────
+
+    def configure_depth_topdown(self, px_size, floor_clip, out_h, out_w):
+        """Configure GPU topdown depth (RS1 orthographic heightmap).
+        
+        Args:
+            px_size: Pixel size in metres (EGO_PX_SIZE/TD_PX_SIZE, typically 0.01)
+            floor_clip: Floor threshold in metres (TD_FLOOR_CLIP, typically 0.91)
+            out_h: Output height (FRAME_H, typically 240)
+            out_w: Output width (FRAME_W, typically 320)
+        """
+        self._dt_scale = float(1.0 / px_size)
+        self._dt_offset = np.float32([out_w / 2.0, out_h / 2.0])
+        self._dt_floor = float(floor_clip)
+        self._dt_out_h = out_h
+        self._dt_out_w = out_w
+        self._dt_configured = True
+        self._dt_gl_ready = False
+
     # ── GL init ──────────────────────────────────────────────────
 
     def _init_gl(self):
@@ -1208,6 +1271,10 @@ class GPURenderer:
         # Initialize depth GL if already configured
         if getattr(self, '_df_configured', False) and not getattr(self, '_df_gl_ready', False):
             self._init_depth_gl()
+
+        # Initialize depth topdown GL if already configured
+        if getattr(self, '_dt_configured', False) and not getattr(self, '_dt_gl_ready', False):
+            self._init_depth_topdown_gl()
 
         # Initialize odom GL if already configured
         if getattr(self, '_od_configured', False) and not getattr(self, '_od_gl_ready', False):
@@ -1439,6 +1506,117 @@ class GPURenderer:
                       n_floor, n_obs, n_empty))
 
         return obs, known, raw_scatter
+
+    # ── GPU topdown depth (RS1 heightmap) ───────────────────────────
+
+    def _init_depth_topdown_gl(self):
+        """Initialize GPU topdown depth (RS1 orthographic heightmap scatter)."""
+        ctx = self._ctx
+        ow, oh = self._dt_out_w, self._dt_out_h
+
+        # Single output texture for encoded values (floor=1, obstacle=2-101)
+        self._dt_obs_tex = ctx.texture((ow, oh), 1)
+        self._dt_obs_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._dt_obs_tex.repeat_x = False
+        self._dt_obs_tex.repeat_y = False
+        self._dt_obs_depth = ctx.depth_renderbuffer((ow, oh))
+        self._dt_obs_fbo = ctx.framebuffer(
+            color_attachments=[self._dt_obs_tex],
+            depth_attachment=self._dt_obs_depth)
+
+        max_pts = 320 * 240
+        self._dt_vbo = ctx.buffer(reserve=max_pts * 12)
+
+        self._dt_prog_obs = ctx.program(
+            vertex_shader=_VERT_SCATTER_TOPDOWN,
+            fragment_shader=_FRAG_SCATTER_TOPDOWN)
+
+        self._dt_vao_obs = ctx.vertex_array(
+            self._dt_prog_obs, [(self._dt_vbo, '3f', 'in_v')])
+
+        p = self._dt_prog_obs
+        p['u_scale'].value = self._dt_scale
+        p['u_offset'].value = tuple(self._dt_offset.tolist())
+        p['u_floor_clip'].value = self._dt_floor
+        p['u_fbo_sz'].value = (float(ow), float(oh))
+
+        try:
+            ctx.enable(moderngl.PROGRAM_POINT_SIZE)
+        except Exception:
+            pass
+
+        self._dt_gl_ready = True
+        self._dt_n = 0
+        print("gpu_render: depth_topdown ready %dx%d (RS1 orthographic heightmap)"
+              % (ow, oh))
+
+    def depth_topdown_gpu(self, verts):
+        """Process RS1 topdown depth on GPU: orthographic scatter → heightmap.
+        
+        Replaces dense ego scatter from process_rs1_topdown (lines 579-599).
+        Sparse reflexes (near-field, overhang) and soft-low still on CPU.
+        
+        Args:
+            verts: Nx3 point cloud from RS1 (X, Y, Z in metres), pre-clipped borders
+        
+        Returns:
+            (obs, known) where:
+            - obs: uint8 (H, W) obstacle height in cm (0=floor, 1-100=obstacle)
+            - known: uint8 (H, W) known mask (255=valid depth, 0=no data)
+            Returns None if GPU not available.
+        """
+        if not self.available or not getattr(self, '_dt_configured', False):
+            return None
+        if not self._gl_ready:
+            try:
+                self._init_gl()
+                self._gl_ready = True
+            except Exception as e:
+                print("gpu_render: init failed: %s" % e)
+                self.available = False
+                return None
+        if not getattr(self, '_dt_gl_ready', False):
+            try:
+                self._init_depth_topdown_gl()
+            except Exception as e:
+                print("gpu_render: topdown init failed: %s" % e)
+                import traceback; traceback.print_exc()
+                return None
+
+        t0 = time.monotonic()
+        oh, ow = self._dt_out_h, self._dt_out_w
+        n_pts = min(len(verts), 320 * 240)
+
+        self._dt_vbo.write(
+            np.ascontiguousarray(verts[:n_pts], dtype=np.float32).tobytes())
+
+        # Scatter all valid points → obs FBO (max-encode via depth test)
+        self._dt_obs_fbo.use()
+        self._dt_obs_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
+        self._ctx.enable(moderngl.DEPTH_TEST)
+        self._ctx.depth_func = '>'
+        self._dt_vao_obs.render(moderngl.POINTS, vertices=n_pts)
+
+        # Single readback — decode floor-as-free encoding to (obs, known)
+        raw_data = self._dt_obs_fbo.read(components=1, alignment=1)
+        raw = np.frombuffer(raw_data, dtype=np.uint8).reshape(oh, ow)
+        
+        # Decode: 0=no data, 1=floor (known+free), 2-101=obstacle (known+obs)
+        known = np.where(raw > 0, np.uint8(255), np.uint8(0))
+        obs = np.where(raw >= 2, (raw - 1).astype(np.uint8), np.uint8(0))
+
+        self._ctx.depth_func = '<'
+
+        self._dt_n += 1
+        t1 = time.monotonic()
+        if self._dt_n <= 3 or self._dt_n % 100 == 0:
+            n_empty = int(np.count_nonzero(raw == 0))
+            n_floor = int(np.count_nonzero(raw == 1))
+            n_obs = int(np.count_nonzero(raw >= 2))
+            print("gpu_topdown: scatter+read=%.1fms  floor=%d obs=%d empty=%d" % (
+                (t1 - t0) * 1e3, n_floor, n_obs, n_empty))
+
+        return obs, known
 
     # ── GPU visual odometry ─────────────────────────────────────
 

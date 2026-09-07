@@ -502,6 +502,72 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
 
 
 
+def process_rs1_sparse_reflexes(verts, work_verts=None,
+                                 out_h=FRAME_H, out_w=FRAME_W,
+                                 near_threshold_m=0.30, near_min_pixels=50,
+                                 overhang_near_m=0.30, overhang_far_m=0.70,
+                                 overhang_row_min=10, overhang_row_max=50,
+                                 lateral_col_margin=30,
+                                 overhang_min_pixels=80,
+                                 floor_clip_m=TD_FLOOR_CLIP,
+                                 large_obj_stride=8):
+    """RS1 sparse reflexes only (near-field + overhang).
+    
+    Extracted from process_rs1_topdown for use with GPU heightmap.
+    Soft-low can be derived from GPU heightmap separately if needed.
+    """
+    result = {
+        'near_field': False, 'near_close_count': 0, 'near_min_z': float('inf'),
+        'overhang': False, 'overhang_count': 0, 'overhang_median_z': float('inf'),
+    }
+    if verts is None or len(verts) == 0:
+        return result
+    
+    v = _clip_decimated_border(verts, out=work_verts)
+    z = v[:, 2]
+    valid = z > 0.01
+    if not np.any(valid):
+        return result
+    
+    # Sparse large-object reflexes (near + overhang) with stride
+    s = max(1, int(large_obj_stride))
+    z_s = z[::s]
+    valid_s = z_s > 0.01
+    near_min_s = max(3, int(math.ceil(near_min_pixels / float(s))))
+    ovh_min_s = max(3, int(math.ceil(overhang_min_pixels / float(s))))
+    
+    if np.any(valid_s):
+        result['near_min_z'] = float(np.min(z_s[valid_s]))
+        near_mask_s = valid_s & (z_s < near_threshold_m)
+        result['near_close_count'] = int(np.sum(near_mask_s)) * s
+        result['near_field'] = int(np.sum(near_mask_s)) >= near_min_s
+        
+        # Overhang: sparse mid-range + forward strip
+        mid_s = valid_s & (z_s >= overhang_near_m) & (z_s <= overhang_far_m)
+        if np.any(mid_s):
+            idx = np.arange(0, len(v), s, dtype=np.int32)
+            idx = idx[mid_s]
+            v_mid = v[idx]
+            z_mid = v_mid[:, 2]
+            scale = np.float32(1.0 / TD_PX_SIZE)
+            center = np.float32([out_w * 0.5, out_h * 0.5])
+            p = v_mid[:, :2] * scale + center
+            cols, rows = p[:, 0], p[:, 1]
+            rows_rot = out_h - 1 - rows
+            cols_rot = out_w - 1 - cols
+            ovh_strip = (
+                (rows_rot >= overhang_row_min) & (rows_rot <= overhang_row_max) &
+                (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
+            )
+            if np.any(ovh_strip):
+                ovh_z = z_mid[ovh_strip]
+                result['overhang_count'] = int(len(ovh_z)) * s
+                result['overhang_median_z'] = float(np.median(ovh_z))
+                result['overhang'] = int(len(ovh_z)) >= ovh_min_s
+    
+    return result
+
+
 def process_rs1_topdown(verts, out_obs, out_known, work_verts=None,
                         out_h=FRAME_H, out_w=FRAME_W,
                         near_threshold_m=0.30, near_min_pixels=50,
@@ -706,6 +772,10 @@ class Vision:
             floor_clip=float(FW_FLOOR_CLIP),
             height_clip=float(FW_HEIGHT_CLIP),
             out_h=FRAME_W, out_w=FRAME_H)
+        self._gpu.configure_depth_topdown(
+            px_size=float(TD_PX_SIZE),
+            floor_clip=float(TD_FLOOR_CLIP),
+            out_h=FRAME_H, out_w=FRAME_W)
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
@@ -1184,10 +1254,36 @@ class Vision:
             self._z1[:] = 0
             self._k1[:] = 0
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
-                # ONE clip + ONE pass (was 4× clip+scan → ~11ms at mag=3)
-                _rs1 = process_rs1_topdown(
-                    self._rs1.verts, self._z1, self._k1,
-                    work_verts=self._rs1_work_verts)
+                # GPU heightmap @30Hz for policy + sparse CPU reflexes
+                v_clean = _clip_decimated_border(self._rs1.verts, out=self._rs1_work_verts)
+                _gpu_result = self._gpu.depth_topdown_gpu(v_clean)
+                
+                if _gpu_result is not None:
+                    # GPU path: heightmap from GPU, sparse reflexes from CPU
+                    self._z1[:], self._k1[:] = _gpu_result
+                    
+                    # Sparse reflexes (near + overhang) on CPU stride=8
+                    _rs1_sparse = process_rs1_sparse_reflexes(
+                        self._rs1.verts, work_verts=self._rs1_work_verts)
+                    
+                    # Soft-low: TODO derive from GPU heightmap forward strip if equivalent
+                    _rs1 = {
+                        'near_field': _rs1_sparse['near_field'],
+                        'near_close_count': _rs1_sparse['near_close_count'],
+                        'near_min_z': _rs1_sparse['near_min_z'],
+                        'overhang': _rs1_sparse['overhang'],
+                        'overhang_count': _rs1_sparse['overhang_count'],
+                        'overhang_median_z': _rs1_sparse['overhang_median_z'],
+                        'soft_low': False,  # TODO: derive from GPU heightmap
+                        'soft_low_count': 0,
+                        'soft_low_median_height': float('inf'),
+                    }
+                else:
+                    # CPU fallback: full process_rs1_topdown (sparse + dense)
+                    _rs1 = process_rs1_topdown(
+                        self._rs1.verts, self._z1, self._k1,
+                        work_verts=self._rs1_work_verts)
+                
                 self._topdown_near_field = _rs1['near_field']
                 self._near_field_close_count = _rs1['near_close_count']
                 self._near_field_min_z = _rs1['near_min_z']
@@ -1196,7 +1292,7 @@ class Vision:
                 self._overhang_approach_median_z = _rs1['overhang_median_z']
                 self._topdown_soft_low_obstacle = _rs1['soft_low']
                 self._soft_low_obstacle_count = _rs1['soft_low_count']
-                self._soft_low_obstacle_median_height = _rs1['soft_low_median_height']
+                self._topdown_soft_low_obstacle_median_height = _rs1['soft_low_median_height']
                 # Rate-limited reflex logs (every 90 frames while sticky)
                 if _rs1['near_field']:
                     self._near_field_log_n = getattr(self, '_near_field_log_n', 0) + 1
