@@ -191,42 +191,36 @@ class KevinRerunLogger:
         robot_footprint_overlay = log_job.get("robot_footprint_overlay")
         if robot_footprint_overlay is not None:
             fov = np.ascontiguousarray(robot_footprint_overlay)
-            if fov.ndim == 3 and fov.shape[2] == 4:
-                rr.log("vision/depth_self_mask", rr.Image(fov))
-                rr.log("vision/robot_foot_overlay", rr.Image(fov))
-            elif fov.ndim == 3 and fov.shape[2] >= 3:
-                rr.log("vision/robot_foot_overlay", rr.Image(fov[:, :, :3]))
-        
+            # RGB only — avoid dual RGBA entities stacking opaque in the same view
+            rgb_o = fov[:, :, :3] if (fov.ndim == 3 and fov.shape[2] >= 3) else fov
+            rr.log("vision/robot_foot_overlay", rr.Image(rgb_o))
+            rr.log("vision/depth_self_mask", rr.Image(rgb_o))
+
         rs1_mask_overlay = log_job.get("rs1_mask_overlay")
         if rs1_mask_overlay is not None:
             overlay = np.ascontiguousarray(rs1_mask_overlay)
-            if overlay.ndim == 3 and overlay.shape[2] == 4:
-                rr.log("vision/rs1_depth_mask", rr.Image(overlay))
-                rr.log("vision/rs1_mask_overlay", rr.Image(overlay))
-            elif overlay.ndim == 3 and overlay.shape[2] >= 3:
-                rr.log("vision/rs1_mask_overlay", rr.Image(overlay[:, :, :3]))
-        
+            rgb_o = overlay[:, :, :3] if (overlay.ndim == 3 and overlay.shape[2] >= 3) else overlay
+            rr.log("vision/rs1_mask_overlay", rr.Image(rgb_o))
+            rr.log("vision/rs1_depth_mask", rr.Image(rgb_o))
+
         rs1_trust_mask_overlay = log_job.get("rs1_trust_mask_overlay")
         if rs1_trust_mask_overlay is not None:
+            # Safety sensor trust/FOV (where "clear" is believed).
             tov = np.ascontiguousarray(rs1_trust_mask_overlay)
-            if tov.ndim == 3 and tov.shape[2] >= 3:
-                rr.log("vision/rs1_trust_mask_overlay", rr.Image(tov))
-        
+            rr.log("vision/rs1_trust_mask_overlay", rr.Image(tov))
+
         rs1_safety_foot_overlay = log_job.get("rs1_safety_foot_overlay")
         if rs1_safety_foot_overlay is not None:
+            # Safety FOOT padded rect (forward-scan box) — orange.
             sof = np.ascontiguousarray(rs1_safety_foot_overlay)
-            if sof.ndim == 3 and sof.shape[2] == 4:
-                rr.log("vision/rs1_safety_foot", rr.Image(sof))
-            elif sof.ndim == 3 and sof.shape[2] >= 3:
-                rr.log("vision/rs1_safety_foot", rr.Image(sof[:, :, :3]))
-        
+            rgb_o = sof[:, :, :3] if (sof.ndim == 3 and sof.shape[2] >= 3) else sof
+            rr.log("vision/rs1_safety_foot", rr.Image(rgb_o))
+
         safety_foot_overlay = log_job.get("safety_foot_overlay")
         if safety_foot_overlay is not None:
             sof2 = np.ascontiguousarray(safety_foot_overlay)
-            if sof2.ndim == 3 and sof2.shape[2] == 4:
-                rr.log("vision/safety_foot", rr.Image(sof2))
-            elif sof2.ndim == 3 and sof2.shape[2] >= 3:
-                rr.log("vision/safety_foot", rr.Image(sof2[:, :, :3]))
+            rgb_o = sof2[:, :, :3] if (sof2.ndim == 3 and sof2.shape[2] >= 3) else sof2
+            rr.log("vision/safety_foot", rr.Image(rgb_o))
 
     def maybe_log(
         self,

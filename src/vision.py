@@ -2002,45 +2002,42 @@ class Vision:
             )
     
     def get_rs1_mask_overlay(self):
-        """Depth self-mask exclusion (UNDER_ROBOT + SELF_IGNORE) on ego-aligned RS1 color.
-
-        RS1 color is 320x240 = FRAME — same pixels as the ego depth map. Draw boxes 1:1
-        (no RS1_VIZ_SCALE). This is what clears robot returns from depth, not safety FOV.
-        Trust overlay left alone elsewhere.
-        """
+        """Translucent self-mask on ego-aligned RS1 color (same style as foot overlay)."""
         import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
-
-        rgb = self._rs1.color[::-1, ::-1].copy()
+        rgb = self._rs1.color[::-1, ::-1]
         h, w = rgb.shape[:2]
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        overlay[:, :, :3] = rgb
-        overlay[:, :, 3] = 0
+        out = rgb.astype(np.float32).copy()
+        a = _mask_viz_alpha()
+        a = max(0.12, min(0.45, float(a)))
 
-        def paint(x0, y0, x1, y1, add_g=0, add_b=0):
+        def paint(x0, y0, x1, y1, tint):
             x0, y0 = max(0, min(w, int(x0))), max(0, min(h, int(y0)))
             x1, y1 = max(0, min(w, int(x1))), max(0, min(h, int(y1)))
             if x1 <= x0 or y1 <= y0:
                 return
-            m = np.zeros((h, w), dtype=bool)
-            m[y0:y1, x0:x1] = True
-            if add_g:
-                overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + add_g, 0, 255).astype(np.uint8)
-            if add_b:
-                overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + add_b, 0, 255).astype(np.uint8)
-            overlay[m, 3] = 110
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 220), 1)
+            src = out[y0:y1, x0:x1]
+            tgt = np.array(tint, dtype=np.float32)
+            src[:] = src * (1.0 - a) + tgt * a
+            cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 1)
 
         for box in UNDER_ROBOT_BOXES:
-            paint(*box, add_g=70)
+            paint(*box, tint=(60, 220, 90))
         for box in SELF_IGNORE_BOXES:
-            paint(*box, add_b=70)
-
+            paint(*box, tint=(60, 140, 255))
         if UNDER_ROBOT_BOXES:
             bx0, by0, bx1, by1 = UNDER_ROBOT_BOXES[0]
             fx = min(w - 1, max(0, int(bx1) - 1))
-            overlay[int(by0):int(by1), max(0, fx - 1):min(w, fx + 2)] = (0, 255, 255, 220)
+            y0, y1 = max(0, int(by0)), min(h, int(by1))
+            x0c, x1c = max(0, fx - 1), min(w, fx + 2)
+            if y1 > y0 and x1c > x0c:
+                edge = out[y0:y1, x0c:x1c]
+                edge[:] = edge * (1.0 - 0.55) + np.array([0, 255, 255], np.float32) * 0.55
+
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        overlay[:, :, :3] = np.clip(out, 0, 255).astype(np.uint8)
+        overlay[:, :, 3] = 255
         return overlay
 
 
@@ -2284,7 +2281,7 @@ class Vision:
         }
 
     def get_robot_footprint_underlay(self):
-        """Pre-selfmask ego map (so boxes aren't tinted over cleared black)."""
+        """Ego map underlay for foot/mask viz (no self-mask punch to black)."""
         underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         obs = getattr(self, "_viz_obs_premask", None)
         if obs is None:
@@ -2294,53 +2291,68 @@ class Vision:
         if obs is None or known is None:
             underlay[:] = (50, 50, 50)
             return underlay
-        # Use premask obs so under-robot pixels are NOT force-cleared black/gray
-        underlay[(known > 0) & (obs == 0)] = (40, 40, 40)
-        underlay[(known == 0) & (obs == 0)] = (0, 0, 0)
+        # Known-free = mid gray; unknown = dark gray (not pure black — reads as a hole)
+        underlay[(known > 0) & (obs == 0)] = (48, 48, 48)
+        underlay[(known == 0) & (obs == 0)] = (22, 22, 22)
         hit = obs > 0
         if np.any(hit):
-            if height is not None:
-                # height may be post-clear; still show premask hits as yellow-red-ish
-                underlay[hit, 0] = 255
-                underlay[hit, 1] = 200
-                underlay[hit, 2] = 0
-            else:
-                underlay[hit] = (255, 200, 0)
+            underlay[hit, 0] = 255
+            underlay[hit, 1] = 200
+            underlay[hit, 2] = 0
+        # Soften footprint interior so translucent green has gray to show through
+        # (self-mask already cleared obs here; paint known-free gray explicitly)
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            x0, y0 = max(0, x0), max(0, y0)
+            x1, y1 = min(FRAME_W, x1), min(FRAME_H, y1)
+            if x1 > x0 and y1 > y0:
+                region = underlay[y0:y1, x0:x1]
+                # keep obstacle yellow if any survived; else soft gray
+                blank = (region[:, :, 0] < 40) & (region[:, :, 1] < 40) & (region[:, :, 2] < 40)
+                region[blank] = (52, 52, 52)
         return underlay
 
+
     def get_robot_footprint_overlay(self):
-        """Depth self-mask boxes (UNDER_ROBOT+SELF_IGNORE) on ego map — exact exclusion pixels."""
+        """Translucent self-mask boxes on ego underlay — matches trust look (image 2).
+
+        Soft-blend tint into RGB at _mask_viz_alpha(); full-frame A=255 so a solo
+        Rerun Image still shows the map (A=0 would go black). Yellow outlines only.
+        """
         import cv2
         rgb = self.get_robot_footprint_underlay()
         if rgb is None:
             return None
         h, w = rgb.shape[:2]
-        overlay = np.zeros((h, w, 4), dtype=np.uint8)
-        overlay[:, :, :3] = rgb
-        overlay[:, :, 3] = 0
+        out = rgb.astype(np.float32).copy()
+        a = _mask_viz_alpha()
+        a = max(0.12, min(0.45, float(a)))  # visible but see-through
 
-        def paint(x0, y0, x1, y1, add_g=0, add_b=0):
+        def paint(x0, y0, x1, y1, tint):
             x0, y0 = max(0, min(w, int(x0))), max(0, min(h, int(y0)))
             x1, y1 = max(0, min(w, int(x1))), max(0, min(h, int(y1)))
             if x1 <= x0 or y1 <= y0:
                 return
-            m = np.zeros((h, w), dtype=bool)
-            m[y0:y1, x0:x1] = True
-            if add_g:
-                overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + add_g, 0, 255).astype(np.uint8)
-            if add_b:
-                overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + add_b, 0, 255).astype(np.uint8)
-            overlay[m, 3] = 110
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 220), 1)
+            src = out[y0:y1, x0:x1]
+            tgt = np.array(tint, dtype=np.float32)
+            src[:] = src * (1.0 - a) + tgt * a
+            cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 1)
 
         for box in UNDER_ROBOT_BOXES:
-            paint(*box, add_g=70)
+            paint(*box, tint=(60, 220, 90))
         for box in SELF_IGNORE_BOXES:
-            paint(*box, add_b=70)
-
+            paint(*box, tint=(60, 140, 255))
         if UNDER_ROBOT_BOXES:
             bx0, by0, bx1, by1 = UNDER_ROBOT_BOXES[0]
             fx = min(w - 1, max(0, int(bx1) - 1))
-            overlay[int(by0):int(by1), max(0, fx - 1):min(w, fx + 2)] = (0, 255, 255, 220)
+            y0, y1 = max(0, int(by0)), min(h, int(by1))
+            x0c, x1c = max(0, fx - 1), min(w, fx + 2)
+            if y1 > y0 and x1c > x0c:
+                # cyan front edge — also soft
+                edge = out[y0:y1, x0c:x1c]
+                edge[:] = edge * (1.0 - 0.55) + np.array([0, 255, 255], np.float32) * 0.55
+
+        overlay = np.zeros((h, w, 4), dtype=np.uint8)
+        overlay[:, :, :3] = np.clip(out, 0, 255).astype(np.uint8)
+        overlay[:, :, 3] = 255
         return overlay
 
