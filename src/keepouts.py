@@ -45,7 +45,8 @@ NAMED_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "treadmill": {"radius_m": 0.85, "kind": "hard", "ahead_m": 0.50},
 }
 
-_SOFT_KINDS = frozenset({"soft", "floor_mat", "rug", "mat"})
+_SOFT_KINDS = frozenset({"soft", "rug", "mat"})
+# floor_mat is now HARD (visual checkered detector is primary; map paint is backup)
 
 
 def _default() -> dict:
@@ -251,7 +252,7 @@ def _self_test() -> None:
     from robot_config import FRAME_H, FRAME_W, RCX, RCY
 
     assert paint_value_for_kind("soft") == PAINT_SOFT
-    assert paint_value_for_kind("floor_mat") == PAINT_SOFT
+    assert paint_value_for_kind("floor_mat") == PAINT_HARD  # Hardened: visual detector is primary
     assert paint_value_for_kind("hard") == PAINT_HARD
     assert PAINT_SOFT <= 100  # soft prefer band for MPPI
     assert PAINT_HARD > 100

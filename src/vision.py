@@ -32,6 +32,7 @@ from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
 from slam import PoseGraphSLAM
+from checkered_mat import detect_checkered_mat
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -248,6 +249,10 @@ class Vision:
         self._topdown_near_field = False
         self._near_field_close_count = 0
         self._near_field_min_z = float('inf')
+        self._checkered_mat = False
+        self._checkered_mat_score = 0.0
+        self._checkered_mat_meta = {}
+        self._checkered_prev = False
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._cuvslam = None
@@ -810,9 +815,41 @@ class Vision:
             self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
             self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
+            # Wood bump + checkered mat detection (ego-frame, RS1 RGB, no SLAM)
+            # Uses RS1 top-down color (already rotated 180° above) to detect:
+            #   (a) Wood floor bump/lip (texture transition, strong H edge)
+            #   (b) Checkered door mat (alternating grid pattern)
+            if self._rs1 and self._rs1.ok:
+                # RS1 color is already rotated 180° as rgbd1 (line ~841 above)
+                triggered, score, meta = detect_checkered_mat(
+                    rgbd1, prev_triggered=self._checkered_prev)
+                self._checkered_mat = triggered
+                self._checkered_mat_score = score
+                self._checkered_mat_meta = meta
+                self._checkered_prev = triggered
+                if triggered and not hasattr(self, '_checkered_log_n'):
+                    self._checkered_log_n = 0
+                if triggered:
+                    self._checkered_log_n += 1
+                    if self._checkered_log_n == 1 or self._checkered_log_n % 30 == 0:
+                        w_sc = meta.get("wood_score", 0.0)
+                        c_sc = meta.get("checker_score", 0.0)
+                        print("vision: WOOD/CHECKER — score=%.2f wood=%.2f checker=%.2f "
+                              "(RS1 ego-frame hard-stop)" % (score, w_sc, c_sc))
+                else:
+                    if hasattr(self, '_checkered_log_n') and self._checkered_log_n > 0:
+                        print("vision: WOOD/CHECKER cleared — score=%.2f (after %d frames)"
+                              % (score, self._checkered_log_n))
+                        self._checkered_log_n = 0
+            else:
+                self._checkered_mat = False
+                self._checkered_mat_score = 0.0
+                self._checkered_mat_meta = {}
+
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height,
-                                topdown_near_field=self._topdown_near_field)
+                                topdown_near_field=self._topdown_near_field,
+                                checkered_mat=self._checkered_mat)
             if not self._topdown_ok:
                 # Hard immobilize: no top-down depth reading.
                 self._safety._fwd_scale = 0.0
@@ -963,3 +1000,13 @@ class Vision:
     def near_field_min_z(self):
         """Minimum (closest) Z distance in metres when near-field detected."""
         return float(getattr(self, '_near_field_min_z', float('inf')))
+
+    @property
+    def checkered_mat(self):
+        """True when checkered mat detected (ego-frame, no SLAM)."""
+        return bool(getattr(self, '_checkered_mat', False))
+
+    @property
+    def checkered_mat_score(self):
+        """Checkered mat detection score (0.0-1.0)."""
+        return float(getattr(self, '_checkered_mat_score', 0.0))
