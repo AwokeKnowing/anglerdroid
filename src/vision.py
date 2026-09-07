@@ -2010,8 +2010,13 @@ class Vision:
                 body_fwd = (y0, y1, x1)
         if body_fwd is not None:
             y0, y1, x1 = body_fwd
-            fx = min(w - 1, max(0, x1 - 1))
-            overlay[y0:y1, fx, :] = [255, 255, 0, 255]
+            # Thick bright crop line at body forward edge (bumper plane)
+            fx0 = max(0, min(w, x1 - 2))
+            fx1 = max(0, min(w, x1 + 2))
+            overlay[y0:y1, fx0:fx1, :] = [0, 255, 255, 255]  # cyan, 4px
+            # tick marks at top/bottom so the line reads as a crop plane
+            overlay[max(0, y0):min(h, y0 + 6), fx0:fx1, :] = [255, 255, 0, 255]
+            overlay[max(0, y1 - 6):min(h, y1), fx0:fx1, :] = [255, 255, 0, 255]
         return overlay
 
     def get_rs1_trust_mask_overlay(self):
@@ -2252,10 +2257,12 @@ class Vision:
             underlay[y0:y1, x0:x1, 1] = 0    # G
             underlay[y0:y1, x0:x1, 2] = 200  # B (magenta)
         
-        # Draw bright yellow forward edge on body box (first box in FOOTPRINT_BOXES)
+        # Thick cyan forward crop line on body box (bumper plane @ 1cm/px)
         body_x0, body_y0, body_x1, body_y1 = FOOTPRINT_BOXES[0]
         x1_line = min(body_x1, FRAME_W - 1)
-        underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
+        underlay[body_y0:body_y1, max(0, x1_line - 2):min(FRAME_W, x1_line + 2)] = [0, 255, 255]
+        underlay[body_y0:min(body_y0 + 6, FRAME_H), max(0, x1_line - 2):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
+        underlay[max(0, body_y1 - 6):body_y1, max(0, x1_line - 2):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
         
         # Draw yellow outline around all boxes for clarity
         for x0, y0, x1, y1 in FOOTPRINT_BOXES:
