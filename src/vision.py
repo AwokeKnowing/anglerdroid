@@ -952,7 +952,9 @@ class Vision:
                                 topdown_near_field=self._topdown_near_field,
                                 topdown_hazard=self._topdown_hazard)
             
-            # Hard immobilize conditions
+            # Hard immobilize conditions (CRITICAL SAFETY ONLY)
+            # Philosophy: Immobilize only for immediate safety hazards.
+            # When SLAM bad → block map-frame ops, but local navigation still works.
             immobilize = False
             immobilize_reason = None
             
@@ -962,7 +964,7 @@ class Vision:
                 immobilize_reason = f"STUCK (wheels spinning, no motion)"
             
             if not self._topdown_ok:
-                # No top-down depth reading
+                # No top-down depth reading - safety critical
                 immobilize = True
                 immobilize_reason = "TOPDOWN LOST"
                 self._topdown_lost_n = getattr(self, '_topdown_lost_n', 0) + 1
@@ -981,10 +983,21 @@ class Vision:
                     )
                 self._topdown_lost_n = 0
             
+            # Note: SLAM lock status tracked but does NOT immobilize.
+            # When SLAM not locked:
+            #   ✅ Local navigation works (obstacle avoid, near-field, MPPI ~1m goals)
+            #   ❌ Map-frame operations disabled (global nav, map keepouts)
+            # This allows graceful degradation: roam works even without full SLAM.
             if not self._slam_locked:
-                # SLAM not locked — immobilize autonomous features
-                immobilize = True
-                immobilize_reason = f"SLAM NOT LOCKED ({self._slam_lock_reason})"
+                if not hasattr(self, '_slam_unlock_logged') or not self._slam_unlock_logged:
+                    print(f"⚠️  SLAM NOT LOCKED ({self._slam_lock_reason})")
+                    print(f"   → Map-frame operations disabled (keepouts, global nav)")
+                    print(f"   → Local navigation still works (obstacle avoid, MPPI)")
+                    self._slam_unlock_logged = True
+            else:
+                if hasattr(self, '_slam_unlock_logged') and self._slam_unlock_logged:
+                    print(f"✓ SLAM LOCKED — map-frame operations re-enabled")
+                self._slam_unlock_logged = False
             
             if immobilize:
                 self._safety._fwd_scale = 0.0
