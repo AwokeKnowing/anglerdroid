@@ -142,29 +142,29 @@ class SafetyGuard:
 
     # ── per-frame update ──
 
-    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False, checkered_mat=False):
+    def update(self, obs_map, yaw_delta, fwd_delta, height_cm=None, topdown_near_field=False, topdown_hazard=False):
         """Feed per-frame odometry. Computes directional scales.
 
         height_cm: optional ego height map (cm). Tall cells inflate for mast/table tops.
         topdown_near_field: True when top-down camera sees object <30cm overhead.
                            Triggers immediate forward stop; reverse allowed if bwd_clear.
-        checkered_mat: True when RGB camera detects checkered mat in sensor frame.
-                      Triggers immediate forward stop; reverse allowed if bwd_clear.
+        topdown_hazard: True when RS1 topdown RGB detects bump or checkered mat.
+                       Triggers immediate forward stop; reverse allowed if bwd_clear.
         """
         self._tick += 1
         self._hist.append((yaw_delta, fwd_delta))
         self._topdown_near_field = topdown_near_field
 
-        # ── Checkered mat reflex: RGB-detected checkered floor mat (sensor frame) ──
+        # ── Topdown hazard reflex: RS1 RGB bump/checkered detection (sensor frame) ──
         # This is an EGO/VISION REFLEX that works WITHOUT SLAM or map-based keepouts.
-        # Detects checkered mat pattern in RGB camera and triggers forward hard-stop.
+        # Detects wood bump (threshold/lip) and checkered mat in RS1 topdown RGB.
         # Reverse is still allowed if rear clear (escape capability).
-        if checkered_mat:
-            self._near_field_reason = "checkered_mat"
+        if topdown_hazard:
+            self._near_field_reason = "topdown_hazard"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
             if self._tick % 10 == 0:
-                print("safety: CHECKERED MAT REFLEX — RGB sees checkered pattern, "
+                print("safety: TOPDOWN HAZARD REFLEX — RS1 RGB sees bump/checkered, "
                       "fwd=0.0, computing bwd/ang normally")
         # ── Near-field reflex: overhead object <30cm from top-down camera ──
         # This is a REFLEX that runs BEFORE floor-obstacle logic. Table undersides,
@@ -206,10 +206,10 @@ class SafetyGuard:
         else:
             bwd_clear = 0
 
-        # Apply clearance scales. Near-field reflexes (checkered mat, topdown) already
+        # Apply clearance scales. Near-field reflexes (topdown hazard, topdown depth) already
         # zeroed fwd_scale above; don't override it. Backward and angular are always
         # computed from obstacles.
-        if not (topdown_near_field or checkered_mat):
+        if not (topdown_near_field or topdown_hazard):
             self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
         if fwd_clear < 10 and self._tick % 5 == 0:

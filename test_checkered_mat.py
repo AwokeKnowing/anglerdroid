@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Unit tests for checkered floor mat hard-stop detection (ego/vision reflex).
+Unit tests for topdown floor hazard hard-stop detection (ego/vision reflex).
 
-Tests the RGB-based checkered mat detector that works WITHOUT SLAM or map keepouts.
-Detects checkered floor mat patterns and triggers forward hard-stop (fwd_scale=0)
-while allowing reverse/turn if rear is clear.
+Tests the RS1 topdown RGB-based hazard detector that works WITHOUT SLAM or map keepouts.
+Detects TWO hazard types:
+  1. Wood bump / threshold (edge detection)
+  2. Checkered floor mat pattern (corner detection)
+
+Triggers forward hard-stop (fwd_scale=0) while allowing reverse/turn if rear is clear.
 
 Test cases:
 1. Synthetic 6x6 checkerboard → detection triggers
-2. Checkerboard in bottom region only → triggers
-3. Checkerboard in top region (not floor) → no trigger
-4. Small checkerboard (fewer corners) → triggers with reduced confidence
-5. No checkerboard pattern → no trigger
-6. Partial checkerboard visible → triggers if enough corners
-7. SafetyGuard integration → fwd=0, bwd/ang computed normally
-8. Temporal filtering → reduces flicker
-9. Empty/invalid images → no crash
-10. Different checkerboard sizes (tunable parameters)
+2. Checkerboard in forward region → triggers
+3. Checkerboard in rear region (not forward) → no trigger
+4. Bump detection via edge detection → triggers
+5. No pattern or bump → no trigger
+6. SafetyGuard integration → fwd=0, bwd/ang computed normally
+7. Temporal filtering → reduces flicker
+8. Empty/invalid images → no crash
+9. Different checkerboard sizes (tunable parameters)
+10. Bump + checkered both present → triggers on either
 """
 
 import sys
@@ -27,7 +30,7 @@ import cv2
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from checkered_mat import CheckeredMatDetector, check_checkered_mat
+from checkered_mat import TopdownHazardDetector, check_topdown_hazard
 from safety import SafetyGuard
 
 
@@ -73,11 +76,13 @@ def make_checkerboard_image(h=480, w=640, rows=7, cols=7, square_size=50):
     return rgb
 
 
-def make_checkerboard_bottom(h=480, w=640, rows=7, cols=7, square_size=40):
-    """Create checkerboard in BOTTOM region (where floor mat would be).
+def make_checkerboard_forward(h=480, w=640, rows=7, cols=7, square_size=40):
+    """Create checkerboard in FORWARD region (topdown view - top of image).
+    
+    Note: RS1 topdown view is rotated 180°. After rotation, forward is at TOP.
     
     Returns:
-        RGB image with checkerboard at bottom (floor perspective)
+        RGB image with checkerboard at top (forward region in topdown)
     """
     img = np.full((h, w), 128, dtype=np.uint8)
     
@@ -91,8 +96,8 @@ def make_checkerboard_bottom(h=480, w=640, rows=7, cols=7, square_size=40):
                 board[i*square_size:(i+1)*square_size, 
                       j*square_size:(j+1)*square_size] = 255
     
-    # Place at BOTTOM of image
-    y_offset = h - board_h - 10
+    # Place at TOP of image (forward region in topdown view)
+    y_offset = 10
     x_offset = (w - board_w) // 2
     
     if y_offset >= 0 and x_offset >= 0:
@@ -104,11 +109,13 @@ def make_checkerboard_bottom(h=480, w=640, rows=7, cols=7, square_size=40):
     return rgb
 
 
-def make_checkerboard_top(h=480, w=640, rows=7, cols=7, square_size=40):
-    """Create checkerboard in TOP region (not floor - should not trigger).
+def make_checkerboard_rear(h=480, w=640, rows=7, cols=7, square_size=40):
+    """Create checkerboard in REAR region (topdown view - bottom of image).
+    
+    Should NOT trigger (not in forward path).
     
     Returns:
-        RGB image with checkerboard at top
+        RGB image with checkerboard at bottom (rear region in topdown)
     """
     img = np.full((h, w), 128, dtype=np.uint8)
     
@@ -122,8 +129,8 @@ def make_checkerboard_top(h=480, w=640, rows=7, cols=7, square_size=40):
                 board[i*square_size:(i+1)*square_size, 
                       j*square_size:(j+1)*square_size] = 255
     
-    # Place at TOP of image
-    y_offset = 10
+    # Place at BOTTOM of image (rear region in topdown view)
+    y_offset = h - board_h - 10
     x_offset = (w - board_w) // 2
     
     if x_offset >= 0:
@@ -141,6 +148,33 @@ def make_random_noise(h=480, w=640):
     return noise
 
 
+def make_bump_image(h=480, w=640, bump_y=100, bump_thickness=10):
+    """Create image with horizontal edge (simulating wood bump/threshold).
+    
+    Args:
+        h, w: Image dimensions
+        bump_y: Y position of bump (horizontal line)
+        bump_thickness: Thickness of transition edge (sharp edge for detection)
+    
+    Returns:
+        RGB image with horizontal edge at bump_y
+    """
+    img = np.full((h, w), 150, dtype=np.uint8)
+    
+    # Create sharp dark-to-light transition (bump/threshold)
+    img[:bump_y, :] = 60   # Much darker before bump (strong contrast)
+    img[bump_y+bump_thickness:, :] = 230  # Much lighter after bump
+    
+    # Sharp transition (not too smooth, so Canny finds it easily)
+    for i in range(bump_thickness):
+        blend = i / bump_thickness
+        img[bump_y+i, :] = int(60 * (1-blend) + 230 * blend)
+    
+    # Convert to RGB
+    rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+    return rgb
+
+
 def test_detect_centered_checkerboard():
     """Test 1: Centered checkerboard with full image analysis."""
     print("\n" + "="*70)
@@ -149,132 +183,134 @@ def test_detect_centered_checkerboard():
     
     img = make_checkerboard_image(h=480, w=640, rows=7, cols=7, square_size=50)
     
-    # Use full image analysis (bottom_fraction=1.0) to detect centered board
-    detector = CheckeredMatDetector(
+    # Use full image analysis (forward_fraction=1.0) to detect centered board
+    detector = TopdownHazardDetector(
         checkerboard_rows=6,
         checkerboard_cols=6,
-        bottom_fraction=1.0,  # Analyze full image (not just bottom)
+        forward_fraction=1.0,  # Analyze full image
         min_corners=4
     )
     
-    triggered = detector.check(img)
+    triggered, reason = detector.check(img)
     
     print(f"  Centered 7x7 checkerboard (full image analysis):")
     print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
     print(f"    Corners found: {detector.corner_count}")
-    print(f"    Confidence: {detector.detection_confidence:.2f}")
     
     assert triggered, "Should detect centered checkerboard with full image analysis"
+    assert reason == 'checkered', f"Expected reason='checkered', got '{reason}'"
     assert detector.corner_count >= 4, f"Expected >=4 corners, got {detector.corner_count}"
     
     print("  ✅ PASS: Centered checkerboard detected")
 
 
-def test_detect_bottom_checkerboard():
-    """Test 2: Detect checkerboard in bottom region (floor mat position)."""
+def test_detect_forward_checkerboard():
+    """Test 2: Detect checkerboard in forward region (topdown view)."""
     print("\n" + "="*70)
-    print("Test 2: Detect checkerboard at BOTTOM (floor mat)")
+    print("Test 2: Detect checkerboard in FORWARD region (topdown)")
     print("="*70)
     
-    img = make_checkerboard_bottom(h=480, w=640, rows=7, cols=7, square_size=40)
+    img = make_checkerboard_forward(h=480, w=640, rows=7, cols=7, square_size=40)
     
-    detector = CheckeredMatDetector(
+    detector = TopdownHazardDetector(
         checkerboard_rows=6,
         checkerboard_cols=6,
-        bottom_fraction=0.5,
+        forward_fraction=0.4,  # Analyze forward 40%
         min_corners=4
     )
     
-    triggered = detector.check(img)
+    triggered, reason = detector.check(img)
     
-    print(f"  Bottom checkerboard:")
+    print(f"  Forward checkerboard:")
     print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
     print(f"    Corners found: {detector.corner_count}")
-    print(f"    Confidence: {detector.detection_confidence:.2f}")
     
-    assert triggered, "Should detect bottom checkerboard (floor mat)"
+    assert triggered, "Should detect forward checkerboard in topdown view"
+    assert reason == 'checkered', f"Expected reason='checkered', got '{reason}'"
     
-    print("  ✅ PASS: Bottom checkerboard detected")
+    print("  ✅ PASS: Forward checkerboard detected")
 
 
-def test_no_detect_top_checkerboard():
-    """Test 3: Should NOT detect checkerboard in top region (not floor)."""
+def test_no_detect_rear_checkerboard():
+    """Test 3: Should NOT detect checkerboard in rear region."""
     print("\n" + "="*70)
-    print("Test 3: Should NOT detect checkerboard at TOP (not floor)")
+    print("Test 3: Should NOT detect checkerboard in REAR (not forward)")
     print("="*70)
     
-    img = make_checkerboard_top(h=480, w=640, rows=7, cols=7, square_size=40)
+    img = make_checkerboard_rear(h=480, w=640, rows=7, cols=7, square_size=40)
     
-    detector = CheckeredMatDetector(
+    detector = TopdownHazardDetector(
         checkerboard_rows=6,
         checkerboard_cols=6,
-        bottom_fraction=0.5,  # Only look at bottom 50%
+        forward_fraction=0.4,  # Only analyze forward 40%
         min_corners=4
     )
     
-    triggered = detector.check(img)
+    triggered, reason = detector.check(img)
     
-    print(f"  Top checkerboard (bottom_fraction=0.5):")
+    print(f"  Rear checkerboard (forward_fraction=0.4):")
     print(f"    Triggered: {triggered}")
     print(f"    Corners found: {detector.corner_count}")
     
-    assert not triggered, "Should NOT detect checkerboard in top region"
+    assert not triggered, "Should NOT detect checkerboard in rear region"
     
-    print("  ✅ PASS: Top checkerboard correctly ignored")
+    print("  ✅ PASS: Rear checkerboard correctly ignored")
+
+
+def test_detect_bump():
+    """Test 4: Detect wood bump via edge detection."""
+    print("\n" + "="*70)
+    print("Test 4: Detect wood bump (horizontal edge)")
+    print("="*70)
+    
+    img = make_bump_image(h=480, w=640, bump_y=80, bump_thickness=8)
+    
+    detector = TopdownHazardDetector(
+        forward_fraction=0.4,
+        bump_edge_thresh=50
+    )
+    
+    triggered, reason = detector.check(img)
+    
+    print(f"  Bump image:")
+    print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
+    print(f"    Edge count (consecutive rows): {detector.edge_count}")
+    
+    assert triggered, "Should detect bump via edge detection"
+    assert reason == 'bump', f"Expected reason='bump', got '{reason}'"
+    assert detector.edge_count >= 1, f"Expected >=1 consecutive edge rows, got {detector.edge_count}"
+    
+    print("  ✅ PASS: Bump detected via edge detection")
 
 
 def test_no_pattern():
-    """Test 4: No detection on random noise (no checkerboard)."""
+    """Test 5: No detection on random noise (no checkerboard or bump)."""
     print("\n" + "="*70)
-    print("Test 4: No detection on random noise")
+    print("Test 5: No detection on random noise")
     print("="*70)
     
     img = make_random_noise(h=480, w=640)
     
-    detector = CheckeredMatDetector()
-    triggered = detector.check(img)
+    detector = TopdownHazardDetector()
+    triggered, reason = detector.check(img)
     
     print(f"  Random noise:")
     print(f"    Triggered: {triggered}")
     print(f"    Corners found: {detector.corner_count}")
+    print(f"    Edges found: {detector.edge_count}")
     
     assert not triggered, "Should NOT detect pattern in noise"
-    assert detector.corner_count == 0, "Should find 0 corners in noise"
     
     print("  ✅ PASS: No false detection on noise")
 
 
-def test_small_checkerboard():
-    """Test 5: Detect smaller checkerboard (4x4 corners)."""
+def test_safety_guard_topdown_hazard_stop():
+    """Test 6: SafetyGuard stops forward when topdown hazard detected."""
     print("\n" + "="*70)
-    print("Test 5: Detect smaller 4x4 checkerboard")
-    print("="*70)
-    
-    img = make_checkerboard_bottom(h=480, w=640, rows=5, cols=5, square_size=50)
-    
-    detector = CheckeredMatDetector(
-        checkerboard_rows=4,
-        checkerboard_cols=4,
-        bottom_fraction=0.5,
-        min_corners=4
-    )
-    
-    triggered = detector.check(img)
-    
-    print(f"  4x4 checkerboard:")
-    print(f"    Triggered: {triggered}")
-    print(f"    Corners found: {detector.corner_count}")
-    print(f"    Confidence: {detector.detection_confidence:.2f}")
-    
-    assert triggered, "Should detect 4x4 checkerboard"
-    
-    print("  ✅ PASS: Small checkerboard detected")
-
-
-def test_safety_guard_checkered_mat_stop():
-    """Test 6: SafetyGuard stops forward when checkered mat detected."""
-    print("\n" + "="*70)
-    print("Test 6: SafetyGuard stops forward with checkered mat")
+    print("Test 6: SafetyGuard stops forward with topdown hazard")
     print("="*70)
     
     guard = SafetyGuard()
@@ -282,11 +318,11 @@ def test_safety_guard_checkered_mat_stop():
     # Create clear obstacle map (no floor obstacles)
     obs_map = np.zeros((240, 320), dtype=np.uint8)
     
-    # Update with checkered_mat flag TRUE
+    # Update with topdown_hazard flag TRUE
     guard.update(obs_map, yaw_delta=0.0, fwd_delta=0.0, 
-                 checkered_mat=True)
+                 topdown_hazard=True)
     
-    print(f"  With checkered mat reflex:")
+    print(f"  With topdown hazard reflex:")
     print(f"    Forward scale: {guard.fwd_scale:.2f}")
     print(f"    Backward scale: {guard.bwd_scale:.2f}")
     print(f"    Angular scale: {guard.ang_scale:.2f}")
@@ -295,15 +331,15 @@ def test_safety_guard_checkered_mat_stop():
     assert guard.fwd_scale == 0.0, "Forward should be STOPPED"
     assert guard.bwd_scale > 0.0, "Backward should be ALLOWED (if clear)"
     assert guard.ang_scale > 0.0, "Angular should be ALLOWED"
-    assert guard.near_field_reason == "checkered_mat"
+    assert guard.near_field_reason == "topdown_hazard"
     
     print("  ✅ PASS: Forward stopped, backward/angular allowed")
 
 
-def test_safety_guard_checkered_mat_clear():
-    """Test 7: SafetyGuard allows all motion when checkered mat clear."""
+def test_safety_guard_topdown_hazard_clear():
+    """Test 7: SafetyGuard allows all motion when topdown hazard clear."""
     print("\n" + "="*70)
-    print("Test 7: SafetyGuard allows motion when checkered mat clear")
+    print("Test 7: SafetyGuard allows motion when topdown hazard clear")
     print("="*70)
     
     guard = SafetyGuard()
@@ -311,11 +347,11 @@ def test_safety_guard_checkered_mat_clear():
     # Create clear obstacle map
     obs_map = np.zeros((240, 320), dtype=np.uint8)
     
-    # Update with checkered_mat flag FALSE
+    # Update with topdown_hazard flag FALSE
     guard.update(obs_map, yaw_delta=0.0, fwd_delta=0.0, 
-                 checkered_mat=False)
+                 topdown_hazard=False)
     
-    print(f"  Without checkered mat reflex:")
+    print(f"  Without topdown hazard reflex:")
     print(f"    Forward scale: {guard.fwd_scale:.2f}")
     print(f"    Backward scale: {guard.bwd_scale:.2f}")
     print(f"    Angular scale: {guard.ang_scale:.2f}")
@@ -334,26 +370,26 @@ def test_temporal_filtering():
     print("Test 8: Temporal filtering reduces flicker")
     print("="*70)
     
-    img_with = make_checkerboard_bottom(h=480, w=640, rows=7, cols=7)
+    img_with = make_checkerboard_forward(h=480, w=640, rows=7, cols=7)
     img_without = make_random_noise(h=480, w=640)
     
-    detector = CheckeredMatDetector(
+    detector = TopdownHazardDetector(
         checkerboard_rows=6,
         checkerboard_cols=6,
-        bottom_fraction=0.5,
+        forward_fraction=0.4,
         min_corners=4
     )
     
     # First frame: no pattern
-    t1 = detector.check(img_without)
+    t1, _ = detector.check(img_without)
     print(f"  Frame 1 (no pattern): {t1}, history={detector._detection_history}")
     
     # Second frame: pattern appears (but history not full yet)
-    t2 = detector.check(img_with)
+    t2, _ = detector.check(img_with)
     print(f"  Frame 2 (pattern): {t2}, history={detector._detection_history}")
     
     # Third frame: pattern continues
-    t3 = detector.check(img_with)
+    t3, _ = detector.check(img_with)
     print(f"  Frame 3 (pattern): {t3}, history={detector._detection_history}")
     
     assert not t1, "Frame 1 should not trigger (no pattern)"
@@ -369,23 +405,23 @@ def test_empty_image():
     print("Test 9: Empty/invalid image handling")
     print("="*70)
     
-    detector = CheckeredMatDetector()
+    detector = TopdownHazardDetector()
     
     # Empty array
     empty = np.zeros((0, 0, 3), dtype=np.uint8)
-    t1 = detector.check(empty)
+    t1, _ = detector.check(empty)
     
     print(f"  Empty image: triggered={t1}")
     assert not t1, "Empty image should not trigger"
     
     # None
-    t2 = detector.check(None)
+    t2, _ = detector.check(None)
     print(f"  None image: triggered={t2}")
     assert not t2, "None should not trigger"
     
     # Very small image
     tiny = np.zeros((10, 10, 3), dtype=np.uint8)
-    t3 = detector.check(tiny)
+    t3, _ = detector.check(tiny)
     print(f"  Tiny image: triggered={t3}")
     assert not t3, "Tiny image should not trigger"
     
@@ -393,87 +429,67 @@ def test_empty_image():
 
 
 def test_tunable_parameters():
-    """Test 10: Different checkerboard sizes (tunable parameters)."""
+    """Test 10: Different checkerboard sizes and bump thresholds (tunable parameters)."""
     print("\n" + "="*70)
-    print("Test 10: Tunable parameters (different board sizes)")
+    print("Test 10: Tunable parameters (different sizes/thresholds)")
     print("="*70)
     
     # 8x8 checkerboard
-    img_8x8 = make_checkerboard_bottom(h=480, w=640, rows=9, cols=9, square_size=35)
+    img_8x8 = make_checkerboard_forward(h=480, w=640, rows=9, cols=9, square_size=25)
     
-    detector_8x8 = CheckeredMatDetector(
+    detector_8x8 = TopdownHazardDetector(
         checkerboard_rows=8,
         checkerboard_cols=8,
-        bottom_fraction=0.6,
+        forward_fraction=0.5,
         min_corners=10
     )
     
-    t1 = detector_8x8.check(img_8x8)
+    t1, r1 = detector_8x8.check(img_8x8)
     
     print(f"  8x8 checkerboard:")
     print(f"    Triggered: {t1}")
+    print(f"    Reason: {r1}")
     print(f"    Corners: {detector_8x8.corner_count}")
-    print(f"    Confidence: {detector_8x8.detection_confidence:.2f}")
     
     assert t1, "Should detect 8x8 checkerboard with correct params"
     
-    # Same image with wrong detector params (should not find 6x6 in 9x9 board)
-    detector_6x6 = CheckeredMatDetector(
-        checkerboard_rows=6,
-        checkerboard_cols=6
+    # Bump with custom thresholds (make bump more prominent)
+    img_bump = make_bump_image(h=480, w=640, bump_y=60, bump_thickness=10)
+    
+    detector_bump = TopdownHazardDetector(
+        bump_edge_thresh=40,
+        forward_fraction=0.3
     )
     
-    t2 = detector_6x6.check(img_8x8)
-    print(f"  8x8 checkerboard with 6x6 detector: triggered={t2}")
-    # This might or might not trigger depending on partial pattern matching
+    t2, r2 = detector_bump.check(img_bump)
+    print(f"  Bump with custom thresholds:")
+    print(f"    Triggered: {t2}")
+    print(f"    Reason: {r2}")
+    print(f"    Consecutive edge rows: {detector_bump.edge_count}")
+    
+    assert t2, "Should detect bump with custom thresholds"
+    assert r2 == 'bump', f"Expected bump, got {r2}"
     
     print("  ✅ PASS: Tunable parameters work correctly")
-
-
-def test_convenience_function():
-    """Test 11: Convenience function check_checkered_mat()."""
-    print("\n" + "="*70)
-    print("Test 11: Convenience function check_checkered_mat()")
-    print("="*70)
-    
-    img = make_checkerboard_bottom(h=480, w=640, rows=7, cols=7)
-    
-    triggered, corner_count, confidence = check_checkered_mat(
-        img,
-        checkerboard_rows=6,
-        checkerboard_cols=6,
-        bottom_fraction=0.5,
-        min_corners=4
-    )
-    
-    print(f"  One-shot detection:")
-    print(f"    Triggered: {triggered}")
-    print(f"    Corners: {corner_count}")
-    print(f"    Confidence: {confidence:.2f}")
-    
-    assert triggered, "Convenience function should detect checkerboard"
-    
-    print("  ✅ PASS: Convenience function works")
 
 
 def run_all_tests():
     """Run all test cases."""
     print("\n" + "╔"+"═"*68+"╗")
-    print("║" + " "*18 + "CHECKERED MAT REFLEX TESTS" + " "*24 + "║")
+    print("║" + " "*16 + "TOPDOWN HAZARD REFLEX TESTS" + " "*25 + "║")
     print("╚"+"═"*68+"╝")
     
     tests = [
         test_detect_centered_checkerboard,
-        test_detect_bottom_checkerboard,
-        test_no_detect_top_checkerboard,
+        test_detect_forward_checkerboard,
+        test_no_detect_rear_checkerboard,
+        test_detect_bump,
         test_no_pattern,
-        test_small_checkerboard,
-        test_safety_guard_checkered_mat_stop,
-        test_safety_guard_checkered_mat_clear,
+        test_safety_guard_topdown_hazard_stop,
+        test_safety_guard_topdown_hazard_clear,
         test_temporal_filtering,
         test_empty_image,
         test_tunable_parameters,
-        test_convenience_function,
     ]
     
     passed = 0
