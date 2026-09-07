@@ -862,6 +862,12 @@ class Vision:
             _t_grab = time.monotonic()
 
             # --- Pose update (cuVSLAM or wheel+visual) ---
+            # Determine if we're using real encoder feedback or commanded velocity fallback
+            using_encoder_feedback = False
+            if self._wheelbase is not None:
+                health = self._wheelbase.get_encoder_health()
+                using_encoder_feedback = health['encoder_ok'] and health['age_s'] < 0.3
+            
             if _use_cuvslam:
                 fused_yaw, fused_fwd = 0.0, 0.0
                 if (self._rs2 and self._rs2.ok
