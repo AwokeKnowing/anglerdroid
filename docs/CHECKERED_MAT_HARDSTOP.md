@@ -39,9 +39,11 @@ Implement a **sensor-frame (ego/vision) reflex** using **RS1 top-down RealSense 
 ### Detection Pipeline
 
 ```
-Webcam RGB Frame (Vision frames[0]) ← PRIMARY SOURCE
+RS1 Topdown RGB (rgbd1) ← PRIMARY SOURCE
     ↓
-Extract bottom region (default: bottom 50% of image)
+Rotate 180° (RS1 mounted upside-down)
+    ↓
+Extract forward region (default: 40%)
     ↓
 Convert to grayscale
     ↓

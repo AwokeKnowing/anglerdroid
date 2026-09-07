@@ -172,7 +172,7 @@ class TopdownHazardDetector:
             
             # Bump = continuous horizontal line with strong edges spanning width
             # Require: (1) high % of width covered, (2) multiple consecutive rows
-            width_thresh = w * 0.5  # At least 50% of image width (conservative)
+            width_thresh = w * 0.6  # At least 60% of image width (conservative, avoid noise)
             strong_rows = row_edge_counts >= width_thresh
             
             # Count consecutive runs of strong rows (bump = at least 2-3 consecutive rows)
