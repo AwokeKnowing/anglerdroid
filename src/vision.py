@@ -104,7 +104,7 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
     region[:, c + 1] = (region[:, c + 1].astype(np.float32) * blend + white).astype(np.uint8)
 
 
-def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
+def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480, out=None):
     """Zero out border pixels of a decimated RS depth grid.
 
     The RS SDK decimation filter averages depth in NxN blocks.  At frame
@@ -112,11 +112,16 @@ def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
     depth values that deproject to wildly wrong 3-D positions.  Zeroing
     the border removes these systematic artifacts.
 
-    Returns a *copy* — the original camera buffer is never modified.
+    If out is provided (Nx3 float32, N>=len(verts)), copy into it and mutate
+    in place — no fresh alloc. Otherwise allocates a copy (legacy callers).
     """
-    # Copy once for border zeroing (callers must not share mutated verts)
-    v = np.array(verts.reshape(-1, 3), dtype=np.float32, copy=True)
-    n = len(v)
+    src = np.asarray(verts).reshape(-1, 3)
+    n = int(src.shape[0])
+    if out is not None and out.shape[0] >= n and out.shape[1] == 3:
+        v = out[:n]
+        np.copyto(v, src.astype(np.float32, copy=False))
+    else:
+        v = np.array(src, dtype=np.float32, copy=True)
     if n < 100:
         return v
     aspect = float(orig_w) / orig_h
@@ -496,6 +501,131 @@ def depth_topdown(verts, out_h=FRAME_H, out_w=FRAME_W):
 
 
 
+
+def process_rs1_topdown(verts, out_obs, out_known, work_verts=None,
+                        out_h=FRAME_H, out_w=FRAME_W,
+                        near_threshold_m=0.30, near_min_pixels=50,
+                        overhang_near_m=0.30, overhang_far_m=0.70,
+                        overhang_row_min=10, overhang_row_max=50,
+                        soft_near_m=0.35, soft_far_m=1.00,
+                        soft_min_height_cm=5.0, soft_max_height_cm=30.0,
+                        soft_row_min=10, soft_row_max=80,
+                        lateral_col_margin=30,
+                        soft_min_pixels=100, overhang_min_pixels=80,
+                        floor_clip_m=TD_FLOOR_CLIP,
+                        large_obj_stride=8):
+    """RS1 topdown: dense ego+soft-low, sparse near/overhang.
+
+    Tables/hands/overhangs are big uniform — James: only a few samples needed.
+    Soft-low (dog-bed edges) + ego fill keep full mag=3 density for GSD.
+
+    large_obj_stride: subsample factor for near + overhang only (default 8).
+    Pixel thresholds for those reflexes scale down with the stride.
+    """
+    result = {
+        'near_field': False, 'near_close_count': 0, 'near_min_z': float('inf'),
+        'overhang': False, 'overhang_count': 0, 'overhang_median_z': float('inf'),
+        'soft_low': False, 'soft_low_count': 0, 'soft_low_median_height': float('inf'),
+    }
+    out_obs.fill(0)
+    out_known.fill(0)
+    if verts is None or len(verts) == 0:
+        return result
+
+    v = _clip_decimated_border(verts, out=work_verts)
+    z = v[:, 2]
+    valid = z > 0.01
+    if not np.any(valid):
+        return result
+
+    # --- Sparse large-object reflexes (near + overhang) ---
+    # Stride the cloud; scale min_pixels so trigger rate stays similar.
+    s = max(1, int(large_obj_stride))
+    z_s = z[::s]
+    valid_s = z_s > 0.01
+    near_min_s = max(3, int(math.ceil(near_min_pixels / float(s))))
+    ovh_min_s = max(3, int(math.ceil(overhang_min_pixels / float(s))))
+    if np.any(valid_s):
+        result['near_min_z'] = float(np.min(z_s[valid_s]))
+        near_mask_s = valid_s & (z_s < near_threshold_m)
+        # Report counts scaled back to full-cloud equivalent for logs/thresholds feel
+        result['near_close_count'] = int(np.sum(near_mask_s)) * s
+        result['near_field'] = int(np.sum(near_mask_s)) >= near_min_s
+
+        # Overhang: sparse mid-range + forward strip
+        mid_s = valid_s & (z_s >= overhang_near_m) & (z_s <= overhang_far_m)
+        if np.any(mid_s):
+            # Need xy of strided verts — index into v
+            idx = np.arange(0, len(v), s, dtype=np.int32)
+            idx = idx[mid_s]
+            v_mid = v[idx]
+            z_mid = v_mid[:, 2]
+            scale = np.float32(1.0 / TD_PX_SIZE)
+            center = np.float32([out_w * 0.5, out_h * 0.5])
+            p = v_mid[:, :2] * scale + center
+            cols, rows = p[:, 0], p[:, 1]
+            rows_rot = out_h - 1 - rows
+            cols_rot = out_w - 1 - cols
+            ovh_strip = (
+                (rows_rot >= overhang_row_min) & (rows_rot <= overhang_row_max) &
+                (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
+            )
+            if np.any(ovh_strip):
+                ovh_z = z_mid[ovh_strip]
+                result['overhang_count'] = int(len(ovh_z)) * s
+                result['overhang_median_z'] = float(np.median(ovh_z))
+                result['overhang'] = int(len(ovh_z)) >= ovh_min_s
+
+    # --- Dense ego scatter (GSD / obstacle map) ---
+    scale = np.float32(1.0 / TD_PX_SIZE)
+    center = np.float32([out_w * 0.5, out_h * 0.5])
+    v_valid = v[valid]
+    p_all = v_valid[:, :2] * scale + center
+    with np.errstate(invalid='ignore'):
+        ja, ia = p_all.astype(np.uint32).T
+    ma = (ia < np.uint32(out_h)) & (ja < np.uint32(out_w))
+    out_known[ia[ma], ja[ma]] = 255
+
+    obstacle = valid & (z < floor_clip_m)
+    if np.any(obstacle):
+        v_obs = v[obstacle]
+        p_obs = v_obs[:, :2] * scale + center
+        height_cm = np.clip(
+            ((floor_clip_m - v_obs[:, 2]) * 100).astype(np.int32),
+            1, 100).astype(np.uint8)
+        with np.errstate(invalid='ignore'):
+            jo, io = p_obs.astype(np.uint32).T
+        mo = (io < np.uint32(out_h)) & (jo < np.uint32(out_w))
+        np.maximum.at(out_obs, (io[mo], jo[mo]), height_cm[mo])
+
+    # --- Dense soft-low (dog-bed edges need detail) ---
+    soft_band = valid & (z >= soft_near_m) & (z <= soft_far_m)
+    if np.any(soft_band):
+        v_soft = v[soft_band]
+        z_soft = v_soft[:, 2]
+        height_cm = (floor_clip_m - z_soft) * 100.0
+        soft_height = (height_cm >= soft_min_height_cm) & (height_cm <= soft_max_height_cm)
+        if np.any(soft_height):
+            v_sh = v_soft[soft_height]
+            h_sh = height_cm[soft_height]
+            p = v_sh[:, :2] * scale + center
+            cols, rows = p[:, 0], p[:, 1]
+            rows_rot = out_h - 1 - rows
+            cols_rot = out_w - 1 - cols
+            soft_strip = (
+                (rows_rot >= soft_row_min) & (rows_rot <= soft_row_max) &
+                (cols_rot >= lateral_col_margin) & (cols_rot < out_w - lateral_col_margin)
+            )
+            if np.any(soft_strip):
+                soft_heights = h_sh[soft_strip]
+                result['soft_low_count'] = int(len(soft_heights))
+                result['soft_low_median_height'] = float(np.median(soft_heights))
+                result['soft_low'] = result['soft_low_count'] >= soft_min_pixels
+
+    return result
+
+
+
 class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
@@ -549,6 +679,8 @@ class Vision:
         # Pre-allocated depth processing buffers (cleared per-frame, not re-allocated)
         self._z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        # Mag=3 → ~45k verts; size for mag=1 headroom so copyto never reallocs
+        self._rs1_work_verts = np.zeros((848 * 480 // 1, 3), dtype=np.float32)
         self._z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
         self._k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
         self._kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -1052,71 +1184,44 @@ class Vision:
             self._z1[:] = 0
             self._k1[:] = 0
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
-                # Check for near-field hazard (table underside, hand, etc.) FIRST
-                # This is a REFLEX that triggers before floor-obstacle logic.
-                triggered, close_count, min_z = check_topdown_near_field(self._rs1.verts)
-                self._topdown_near_field = triggered
-                self._near_field_close_count = close_count
-                self._near_field_min_z = min_z
-                if triggered and not hasattr(self, '_near_field_log_n'):
-                    self._near_field_log_n = 0
-                if triggered:
-                    self._near_field_log_n += 1
+                # ONE clip + ONE pass (was 4× clip+scan → ~11ms at mag=3)
+                _rs1 = process_rs1_topdown(
+                    self._rs1.verts, self._z1, self._k1,
+                    work_verts=self._rs1_work_verts)
+                self._topdown_near_field = _rs1['near_field']
+                self._near_field_close_count = _rs1['near_close_count']
+                self._near_field_min_z = _rs1['near_min_z']
+                self._topdown_overhang_approach = _rs1['overhang']
+                self._overhang_approach_count = _rs1['overhang_count']
+                self._overhang_approach_median_z = _rs1['overhang_median_z']
+                self._topdown_soft_low_obstacle = _rs1['soft_low']
+                self._soft_low_obstacle_count = _rs1['soft_low_count']
+                self._soft_low_obstacle_median_height = _rs1['soft_low_median_height']
+                # Rate-limited reflex logs (every 90 frames while sticky)
+                if _rs1['near_field']:
+                    self._near_field_log_n = getattr(self, '_near_field_log_n', 0) + 1
                     if self._near_field_log_n == 1 or self._near_field_log_n % 90 == 0:
                         print("vision: NEAR-FIELD REFLEX triggered — "
-                              "close_px=%d min_z=%.3fm (table/hand <30cm from topdown)"
-                              % (close_count, min_z))
-                else:
-                    if hasattr(self, '_near_field_log_n') and self._near_field_log_n > 0:
-                        print("vision: NEAR-FIELD REFLEX cleared — "
-                              "close_px=%d min_z=%.3fm (after %d frames)"
-                              % (close_count, min_z, self._near_field_log_n))
-                        self._near_field_log_n = 0
-                
-                # Check for overhang approach (table underside at medium distance)
-                # Provides EARLY warning before near-field reflex (30-70cm vs <30cm).
-                ovh_triggered, ovh_count, ovh_median_z = check_topdown_overhang_approach(self._rs1.verts)
-                self._topdown_overhang_approach = ovh_triggered
-                self._overhang_approach_count = ovh_count
-                self._overhang_approach_median_z = ovh_median_z
-                if ovh_triggered and not hasattr(self, '_overhang_approach_log_n'):
-                    self._overhang_approach_log_n = 0
-                if ovh_triggered:
-                    self._overhang_approach_log_n += 1
+                              "close_px=%d min_z=%.3fm"
+                              % (_rs1['near_close_count'], _rs1['near_min_z']))
+                elif getattr(self, '_near_field_log_n', 0):
+                    self._near_field_log_n = 0
+                if _rs1['overhang']:
+                    self._overhang_approach_log_n = getattr(self, '_overhang_approach_log_n', 0) + 1
                     if self._overhang_approach_log_n == 1 or self._overhang_approach_log_n % 90 == 0:
                         print("vision: OVERHANG APPROACH detected — "
-                              "ovh_px=%d median_z=%.3fm (table/shelf ahead 30-70cm, blocks COMMIT)"
-                              % (ovh_count, ovh_median_z))
-                else:
-                    if hasattr(self, '_overhang_approach_log_n') and self._overhang_approach_log_n > 0:
-                        print("vision: OVERHANG APPROACH cleared — "
-                              "ovh_px=%d median_z=%.3fm (after %d frames)"
-                              % (ovh_count, ovh_median_z, self._overhang_approach_log_n))
-                        self._overhang_approach_log_n = 0
-                
-                # Check for soft low obstacles (dog bed, cushions, soft furniture)
-                # Detects LOW obstacles (5-30cm height) at medium distance (35cm-1m).
-                # Fills gap between near-field and overhang: soft ground-level hazards.
-                soft_low_triggered, soft_low_count, soft_low_height = check_topdown_soft_low_obstacle(self._rs1.verts)
-                self._topdown_soft_low_obstacle = soft_low_triggered
-                self._soft_low_obstacle_count = soft_low_count
-                self._soft_low_obstacle_median_height = soft_low_height
-                if soft_low_triggered and not hasattr(self, '_soft_low_obstacle_log_n'):
-                    self._soft_low_obstacle_log_n = 0
-                if soft_low_triggered:
-                    self._soft_low_obstacle_log_n += 1
+                              "ovh_px=%d median_z=%.3fm"
+                              % (_rs1['overhang_count'], _rs1['overhang_median_z']))
+                elif getattr(self, '_overhang_approach_log_n', 0):
+                    self._overhang_approach_log_n = 0
+                if _rs1['soft_low']:
+                    self._soft_low_obstacle_log_n = getattr(self, '_soft_low_obstacle_log_n', 0) + 1
                     if self._soft_low_obstacle_log_n == 1 or self._soft_low_obstacle_log_n % 90 == 0:
                         print("vision: SOFT LOW OBSTACLE detected — "
-                              "low_obs_px=%d median_h=%.1fcm (dog bed / cushion ahead, attenuate fwd)"
-                              % (soft_low_count, soft_low_height))
-                else:
-                    if hasattr(self, '_soft_low_obstacle_log_n') and self._soft_low_obstacle_log_n > 0:
-                        print("vision: SOFT LOW OBSTACLE cleared — "
-                              "low_obs_px=%d median_h=%.1fcm (after %d frames)"
-                              % (soft_low_count, soft_low_height, self._soft_low_obstacle_log_n))
-                        self._soft_low_obstacle_log_n = 0
-                
-                self._z1[:], self._k1[:] = depth_topdown(self._rs1.verts)
+                              "low_obs_px=%d median_h=%.1fcm"
+                              % (_rs1['soft_low_count'], _rs1['soft_low_median_height']))
+                elif getattr(self, '_soft_low_obstacle_log_n', 0):
+                    self._soft_low_obstacle_log_n = 0
             else:
                 self._topdown_near_field = False
                 self._near_field_close_count = 0
