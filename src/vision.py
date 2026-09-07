@@ -819,10 +819,11 @@ class Vision:
         mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
 
         # RS1 top-down rectangle: separate forward/other margins for tight approach.
-        # James 2026-09-07: Forward margin was 10px (too conservative), now 5px.
-        # This extends usable free space ~5cm closer to real obstacles forward.
-        TD_EDGE_SIDES = 10      # left, top, bottom margins (px)
-        TD_EDGE_FWD = 5         # forward (right) margin (px) — tighter for approach
+        # James 2026-09-07: Mask was stopping ~5cm short of real obstacles (e.g., box).
+        # Forward margin now matches obstacle distance (extend mask to front of box).
+        TD_EDGE_SIDES = 10          # left, top, bottom margins (px)
+        TD_FWD_MARGIN_CM = 5.0      # forward safety margin in cm (tune vs real obstacles)
+        TD_EDGE_FWD = int(TD_FWD_MARGIN_CM / (EGO_PX_SIZE * 100))  # convert cm to ego px
         td_col_end = FRAME_W + int(TD_X_OFFSET)     # 245
         mask[TD_EDGE_SIDES:FRAME_H - TD_EDGE_SIDES,
              TD_EDGE_SIDES:td_col_end - TD_EDGE_FWD] = 255
@@ -1806,10 +1807,11 @@ class Vision:
         """Create semi-transparent overlay of obs_mask on RS1 topdown RGB.
         
         Returns RGBA (H, W, 4) uint8 array showing:
-        - RGB background: RS1 topdown color (carpet, floor texture visible)
-        - Alpha overlay: White where mask is valid (255), transparent elsewhere
+        - RGB background: RS1 topdown color (carpet, floor texture, box visible)
+        - Green tint where mask is valid (observation region)
+        - Bright cyan border at mask edge (to see where it stops vs real obstacles)
         
-        This helps visualize the valid observation region and tune forward margin.
+        This helps visualize where the mask clips relative to real obstacles like the box.
         """
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
@@ -1818,13 +1820,21 @@ class Vision:
         rgb = self._rs1.color[::-1, ::-1].copy()
         h, w = rgb.shape[:2]
         
-        # Create RGBA overlay
+        # Create RGBA overlay with semi-transparent green tint over valid region
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb  # RGB channels from camera
         
-        # Alpha channel: semi-transparent white where mask is valid
-        # 128 = 50% transparent so floor texture remains visible
-        overlay[:, :, 3] = np.where(self._obs_mask > 0, 128, 0)
+        # Valid region: semi-transparent green tint (easier to see than white)
+        valid_mask = self._obs_mask > 0
+        overlay[valid_mask, 1] = np.clip(rgb[valid_mask, 1].astype(np.int16) + 60, 0, 255).astype(np.uint8)
+        overlay[:, :, 3] = np.where(valid_mask, 120, 0)
+        
+        # Draw bright cyan border at mask edge (makes boundary vs box super obvious)
+        # Sobel-like edge detection on the binary mask
+        import cv2
+        edges = cv2.Canny(self._obs_mask, 50, 150)
+        edge_px = edges > 0
+        overlay[edge_px] = [0, 255, 255, 255]  # Bright cyan, fully opaque
         
         return overlay
 
