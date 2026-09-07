@@ -86,7 +86,7 @@ class PeopleLive:
             from faces.people_behavior import create_people_behavior, GreetHours
 
             # Try InsightFace first (auto-falls back to face_recognition/opencv)
-            rec = FaceRecognizer(backend="auto", model_pack="buffalo_l")
+            rec = FaceRecognizer(backend="insightface", model_pack="buffalo_l")
             people = rec.list_people()
             print("people_live: gallery %s backend=%s" % (people, rec.backend))
 
