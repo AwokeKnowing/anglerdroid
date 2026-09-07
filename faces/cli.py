@@ -47,7 +47,7 @@ def load_image(path: str):
 
 def cmd_enroll(args):
     """Enroll a person from image(s)."""
-    recognizer = FaceRecognizer(gallery_path=args.gallery)
+    recognizer = FaceRecognizer(gallery_path=args.gallery, backend=args.backend, model_pack=args.model_pack)
     
     total = 0
     for img_path in args.images:
@@ -65,7 +65,7 @@ def cmd_enroll(args):
 
 def cmd_list(args):
     """List all enrolled people."""
-    recognizer = FaceRecognizer(gallery_path=args.gallery)
+    recognizer = FaceRecognizer(gallery_path=args.gallery, backend=args.backend, model_pack=args.model_pack)
     people = recognizer.list_people()
     
     if not people:
@@ -81,10 +81,10 @@ def cmd_list(args):
 
 def cmd_recognize(args):
     """Recognize faces in image."""
-    recognizer = FaceRecognizer(gallery_path=args.gallery)
+    recognizer = FaceRecognizer(gallery_path=args.gallery, backend=args.backend, model_pack=args.model_pack)
     
     img = load_image(args.image)
-    results = recognizer.recognize(img, threshold=args.threshold)
+    results = recognizer.recognize(img, threshold=args.threshold, margin=args.margin, log_scores=args.log_scores)
     
     if not results:
         print("No faces detected")
@@ -119,7 +119,7 @@ def cmd_webcam(args):
         print("Error: OpenCV required for webcam. Install opencv-python")
         sys.exit(1)
     
-    recognizer = FaceRecognizer(gallery_path=args.gallery)
+    recognizer = FaceRecognizer(gallery_path=args.gallery, backend=args.backend, model_pack=args.model_pack)
     
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -135,7 +135,7 @@ def cmd_webcam(args):
         if not ret:
             break
         
-        results = recognizer.recognize(frame, threshold=args.threshold)
+        results = recognizer.recognize(frame, threshold=args.threshold, margin=args.margin, log_scores=False)
         
         for name, confidence, (x, y, w, h) in results:
             color = (0, 255, 0) if name != "unknown" else (0, 165, 255)
@@ -175,7 +175,7 @@ def cmd_webcam(args):
 
 def cmd_remove(args):
     """Remove a person from database."""
-    recognizer = FaceRecognizer(gallery_path=args.gallery)
+    recognizer = FaceRecognizer(gallery_path=args.gallery, backend=args.backend, model_pack=args.model_pack)
     
     if recognizer.remove_person(args.name):
         print(f"✅ Removed {args.name}")
@@ -188,6 +188,12 @@ def main():
     parser = argparse.ArgumentParser(description="Face recognition CLI")
     parser.add_argument("--gallery", default=None,
                        help="Gallery path (default: ~/.kevin/faces)")
+    parser.add_argument("--backend", default="auto",
+                       choices=["auto", "insightface", "face_recognition", "opencv-dnn", "opencv-haar"],
+                       help="Recognition backend (default: auto)")
+    parser.add_argument("--model-pack", default="buffalo_l",
+                       choices=["buffalo_l", "buffalo_s"],
+                       help="InsightFace model pack (default: buffalo_l)")
     
     subparsers = parser.add_subparsers(dest="command", help="Command")
     
@@ -201,6 +207,10 @@ def main():
     recognize_parser.add_argument("image", help="Image path")
     recognize_parser.add_argument("--threshold", type=float, default=0.6,
                                  help="Recognition threshold (default: 0.6)")
+    recognize_parser.add_argument("--margin", type=float, default=0.05,
+                                 help="Second-best margin (default: 0.05)")
+    recognize_parser.add_argument("--log-scores", action="store_true",
+                                 help="Log recognition scores for debugging")
     recognize_parser.add_argument("--show", action="store_true",
                                  help="Show annotated image")
     
@@ -209,6 +219,8 @@ def main():
                               help="Camera index (default: 0)")
     webcam_parser.add_argument("--threshold", type=float, default=0.6,
                               help="Recognition threshold (default: 0.6)")
+    webcam_parser.add_argument("--margin", type=float, default=0.05,
+                              help="Second-best margin (default: 0.05)")
     
     remove_parser = subparsers.add_parser("remove", help="Remove a person")
     remove_parser.add_argument("name", help="Person's name")

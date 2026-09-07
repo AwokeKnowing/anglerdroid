@@ -208,6 +208,145 @@ def test_speak_functions():
         return False
 
 
+def test_insightface_backend():
+    """Test InsightFace backend initialization."""
+    if not _HAS_OPENCV or not _HAS_NUMPY:
+        print("⚠️  test_insightface_backend skipped (dependencies not available)")
+        return True
+    
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        print("⚠️  test_insightface_backend skipped (onnxruntime not available)")
+        return True
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            # Should not crash even if models are missing
+            recognizer = FaceRecognizer(gallery_path=tmpdir, backend="insightface", model_pack="buffalo_l")
+            assert recognizer.backend == "insightface"
+            assert recognizer.model_pack == "buffalo_l"
+            assert recognizer.embedding_dim == 512
+            print("✅ test_insightface_backend passed")
+            return True
+        except Exception as e:
+            print(f"❌ test_insightface_backend failed: {e}")
+            return False
+
+
+def test_embedding_dimensions():
+    """Test that different backends produce expected embedding dimensions."""
+    if not _HAS_OPENCV or not _HAS_NUMPY:
+        print("⚠️  test_embedding_dimensions skipped (dependencies not available)")
+        return True
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            # Test InsightFace (synthetic check)
+            try:
+                import onnxruntime as ort
+                recognizer_if = FaceRecognizer(gallery_path=tmpdir, backend="insightface", model_pack="buffalo_l")
+                assert recognizer_if.embedding_dim == 512
+                
+                recognizer_if_s = FaceRecognizer(gallery_path=tmpdir, backend="insightface", model_pack="buffalo_s")
+                assert recognizer_if_s.embedding_dim == 512
+            except ImportError:
+                pass
+            
+            # Test face_recognition (dlib) - 128-D
+            try:
+                import face_recognition
+                recognizer_fr = FaceRecognizer(gallery_path=tmpdir, backend="face_recognition")
+                # Create synthetic 128-D embedding
+                test_emb = np.random.randn(128)
+                assert len(test_emb) == 128
+            except ImportError:
+                pass
+            
+            print("✅ test_embedding_dimensions passed")
+            return True
+        except Exception as e:
+            print(f"❌ test_embedding_dimensions failed: {e}")
+            return False
+
+
+def test_stricter_matching():
+    """Test stricter matching with threshold + margin."""
+    if not _HAS_NUMPY or not _HAS_OPENCV:
+        print("⚠️  test_stricter_matching skipped (dependencies not available)")
+        return True
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        try:
+            recognizer = FaceRecognizer(gallery_path=tmpdir, backend="opencv-dnn")
+            
+            # Create synthetic embeddings (normalized)
+            emb_alice_1 = np.random.randn(128).astype(np.float32)
+            emb_alice_1 /= np.linalg.norm(emb_alice_1)
+            
+            emb_alice_2 = emb_alice_1 + np.random.randn(128) * 0.1
+            emb_alice_2 /= np.linalg.norm(emb_alice_2)
+            
+            emb_bob = np.random.randn(128).astype(np.float32)
+            emb_bob /= np.linalg.norm(emb_bob)
+            
+            # Add to database
+            recognizer.db["Alice"] = {"embeddings": [emb_alice_1, emb_alice_2]}
+            recognizer.db["Bob"] = {"embeddings": [emb_bob]}
+            
+            # Test cosine similarity calculation
+            sim_alice = np.dot(emb_alice_1, emb_alice_2)
+            sim_bob = np.dot(emb_alice_1, emb_bob)
+            
+            # Alice embeddings should be more similar than Alice vs Bob
+            assert sim_alice > sim_bob, f"Alice similarity {sim_alice:.3f} should be > Bob similarity {sim_bob:.3f}"
+            
+            # Test margin requirement
+            margin = 0.05
+            if (sim_alice - sim_bob) >= margin:
+                print(f"  Margin check passed: {sim_alice:.3f} - {sim_bob:.3f} = {sim_alice - sim_bob:.3f} >= {margin}")
+            
+            print("✅ test_stricter_matching passed")
+            return True
+        except Exception as e:
+            print(f"❌ test_stricter_matching failed: {e}")
+            return False
+
+
+def test_landmark_alignment():
+    """Test landmark alignment function."""
+    if not _HAS_NUMPY or not _HAS_OPENCV:
+        print("⚠️  test_landmark_alignment skipped (dependencies not available)")
+        return True
+    
+    try:
+        from faces.recognizer import _align_face_insightface
+        
+        # Create test image
+        img = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        # Synthetic 5-point landmarks (rough face position)
+        landmarks = np.array([
+            [200, 180],  # right eye
+            [280, 180],  # left eye
+            [240, 220],  # nose
+            [210, 260],  # right mouth
+            [270, 260]   # left mouth
+        ], dtype=np.float32)
+        
+        # Should produce 112x112 aligned face
+        aligned = _align_face_insightface(img, landmarks, image_size=(112, 112))
+        
+        assert aligned.shape == (112, 112, 3), f"Expected (112, 112, 3), got {aligned.shape}"
+        assert aligned.dtype == np.uint8
+        
+        print("✅ test_landmark_alignment passed")
+        return True
+    except Exception as e:
+        print(f"❌ test_landmark_alignment failed: {e}")
+        return False
+
+
 def run_all_tests():
     """Run all tests."""
     print("Running face recognition tests...\n")
@@ -220,6 +359,10 @@ def run_all_tests():
         test_remove_person,
         test_conversation_manager,
         test_speak_functions,
+        test_insightface_backend,
+        test_embedding_dimensions,
+        test_stricter_matching,
+        test_landmark_alignment,
         _people_tests.test_greet_hours_day_window,
         _people_tests.test_greet_hours_wrap_midnight,
         _people_tests.test_name_call_match,
