@@ -30,7 +30,9 @@ from robot_config import (FRAME_W, FRAME_H,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
                           FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES,
-                          RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT)
+                          RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT,
+                          WHEEL_HALF, FOOT_PAD_FWD, FOOT_PAD_BWD, FOOT_PAD_LAT,
+                          MAST_RADIUS_PX)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -1993,34 +1995,97 @@ class Vision:
           - Yellow outline: box edges
           - Cyan line: bumper/crop line at body front (should sit just before obstacles)
         
-        Boxes are scaled by RS1_VIZ_SCALE for camera-space visualization (ego-map boxes 
-        are 1 cm/px orthographic; RS1 color has perspective → boxes need scaling to cover 
-        robot hull in camera view). Tune RS1_VIZ_SCALE in robot_config.py to align boxes 
-        with actual robot body + wheels.
+        Boxes are rebuilt with scaled dimensions (ROBOT_W/H, WHEEL_HALF, pads × RS1_VIZ_SCALE)
+        for camera-space visualization (ego-map at 1 cm/px; RS1 color has perspective → need
+        scaled geometry). Tune RS1_VIZ_SCALE in robot_config.py to align with actual robot hull.
+        
+        This uses the same dimension-scaling approach as offline mask_tune dumps (scale dimensions,
+        rebuild boxes) NOT corner homothety. Map metric unchanged.
         """
         import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
 
-        def scale_box(x0, y0, x1, y1, scale, cx=RCX + RS1_VIZ_CX_SHIFT, cy=RCY):
-            """Scale box around viz center (cx shifted forward, cy) by scale factor."""
-            xs0 = cx + (x0 - cx) * scale
-            ys0 = cy + (y0 - cy) * scale
-            xs1 = cx + (x1 - cx) * scale
-            ys1 = cy + (y1 - cy) * scale
-            return int(round(xs0)), int(round(ys0)), int(round(xs1)), int(round(ys1))
+        def scaled_boxes(scale, cx_shift=RS1_VIZ_CX_SHIFT):
+            """Rebuild boxes with scaled dimensions (same logic as robot_config but scaled).
+            
+            Returns (under_robot_boxes, self_ignore_boxes) with scaled geometry.
+            Matches offline mask_tune dump_mask.py scaled_boxes() semantics.
+            """
+            # Scale dimensions
+            rw = int(round(ROBOT_W * scale))
+            rh = int(round(ROBOT_H * scale))
+            wh = int(round(WHEEL_HALF * scale))
+            pad_fwd = int(round(FOOT_PAD_FWD * scale))
+            pad_bwd = int(round(FOOT_PAD_BWD * scale))
+            pad_lat = int(round(FOOT_PAD_LAT * scale))
+            mast_r = int(round(MAST_RADIUS_PX * scale))
+            
+            # Scaled robot center (shifted forward in +x for viz)
+            rcx = RCX + cx_shift
+            rcy = RCY
+            
+            # Body box (scaled dimensions)
+            body_x0 = max(0, rcx - rw // 2 - pad_bwd)
+            body_y0 = max(0, rcy - rh // 2)
+            body_x1 = min(FRAME_W, rcx + rw // 2 + pad_fwd)
+            body_y1 = min(FRAME_H, rcy + rh // 2)
+            
+            # Wheel boxes (4 corners, scaled placement)
+            # Front-left
+            wfl_x0 = max(0, rcx + rw // 2 - 5 - wh)
+            wfl_y0 = max(0, rcy - rh // 2 - pad_lat - wh)
+            wfl_x1 = min(FRAME_W, wfl_x0 + 2 * wh)
+            wfl_y1 = min(FRAME_H, wfl_y0 + 2 * wh)
+            
+            # Front-right
+            wfr_x0 = max(0, rcx + rw // 2 - 5 - wh)
+            wfr_y0 = max(0, rcy + rh // 2 + pad_lat - wh)
+            wfr_x1 = min(FRAME_W, wfr_x0 + 2 * wh)
+            wfr_y1 = min(FRAME_H, wfr_y0 + 2 * wh)
+            
+            # Back-left
+            wbl_x0 = max(0, rcx - rw // 2 + 5 - wh)
+            wbl_y0 = max(0, rcy - rh // 2 - pad_lat - wh)
+            wbl_x1 = min(FRAME_W, wbl_x0 + 2 * wh)
+            wbl_y1 = min(FRAME_H, wbl_y0 + 2 * wh)
+            
+            # Back-right
+            wbr_x0 = max(0, rcx - rw // 2 + 5 - wh)
+            wbr_y0 = max(0, rcy + rh // 2 + pad_lat - wh)
+            wbr_x1 = min(FRAME_W, wbr_x0 + 2 * wh)
+            wbr_y1 = min(FRAME_H, wbr_y0 + 2 * wh)
+            
+            under_boxes = [
+                (body_x0, body_y0, body_x1, body_y1),
+                (wfl_x0, wfl_y0, wfl_x1, wfl_y1),
+                (wfr_x0, wfr_y0, wfr_x1, wfr_y1),
+                (wbl_x0, wbl_y0, wbl_x1, wbl_y1),
+                (wbr_x0, wbr_y0, wbr_x1, wbr_y1),
+            ]
+            
+            # Mast self-ignore: scaled strip around centerline
+            mast_x0 = max(0, rcx - rw // 2 - pad_bwd)
+            mast_y0 = max(0, rcy - mast_r)
+            mast_x1 = min(FRAME_W, rcx + rw // 2 + pad_fwd)
+            mast_y1 = min(FRAME_H, rcy + mast_r)
+            
+            ignore_boxes = [
+                (mast_x0, mast_y0, mast_x1, mast_y1),
+            ]
+            
+            return under_boxes, ignore_boxes
 
         rgb = self._rs1.color[::-1, ::-1].copy()
         h, w = rgb.shape[:2]
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb
 
+        under_boxes, ignore_boxes = scaled_boxes(RS1_VIZ_SCALE)
+
         # Under-robot boxes: green tint (marked clear+known)
         overlay[:, :, 3] = 255
-        for bx0, by0, bx1, by1 in UNDER_ROBOT_BOXES:
-            x0, y0, x1, y1 = scale_box(bx0, by0, bx1, by1, RS1_VIZ_SCALE)
-            x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
-            y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
+        for x0, y0, x1, y1 in under_boxes:
             if x1 <= x0 or y1 <= y0:
                 continue
             m = np.zeros((h, w), dtype=bool)
@@ -2031,10 +2096,7 @@ class Vision:
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         
         # Self-ignore boxes: blue tint (removed from obs, NOT marked clear)
-        for bx0, by0, bx1, by1 in SELF_IGNORE_BOXES:
-            x0, y0, x1, y1 = scale_box(bx0, by0, bx1, by1, RS1_VIZ_SCALE)
-            x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
-            y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
+        for x0, y0, x1, y1 in ignore_boxes:
             if x1 <= x0 or y1 <= y0:
                 continue
             m = np.zeros((h, w), dtype=bool)
@@ -2044,15 +2106,12 @@ class Vision:
             overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + 120, 0, 255).astype(np.uint8)  # blue
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         
-        # Cyan forward crop line on first under-robot box (body floor bumper)
-        if UNDER_ROBOT_BOXES:
-            body_bx0, body_by0, body_bx1, body_by1 = UNDER_ROBOT_BOXES[0]
-            body_x0, body_y0, body_x1, body_y1 = scale_box(body_bx0, body_by0, body_bx1, body_by1, RS1_VIZ_SCALE)
-            y0 = max(0, min(h, body_y0))
-            y1 = max(0, min(h, body_y1))
+        # Cyan forward crop line on body floor bumper (first under-robot box)
+        if under_boxes:
+            body_x0, body_y0, body_x1, body_y1 = under_boxes[0]
             fx = min(w - 1, max(0, body_x1 - 1))
-            if y1 > y0:
-                overlay[y0:y1, fx, :] = [0, 255, 255, 255]  # cyan
+            if body_y1 > body_y0:
+                overlay[body_y0:body_y1, fx, :] = [0, 255, 255, 255]  # cyan
         return overlay
 
     def get_rs1_trust_mask_overlay(self):
