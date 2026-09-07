@@ -13,8 +13,46 @@ Conversational face recognition for Kevin with enrollment, greetings, and persis
 - **Higher accuracy**: 0.7-0.9 cosine similarity (vs 0.4-0.5 SFace)
 - **Stricter matching**: Threshold + margin checks reduce false IDs
 - **Fast on Jetson**: ~20ms per face on Orin NX with CUDA
+- **Interactive enrollment**: Politely asks unknown faces for their name
 
 **See**: [`docs/INSIGHTFACE_UPGRADE.md`](../docs/INSIGHTFACE_UPGRADE.md) for model download, setup, and migration guide.
+
+## 🎯 Interactive Live Enrollment (NEW)
+
+Kevin now handles unknown faces gracefully with natural conversation:
+
+**Workflow**:
+1. Face detected with **low confidence** (<90%)
+2. Polite prompt: *"Hi! I don't think we've met. What's your name?"*
+3. Collect name from ASR (English/Spanish auto-detect)
+4. Capture 3-5 live face crops from robot webcam
+5. Enroll with InsightFace backend
+6. Confirm: *"Nice to meet you, {name}!"*
+7. 5-minute cooldown before re-prompting
+
+**Features**:
+- **Curious personality**: Actively learns who you are
+- **Polite timeout**: Leaves if no response after 15s
+- **Bilingual**: English/Spanish auto-switch
+- **Domain-matched**: Captures from live robot webcam (no phone gallery)
+- **Cooldown protected**: Won't spam re-prompts
+
+**Integration**:
+```python
+behavior = create_people_behavior(
+    recognizer=recognizer,
+    enable_live_enrollment=True,
+    enrollment_confidence_threshold=0.90  # User-facing "90%" bar
+)
+
+# In perception loop
+action = behavior.on_face_seen(name, confidence, box, image=frame, landmarks=lm)
+
+# In ASR callback
+action = behavior.on_transcript(transcript, language="en")
+```
+
+See tests in `faces/test_live_enrollment.py`.
 
 ## Features
 

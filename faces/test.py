@@ -389,9 +389,11 @@ def run_all_tests():
         print(f"❌ {len(failed)} test(s) failed:")
         for name in failed:
             print(f"  - {name}")
+        print("\nNote: Run 'python -m faces.test_live_enrollment' for live enrollment tests")
         sys.exit(1)
     else:
         print(f"✅ All {len(tests)} tests passed")
+        print("\nNote: Run 'python -m faces.test_live_enrollment' for live enrollment tests")
         sys.exit(0)
 
 

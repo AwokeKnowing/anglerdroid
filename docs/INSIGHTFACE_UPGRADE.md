@@ -235,9 +235,123 @@ Face recognition scores: james:0.782 (margin=0.215)
 - `faces/recognizer.py` - Added InsightFace backend, landmark alignment, stricter matching
 - `faces/rebuild_embeddings.py` - Script to rebuild database with new backend (NEW)
 - `faces/enroll_live.py` - Live webcam enrollment for domain gap (NEW)
+- `faces/live_enrollment.py` - Interactive enrollment manager for unknown faces (NEW)
+- `faces/people_behavior.py` - Integrated live enrollment flow (UPDATED)
 - `faces/test.py` - Added InsightFace tests with synthetic embeddings
+- `faces/test_live_enrollment.py` - Tests for interactive enrollment (NEW)
 - `src/requirements.txt` - Added onnxruntime-gpu
 - `docs/INSIGHTFACE_UPGRADE.md` - This document (NEW)
+
+## Interactive Live Enrollment
+
+**NEW**: Kevin now handles unknown faces gracefully with interactive enrollment.
+
+### Workflow
+
+1. **Face detected** with low confidence (<90% user-facing threshold)
+2. **Polite prompt**: "Hi! I don't think we've met. What's your name?"
+3. **Name collection** from ASR (English/Spanish auto-detect)
+4. **Sample collection**: 3-5 live face crops from robot webcam
+5. **Enrollment**: Add to gallery with InsightFace embeddings
+6. **Confirmation**: "Nice to meet you, {name}!"
+7. **Cooldown**: 5-minute cooldown before re-prompting
+
+### Kevin Personality
+- **Curious**: Actively wants to learn who you are
+- **Calm**: Non-pushy, polite timeout if no response
+- **Clean humor**: Friendly but professional
+- **Bilingual**: Starts English, switches to Spanish if detected
+
+### Confidence Mapping
+
+**User-facing "90%" bar** maps to internal cosine threshold with margin:
+
+| User confidence | Internal threshold | Margin | Action |
+|-----------------|-------------------|--------|--------|
+| >= 90% | cosine >= 0.60 | + 0.05 margin | Greet normally |
+| < 90% | cosine < 0.60 OR margin fail | - | Prompt for enrollment |
+
+This keeps false IDs rare (<1%) while still enrolling uncertain faces.
+
+### Timeout Behavior
+
+If no name is provided within 15 seconds:
+- Kevin politely leaves: "No worries! Let me know if you need anything."
+- No enrollment occurs
+- Cooldown starts (won't re-prompt for 5 minutes)
+
+### Safety & Privacy
+
+- ✅ **Speech + camera only** (no driving required)
+- ✅ **Live samples** from robot webcam (matches viewing conditions)
+- ✅ **Never commits** face images to git (.gitignore enforced)
+- ✅ **User-initiated** (only happens when face is seen, not proactive)
+- ✅ **Cooldown protected** (won't spam re-prompts)
+
+### Integration
+
+Wire into your perception loop:
+
+```python
+from faces.recognizer import FaceRecognizer
+from faces.people_behavior import create_people_behavior
+
+# Setup
+recognizer = FaceRecognizer(backend="insightface", model_pack="buffalo_l")
+behavior = create_people_behavior(
+    speak_fn=your_speak_function,
+    recognizer=recognizer,
+    enable_live_enrollment=True,
+    enrollment_confidence_threshold=0.90  # User-facing "90%" bar
+)
+
+# In perception loop
+results = recognizer.recognize(frame, threshold=0.60, margin=0.05, log_scores=True)
+
+for name, confidence, box in results:
+    # Handle face with enrollment integration
+    action = behavior.on_face_seen(
+        name=name,
+        confidence=confidence,
+        box=box,
+        image=frame,  # Pass frame for sample collection
+        landmarks=landmarks if available else None,
+        speak=True
+    )
+    
+    if action:
+        print(f"Action: {action.kind} - {action.utterance}")
+
+# In ASR callback
+def on_speech(transcript, language="en"):
+    action = behavior.on_transcript(
+        transcript,
+        language=language,
+        speak=True
+    )
+    if action:
+        print(f"Action: {action.kind} - {action.utterance}")
+```
+
+### Testing
+
+Run live enrollment tests:
+```bash
+python3 -m faces.test_live_enrollment
+
+# Tests:
+# - Unknown face → prompt for name
+# - Low-confidence known → treat as unknown
+# - Name collection from ASR
+# - Sample collection (3-5 crops)
+# - Timeout after 15s
+# - Cooldown respects 5-minute window
+# - High confidence (≥90%) skips enrollment
+```
+
+All tests use mocked speech/images (no real household photos).
+
+## Files Changed
 
 ## Performance Targets
 

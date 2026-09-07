@@ -5,6 +5,7 @@ Provides:
   - NameCallResponder: react when someone says Kevin's name
   - DirectionalHelp: map simple help / direction asks to utterances
     (+ optional goal_hint dict for a future mid-layer — not wired)
+  - LiveEnrollmentIntegration: handle unknown faces with interactive enrollment
 
 These are code-only stubs. Do not enable on hardware until re-arm criteria
 are met and the user asks.
@@ -16,6 +17,13 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+
+try:
+    from faces.live_enrollment import LiveEnrollmentManager
+    _HAS_LIVE_ENROLLMENT = True
+except ImportError:
+    _HAS_LIVE_ENROLLMENT = False
+    LiveEnrollmentManager = None
 
 
 DEFAULT_GREET_START = 8   # inclusive local hour
@@ -255,7 +263,7 @@ class DirectionalHelp:
 
 
 class PeopleBehaviorStub:
-    """Compose greet-hours + name-call + directional help. Speak only; no drive."""
+    """Compose greet-hours + name-call + directional help + live enrollment. Speak only; no drive."""
 
     def __init__(
         self,
@@ -263,6 +271,9 @@ class PeopleBehaviorStub:
         greet_hours: Optional[GreetHours] = None,
         cooldown_seconds: float = 300.0,
         volume: float = 0.1,
+        recognizer = None,
+        enable_live_enrollment: bool = True,
+        enrollment_confidence_threshold: float = 0.90,
     ):
         self.speak_fn = speak_fn if speak_fn is not None else self._stub_speak
         self.greet_hours = greet_hours or GreetHours()
@@ -273,7 +284,21 @@ class PeopleBehaviorStub:
         self._last_greet: Dict[str, float] = {}
         self._last_name_call = 0.0
         self.enabled_on_hardware = False  # hard flag — never auto-arm
-
+        
+        # Live enrollment manager
+        self.enrollment_manager = None
+        if enable_live_enrollment and recognizer is not None and _HAS_LIVE_ENROLLMENT:
+            self.enrollment_manager = LiveEnrollmentManager(
+                recognizer=recognizer,
+                speak_fn=self.speak_fn,
+                confidence_threshold=enrollment_confidence_threshold,
+                min_samples=3,
+                max_samples=5,
+                session_timeout=15.0,
+                cooldown_seconds=cooldown_seconds,
+                language="en"
+            )
+        
     def _stub_speak(self, text: str) -> None:
         print(f"🔊 [people @ {self.volume:.0%}]: {text}")
 
@@ -287,21 +312,108 @@ class PeopleBehaviorStub:
     def on_face_seen(
         self,
         name: str,
+        confidence: float,
+        box: Tuple[int, int, int, int],
+        image = None,
+        landmarks = None,
         *,
         hour: Optional[int] = None,
         now: Optional[float] = None,
         speak: bool = True,
     ) -> Optional[PeopleAction]:
-        """Proactive greet for a known face, gated by greet-hours + cooldown."""
-        if not name or name == "unknown":
+        """Handle face detection with recognition result.
+        
+        If confidence is low (<90% by default), triggers interactive enrollment.
+        If recognized with high confidence, greets if appropriate.
+        
+        Args:
+            name: Recognized name or "unknown"
+            confidence: Recognition confidence (0.0-1.0)
+            box: Face bounding box (x, y, w, h)
+            image: Optional BGR image for enrollment samples
+            landmarks: Optional 5-point landmarks
+            hour: Optional hour override
+            now: Optional time override
+            speak: Whether to speak greetings/prompts
+        
+        Returns:
+            PeopleAction or None
+        """
+        t = time.time() if now is None else float(now)
+        
+        # Check if enrollment session is active
+        if self.enrollment_manager is not None and self.enrollment_manager.is_session_active():
+            session = self.enrollment_manager.active_session
+            
+            # Check timeout
+            timed_out, leave_msg = self.enrollment_manager.check_timeout(now=t)
+            if timed_out:
+                return PeopleAction(
+                    kind="enrollment_timeout",
+                    utterance=leave_msg,
+                    meta={"reason": "no_name_received"}
+                )
+            
+            # Collecting samples?
+            if session.person_name is not None and image is not None:
+                collected, n_samples, n_needed = self.enrollment_manager.collect_sample(image, box, landmarks)
+                
+                if collected:
+                    # Check if we have enough samples
+                    if session.is_complete():
+                        success, msg = self.enrollment_manager.finalize_enrollment()
+                        if success:
+                            return PeopleAction(
+                                kind="enrollment_complete",
+                                utterance=msg,
+                                meta={"name": session.person_name, "samples": n_samples}
+                            )
+                        else:
+                            return PeopleAction(
+                                kind="enrollment_failed",
+                                utterance=msg,
+                                meta={"name": session.person_name}
+                            )
+                
+                # Still collecting
+                return PeopleAction(
+                    kind="enrollment_collecting",
+                    utterance="",
+                    meta={"samples": n_samples, "needed": n_needed}
+                )
+            
+            # Waiting for name from ASR (handled in on_transcript)
             return None
+        
+        # Unknown or low-confidence face?
+        if name == "unknown" or confidence < (self.enrollment_manager.confidence_threshold if self.enrollment_manager else 0.90):
+            if self.enrollment_manager is not None:
+                # Should we start enrollment?
+                if self.enrollment_manager.should_enroll(confidence, box, now=t):
+                    prompt = self.enrollment_manager.start_session(box, language="en", now=t)
+                    if speak:
+                        pass  # Already spoken in start_session
+                    return PeopleAction(
+                        kind="enrollment_prompt",
+                        utterance=prompt,
+                        meta={"confidence": confidence, "box": box}
+                    )
+            
+            # Don't pretend to know them, just log
+            return PeopleAction(
+                kind="face_unknown",
+                utterance="",
+                meta={"confidence": confidence, "threshold_failed": True}
+            )
+        
+        # High-confidence recognition: proceed with greeting
         if not self.can_greet_now(hour):
             return PeopleAction(
                 kind="greet",
                 utterance="",
                 meta={"skipped": "outside_greet_hours", "name": name},
             )
-        t = time.time() if now is None else float(now)
+        
         last = self._last_greet.get(name, 0.0)
         if t - last < self.cooldown_seconds:
             return PeopleAction(
@@ -309,6 +421,7 @@ class PeopleBehaviorStub:
                 utterance="",
                 meta={"skipped": "cooldown", "name": name},
             )
+        
         # Lightweight time-of-day phrase (mirrors conversation.py buckets).
         h = time.localtime().tm_hour if hour is None else int(hour)
         if 5 <= h < 12:
@@ -317,7 +430,8 @@ class PeopleBehaviorStub:
             utter = f"Hi {name}!"
         else:
             utter = f"Good evening, {name}!"
-        action = PeopleAction(kind="greet", utterance=utter, meta={"name": name})
+        
+        action = PeopleAction(kind="greet", utterance=utter, meta={"name": name, "confidence": confidence})
         self._last_greet[name] = t
         if speak and utter:
             self._speak(utter)
@@ -329,12 +443,47 @@ class PeopleBehaviorStub:
         *,
         now: Optional[float] = None,
         speak: bool = True,
+        language: str = "en",
     ) -> Optional[PeopleAction]:
-        """Handle name-call and/or directional help from ASR text."""
+        """Handle name-call and/or directional help from ASR text.
+        
+        Also handles name responses during enrollment sessions.
+        
+        Args:
+            transcript: ASR text
+            now: Optional time override
+            speak: Whether to speak responses
+            language: Detected language ("en" or "es")
+        """
         text = (transcript or "").strip()
         if not text:
             return None
         t = time.time() if now is None else float(now)
+
+        # Check if enrollment session is waiting for name
+        if self.enrollment_manager is not None and self.enrollment_manager.is_session_active():
+            session = self.enrollment_manager.active_session
+            if session.person_name is None:
+                # Extract name from transcript
+                # Simple heuristic: remove common prefixes
+                name = text
+                for prefix in ["my name is", "i'm", "i am", "call me", "it's", "this is",
+                              "me llamo", "soy", "mi nombre es"]:
+                    if name.lower().startswith(prefix):
+                        name = name[len(prefix):].strip()
+                        break
+                
+                # Clean name (remove trailing punctuation, etc)
+                name = re.sub(r'[^\w\s-]', '', name).strip()
+                
+                if name:
+                    # Acknowledge name and prepare to collect samples
+                    ack = self.enrollment_manager.on_name_received(name, language)
+                    return PeopleAction(
+                        kind="enrollment_name_received",
+                        utterance=ack,
+                        meta={"name": name, "language": language}
+                    )
 
         name_action = self.name_call.respond(text)
         help_action = self.directional.respond(text)
@@ -401,11 +550,28 @@ def create_people_behavior(
     greet_end: int = DEFAULT_GREET_END,
     cooldown_seconds: float = 300.0,
     volume: float = 0.1,
+    recognizer = None,
+    enable_live_enrollment: bool = True,
+    enrollment_confidence_threshold: float = 0.90,
 ) -> PeopleBehaviorStub:
-    """Factory for offline demos / tests. Does not touch main.py or hardware."""
+    """Factory for offline demos / tests. Does not touch main.py or hardware.
+    
+    Args:
+        speak_fn: Speech function
+        greet_start: Greet window start hour (0-23)
+        greet_end: Greet window end hour (0-24)
+        cooldown_seconds: Seconds between greets/prompts
+        volume: Speech volume (0.0-1.0)
+        recognizer: FaceRecognizer instance for live enrollment
+        enable_live_enrollment: Enable interactive enrollment for unknown faces
+        enrollment_confidence_threshold: User-facing confidence bar (0.90 = 90%)
+    """
     return PeopleBehaviorStub(
         speak_fn=speak_fn,
         greet_hours=GreetHours(start_hour=greet_start, end_hour=greet_end),
         cooldown_seconds=cooldown_seconds,
         volume=volume,
+        recognizer=recognizer,
+        enable_live_enrollment=enable_live_enrollment,
+        enrollment_confidence_threshold=enrollment_confidence_threshold,
     )
