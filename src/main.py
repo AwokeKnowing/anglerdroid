@@ -465,6 +465,7 @@ def main():
             pass
         if wb:
             wb.shutdown()
+        rerun_logger.shutdown()
         print("main: shutdown complete")
 
 
