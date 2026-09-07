@@ -42,6 +42,7 @@ class FrameBudget:
     DROPPABLE = 1
     
     # Stage definitions: name -> priority level
+    # Main loop stages:
     STAGE_PRIORITIES = {
         "atlas": CRITICAL,
         "safety": CRITICAL,
@@ -50,15 +51,30 @@ class FrameBudget:
         "tool_calls": DROPPABLE,
     }
     
-    def __init__(self, budget_ms: float, shed_threshold: float = 0.85):
+    # Vision capture loop stages:
+    # See vision.py _capture_loop() for stage definitions
+    CAPTURE_STAGE_PRIORITIES = {
+        "grab": CRITICAL,           # Camera frame capture (blocking)
+        "rs1_process": CRITICAL,    # Topdown depth (safety ground truth)
+        "rs2_process": DROPPABLE,   # Forward depth (can fallback to topdown only)
+        "obs_combine": CRITICAL,    # Combine obstacles (fast, needed for safety)
+        "odom": DROPPABLE,          # Odometry update (throttleable with wheelbase=None)
+        "gmap": DROPPABLE,          # Global map SLAM updates (expensive, non-safety-critical)
+        "safety_update": CRITICAL,  # Safety scale computation (must run)
+        "render": CRITICAL,         # Atlas render for main loop (needed by UI)
+    }
+    
+    def __init__(self, budget_ms: float, shed_threshold: float = 0.85, use_capture_priorities: bool = False):
         """
         Args:
             budget_ms: Frame time budget in milliseconds (33.3 for 30 Hz)
             shed_threshold: Fraction of budget (0.0-1.0) that triggers shedding
+            use_capture_priorities: If True, use CAPTURE_STAGE_PRIORITIES instead of STAGE_PRIORITIES
         """
         self.budget_ms = budget_ms
         self.shed_threshold = shed_threshold
         self.shed_ms = budget_ms * shed_threshold
+        self.use_capture_priorities = use_capture_priorities
         
         self.frame_start_time = 0.0
         self.accumulated_ms = 0.0
@@ -90,7 +106,8 @@ class FrameBudget:
         Critical stages always run.
         Droppable stages are skipped if budget is exceeded.
         """
-        priority = self.STAGE_PRIORITIES.get(stage_name, self.DROPPABLE)
+        priorities = self.CAPTURE_STAGE_PRIORITIES if self.use_capture_priorities else self.STAGE_PRIORITIES
+        priority = priorities.get(stage_name, self.DROPPABLE)
         
         if priority == self.CRITICAL:
             return True

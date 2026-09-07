@@ -22,6 +22,8 @@ import time
 import numpy as np
 import cv2
 
+from loop_timing import FrameBudget
+
 from robot_config import (FRAME_W, FRAME_H,
                           CROSSHAIR_CX, CROSSHAIR_CY, EGO_PX_SIZE,
                           WHEEL_RADIUS_M, WHEELBASE_M,
@@ -483,6 +485,15 @@ class Vision:
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
 
+        # Capture loop budget for 30 Hz frame timing
+        CAPTURE_BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 Hz
+        CAPTURE_SHED_THRESHOLD = 0.85  # Shed droppable stages if >85% budget used
+        self._capture_budget = FrameBudget(
+            budget_ms=CAPTURE_BUDGET_MS,
+            shed_threshold=CAPTURE_SHED_THRESHOLD,
+            use_capture_priorities=True
+        )
+
         self._running = False
         self._thread = None
         self._rs1 = None
@@ -844,6 +855,7 @@ class Vision:
 
         while self._running:
             _t0 = time.monotonic()
+            self._capture_budget.reset_frame()
 
             try:
                 # Parallel grabs so dual RealSense waits overlap (not sum).
@@ -1024,18 +1036,21 @@ class Vision:
             _t_rs1 = time.monotonic()
 
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
+            # DROPPABLE: Can fallback to topdown-only if budget tight
             z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
             _raw_scatter = None
             _dbg = self.debug_depth
-            if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
-                if getattr(self, '_pitch_cal_request', False):
-                    self._calibrate_rs2_pitch(self._rs2.verts)
-                rs2_clean = _clip_decimated_border(self._rs2.verts)
-                _gpu_result = self._gpu.depth_forward_gpu(
-                    rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
-                if _gpu_result is not None:
-                    z2, k2, _raw_scatter = _gpu_result
+            if self._capture_budget.should_run("rs2_process"):
+                with self._capture_budget.stage("rs2_process"):
+                    if self._rs2 and self._rs2.ok and self._rs2.verts is not None:
+                        if getattr(self, '_pitch_cal_request', False):
+                            self._calibrate_rs2_pitch(self._rs2.verts)
+                        rs2_clean = _clip_decimated_border(self._rs2.verts)
+                        _gpu_result = self._gpu.depth_forward_gpu(
+                            rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
+                        if _gpu_result is not None:
+                            z2, k2, _raw_scatter = _gpu_result
             obs2 = np.rot90(z2, k=-1)
             known2 = np.rot90(k2, k=-1)
             _t_depth = time.monotonic()
@@ -1176,27 +1191,30 @@ class Vision:
                     skip_slam_update = True
                     skip_reason = "stuck"
             
-            if not skip_slam_update:
-                self._gpu.gmap_update_gpu(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE),
-                    free_range_mask=self._free_range_mask)
-                self._global_map.keyframe_check(
-                    obs_combined, known_combined,
-                    cap_x, cap_y, cap_theta,
-                    rcx_f, rcy_f, float(TD_PX_SIZE))
-                
-                # Sync GPU map after loop closure rebuild
-                if self._global_map.needs_gpu_sync():
-                    cpu_map, cpu_height = self._global_map.get_cpu_map()
-                    self._gpu.gmap_reset(cpu_map, cpu_height)
-                    self._global_map.clear_gpu_sync_flag()
-                    print("vision: GPU gmap synchronized after loop closure")
+            # GMAP updates - DROPPABLE (expensive GPU ops, non-safety-critical)
+            if not skip_slam_update and self._capture_budget.should_run("gmap"):
+                with self._capture_budget.stage("gmap"):
+                    self._gpu.gmap_update_gpu(
+                        obs_combined, known_combined,
+                        cap_x, cap_y, cap_theta,
+                        rcx_f, rcy_f, float(TD_PX_SIZE),
+                        free_range_mask=self._free_range_mask)
+                    self._global_map.keyframe_check(
+                        obs_combined, known_combined,
+                        cap_x, cap_y, cap_theta,
+                        rcx_f, rcy_f, float(TD_PX_SIZE))
+                    
+                    # Sync GPU map after loop closure rebuild
+                    if self._global_map.needs_gpu_sync():
+                        cpu_map, cpu_height = self._global_map.get_cpu_map()
+                        self._gpu.gmap_reset(cpu_map, cpu_height)
+                        self._global_map.clear_gpu_sync_flag()
+                        print("vision: GPU gmap synchronized after loop closure")
             else:
                 # Log skip first time and periodically
                 if not hasattr(self, '_slam_skip_warned') or self._slam_skip_warned != skip_reason:
-                    print(f"⚠️  SLAM update skipped: {skip_reason} (pose not ground truth)")
+                    if skip_slam_update:
+                        print(f"⚠️  SLAM update skipped: {skip_reason} (pose not ground truth)")
                     self._slam_skip_warned = skip_reason
             
             _t_gmap_up = time.monotonic()
@@ -1350,9 +1368,21 @@ class Vision:
                                 _t_end - _t_safety))
             if len(_loop_times) % 300 == 0:
                 avg = np.mean(_loop_times[-300:], axis=0) * 1000
+                total_avg = sum(avg)
+                
+                # Get budget stats
+                lifetime = self._capture_budget.get_lifetime_stats()
+                shed_counts = lifetime.get("shed_counts", {})
+                
+                # Build shed info
+                shed_info = ""
+                if shed_counts:
+                    shed_parts = ["%s=%d" % (k, v) for k, v in sorted(shed_counts.items())]
+                    shed_info = "  shed:[%s]" % ",".join(shed_parts)
+                
                 print("capture: grab=%.1f rs1=%.1f rs2=%.1f obs=%.1f odom=%.1f "
                       "gmap=%.1f safety=%.1f render=%.1f "
-                      "TOTAL=%.1fms" % (*avg, sum(avg)))
+                      "TOTAL=%.1fms (budget %.1fms @ 30Hz)%s" % (*avg, total_avg, 33.3, shed_info))
 
     def stop(self):
         self._running = False
