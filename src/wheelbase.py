@@ -77,6 +77,7 @@ class WheelBase:
         self.stale_command_thread = None
         self._is_closed_loop = False
         self._is_idle = True
+        self._can_bus_failed = False  # Flag: CAN bus has failed, no further motion commands
         self._last_sent_left = None
         self._last_sent_right = None
         self._last_send_time = 0.0
@@ -360,13 +361,65 @@ class WheelBase:
         except can.CanOperationError as e:
             print(f"Warning during idle transition: {e}")
 
+    def _handle_can_failure(self, error, context="unknown"):
+        """Handle catastrophic CAN bus failure.
+        
+        When the CAN bus fails (device removed, cable unplugged, etc.), we:
+        1. Log the error with context
+        2. Set the failure flag to prevent further motion commands
+        3. Try to stop the robot (best effort, may fail if bus is truly gone)
+        4. Mark as idle to prevent watchdog/state confusion
+        
+        After this, the wheelbase will no-op all motion commands gracefully.
+        The main loop should catch the raised exception and shut down cleanly.
+        """
+        if self._can_bus_failed:
+            return  # Already handled
+        
+        self._can_bus_failed = True
+        print(f"❌ FATAL: CAN bus failure during {context}: {error}")
+        print(f"   CAN operations are no longer possible. Wheelbase disabled.")
+        print(f"   Attempting best-effort stop (may fail)...")
+        
+        # Best-effort attempt to stop (likely to fail if bus is gone)
+        try:
+            with self.bus_lock:
+                self.left.set_velocity(0.0)
+                self.right.set_velocity(0.0)
+                self.left.disable_watchdog()
+                self.right.disable_watchdog()
+                self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
+                self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
+            print(f"   Best-effort stop succeeded (bus may have recovered briefly)")
+        except Exception as stop_error:
+            print(f"   Best-effort stop failed (expected): {stop_error}")
+        
+        # Update internal state to reflect disabled state
+        self._is_closed_loop = False
+        self._is_idle = True
+        self._last_sent_left = 0.0
+        self._last_sent_right = 0.0
+        self._zero_vel_since = None
+        
+        print(f"   Wheelbase is now DISARMED. Main should shut down cleanly.")
+
     def twist(self, forward_mps: float, angular_rads: float):
-        """Differential drive: forward m/s, angular rad/s (instant)."""
-        v_l = forward_mps - (angular_rads * self.wheelbase_m / 2)
-        v_r = forward_mps + (angular_rads * self.wheelbase_m / 2)
-        left_tps = v_l / (2 * 3.1415926535 * self.wheel_radius_m)
-        right_tps = v_r / (2 * 3.1415926535 * self.wheel_radius_m)
-        self.set_wheel_vels(left_tps, right_tps)
+        """Differential drive: forward m/s, angular rad/s (instant).
+        
+        Raises:
+            RuntimeError: If CAN bus has failed (converted from CanOperationError).
+        """
+        if self._can_bus_failed:
+            return  # No-op after CAN failure
+        try:
+            v_l = forward_mps - (angular_rads * self.wheelbase_m / 2)
+            v_r = forward_mps + (angular_rads * self.wheelbase_m / 2)
+            left_tps = v_l / (2 * 3.1415926535 * self.wheel_radius_m)
+            right_tps = v_r / (2 * 3.1415926535 * self.wheel_radius_m)
+            self.set_wheel_vels(left_tps, right_tps)
+        except can.CanOperationError as e:
+            self._handle_can_failure(e, "twist")
+            raise RuntimeError("CAN bus failed during twist") from e
 
     def _start_twist_for_thread(self):
         self._twist_for_thread = threading.Thread(target=self._twist_for_loop, daemon=True)
@@ -398,7 +451,14 @@ class WheelBase:
                 fwd = forward_mps * max(0.0, frac)
             else:
                 fwd = forward_mps
-            self.twist(fwd, angular_rads)
+            try:
+                self.twist(fwd, angular_rads)
+            except (can.CanOperationError, RuntimeError) as e:
+                # CAN failure during twist_for: cancel the profile and stop
+                print(f"twist_for loop: CAN error, canceling profile: {e}")
+                with self._twist_for_lock:
+                    self._twist_for_params = None
+                break
             time.sleep(max(0, self.TWIST_FOR_INTERVAL - (time.monotonic() - t0)))
 
     def twist_for(self, forward_mps: float, angular_rads: float,
@@ -598,11 +658,18 @@ class WheelBase:
     def _watchdog_feeder_loop(self):
         while self.running:
             try:
-                if self._is_closed_loop and not self._is_idle:
+                if self._is_closed_loop and not self._is_idle and not self._can_bus_failed:
                     with self.bus_lock:
                         self.left.feed_watchdog()
                         self.right.feed_watchdog()
                     self._last_send_time = time.time()
+            except can.CanOperationError as e:
+                # Watchdog feed failed - CAN bus likely gone
+                # Don't call _handle_can_failure here as it may be redundant with main path
+                # Just log and stop trying to feed
+                if not self._can_bus_failed:
+                    print(f"Watchdog feeder: CAN error (bus likely failed): {e}")
+                    self._can_bus_failed = True
             except Exception:
                 pass
             time.sleep(0.5)
@@ -613,7 +680,14 @@ class WheelBase:
         This method is the ONLY entry point for velocity commands. Every call
         updates _last_command_time, which is monitored by the stale-command
         watcher to ensure continuous command flow during motion.
+        
+        Raises:
+            RuntimeError: If CAN bus has failed (converted from CanOperationError).
         """
+        # Early exit if CAN bus has already failed
+        if self._can_bus_failed:
+            return  # No-op after CAN failure
+        
         # Record this command timestamp for staleness monitoring
         self._last_command_time = time.time()
         
@@ -639,19 +713,23 @@ class WheelBase:
             self._zero_vel_since = None
             if not self._is_closed_loop:
                 print("Re-engaging motors from idle...")
-                with self.bus_lock:
-                    self.left.clear_errors()
-                    self.right.clear_errors()
-                    self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
-                    self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
-                    self.left.set_velocity(0.0)
-                    self.right.set_velocity(0.0)
-                    self.left.enable_watchdog(5.0)
-                    self.right.enable_watchdog(5.0)
-                self._is_closed_loop = True
-                self._is_idle = False
-                self._last_sent_left = None
-                self._last_sent_right = None
+                try:
+                    with self.bus_lock:
+                        self.left.clear_errors()
+                        self.right.clear_errors()
+                        self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
+                        self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
+                        self.left.set_velocity(0.0)
+                        self.right.set_velocity(0.0)
+                        self.left.enable_watchdog(5.0)
+                        self.right.enable_watchdog(5.0)
+                    self._is_closed_loop = True
+                    self._is_idle = False
+                    self._last_sent_left = None
+                    self._last_sent_right = None
+                except can.CanOperationError as e:
+                    self._handle_can_failure(e, "set_wheel_vels (re-engage)")
+                    raise RuntimeError("CAN bus failed during motor re-engage") from e
 
         actual_left = -left_tps if self.invert_left else left_tps
         actual_right = right_tps
@@ -663,12 +741,16 @@ class WheelBase:
         watchdog_due = (now - self._last_send_time) >= self.WATCHDOG_FEED_INTERVAL
 
         if vel_changed or watchdog_due:
-            with self.bus_lock:
-                self.left.set_velocity(actual_left)
-                self.right.set_velocity(actual_right)
-            self._last_sent_left = actual_left
-            self._last_sent_right = actual_right
-            self._last_send_time = now
+            try:
+                with self.bus_lock:
+                    self.left.set_velocity(actual_left)
+                    self.right.set_velocity(actual_right)
+                self._last_sent_left = actual_left
+                self._last_sent_right = actual_right
+                self._last_send_time = now
+            except can.CanOperationError as e:
+                self._handle_can_failure(e, "set_wheel_vels (send)")
+                raise RuntimeError("CAN bus failed during velocity send") from e
 
     def stop(self):
         self.set_wheel_vels(0.0, 0.0)
