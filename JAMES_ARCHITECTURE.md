@@ -167,3 +167,21 @@ The extras loop is designed to optionally integrate with i777 detection services
 
 ## Door mat cue
 Prefer **brown border HSV** around the front-door checkered floor (named keepout `checkered_door`), not chessboard corners on the 30Hz path. RL learns stuck risk.
+
+
+## Orin embedded performance (James 2026-09-07)
+
+The split above is necessary but not sufficient. On Orin:
+
+- Target the **theoretically minimum physically possible** frame time.
+- Keep frames **on GPU**; CPU is for control/orchestration, not bulk pixels.
+- Choose **when** to project / deproject / join so the expensive ops see the
+  fewest points (decimate early).
+- Ship viz/logs to i777 on a **side thread** (downsize→compress→send) with a
+  bounded queue — drop frames rather than stall capture.
+- Continuously ask: what is each core doing *this* millisecond?
+
+Regressions to watch for after refactors: undecimated NumPy over full RS
+pointclouds, per-frame ThreadPoolExecutor create/destroy, AE exposure >33ms,
+`wait_for_frames` timeouts that eat multiple periods, atlas `.copy()` on the
+critical path when a view would do.

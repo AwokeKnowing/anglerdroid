@@ -1,3 +1,49 @@
+# AGENTS.md — Kevin / Anglerdroid (Orin-first)
+
+## Non-negotiable: Orin microsecond vigilance
+
+Making stuff work is easy. Making it work on Jetson Orin NX in the **most
+optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
+
+### Critical path (30 Hz = 33.3 ms hard budget)
+1. **Fresh frames every tick** — RealSense + RGB configured for 30 Hz; exposure
+   capped so AE cannot stretch past the frame period.
+2. **GPU-resident processing** — get depth/color onto GPU and keep them there.
+   No casual CPU round-trips (`get_data` → numpy → upload again) in the hot path.
+3. **Decimation / projection phase order** — do the *cheapest* reduction as early
+   as physically possible (SDK decimate / GPU downsample) *before* project,
+   deproject, join, morph, scatter. Never process undecimated 848×480 views in
+   Python/NumPy “because it was easier.”
+4. **Depth reflexes only on capture** — near / overhang / soft-low. RGB image
+   detections (brown border, faces, gestures) live in a **~3 Hz extras** loop or
+   on **i777**, never in capture.
+5. **i777 ship thread** — separate non-blocking thread: downsize / compress /
+   queue frames or detections to i777. Capture must never stall on network or
+   encode.
+6. **Per-core accounting** — know what every ARM core and the GPU are doing each
+   phase. Prefer persistent worker pools over creating pools/threads per frame.
+
+### Past wizardry (do not casually undo)
+- RealSense depth **decimation** was tuned so pointclouds are tiny and downstream
+  work is trivial (docstring historically aimed at mag≈8 → ~6k verts). If you
+  change `RS_DECIMATE_MAG`, **re-benchmark** capture timing on device.
+- Pre-allocated buffers, queue size 1, poll-then-short-wait grabs.
+- GPU path in `gpu_render.py` for forward depth / odom / gmap / atlas.
+
+### Before declaring a vision change “done”
+- [ ] Ran silent vision smoke on Kevin; pasted CAPTURE TIMING table
+- [ ] TOTAL p95 < 33.3 ms (or explained the physical blocker)
+- [ ] No new undecimated CPU loops on 848×480
+- [ ] No new sync network/encode on capture thread
+- [ ] Stated which cores/GPU own each new stage
+
+### Related docs
+- `JAMES_ARCHITECTURE.md` — 30 Hz vs ~3 Hz extras split
+- `LOOP_HARDENING_SUMMARY.md` / `CAPTURE_FPS.md` — budget shedding notes
+- `skills/checkered_mat_keepout.md` — brown border @ 3 Hz + named keepout
+
+---
+
 # AGENTS.md — Coding-Agent Skill Repair Loop (Stub)
 
 **Status**: Placeholder for future implementation.
