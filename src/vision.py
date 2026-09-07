@@ -835,7 +835,8 @@ class Vision:
                     vl, vr = 0.0, 0.0
 
                 fused_yaw, fused_fwd = self._pose.update(
-                    vl, vr, dt, vis_yaw, vis_fwd, vis_conf)
+                    vl, vr, dt, vis_yaw, vis_fwd, vis_conf,
+                    using_encoder_feedback=using_encoder_feedback)
             _t_odom = time.monotonic()
 
             if not hasattr(self, '_odom_log_n'):
@@ -888,22 +889,44 @@ class Vision:
             rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
             rcy_f = float(CROSSHAIR_CY)
 
-            self._gpu.gmap_update_gpu(
-                obs_combined, known_combined,
-                cap_x, cap_y, cap_theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE),
-                free_range_mask=self._free_range_mask)
-            self._global_map.keyframe_check(
-                obs_combined, known_combined,
-                cap_x, cap_y, cap_theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE))
+            # CRITICAL SAFETY: Only update SLAM/gmap with reliable pose
+            # When using commanded velocity fallback (encoders failed), pose is NOT ground truth.
+            # Scenario: robot stuck, wheels spinning → commanded vel says moving but actually stationary.
+            # Never feed bad pose to SLAM or it will corrupt the map.
             
-            # Sync GPU map after loop closure rebuild
-            if self._global_map.needs_gpu_sync():
-                cpu_map, cpu_height = self._global_map.get_cpu_map()
-                self._gpu.gmap_reset(cpu_map, cpu_height)
-                self._global_map.clear_gpu_sync_flag()
-                print("vision: GPU gmap synchronized after loop closure")
+            skip_slam_update = False
+            skip_reason = None
+            
+            if not _use_cuvslam:  # Only applies to self-SLAM with wheel odom
+                if not using_encoder_feedback:
+                    skip_slam_update = True
+                    skip_reason = "encoder_fallback"
+                elif pose_src.is_stuck:
+                    skip_slam_update = True
+                    skip_reason = "stuck"
+            
+            if not skip_slam_update:
+                self._gpu.gmap_update_gpu(
+                    obs_combined, known_combined,
+                    cap_x, cap_y, cap_theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE),
+                    free_range_mask=self._free_range_mask)
+                self._global_map.keyframe_check(
+                    obs_combined, known_combined,
+                    cap_x, cap_y, cap_theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE))
+                
+                # Sync GPU map after loop closure rebuild
+                if self._global_map.needs_gpu_sync():
+                    cpu_map, cpu_height = self._global_map.get_cpu_map()
+                    self._gpu.gmap_reset(cpu_map, cpu_height)
+                    self._global_map.clear_gpu_sync_flag()
+                    print("vision: GPU gmap synchronized after loop closure")
+            else:
+                # Log skip first time and periodically
+                if not hasattr(self, '_slam_skip_warned') or self._slam_skip_warned != skip_reason:
+                    print(f"⚠️  SLAM update skipped: {skip_reason} (pose not ground truth)")
+                    self._slam_skip_warned = skip_reason
             
             _t_gmap_up = time.monotonic()
 
@@ -932,6 +955,11 @@ class Vision:
             # Hard immobilize conditions
             immobilize = False
             immobilize_reason = None
+            
+            # CRITICAL: Check if stuck (wheels spinning but not moving)
+            if pose_src.is_stuck:
+                immobilize = True
+                immobilize_reason = f"STUCK (wheels spinning, no motion)"
             
             if not self._topdown_ok:
                 # No top-down depth reading
@@ -1098,6 +1126,22 @@ class Vision:
     def slam_lock_reason(self):
         """Human-readable reason for SLAM lock status."""
         return self._slam_lock_reason
+    
+    @property
+    def is_stuck(self):
+        """True when robot is stuck (wheels spinning but not moving).
+        
+        CRITICAL SAFETY: When stuck:
+        - Autonomous motion should stop
+        - Do NOT keep commanding forward
+        - Try recovery (reverse/turn)
+        """
+        return self._pose.is_stuck if hasattr(self._pose, 'is_stuck') else False
+    
+    @property
+    def stuck_count(self):
+        """Number of times stuck has been detected."""
+        return self._pose.stuck_count if hasattr(self._pose, 'stuck_count') else 0
     
     @property
     def safety_throttled(self):

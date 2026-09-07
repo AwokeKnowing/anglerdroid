@@ -92,6 +92,14 @@ class PoseEstimator:
         self._wheel_only_frames = 0
         self._last_visual_time = 0.0
         self._excessive_disagreement_count = 0
+        
+        # Stuck detection (CRITICAL SAFETY)
+        self._commanded_forward_sum = 0.0  # Commanded displacement
+        self._actual_forward_sum = 0.0     # Actual visual displacement
+        self._stuck_check_start = 0.0      # When current window started
+        self._stuck_count = 0              # Number of times stuck detected
+        self._is_stuck = False             # Current stuck state
+        self._last_stuck_log = 0.0         # Throttle stuck logging
 
     def reset(self):
         self.x = self.y = self.theta = 0.0
@@ -107,9 +115,18 @@ class PoseEstimator:
     def update(self, v_left_mps: float, v_right_mps: float,
                dt: float,
                vis_yaw: float, vis_fwd: float,
-               vis_confidence: float = 0.0):
+               vis_confidence: float = 0.0,
+               using_encoder_feedback: bool = True):
         """Fuse wheel + visual odom, integrate, record history.
 
+        Args:
+            v_left_mps, v_right_mps: Wheel velocities
+            dt: Time delta
+            vis_yaw, vis_fwd: Visual odometry
+            vis_confidence: Visual confidence [0-1]
+            using_encoder_feedback: True if wheel velocities from encoders, 
+                                    False if from commanded velocity
+        
         Returns (fused_yaw, fused_fwd) for map warping.
         """
         if dt <= 0:
@@ -152,6 +169,13 @@ class PoseEstimator:
         self._hidx = (self._hidx + 1) % HISTORY_SIZE
         if self._hlen < HISTORY_SIZE:
             self._hlen += 1
+        
+        # ── 6. Stuck detection (CRITICAL SAFETY) ──
+        # If using commanded velocity (not encoder feedback), we MUST check
+        # if actual displacement matches commanded displacement.
+        # Scenario: Robot stuck on bump, wheels spinning, commanded says moving
+        # but visual odom shows zero displacement → STUCK
+        self._update_stuck_detection(ds_w, vis_fwd, vis_ok, using_encoder_feedback, dt)
 
         return dtheta, ds
 
@@ -327,3 +351,95 @@ class PoseEstimator:
             'visual_accepted': self._visual_accepted,
             'visual_rejected': self._visual_rejected,
         }
+    
+    # ── Stuck detection (CRITICAL SAFETY) ──────────────────────────
+    
+    STUCK_WINDOW_S = 3.0          # Detection window (3 seconds)
+    STUCK_CMD_THRESHOLD = 0.15    # Min commanded displacement to check (15cm)
+    STUCK_RATIO_THRESHOLD = 0.3   # Max ratio: actual/commanded to be stuck
+    
+    def _update_stuck_detection(self, ds_commanded, ds_visual, visual_ok, 
+                                using_encoder_feedback, dt):
+        """Detect if robot is stuck (wheels spinning but not moving).
+        
+        CRITICAL SAFETY: When encoders fail and we fall back to commanded
+        velocity, we MUST detect if actual displacement (from visual) is
+        much less than commanded displacement.
+        
+        Scenario: Robot stuck on bump
+        - Commanded: "move forward 0.5m"
+        - Actual visual: displacement ~0.0m
+        - Detection: STUCK after 3s of this mismatch
+        
+        Args:
+            ds_commanded: Commanded forward displacement (from wheels/commanded vel)
+            ds_visual: Visual forward displacement (from GPU odom)
+            visual_ok: True if visual odom was accepted
+            using_encoder_feedback: False when using commanded velocity fallback
+            dt: Time delta
+        """
+        now = time.time()
+        
+        # Reset window if starting
+        if self._stuck_check_start == 0.0:
+            self._stuck_check_start = now
+        
+        # Accumulate commanded and actual displacement
+        self._commanded_forward_sum += abs(ds_commanded)
+        if visual_ok:
+            self._actual_forward_sum += abs(ds_visual)
+        
+        # Check window duration
+        window_duration = now - self._stuck_check_start
+        
+        if window_duration >= self.STUCK_WINDOW_S:
+            # Time to evaluate
+            commanded_total = self._commanded_forward_sum
+            actual_total = self._actual_forward_sum
+            
+            # Only check if we commanded significant motion
+            if commanded_total >= self.STUCK_CMD_THRESHOLD:
+                ratio = actual_total / max(commanded_total, 1e-6)
+                
+                was_stuck = self._is_stuck
+                
+                if ratio < self.STUCK_RATIO_THRESHOLD:
+                    # STUCK: actual displacement much less than commanded
+                    if not self._is_stuck:
+                        self._stuck_count += 1
+                        self._is_stuck = True
+                        print(f"🚨 STUCK DETECTED (count={self._stuck_count})")
+                        print(f"   Commanded: {commanded_total:.3f}m, "
+                              f"Actual: {actual_total:.3f}m, "
+                              f"Ratio: {ratio:.2f}")
+                        print(f"   Using encoders: {using_encoder_feedback}, "
+                              f"Visual OK: {visual_ok}")
+                        print(f"   ⚠️  Wheels spinning but no forward motion!")
+                        self._last_stuck_log = now
+                    elif now - self._last_stuck_log >= 2.0:
+                        # Still stuck, periodic reminder
+                        print(f"🚨 STILL STUCK (duration: {window_duration:.1f}s)")
+                        self._last_stuck_log = now
+                else:
+                    # Not stuck
+                    if self._is_stuck:
+                        print(f"✓ UNSTUCK (was stuck {window_duration:.1f}s)")
+                    self._is_stuck = False
+            else:
+                # Not commanding significant motion, reset stuck
+                self._is_stuck = False
+            
+            # Reset window
+            self._stuck_check_start = now
+            self._commanded_forward_sum = 0.0
+            self._actual_forward_sum = 0.0
+    
+    @property
+    def is_stuck(self):
+        """True if robot is currently detected as stuck (wheels spinning, no motion)."""
+        return self._is_stuck
+    
+    @property
+    def stuck_count(self):
+        """Number of times stuck has been detected this session."""
+        return self._stuck_count

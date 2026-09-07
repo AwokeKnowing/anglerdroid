@@ -172,10 +172,17 @@ def main():
             if loop_start - last_slam_status >= 10.0:
                 slam_locked = vis.slam_locked
                 slam_reason = vis.slam_lock_reason
+                is_stuck = vis.is_stuck
+                stuck_count = vis.stuck_count
+                
                 lock_symbol = "🟢" if slam_locked else "🔴"
-                print(f"{lock_symbol} SLAM: {'LOCKED' if slam_locked else f'NOT LOCKED ({slam_reason})'}")
+                stuck_warn = f" | 🚨 STUCK (count={stuck_count})" if is_stuck else ""
+                
+                print(f"{lock_symbol} SLAM: {'LOCKED' if slam_locked else f'NOT LOCKED ({slam_reason})'}{stuck_warn}")
                 if not slam_locked:
                     print(f"   ⚠️  Map-frame navigation disabled — fix: {slam_reason}")
+                if is_stuck:
+                    print(f"   🚨 WHEELS SPINNING BUT NOT MOVING — immobilized")
                 last_slam_status = loop_start
 
             # Get latest atlas only (no frame copies)
