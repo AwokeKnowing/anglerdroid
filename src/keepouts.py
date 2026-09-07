@@ -104,8 +104,13 @@ def paint_value_for_kind(kind: str) -> int:
     return PAINT_HARD
 
 
-def _remember_pose(pose_xy_yaw: Tuple[float, float, float]) -> None:
-    """Cache pose in-process and throttle-write for CLI mark."""
+def _remember_pose(pose_xy_yaw: Tuple[float, float, float], slam_locked: bool = False) -> None:
+    """Cache pose in-process and throttle-write for CLI mark.
+    
+    Args:
+        pose_xy_yaw: (x, y, theta) pose tuple
+        slam_locked: True if SLAM is locked (reliable encoders + tracking)
+    """
     global _last_pose, _last_pose_write
     _last_pose = (
         float(pose_xy_yaw[0]),
@@ -121,7 +126,13 @@ def _remember_pose(pose_xy_yaw: Tuple[float, float, float]) -> None:
         tmp = POSE_PATH + ".tmp"
         with open(tmp, "w") as f:
             json.dump(
-                {"x": _last_pose[0], "y": _last_pose[1], "yaw": _last_pose[2], "t": time.time()},
+                {
+                    "x": _last_pose[0], 
+                    "y": _last_pose[1], 
+                    "yaw": _last_pose[2], 
+                    "t": time.time(),
+                    "slam_locked": slam_locked,
+                },
                 f,
             )
         os.replace(tmp, POSE_PATH)
@@ -177,8 +188,18 @@ def mark_disk_at_pose(
 def mark_named(
     name: str,
     pose_xy_yaw: Optional[Tuple[float, float, float]] = None,
+    require_slam_lock: bool = True,
 ) -> dict:
-    """Mark a known named hazard using NAMED_DEFAULTS + latest pose."""
+    """Mark a known named hazard using NAMED_DEFAULTS + latest pose.
+    
+    Args:
+        name: Keepout name (e.g. "dog_bed", "checkered_door")
+        pose_xy_yaw: Optional explicit pose; uses latest if None
+        require_slam_lock: If True, check slam_locked in pose file (default True)
+    
+    Raises:
+        RuntimeError: If SLAM not locked and require_slam_lock=True
+    """
     key = (name or "").strip().lower().replace(" ", "_").replace("-", "_")
     aliases = {
         "dogbed": "dog_bed",
@@ -195,6 +216,20 @@ def mark_named(
         raise ValueError(
             "unknown keepout %r — known: %s" % (name, ", ".join(sorted(NAMED_DEFAULTS)))
         )
+    
+    # Check SLAM lock status from pose file
+    if require_slam_lock:
+        try:
+            with open(POSE_PATH) as f:
+                pose_data = json.load(f)
+            if not pose_data.get("slam_locked", False):
+                raise RuntimeError(
+                    "🔴 SLAM NOT LOCKED — cannot mark map-frame keepouts\n"
+                    "   Wait for SLAM lock (check logs for '🟢 SLAM LOCKED') or use --no-slam-check"
+                )
+        except FileNotFoundError:
+            raise RuntimeError("no pose yet — wait for live main / paint_ego, or pass pose")
+    
     pose = pose_xy_yaw or read_latest_pose()
     if pose is None:
         raise RuntimeError("no pose yet — wait for live main / paint_ego, or pass pose")
@@ -208,15 +243,22 @@ def mark_named(
     )
 
 
-def paint_ego(obs: np.ndarray, pose_xy_yaw: Tuple[float, float, float], value: int = None) -> np.ndarray:
+def paint_ego(obs: np.ndarray, pose_xy_yaw: Tuple[float, float, float], 
+              value: int = None, slam_locked: bool = False) -> np.ndarray:
     """OR keepout disks into a copy of ego obs (H,W). pose = robot in map frame.
 
     Soft kinds use PAINT_SOFT (prefer); hard kinds use PAINT_HARD.
     Optional ``value`` overrides every disk (legacy).
+    
+    Args:
+        obs: Ego obstacle map
+        pose_xy_yaw: (x, y, theta) pose tuple
+        value: Optional override paint value
+        slam_locked: True if SLAM is locked (for pose persistence)
     """
     if obs is None:
         return obs
-    _remember_pose(pose_xy_yaw)
+    _remember_pose(pose_xy_yaw, slam_locked=slam_locked)
     data = load()
     disks = data.get("disks_map_m") or []
     if not disks:

@@ -501,6 +501,9 @@ class WheelBase:
 
     def _encoder_reader_loop(self):
         _sdo_fail_count = 0
+        _startup_attempts = 0
+        _max_startup_attempts = 10
+        
         while self.running:
             vl = vr = None
             try:
@@ -531,6 +534,14 @@ class WheelBase:
                         if _sdo_fail_count in (5, 10, 50, 500):
                             print("encoder: SDO read failed %d times "
                                   "(vl=%s vr=%s) — backing off" % (_sdo_fail_count, vl, vr))
+                        
+                        # During startup, provide extra diagnostic info
+                        if not self._enc_ok and _startup_attempts < _max_startup_attempts:
+                            _startup_attempts += 1
+                            if _startup_attempts in (3, 5, 10):
+                                print(f"⚠️  encoder startup: {_startup_attempts}/{_max_startup_attempts} attempts, "
+                                      f"still failing (native={self._enc_native}, sdo_fails={_sdo_fail_count})")
+                                print(f"   Check: CAN bus up? ODrive powered? Cables connected?")
 
                 if vl is not None and vr is not None:
                     with self._enc_lock:

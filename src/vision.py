@@ -262,6 +262,12 @@ class Vision:
         self._free_range_mask = self._build_free_range_mask()
         self._wheelbase = None
         self._last_capture_time = None
+        
+        # SLAM lock state (critical for operator awareness)
+        self._slam_locked = False
+        self._slam_lock_reason = "not_initialized"
+        self._slam_lock_lost_at = 0.0
+        self._slam_lock_warnings = 0
 
         from gpu_render import GPURenderer
         self._gpu = GPURenderer(MAP_W, MAP_H, ATLAS_W, ATLAS_H)
@@ -341,6 +347,63 @@ class Vision:
         mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         mask[dd <= FREE_RANGE_PX] = 255
         return mask
+    
+    def _update_slam_lock_status(self):
+        """Update SLAM lock status based on encoder health and tracking quality.
+        
+        SLAM is considered "locked" when:
+        1. Encoders are working (enc_ok=True, age <1s)
+        2. Visual odometry accepting frames OR wheel-only is acceptable
+        3. Top-down depth is working
+        
+        When NOT locked:
+        - Map-frame features are unreliable (keepouts, navigation)
+        - Autonomous motion should be disabled
+        - Operator must be clearly warned
+        """
+        reasons = []
+        
+        # Check encoder health
+        enc_ok = False
+        if self._wheelbase:
+            health = self._wheelbase.get_encoder_health()
+            enc_ok = health['encoder_ok'] and health['age_s'] < 1.0
+            if not enc_ok:
+                if not health['encoder_ok']:
+                    reasons.append("encoder_failed")
+                else:
+                    reasons.append(f"encoder_stale_{health['age_s']:.1f}s")
+        else:
+            reasons.append("no_wheelbase")
+        
+        # Check tracking quality
+        quality = self._pose.get_tracking_quality()
+        visual_ok = quality['visual_accept_rate'] > 0.2  # At least 20% visual
+        time_since_visual = quality['time_since_visual']
+        
+        # Wheel-only is acceptable if visual is recently working
+        if not visual_ok and time_since_visual > 5.0:
+            reasons.append(f"no_visual_{time_since_visual:.0f}s")
+        
+        # Check top-down (already tracked via _topdown_ok)
+        if not self._topdown_ok:
+            reasons.append("topdown_lost")
+        
+        # Determine lock status
+        was_locked = self._slam_locked
+        self._slam_locked = enc_ok and (visual_ok or time_since_visual < 5.0) and self._topdown_ok
+        self._slam_lock_reason = ", ".join(reasons) if reasons else "ok"
+        
+        # Log state changes
+        if was_locked and not self._slam_locked:
+            self._slam_lock_lost_at = time.monotonic()
+            self._slam_lock_warnings += 1
+            print(f"🔴 SLAM LOCK LOST: {self._slam_lock_reason}")
+            print(f"   ⚠️  Map-frame navigation DISABLED until lock restored")
+        elif not was_locked and self._slam_locked:
+            downtime = time.monotonic() - self._slam_lock_lost_at if self._slam_lock_lost_at > 0 else 0
+            print(f"🟢 SLAM LOCKED (was unlocked {downtime:.1f}s)")
+            print(f"   ✓ Encoders working, tracking quality good")
 
     def set_wheelbase(self, wb):
         """Provide wheelbase reference for wheel odometry fusion."""
@@ -858,15 +921,22 @@ class Vision:
             self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
             self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
+            # ── Check SLAM lock status (encoder + tracking quality) ───
+            self._update_slam_lock_status()
+            
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height,
                                 topdown_near_field=self._topdown_near_field,
                                 topdown_hazard=self._topdown_hazard)
+            
+            # Hard immobilize conditions
+            immobilize = False
+            immobilize_reason = None
+            
             if not self._topdown_ok:
-                # Hard immobilize: no top-down depth reading.
-                self._safety._fwd_scale = 0.0
-                self._safety._bwd_scale = 0.0
-                self._safety._ang_scale = 0.0
+                # No top-down depth reading
+                immobilize = True
+                immobilize_reason = "TOPDOWN LOST"
                 self._topdown_lost_n = getattr(self, '_topdown_lost_n', 0) + 1
                 if self._topdown_lost_n == 1 or self._topdown_lost_n % 60 == 0:
                     print(
@@ -882,6 +952,23 @@ class Vision:
                         % (self._topdown_known_px, self._topdown_lost_n)
                     )
                 self._topdown_lost_n = 0
+            
+            if not self._slam_locked:
+                # SLAM not locked — immobilize autonomous features
+                immobilize = True
+                immobilize_reason = f"SLAM NOT LOCKED ({self._slam_lock_reason})"
+            
+            if immobilize:
+                self._safety._fwd_scale = 0.0
+                self._safety._bwd_scale = 0.0
+                self._safety._ang_scale = 0.0
+                # Log first immobilization and periodically
+                if not hasattr(self, '_immobilize_warned') or self._immobilize_warned != immobilize_reason:
+                    print(f"⚠️  vision: {immobilize_reason} — autonomous motion disabled")
+                    self._immobilize_warned = immobilize_reason
+            else:
+                self._immobilize_warned = None
+            
             _t_safety = time.monotonic()
 
             # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
@@ -994,6 +1081,24 @@ class Vision:
     def safety_ang_scale(self):
         return self._safety.ang_scale
 
+    @property
+    def slam_locked(self):
+        """True when SLAM is locked (encoders + tracking working).
+        
+        When False, map-frame navigation features should be disabled:
+        - Do NOT mark keepouts
+        - Do NOT trust global map for navigation
+        - Do NOT use autonomous wander
+        
+        Use this before any map-frame operation.
+        """
+        return self._slam_locked
+    
+    @property
+    def slam_lock_reason(self):
+        """Human-readable reason for SLAM lock status."""
+        return self._slam_lock_reason
+    
     @property
     def safety_throttled(self):
         return self._safety.is_throttled

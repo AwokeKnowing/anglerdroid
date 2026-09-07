@@ -161,11 +161,22 @@ def main():
     print("  budget=%.1f ms/frame | every 30 frames: fps, avg process_ms, avg wait_ms" % BUDGET_MS)
     frame_id = 0
     last_report = time.monotonic()
+    last_slam_status = time.monotonic()
     process_sum = 0.0
     wait_sum = 0.0
     try:
         while True:
             loop_start = time.monotonic()
+            
+            # Periodic SLAM lock status (every 10 seconds)
+            if loop_start - last_slam_status >= 10.0:
+                slam_locked = vis.slam_locked
+                slam_reason = vis.slam_lock_reason
+                lock_symbol = "🟢" if slam_locked else "🔴"
+                print(f"{lock_symbol} SLAM: {'LOCKED' if slam_locked else f'NOT LOCKED ({slam_reason})'}")
+                if not slam_locked:
+                    print(f"   ⚠️  Map-frame navigation disabled — fix: {slam_reason}")
+                last_slam_status = loop_start
 
             # Get latest atlas only (no frame copies)
             atlas, ts = tools.get_atlas()

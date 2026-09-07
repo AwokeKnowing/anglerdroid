@@ -153,7 +153,10 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
 
     pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
     try:
-        obs_map = keepouts.paint_ego(obs_map, pose)
+        # Pass slam_locked status to keepouts (critical: don't trust map-frame keepouts if SLAM unlocked)
+        vis = tools.get_vision_instance()
+        slam_locked = vis.slam_locked if vis else False
+        obs_map = keepouts.paint_ego(obs_map, pose, slam_locked=slam_locked)
     except Exception as e:
         print("keepouts: paint skip %s" % e)
     cmd = mppi.tick(obs_map, pose, 0.033)
