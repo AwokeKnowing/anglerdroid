@@ -546,6 +546,16 @@ class Vision:
         self._wheelbase = None
         self._last_capture_time = None
         
+        # Pre-allocated depth processing buffers (cleared per-frame, not re-allocated)
+        self._z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+        self._k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+        self._kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
         self._slam_lock_reason = "not_initialized"
@@ -1036,8 +1046,9 @@ class Vision:
             _t_hazard = time.monotonic()
             
             # RS1 top-down depth → (obstacles, known), rotate 180°
-            z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+            # Use preallocated buffers (clear instead of allocate)
+            self._z1[:] = 0
+            self._k1[:] = 0
             if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
                 # Check for near-field hazard (table underside, hand, etc.) FIRST
                 # This is a REFLEX that triggers before floor-obstacle logic.
@@ -1103,7 +1114,7 @@ class Vision:
                               % (soft_low_count, soft_low_height, self._soft_low_obstacle_log_n))
                         self._soft_low_obstacle_log_n = 0
                 
-                z1, k1 = depth_topdown(self._rs1.verts)
+                self._z1[:], self._k1[:] = depth_topdown(self._rs1.verts)
             else:
                 self._topdown_near_field = False
                 self._near_field_close_count = 0
@@ -1115,8 +1126,8 @@ class Vision:
                 self._soft_low_obstacle_count = 0
                 self._soft_low_obstacle_median_height = float('inf')
                 
-            obs1 = z1[::-1, ::-1]
-            known1 = k1[::-1, ::-1]
+            obs1 = self._z1[::-1, ::-1]
+            known1 = self._k1[::-1, ::-1]
             # Top-down depth is ground truth for open-space. No valid known
             # coverage ⇒ immobilize (empty map must NOT look like free space).
             self._topdown_known_px = int(np.count_nonzero(known1))
@@ -1146,8 +1157,9 @@ class Vision:
             
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
             # DROPPABLE: Can fallback to topdown-only if budget tight
-            z2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
-            k2 = np.zeros((FRAME_W, FRAME_H), dtype=np.uint8)
+            # Use preallocated buffers (clear instead of allocate)
+            self._z2[:] = 0
+            self._k2[:] = 0
             _raw_scatter = None
             _dbg = self.debug_depth
             if self._capture_budget.should_run("rs2_process"):
@@ -1159,9 +1171,9 @@ class Vision:
                         _gpu_result = self._gpu.depth_forward_gpu(
                             rs2_clean, y_offset=RS2_EXTRINSIC_Y, debug=_dbg)
                         if _gpu_result is not None:
-                            z2, k2, _raw_scatter = _gpu_result
-            obs2 = np.rot90(z2, k=-1)
-            known2 = np.rot90(k2, k=-1)
+                            self._z2[:], self._k2[:], _raw_scatter = _gpu_result
+            obs2 = np.rot90(self._z2, k=-1)
+            known2 = np.rot90(self._k2, k=-1)
             _t_rs2 = time.monotonic()
             _t_depth = _t_rs2  # Keep for backwards compat with old logging
 
@@ -1169,37 +1181,39 @@ class Vision:
             fw_dx, fw_dy = int(TD_X_OFFSET) + FW_TD_X_DELTA, int(FW_Y_OFFSET)
             td_dx = int(TD_X_OFFSET)
 
-            kc_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit(kc_tmp, known2, fw_dx, fw_dy)
+            # Use preallocated buffer (clear instead of allocate)
+            self._kc_tmp[:] = 0
+            _blit(self._kc_tmp, known2, fw_dx, fw_dy)
             if not hasattr(self, '_kdiag_n'):
                 self._kdiag_n = 0
             self._kdiag_n += 1
             if self._kdiag_n <= 2 or self._kdiag_n % 300 == 0:
                 _k2nz = int(np.count_nonzero(known2))
-                _kcnz_pre = int(np.count_nonzero(kc_tmp))
-                np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
-                _kcnz_post = int(np.count_nonzero(kc_tmp))
+                _kcnz_pre = int(np.count_nonzero(self._kc_tmp))
+                np.bitwise_and(self._kc_tmp, self._fw_cone_mask, out=self._kc_tmp)
+                _kcnz_post = int(np.count_nonzero(self._kc_tmp))
                 print("fw_known: known2=%d blit=%d after_cone=%d "
                       "fw_dx=%d fw_dy=%d" % (_k2nz, _kcnz_pre, _kcnz_post,
                                               fw_dx, fw_dy))
             else:
-                np.bitwise_and(kc_tmp, self._fw_cone_mask, out=kc_tmp)
+                np.bitwise_and(self._kc_tmp, self._fw_cone_mask, out=self._kc_tmp)
 
-            known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit(known_combined, known1, td_dx)
-            np.maximum(known_combined, kc_tmp, out=known_combined)
+            # Use preallocated buffers (clear instead of allocate)
+            self._known_combined[:] = 0
+            _blit(self._known_combined, known1, td_dx)
+            np.maximum(self._known_combined, self._kc_tmp, out=self._known_combined)
 
-            obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit(obs_combined, obs1, td_dx)
-            obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
-            _blit(obs_tmp, obs2, fw_dx, fw_dy)
-            np.maximum(obs_combined, obs_tmp, out=obs_combined)
+            self._obs_combined[:] = 0
+            _blit(self._obs_combined, obs1, td_dx)
+            self._obs_tmp[:] = 0
+            _blit(self._obs_tmp, obs2, fw_dx, fw_dy)
+            np.maximum(self._obs_combined, self._obs_tmp, out=self._obs_combined)
 
-            np.bitwise_and(obs_combined, self._obs_mask, out=obs_combined)
-            np.bitwise_and(known_combined, self._obs_mask, out=known_combined)
+            np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
+            np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-            obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
-            known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
+            self._obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+            self._known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
 
             _t_obs = time.monotonic()
 
@@ -1277,7 +1291,7 @@ class Vision:
                 self._hdiag_n = 0
             self._hdiag_n += 1
             if self._hdiag_n % 300 == 0:
-                om = obs_combined[obs_combined > 0]
+                om = self._obs_combined[self._obs_combined > 0]
                 if len(om) > 0:
                     bins = [0, 5, 10, 20, 30, 50, 70, 100, 256]
                     h, _ = np.histogram(om, bins)
@@ -1309,12 +1323,12 @@ class Vision:
             if not skip_slam_update and self._capture_budget.should_run("gmap"):
                 with self._capture_budget.stage("gmap"):
                     self._gpu.gmap_update_gpu(
-                        obs_combined, known_combined,
+                        self._obs_combined, self._known_combined,
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE),
                         free_range_mask=self._free_range_mask)
                     self._global_map.keyframe_check(
-                        obs_combined, known_combined,
+                        self._obs_combined, self._known_combined,
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE))
                     
@@ -1342,8 +1356,8 @@ class Vision:
             if ego_proj is not None:
                 self._persistent_obs[ego_proj < 90] = 255
             # obs_combined is height-cm (1..100) where obstacles exist
-            self._persistent_obs[obs_combined > 0] = 255
-            self._persistent_height[:] = obs_combined.astype(np.uint8, copy=False)
+            self._persistent_obs[self._obs_combined > 0] = 255
+            self._persistent_height[:] = self._obs_combined.astype(np.uint8, copy=False)
             self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
             self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
 
@@ -1454,9 +1468,9 @@ class Vision:
                     dh, dw = dbg_rgb.shape[:2]
                     atlas[ATLAS_H - dh:ATLAS_H, ATLAS_W - dw:ATLAS_W] = dbg_rgb
 
-                dbg2 = np.zeros((known_combined.shape[0], known_combined.shape[1], 3), dtype=np.uint8)
-                dbg2[(known_combined > 0) & (obs_combined == 0)] = [0, 255, 0]
-                dbg2[obs_combined > 0] = [255, 0, 0]
+                dbg2 = np.zeros((self._known_combined.shape[0], self._known_combined.shape[1], 3), dtype=np.uint8)
+                dbg2[(self._known_combined > 0) & (self._obs_combined == 0)] = [0, 255, 0]
+                dbg2[self._obs_combined > 0] = [255, 0, 0]
                 d2h, d2w = dbg2.shape[:2]
                 atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
 

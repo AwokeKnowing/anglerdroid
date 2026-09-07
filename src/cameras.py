@@ -199,6 +199,7 @@ class RSCamera:
             self.verts = None
 
         self.color = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        # Pre-allocate IR buffers (if capturing IR, allocate on first grab)
         self.ir_left = None
         self.ir_right = None
         self.ok = False
@@ -262,8 +263,15 @@ class RSCamera:
             ir1 = frames.get_infrared_frame(1)
             ir2 = frames.get_infrared_frame(2)
             if ir1 and ir2:
-                self.ir_left = np.asarray(ir1.get_data()).copy()
-                self.ir_right = np.asarray(ir2.get_data()).copy()
+                # Pre-allocate IR buffers on first grab, then mutate in place
+                ir1_data = np.asarray(ir1.get_data())
+                ir2_data = np.asarray(ir2.get_data())
+                if self.ir_left is None or self.ir_left.shape != ir1_data.shape:
+                    self.ir_left = np.zeros_like(ir1_data)
+                if self.ir_right is None or self.ir_right.shape != ir2_data.shape:
+                    self.ir_right = np.zeros_like(ir2_data)
+                np.copyto(self.ir_left, ir1_data)
+                np.copyto(self.ir_right, ir2_data)
 
         self.ok = True
         return True
