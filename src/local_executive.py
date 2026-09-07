@@ -20,6 +20,7 @@ import threading
 import time
 
 import navigator
+import tools
 
 LOOKAHEAD_M = 1.0
 GOAL_REACHED_M = 0.35
@@ -154,7 +155,7 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
     pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
     try:
         # Pass slam_locked status to keepouts (critical: don't trust map-frame keepouts if SLAM unlocked)
-        vis = tools.get_vision_instance()
+        vis = tools.get_vision()
         slam_locked = vis.slam_locked if vis else False
         obs_map = keepouts.paint_ego(obs_map, pose, slam_locked=slam_locked)
     except Exception as e:
