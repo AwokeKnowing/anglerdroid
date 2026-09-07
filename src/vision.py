@@ -29,7 +29,8 @@ from robot_config import (FRAME_W, FRAME_H,
                           WHEEL_RADIUS_M, WHEELBASE_M,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
-                          FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES)
+                          FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES,
+                          RS1_VIZ_SCALE)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -1987,13 +1988,27 @@ class Vision:
         This is the mask that zeros obstacles / forces known-free under the robot body
         (not the trust/FOV obs_mask). Returns RGBA (H,W,4):
           - RGB: RS1 topdown (180°-flipped to ego)
-          - Magenta tint: FOOT rectangle (self-masked region)
-          - Bright yellow line: FOOT forward edge (FOOT_X1) — should sit at bumper,
-            just before real obstacles like the cardboard box
+          - Green tint: under-robot boxes (marked clear+known)
+          - Blue tint: self-ignore boxes (removed from obs, NOT marked clear)
+          - Yellow outline: box edges
+          - Cyan line: bumper/crop line at body front (should sit just before obstacles)
+        
+        Boxes are scaled by RS1_VIZ_SCALE for camera-space visualization (ego-map boxes 
+        are 1 cm/px orthographic; RS1 color has perspective → boxes need scaling to cover 
+        robot hull in camera view). Tune RS1_VIZ_SCALE in robot_config.py to align boxes 
+        with actual robot body + wheels.
         """
         import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
+
+        def scale_box(x0, y0, x1, y1, scale, cx=RCX, cy=RCY):
+            """Scale box around robot center (cx, cy) by scale factor."""
+            xs0 = cx + (x0 - cx) * scale
+            ys0 = cy + (y0 - cy) * scale
+            xs1 = cx + (x1 - cx) * scale
+            ys1 = cy + (y1 - cy) * scale
+            return int(round(xs0)), int(round(ys0)), int(round(xs1)), int(round(ys1))
 
         rgb = self._rs1.color[::-1, ::-1].copy()
         h, w = rgb.shape[:2]
@@ -2003,8 +2018,9 @@ class Vision:
         # Under-robot boxes: green tint (marked clear+known)
         overlay[:, :, 3] = 255
         for bx0, by0, bx1, by1 in UNDER_ROBOT_BOXES:
-            x0 = max(0, min(w, bx0)); x1 = max(0, min(w, bx1))
-            y0 = max(0, min(h, by0)); y1 = max(0, min(h, by1))
+            x0, y0, x1, y1 = scale_box(bx0, by0, bx1, by1, RS1_VIZ_SCALE)
+            x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
+            y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
             if x1 <= x0 or y1 <= y0:
                 continue
             m = np.zeros((h, w), dtype=bool)
@@ -2016,8 +2032,9 @@ class Vision:
         
         # Self-ignore boxes: blue tint (removed from obs, NOT marked clear)
         for bx0, by0, bx1, by1 in SELF_IGNORE_BOXES:
-            x0 = max(0, min(w, bx0)); x1 = max(0, min(w, bx1))
-            y0 = max(0, min(h, by0)); y1 = max(0, min(h, by1))
+            x0, y0, x1, y1 = scale_box(bx0, by0, bx1, by1, RS1_VIZ_SCALE)
+            x0 = max(0, min(w, x0)); x1 = max(0, min(w, x1))
+            y0 = max(0, min(h, y0)); y1 = max(0, min(h, y1))
             if x1 <= x0 or y1 <= y0:
                 continue
             m = np.zeros((h, w), dtype=bool)
@@ -2029,10 +2046,13 @@ class Vision:
         
         # Cyan forward crop line on first under-robot box (body floor bumper)
         if UNDER_ROBOT_BOXES:
-            body_x0, body_y0, body_x1, body_y1 = UNDER_ROBOT_BOXES[0]
-            y0, y1, x1 = body_y0, body_y1, body_x1
-            fx = min(w - 1, max(0, x1 - 1))
-            overlay[y0:y1, fx, :] = [0, 255, 255, 255]  # cyan
+            body_bx0, body_by0, body_bx1, body_by1 = UNDER_ROBOT_BOXES[0]
+            body_x0, body_y0, body_x1, body_y1 = scale_box(body_bx0, body_by0, body_bx1, body_by1, RS1_VIZ_SCALE)
+            y0 = max(0, min(h, body_y0))
+            y1 = max(0, min(h, body_y1))
+            fx = min(w - 1, max(0, body_x1 - 1))
+            if y1 > y0:
+                overlay[y0:y1, fx, :] = [0, 255, 255, 255]  # cyan
         return overlay
 
     def get_rs1_trust_mask_overlay(self):

@@ -103,3 +103,10 @@ SELF_IGNORE_BOXES = [
 
 # Legacy: combined footprint (all boxes) for backward compat with viz code
 FOOTPRINT_BOXES = UNDER_ROBOT_BOXES + SELF_IGNORE_BOXES
+
+# RS1 camera-space visualization scale
+# Ego-map boxes (1 cm/px orthographic) need scaling when drawn on RS1 color (perspective camera).
+# RS1 color shows ~wider FOV with varying GSD; scale ~3–4× makes boxes cover robot hull + wheels.
+# Tune this constant live in Rerun to align green/blue boxes with robot body in vision/rs1_mask_overlay.
+# Map metric (UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES) stays unchanged; this is viz-only.
+RS1_VIZ_SCALE = 3.0           # scale ego boxes for RS1 color overlay (tune vs live footage)
