@@ -13,9 +13,10 @@ WHEELBASE_CM = 34.0
 WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0   # ~0.08565
 WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
 
-# Robot footprint on costmap (pixels). Robot faces RIGHT in ego frame.
-ROBOT_W = 30                  # front-back (x direction)
-ROBOT_H = 42                  # side-to-side (y direction)
+# Robot footprint on costmap (pixels @ 1 cm/px). Robot faces RIGHT in ego frame.
+# Physical: ~42 cm front-back, ~40 cm lateral (wheel-to-wheel).
+ROBOT_W = 42                  # front-back (x direction)
+ROBOT_H = 40                  # side-to-side (y direction)
 ROBOT_CX_OFF = -78            # x offset from crosshair center
 
 FOOT_PAD_FWD = 8              # extra clear pixels forward (self-reflection + mast-inflate ghosts)

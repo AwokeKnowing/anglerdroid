@@ -88,6 +88,7 @@ class KevinRerunLogger:
         rs2: Optional[np.ndarray] = None,
         obs: Optional[np.ndarray] = None,
         height_cm: Optional[np.ndarray] = None,
+        footprint_overlay: Optional[np.ndarray] = None,
         safety: Optional[Mapping[str, Any]] = None,
         force: bool = False,
     ) -> bool:
@@ -125,6 +126,12 @@ class KevinRerunLogger:
                     # float32 depth channel keeps sparse zeros as invalid-ish.
                     hf = h.astype(np.float32, copy=False)
                     rr.log("maps/height_cm", rr.DepthImage(hf, meter=100.0))
+            if footprint_overlay is not None:
+                # Ego-space viz: robot footprint on obstacle underlay.
+                # 1 px = 1 cm. Physical size from robot_config (~42×40 cm).
+                fo = np.ascontiguousarray(footprint_overlay)
+                if fo.ndim == 3:
+                    rr.log("vision/robot_footprint_overlay", rr.Image(fo))
             if safety:
                 rr.log(
                     "safety",

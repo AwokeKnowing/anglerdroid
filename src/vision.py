@@ -104,6 +104,51 @@ def _draw_center_crosshair(region, opacity=CROSSHAIR_OPACITY):
     region[:, c + 1] = (region[:, c + 1].astype(np.float32) * blend + white).astype(np.uint8)
 
 
+def get_robot_footprint_overlay(obs_ego, known_ego):
+    """Generate robot footprint overlay in ego-map space for Rerun visualization.
+    
+    Ego-space visualization (not raw camera): shows FOOT_* rectangle at 1 cm/px
+    so James can compare footprint size to real obstacles (cardboard box, dog bed).
+    
+    Args:
+        obs_ego: uint8 (H, W) obstacle map (0=free, 1-100=height in cm)
+        known_ego: uint8 (H, W) known mask (255=observed, 0=unobserved)
+    
+    Returns:
+        RGB uint8 (H, W, 3) overlay:
+        - Base layer: grayscale known+obs (obstacles in light gray)
+        - Robot foot: magenta fill with yellow forward edge + full outline
+        - Full-frame alpha (no black islands)
+    """
+    h, w = obs_ego.shape[:2]
+    overlay = np.zeros((h, w, 3), dtype=np.uint8)
+    
+    # Base layer: known areas in dark gray, obstacles in light gray
+    known_mask = known_ego > 0
+    obstacle_mask = obs_ego > 0
+    overlay[known_mask] = [40, 40, 40]
+    overlay[obstacle_mask] = [160, 160, 160]
+    
+    # Robot footprint: magenta fill
+    overlay[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = [180, 60, 180]
+    
+    # Forward edge (right edge in ego frame where robot faces RIGHT): bright yellow
+    if FOOT_X1 < w:
+        overlay[FOOT_Y0:FOOT_Y1, FOOT_X1] = [255, 255, 0]
+        if FOOT_X1 + 1 < w:
+            overlay[FOOT_Y0:FOOT_Y1, FOOT_X1 + 1] = [255, 255, 0]
+    
+    # Full rectangle outline: yellow
+    if FOOT_Y0 > 0:
+        overlay[FOOT_Y0, FOOT_X0:FOOT_X1] = [255, 255, 0]
+    if FOOT_Y1 < h:
+        overlay[FOOT_Y1 - 1, FOOT_X0:FOOT_X1] = [255, 255, 0]
+    if FOOT_X0 > 0:
+        overlay[FOOT_Y0:FOOT_Y1, FOOT_X0] = [255, 255, 0]
+    
+    return overlay
+
+
 def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480, out=None):
     """Zero out border pixels of a decimated RS depth grid.
 
@@ -1980,5 +2025,22 @@ class Vision:
                 'pose_theta': pose_theta,
             }
         }
+    
+    def get_robot_footprint_overlay(self):
+        """Get robot footprint overlay in ego-map space for Rerun visualization.
+        
+        Ego-space viz (320×240 @ 1 cm/px): shows FOOT_* rectangle so James
+        can compare footprint to obstacles. Overlay is RGB with obstacles +
+        magenta foot + yellow forward edge.
+        
+        Returns:
+            RGB uint8 (240, 320, 3) or None if no ego obs data available
+        """
+        with self._lock:
+            obs = getattr(self, '_obs_combined', None)
+            known = getattr(self, '_known_combined', None)
+            if obs is None or known is None:
+                return None
+            return get_robot_footprint_overlay(obs.copy(), known.copy())
 
 

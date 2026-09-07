@@ -211,11 +211,17 @@ def main():
                     height = getattr(vis, "_persistent_height", None)
                     # Only copy camera frames on log ticks (every_n gate inside logger
                     # still needs the arrays — peek counter via force=False path).
+                    footprint_overlay = None
                     if rerun_logger.due:
                         try:
                             frames, _atlas2, _ts2 = tools.get_frames()
                         except Exception:
                             frames = None
+                        # Get robot footprint overlay (ego-space viz for James)
+                        try:
+                            footprint_overlay = vis.get_robot_footprint_overlay()
+                        except Exception:
+                            footprint_overlay = None
                     rgb = rs1 = rs2 = None
                     if frames is not None and len(frames) >= 3:
                         rgb, rs1, rs2 = frames[0], frames[1], frames[2]
@@ -227,6 +233,7 @@ def main():
                         rs2=rs2,
                         obs=obs,
                         height_cm=height,
+                        footprint_overlay=footprint_overlay,
                         safety={
                             "fwd": getattr(vis, "safety_fwd_scale", 1.0),
                             "bwd": getattr(vis, "safety_bwd_scale", 1.0),
