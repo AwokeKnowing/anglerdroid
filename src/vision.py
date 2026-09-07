@@ -32,6 +32,7 @@ from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
 from slam import PoseGraphSLAM
+from checkered_mat import CheckeredMatDetector
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -248,6 +249,10 @@ class Vision:
         self._topdown_near_field = False
         self._near_field_close_count = 0
         self._near_field_min_z = float('inf')
+        self._checkered_mat = False
+        self._checkered_mat_corner_count = 0
+        self._checkered_mat_confidence = 0.0
+        self._checkered_mat_detector = CheckeredMatDetector()
         self._safety = SafetyGuard()
         self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
         self._cuvslam = None
@@ -598,6 +603,33 @@ class Vision:
                 cap_x, cap_y, cap_theta = self._pose.x, self._pose.y, self._pose.theta
                 pose_src = self._pose
 
+            # Check for checkered mat (RGB-based reflex, works without SLAM)
+            # Detects checkered floor mat and triggers forward hard-stop.
+            if self._webcam and self._webcam.ok and self._webcam.color is not None:
+                mat_triggered = self._checkered_mat_detector.check(self._webcam.color)
+                self._checkered_mat = mat_triggered
+                self._checkered_mat_corner_count = self._checkered_mat_detector.corner_count
+                self._checkered_mat_confidence = self._checkered_mat_detector.detection_confidence
+                if mat_triggered and not hasattr(self, '_checkered_mat_log_n'):
+                    self._checkered_mat_log_n = 0
+                if mat_triggered:
+                    self._checkered_mat_log_n += 1
+                    if self._checkered_mat_log_n == 1 or self._checkered_mat_log_n % 30 == 0:
+                        print("vision: CHECKERED MAT REFLEX triggered — "
+                              "corners=%d conf=%.2f (mat detected in RGB, fwd=0)"
+                              % (self._checkered_mat_corner_count, self._checkered_mat_confidence))
+                else:
+                    if hasattr(self, '_checkered_mat_log_n') and self._checkered_mat_log_n > 0:
+                        print("vision: CHECKERED MAT REFLEX cleared — "
+                              "corners=%d conf=%.2f (after %d frames)"
+                              % (self._checkered_mat_corner_count, self._checkered_mat_confidence,
+                                 self._checkered_mat_log_n))
+                        self._checkered_mat_log_n = 0
+            else:
+                self._checkered_mat = False
+                self._checkered_mat_corner_count = 0
+                self._checkered_mat_confidence = 0.0
+
             # RS1 top-down depth → (obstacles, known), rotate 180°
             z1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
             k1 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -812,7 +844,8 @@ class Vision:
 
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height,
-                                topdown_near_field=self._topdown_near_field)
+                                topdown_near_field=self._topdown_near_field,
+                                checkered_mat=self._checkered_mat)
             if not self._topdown_ok:
                 # Hard immobilize: no top-down depth reading.
                 self._safety._fwd_scale = 0.0
