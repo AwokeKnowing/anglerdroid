@@ -113,7 +113,8 @@ def _clip_decimated_border(verts, border=4, orig_w=848, orig_h=480):
 
     Returns a *copy* — the original camera buffer is never modified.
     """
-    v = verts.reshape(-1, 3).copy()
+    # Copy once for border zeroing (callers must not share mutated verts)
+    v = np.array(verts.reshape(-1, 3), dtype=np.float32, copy=True)
     n = len(v)
     if n < 100:
         return v
@@ -984,14 +985,13 @@ class Vision:
             self._capture_budget.reset_frame()
 
             try:
-                # Parallel grabs so dual RealSense waits overlap (not sum).
-                _cams = [c for c in (self._webcam, self._rs1, self._rs2) if c]
-                if len(_cams) <= 1:
-                    for c in _cams:
+                # Critical path: RealSense only (parallel).
+                _rs = [c for c in (self._rs1, self._rs2) if c]
+                if len(_rs) <= 1:
+                    for c in _rs:
                         c.grab()
                 else:
-                    # Reuse pool — creating a ThreadPoolExecutor every frame is expensive
-                    list(self._grab_pool.map(lambda c: c.grab(), _cams))
+                    list(self._grab_pool.map(lambda c: c.grab(), _rs))
             except Exception as e:
                 # Never let a camera glitch kill the capture thread (blank atlas forever).
                 if not getattr(self, '_grab_err_n', 0):
@@ -1037,7 +1037,7 @@ class Vision:
                     self._near_field_log_n = 0
                 if triggered:
                     self._near_field_log_n += 1
-                    if self._near_field_log_n == 1 or self._near_field_log_n % 30 == 0:
+                    if self._near_field_log_n == 1 or self._near_field_log_n % 90 == 0:
                         print("vision: NEAR-FIELD REFLEX triggered — "
                               "close_px=%d min_z=%.3fm (table/hand <30cm from topdown)"
                               % (close_count, min_z))
@@ -1058,7 +1058,7 @@ class Vision:
                     self._overhang_approach_log_n = 0
                 if ovh_triggered:
                     self._overhang_approach_log_n += 1
-                    if self._overhang_approach_log_n == 1 or self._overhang_approach_log_n % 30 == 0:
+                    if self._overhang_approach_log_n == 1 or self._overhang_approach_log_n % 90 == 0:
                         print("vision: OVERHANG APPROACH detected — "
                               "ovh_px=%d median_z=%.3fm (table/shelf ahead 30-70cm, blocks COMMIT)"
                               % (ovh_count, ovh_median_z))
@@ -1080,7 +1080,7 @@ class Vision:
                     self._soft_low_obstacle_log_n = 0
                 if soft_low_triggered:
                     self._soft_low_obstacle_log_n += 1
-                    if self._soft_low_obstacle_log_n == 1 or self._soft_low_obstacle_log_n % 30 == 0:
+                    if self._soft_low_obstacle_log_n == 1 or self._soft_low_obstacle_log_n % 90 == 0:
                         print("vision: SOFT LOW OBSTACLE detected — "
                               "low_obs_px=%d median_h=%.1fcm (dog bed / cushion ahead, attenuate fwd)"
                               % (soft_low_count, soft_low_height))
@@ -1471,6 +1471,13 @@ class Vision:
             _t_end = _t_render
 
             # === Stage timing collection ===
+            # Webcam last: never on RS grab clock or pose bucket
+            if self._webcam is not None:
+                try:
+                    self._webcam.grab()
+                except Exception:
+                    pass
+
             _stage_times.append((
                 (_t_grab - _t_start) * 1000.0,      # grab
                 (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose

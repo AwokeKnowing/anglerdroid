@@ -14,7 +14,7 @@ except ImportError:
 from robot_config import FRAME_W, FRAME_H
 RS_DEPTH_W, RS_DEPTH_H = 848, 480
 RGB_CAP_W, RGB_CAP_H = 640, 480
-RS_DECIMATE_MAG = 3  # librealsense log2: 3 => 2**3 = 8x (every 8th)
+RS_DECIMATE_MAG = 3  # VERIFY verts on device (JP6 measured ~45k; mag=8 ~6k)
 
 
 def _set_sensor_opt(sensor, option, value):
@@ -99,7 +99,7 @@ def _open_rgb_capture(device_id):
 class RSCamera:
     """RealSense D435: depth 848x480 -> decimated pointcloud + color 320x240.
 
-    With decimate_mag=3 (=8x) the pointcloud has only 106x60 = 6360 vertices,
+    With decimate_mag=8 the pointcloud has ~106x60 = 6360 vertices;
     making downstream numpy processing trivial (<1 ms).
     Set compute_pointcloud=False for cameras that only provide color.
     Set capture_ir=True to also capture stereo IR frames (for cuVSLAM).
@@ -209,14 +209,21 @@ class RSCamera:
         Prefer poll_for_frames (non-blocking). If empty, wait briefly (~1 frame).
         Never wait hundreds of ms — that destroys 30Hz freshness.
         Never raises — sets ok=False on miss.
+        Set KEVIN_GRAB_PROF=1 to accumulate poll/color/pc phase ms.
         """
+        import os, time as _time
+        _prof = os.environ.get('KEVIN_GRAB_PROF') == '1'
+        _t0 = _time.monotonic() if _prof else 0.0
         try:
             frames = self._pipe.poll_for_frames()
+            waited = False
             if not frames:
                 frames = self._pipe.wait_for_frames(40)
+                waited = True
         except Exception:
             self.ok = False
             return False
+        _t1 = _time.monotonic() if _prof else 0.0
         d = frames.get_depth_frame()
         c = frames.get_color_frame()
         if not d or not c:
@@ -224,6 +231,7 @@ class RSCamera:
             return False
 
         self.color[:] = np.asarray(c.get_data())
+        _t2 = _time.monotonic() if _prof else 0.0
 
         if self._compute_pc:
             d = self._decimate.process(d)
@@ -233,6 +241,22 @@ class RSCamera:
             if self.verts is None or self.verts.shape[0] != raw.shape[0]:
                 self.verts = np.zeros_like(raw)
             np.copyto(self.verts, raw)
+        _t3 = _time.monotonic() if _prof else 0.0
+        if _prof:
+            # Rolling means on instance for probe scripts
+            def _acc(name, dt):
+                n = getattr(self, '_prof_n', 0)
+                prev = getattr(self, name, 0.0)
+                setattr(self, name, (prev * n + dt * 1000.0) / (n + 1))
+            if not hasattr(self, '_prof_n'):
+                self._prof_n = 0
+            _acc('_prof_poll_ms', _t1 - _t0)
+            _acc('_prof_color_ms', _t2 - _t1)
+            _acc('_prof_pc_ms', _t3 - _t2)
+            self._prof_waited_frac = (
+                (getattr(self, '_prof_waited_frac', 0.0) * self._prof_n + (1.0 if waited else 0.0))
+                / (self._prof_n + 1))
+            self._prof_n += 1
 
         if self._capture_ir:
             ir1 = frames.get_infrared_frame(1)
@@ -283,14 +307,22 @@ class WebCam:
         self.ok = False
 
     def grab(self):
-        """Block until next frame. Fills self.color."""
+        """Non-blocking when possible: never stall the 30Hz RS barrier.
+
+        Uses grab()+retrieve(). If no new USB frame is ready, keeps the last
+        color buffer and returns True so parallel RS grabs aren't gated on
+        webcam period (was a multi-10ms bleed on Orin).
+        """
         if not self._cap or not self._cap.isOpened():
             self.ok = False
             return False
-        ret, f = self._cap.read()
+        # Non-blocking poll of driver queue
+        if not self._cap.grab():
+            # No new frame — keep last self.color (sticky). Still "ok" if we ever had one.
+            return bool(getattr(self, '_had_frame', False))
+        ret, f = self._cap.retrieve()
         if not ret or f is None:
-            self.ok = False
-            return False
+            return bool(getattr(self, '_had_frame', False))
         if f.ndim == 2:
             f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
         elif f.shape[2] == 4:
@@ -300,6 +332,7 @@ class WebCam:
         f = f[::-1, ::-1]  # vflip + hflip (camera upside down and mirrored)
         f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         np.copyto(self.color, f)
+        self._had_frame = True
         self.ok = True
         return True
 

@@ -169,7 +169,7 @@ class SafetyGuard:
             self._near_field_reason = "topdown_soft_low_obstacle"
             # Attenuate forward to cautious crawl speed (not full stop)
             self._fwd_scale = 0.3
-            if self._tick % 10 == 0:
+            if self._tick % 90 == 0:
                 print("safety: SOFT LOW OBSTACLE REFLEX — RS1 depth sees dog bed/cushion, "
                       "fwd=0.3 (attenuated), computing bwd/ang normally")
         # ── Topdown hazard reflex: RS1 RGB bump/checkered detection (sensor frame) ──
@@ -180,7 +180,7 @@ class SafetyGuard:
             self._near_field_reason = "topdown_hazard"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
-            if self._tick % 10 == 0:
+            if self._tick % 90 == 0:
                 print("safety: TOPDOWN HAZARD REFLEX — RS1 RGB sees bump/checkered, "
                       "fwd=0.0, computing bwd/ang normally")
         # ── Overhang approach reflex: overhead structure at 30-70cm ahead ──
@@ -191,7 +191,7 @@ class SafetyGuard:
             self._near_field_reason = "topdown_overhang_approach"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
-            if self._tick % 10 == 0:
+            if self._tick % 90 == 0:
                 print("safety: OVERHANG APPROACH REFLEX — topdown sees overhang (30-70cm ahead), "
                       "fwd=0.0, computing bwd/ang normally")
         # ── Near-field reflex: overhead object <30cm from top-down camera ──
@@ -204,7 +204,7 @@ class SafetyGuard:
             self._near_field_reason = "topdown_near_field"
             # Zero forward immediately (reflex); bwd/ang computed normally below
             self._fwd_scale = 0.0
-            if self._tick % 10 == 0:
+            if self._tick % 90 == 0:
                 print("safety: NEAR-FIELD REFLEX — topdown sees close object (<30cm), "
                       "fwd=0.0, computing bwd/ang normally")
         else:
@@ -240,7 +240,7 @@ class SafetyGuard:
         if not (topdown_near_field or topdown_overhang_approach or topdown_hazard or topdown_soft_low_obstacle):
             self._fwd_scale = _clearance_scale(fwd_clear)
         self._bwd_scale = _clearance_scale(bwd_clear)
-        if fwd_clear < 10 and self._tick % 5 == 0:
+        if fwd_clear < 10 and self._tick % 90 == 0:
             print("safety: fwd_clear=%d bwd_clear=%d fwd_scale=%.2f "
                   "scan_region=[%d:%d, %d:]"
                   % (fwd_clear, bwd_clear, self._fwd_scale,
@@ -286,7 +286,9 @@ class SafetyGuard:
             floor = ESCAPE_ANG_FLOOR if min_lat > LAT_HARD_PX else ESCAPE_ANG_HARD
             self._ang_scale = max(self._ang_scale, floor)
         if nose_or_tail_pinned and self._tick % 15 == 0:
-            print("safety: escape_spin ang=%.2f min_lat=%d fwd=%.2f bwd=%.2f"
+            if self._tick % 90 == 0:
+
+                print("safety: escape_spin ang=%.2f min_lat=%d fwd=%.2f bwd=%.2f"
                   % (self._ang_scale, min_lat, self._fwd_scale, self._bwd_scale))
 
         self._throttled = (self._fwd_scale < 0.95 or self._bwd_scale < 0.95

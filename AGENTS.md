@@ -24,9 +24,10 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
    phase. Prefer persistent worker pools over creating pools/threads per frame.
 
 ### Past wizardry (do not casually undo)
-- RealSense depth **decimation**: `RS_DECIMATE_MAG = 3` means **2³ = 8×** (SDK log2).
-  That yields the tuned ~6k-vert cloud — not “mag 3 vs mag 8.” Changing it requires
-  on-device re-benchmark.
+- RealSense depth **decimation**: **measure verts on device**. On current JP/librealsense,
+  `RS_DECIMATE_MAG=3` produced ~45k verts (≈3×3 blocks). Mag=8 → ~6k verts (old docstring).
+  James noted some stacks treat mag as log2 — **verify by counting verts**, then bake-off.
+  Changing it requires on-device re-benchmark (goal 60fps).
 
 ### Hardware-first (GPU > CPU NumPy)
 A “numpy algorithm” is a *shape*, not a placement. On Orin prefer **CuPy /
