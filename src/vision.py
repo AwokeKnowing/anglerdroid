@@ -1532,54 +1532,64 @@ class Vision:
             
             _t_safety = time.monotonic()
 
-            # --- GPU renders full atlas (3D view + cameras + minimap + battery) ---
-            trail = pose_src.get_world_history()
-            rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
-            rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
-            rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
+            # --- GPU atlas render (DROPPABLE: viz for humans/i777, not policy) ---
+            # Policy needs heightmap/obs/safety (already published above) at 30Hz.
+            # Atlas paint can run at lower rate when budget tight.
+            # Expected: render ~9ms; if budget exceeded, skip to stay under 33.3ms target.
+            atlas = None
+            if self._capture_budget.should_run("render"):
+                with self._capture_budget.stage("render"):
+                    trail = pose_src.get_world_history()
+                    rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
+                    rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
+                    rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
 
-            bat_frac = 0.0
-            if self._wheelbase:
-                pct = self._wheelbase.battery_pct
-                bat_frac = max(0.0, min(1.0, pct / 100.0)) if pct >= 0 else 0.0
+                    bat_frac = 0.0
+                    if self._wheelbase:
+                        pct = self._wheelbase.battery_pct
+                        bat_frac = max(0.0, min(1.0, pct / 100.0)) if pct >= 0 else 0.0
 
-            atlas = self._gpu.render(
-                pose_src.x, pose_src.y, pose_src.theta,
-                cameras=[rgb1, rgbd1, rgbd2],
-                trail_xy=trail,
-                fwd_scale=self._safety.fwd_scale,
-                bwd_scale=self._safety.bwd_scale,
-                ang_scale=self._safety.ang_scale,
-                battery_frac=bat_frac)
+                    atlas = self._gpu.render(
+                        pose_src.x, pose_src.y, pose_src.theta,
+                        cameras=[rgb1, rgbd1, rgbd2],
+                        trail_xy=trail,
+                        fwd_scale=self._safety.fwd_scale,
+                        bwd_scale=self._safety.bwd_scale,
+                        ang_scale=self._safety.ang_scale,
+                        battery_frac=bat_frac)
 
-            # Debug overlays — gated by debug_depth flag
-            if _dbg and atlas is not None:
-                if _raw_scatter is not None:
-                    dbg = np.rot90(_raw_scatter, k=-1)
-                    dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
-                    dbg_rgb[dbg == 1] = [0, 255, 0]
-                    dbg_rgb[dbg >= 2] = [255, 0, 0]
-                    dh, dw = dbg_rgb.shape[:2]
-                    atlas[ATLAS_H - dh:ATLAS_H, ATLAS_W - dw:ATLAS_W] = dbg_rgb
+                    # Debug overlays — gated by debug_depth flag
+                    if _dbg and atlas is not None:
+                        if _raw_scatter is not None:
+                            dbg = np.rot90(_raw_scatter, k=-1)
+                            dbg_rgb = np.zeros((dbg.shape[0], dbg.shape[1], 3), dtype=np.uint8)
+                            dbg_rgb[dbg == 1] = [0, 255, 0]
+                            dbg_rgb[dbg >= 2] = [255, 0, 0]
+                            dh, dw = dbg_rgb.shape[:2]
+                            atlas[ATLAS_H - dh:ATLAS_H, ATLAS_W - dw:ATLAS_W] = dbg_rgb
 
-                dbg2 = np.zeros((self._known_combined.shape[0], self._known_combined.shape[1], 3), dtype=np.uint8)
-                dbg2[(self._known_combined > 0) & (self._obs_combined == 0)] = [0, 255, 0]
-                dbg2[self._obs_combined > 0] = [255, 0, 0]
-                d2h, d2w = dbg2.shape[:2]
-                atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
+                        dbg2 = np.zeros((self._known_combined.shape[0], self._known_combined.shape[1], 3), dtype=np.uint8)
+                        dbg2[(self._known_combined > 0) & (self._obs_combined == 0)] = [0, 255, 0]
+                        dbg2[self._obs_combined > 0] = [255, 0, 0]
+                        d2h, d2w = dbg2.shape[:2]
+                        atlas[ATLAS_H - d2h:ATLAS_H, 0:d2w] = dbg2
 
-                # Side-view cross-section (upper-right of 3D area)
-                sv = self._render_side_view()
-                svh, svw = sv.shape[:2]
-                atlas[FRAME_H:FRAME_H + svh, ATLAS_W - svw:ATLAS_W] = sv
+                        # Side-view cross-section (upper-right of 3D area)
+                        sv = self._render_side_view()
+                        svh, svw = sv.shape[:2]
+                        atlas[FRAME_H:FRAME_H + svh, ATLAS_W - svw:ATLAS_W] = sv
 
-            with self._lock:
-                self.frames[0][:] = rgb1
-                self.frames[1][:] = rgbd1
-                self.frames[2][:] = rgbd2
-                if atlas is not None:
-                    self.atlas[:] = atlas
-                self.timestamp = time.time()
+                    # Update frames and atlas under lock
+                    with self._lock:
+                        self.frames[0][:] = rgb1
+                        self.frames[1][:] = rgbd1
+                        self.frames[2][:] = rgbd2
+                        self.atlas[:] = atlas
+                        self.timestamp = time.time()
+            else:
+                # Render skipped — only update timestamp (atlas/frames stay stale)
+                with self._lock:
+                    self.timestamp = time.time()
             _t_render = time.monotonic()
             _t_end = _t_render
 
