@@ -273,7 +273,6 @@ class PeopleBehaviorStub:
         volume: float = 0.1,
         recognizer = None,
         enable_live_enrollment: bool = True,
-        enrollment_confidence_threshold: float = 0.90,
     ):
         self.speak_fn = speak_fn if speak_fn is not None else self._stub_speak
         self.greet_hours = greet_hours or GreetHours()
@@ -291,7 +290,6 @@ class PeopleBehaviorStub:
             self.enrollment_manager = LiveEnrollmentManager(
                 recognizer=recognizer,
                 speak_fn=self.speak_fn,
-                confidence_threshold=enrollment_confidence_threshold,
                 min_samples=3,
                 max_samples=5,
                 session_timeout=15.0,
@@ -323,12 +321,12 @@ class PeopleBehaviorStub:
     ) -> Optional[PeopleAction]:
         """Handle face detection with recognition result.
         
-        If confidence is low (<90% by default), triggers interactive enrollment.
-        If recognized with high confidence, greets if appropriate.
+        Enrollment triggers ONLY when name=="unknown" (recognition rejected).
+        Accepted IDs (passed threshold + margin) greet normally.
         
         Args:
             name: Recognized name or "unknown"
-            confidence: Recognition confidence (0.0-1.0)
+            confidence: Recognition confidence (raw cosine, for logging only)
             box: Face bounding box (x, y, w, h)
             image: Optional BGR image for enrollment samples
             landmarks: Optional 5-point landmarks
@@ -385,11 +383,11 @@ class PeopleBehaviorStub:
             # Waiting for name from ASR (handled in on_transcript)
             return None
         
-        # Unknown or low-confidence face?
-        if name == "unknown" or confidence < (self.enrollment_manager.confidence_threshold if self.enrollment_manager else 0.90):
+        # Unknown face (rejected by recognize threshold + margin)?
+        if name == "unknown":
             if self.enrollment_manager is not None:
                 # Should we start enrollment?
-                if self.enrollment_manager.should_enroll(confidence, box, now=t):
+                if self.enrollment_manager.should_enroll(name, box, now=t):
                     prompt = self.enrollment_manager.start_session(box, language="en", now=t)
                     if speak:
                         pass  # Already spoken in start_session
@@ -403,10 +401,10 @@ class PeopleBehaviorStub:
             return PeopleAction(
                 kind="face_unknown",
                 utterance="",
-                meta={"confidence": confidence, "threshold_failed": True}
+                meta={"confidence": confidence, "rejected": True}
             )
         
-        # High-confidence recognition: proceed with greeting
+        # Recognized (accepted by threshold + margin): proceed with greeting
         if not self.can_greet_now(hour):
             return PeopleAction(
                 kind="greet",
@@ -552,7 +550,6 @@ def create_people_behavior(
     volume: float = 0.1,
     recognizer = None,
     enable_live_enrollment: bool = True,
-    enrollment_confidence_threshold: float = 0.90,
 ) -> PeopleBehaviorStub:
     """Factory for offline demos / tests. Does not touch main.py or hardware.
     
@@ -564,7 +561,6 @@ def create_people_behavior(
         volume: Speech volume (0.0-1.0)
         recognizer: FaceRecognizer instance for live enrollment
         enable_live_enrollment: Enable interactive enrollment for unknown faces
-        enrollment_confidence_threshold: User-facing confidence bar (0.90 = 90%)
     """
     return PeopleBehaviorStub(
         speak_fn=speak_fn,
@@ -573,5 +569,4 @@ def create_people_behavior(
         volume=volume,
         recognizer=recognizer,
         enable_live_enrollment=enable_live_enrollment,
-        enrollment_confidence_threshold=enrollment_confidence_threshold,
     )

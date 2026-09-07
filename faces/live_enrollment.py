@@ -98,7 +98,6 @@ class LiveEnrollmentManager:
         self,
         recognizer,
         speak_fn: Callable[[str], None],
-        confidence_threshold: float = 0.90,  # User-facing "90%" bar
         min_samples: int = 3,
         max_samples: int = 5,
         session_timeout: float = 15.0,
@@ -110,7 +109,6 @@ class LiveEnrollmentManager:
         Args:
             recognizer: FaceRecognizer instance
             speak_fn: Function to speak text
-            confidence_threshold: User-facing confidence bar (0.90 = 90%)
             min_samples: Minimum samples to collect
             max_samples: Maximum samples to collect
             session_timeout: Seconds to wait for name response
@@ -119,7 +117,6 @@ class LiveEnrollmentManager:
         """
         self.recognizer = recognizer
         self.speak = speak_fn
-        self.confidence_threshold = confidence_threshold
         self.min_samples = min_samples
         self.max_samples = max_samples
         self.session_timeout = session_timeout
@@ -163,11 +160,14 @@ class LiveEnrollmentManager:
         leaves = self.TIMEOUT_LEAVE_EN if language == "en" else self.TIMEOUT_LEAVE_ES
         return leaves[self.prompt_index % len(leaves)]
     
-    def should_enroll(self, confidence: float, box: Tuple[int, int, int, int], now: Optional[float] = None) -> bool:
-        """Check if we should start enrollment for this unknown/low-confidence face.
+    def should_enroll(self, name: str, box: Tuple[int, int, int, int], now: Optional[float] = None) -> bool:
+        """Check if we should start enrollment for this unknown face.
+        
+        Enrollment triggers ONLY when recognition returns "unknown" (i.e., failed
+        threshold + margin checks). Never triggers based on raw cosine similarity.
         
         Args:
-            confidence: Recognition confidence (0.0-1.0, user-facing scale)
+            name: Recognition result ("unknown" or person name)
             box: Face bounding box
             now: Current time (optional)
         
@@ -180,8 +180,8 @@ class LiveEnrollmentManager:
         if self.active_session is not None:
             return False
         
-        # Confidence too high (we think we know them)?
-        if confidence >= self.confidence_threshold:
+        # Face was recognized (accepted by threshold + margin)?
+        if name != "unknown":
             return False
         
         # Cooldown active for this face?

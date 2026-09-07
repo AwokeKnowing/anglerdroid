@@ -54,6 +54,44 @@ def rebuild_embeddings(gallery_path: str, backend: str, model_pack: str, backup:
         print(f"Error: Gallery path does not exist: {gallery}")
         sys.exit(1)
     
+    # Check existing database for dimension mismatch
+    db_path = gallery / "database.pkl"
+    if db_path.exists():
+        try:
+            import pickle
+            with open(db_path, "rb") as f:
+                old_db = pickle.load(f)
+            
+            # Check embedding dimensions
+            if old_db:
+                for name, data in old_db.items():
+                    if "embeddings" in data and data["embeddings"]:
+                        old_dim = len(data["embeddings"][0])
+                        
+                        # InsightFace uses 512-D, face_recognition uses 128-D, opencv varies
+                        expected_dim = None
+                        if backend == "insightface":
+                            expected_dim = 512
+                        elif backend == "face_recognition":
+                            expected_dim = 128
+                        
+                        if expected_dim and old_dim != expected_dim:
+                            print()
+                            print("⚠️  WARNING: Embedding dimension mismatch detected!")
+                            print(f"   Existing database: {old_dim}-D embeddings")
+                            print(f"   New backend ({backend}): {expected_dim}-D embeddings")
+                            print()
+                            print("The old database MUST be rebuilt with the new backend.")
+                            print("Mixing different embedding dimensions will cause recognition failures.")
+                            print()
+                            if not backup:
+                                print("❌ Cannot proceed without backup enabled.")
+                                print("   Run with --backup (default) to backup old database first.")
+                                sys.exit(1)
+                        break
+        except Exception as e:
+            print(f"Warning: Could not check existing database: {e}")
+    
     # Backup existing database if requested
     if backup:
         backup_database(gallery)
@@ -62,7 +100,7 @@ def rebuild_embeddings(gallery_path: str, backend: str, model_pack: str, backup:
     print(f"\n🔧 Initializing {backend} backend (model_pack={model_pack})...")
     recognizer = FaceRecognizer(gallery_path=str(gallery), backend=backend, model_pack=model_pack)
     
-    # Clear existing database
+    # Clear existing database (start fresh with new dimensions)
     recognizer.db = {}
     
     # Find all person directories
@@ -113,6 +151,13 @@ def rebuild_embeddings(gallery_path: str, backend: str, model_pack: str, backup:
         total_embeddings += person_embeddings
         print(f"  ✅ {person_name}: {person_embeddings} embeddings extracted")
     
+    # Report embedding dimension
+    if recognizer.db:
+        first_person = list(recognizer.db.keys())[0]
+        if recognizer.db[first_person]["embeddings"]:
+            emb_dim = len(recognizer.db[first_person]["embeddings"][0])
+            print(f"\n📏 Embedding dimension: {emb_dim}-D")
+    
     print("\n" + "=" * 60)
     print(f"✅ Rebuild complete!")
     print(f"   Processed: {total_images} images")
@@ -121,7 +166,8 @@ def rebuild_embeddings(gallery_path: str, backend: str, model_pack: str, backup:
     print(f"   Backend: {backend}")
     if backend == "insightface":
         print(f"   Model pack: {model_pack}")
-        print(f"   Embedding dim: {recognizer.embedding_dim}")
+        if hasattr(recognizer, 'embedding_dim'):
+            print(f"   Embedding dim: {recognizer.embedding_dim}-D")
     print(f"   Database: {gallery / 'database.pkl'}")
     print("=" * 60)
     
@@ -129,6 +175,9 @@ def rebuild_embeddings(gallery_path: str, backend: str, model_pack: str, backup:
     print("\n📊 Summary:")
     for name, data in sorted(recognizer.db.items()):
         print(f"  {name}: {len(data['embeddings'])} embeddings")
+    
+    print("\n⚠️  IMPORTANT: Old SFace/128-D embeddings are incompatible with new 512-D embeddings.")
+    print("If you see recognition failures, ensure all embeddings were rebuilt with the same backend.")
 
 
 def main():

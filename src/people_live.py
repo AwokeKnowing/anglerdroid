@@ -83,11 +83,12 @@ class PeopleLive:
         try:
             from faces.recognizer import FaceRecognizer
             from faces.conversation import ConversationManager
-            from faces.people_behavior import PeopleBehaviorStub, GreetHours
+            from faces.people_behavior import create_people_behavior, GreetHours
 
-            rec = FaceRecognizer()
+            # Try InsightFace first (auto-falls back to face_recognition/opencv)
+            rec = FaceRecognizer(backend="auto", model_pack="buffalo_l")
             people = rec.list_people()
-            print("people_live: gallery %s" % (people,))
+            print("people_live: gallery %s backend=%s" % (people, rec.backend))
 
             def _speak(text: str):
                 # Never drop a greeting — queue if house_bot is talking.
@@ -101,11 +102,16 @@ class PeopleLive:
             )
             # Shorter cooldown so walking past again gets a hello sooner.
             self._cm.cooldown_seconds = 90.0
-            self._pb = PeopleBehaviorStub(
+            
+            # PeopleBehaviorStub with live enrollment
+            self._pb = create_people_behavior(
                 speak_fn=_speak,
-                greet_hours=GreetHours(start_hour=8, end_hour=22),
+                recognizer=rec,
+                greet_start=8,
+                greet_end=22,
                 cooldown_seconds=90.0,
                 volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.30")),
+                enable_live_enrollment=True,
             )
             self._pb.enabled_on_hardware = True
             
@@ -121,6 +127,8 @@ class PeopleLive:
             return True
         except Exception as e:
             print("people_live: init failed: %s" % e)
+            import traceback
+            traceback.print_exc()
             return False
 
     def _enqueue(self, text: str):
@@ -296,8 +304,8 @@ class PeopleLive:
             except Exception:
                 pass
             
-            # Recognize only — FSM owns known-person greets (avoid ConversationManager double-speak).
-            faces = self._cm.recognizer.recognize(img)  # SFace defaults: sim>=0.45, margin>=0.08
+            # Recognize with threshold + margin (unknown = rejected by accept gate)
+            faces = self._cm.recognizer.recognize(img, threshold=0.60, margin=0.05, log_scores=False)
             unknowns = [r for r in faces if r[0] == "unknown"]
             
             self._n_tick += 1
@@ -307,6 +315,8 @@ class PeopleLive:
                 self._fsm.drive_armed = _drive_armed()
             
             now = time.monotonic()
+            
+            # Handle known faces via FSM (approach/greet/leave)
             fsm_actions = []
             for name, confidence, box in faces:
                 if name != "unknown" and self._fsm is not None:
@@ -314,6 +324,7 @@ class PeopleLive:
                     if action:
                         fsm_actions.append(action)
             
+            # Apply FSM actions (known people)
             for action in fsm_actions:
                 action_type = action.get("action_type")
                 utterance = action.get("utterance", "")
@@ -331,25 +342,59 @@ class PeopleLive:
                     PeopleLive.social_priority = True
                     PeopleLive.social_hold_until = now + 2.5
             
-            # Soft unknown notice (rare); no spam — FSM cooldowns cover knowns.
-            if unknowns and not fsm_actions:
-                # Don't speak every unknown sighting; ConversationManager would spam.
-                pass
+            # Handle unknown faces with live enrollment (PeopleBehaviorStub)
+            enrollment_actions = []
+            if self._pb is not None:
+                # Get landmarks for InsightFace if available
+                try:
+                    detections = self._cm.recognizer.detect_faces_with_landmarks(img)
+                except Exception:
+                    detections = [(box, None) for _, _, box in faces]
+                
+                # Match faces to detections by box similarity
+                for name, confidence, box in faces:
+                    # Find matching detection with landmarks
+                    landmarks = None
+                    for det_box, det_lm in detections:
+                        # Rough box match (within 20px)
+                        if abs(det_box[0] - box[0]) < 20 and abs(det_box[1] - box[1]) < 20:
+                            landmarks = det_lm
+                            break
+                    
+                    # Feed all faces (unknown and known) to enrollment manager
+                    action = self._pb.on_face_seen(
+                        name=name,
+                        confidence=confidence,
+                        box=box,
+                        image=img,
+                        landmarks=landmarks,
+                        now=now,
+                        speak=True
+                    )
+                    
+                    if action and action.kind in ("enrollment_prompt", "enrollment_collecting", 
+                                                   "enrollment_complete", "enrollment_timeout"):
+                        enrollment_actions.append(action)
+                        print("people_live: enrollment %s for box=%s" % (action.kind, box))
             
-            if faces or fsm_actions:
-                ids = ["%s:%.2f" % (n, c) for n, c, _b in faces]
+            if faces or fsm_actions or enrollment_actions:
                 print(
-                    "people_live: tick#%d faces=%d fsm_actions=%d unknowns=%d ids=%s rgb=%sx%s"
+                    "people_live: tick#%d faces=%d fsm_actions=%d enrollment_actions=%d unknowns=%d rgb=%sx%s"
                     % (
                         self._n_tick,
                         len(faces),
                         len(fsm_actions),
+                        len(enrollment_actions),
                         len(unknowns),
                         ids,
                         img.shape[1],
                         img.shape[0],
                     )
                 )
+        except Exception as e:
+            print("people_live: face tick err %s" % e)
+            import traceback
+            traceback.print_exc()
         except Exception as e:
             print("people_live: face tick err %s" % e)
 
@@ -363,8 +408,19 @@ class PeopleLive:
             self._n_hear += 1
             
             now = time.monotonic()
+            
+            # Check if enrollment session is active (handles name responses)
+            if self._pb and self._pb.enrollment_manager and self._pb.enrollment_manager.is_session_active():
+                session = self._pb.enrollment_manager.active_session
+                if session.person_name is None:
+                    # Waiting for name — feed transcript to enrollment manager
+                    action = self._pb.on_transcript(text, now=now, speak=True, language="en")
+                    if action and action.kind == "enrollment_name_received":
+                        print("people_live: enrollment name received: %s" % action.meta.get("name"))
+                        return
+            
             # Wake/commands first (Designing for Exit: "go away" must win over empathy).
-            action = self._pb.on_transcript(text)
+            action = self._pb.on_transcript(text, now=now, speak=True, language="en")
             if action is not None:
                 hint = action.goal_hint
                 kind = action.kind
@@ -400,6 +456,8 @@ class PeopleLive:
             print("people_live: heard#%d %r (no action)" % (self._n_hear, text[:80]))
         except Exception as e:
             print("people_live: listen tick err %s" % e)
+            import traceback
+            traceback.print_exc()
 
     def _loop(self):
         time.sleep(0.8)  # cameras settle (was 4s — greets came too late)

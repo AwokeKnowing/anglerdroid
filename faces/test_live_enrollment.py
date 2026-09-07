@@ -39,15 +39,14 @@ def test_enrollment_unknown_face():
                 speak_fn=mock_speak,
                 recognizer=recognizer,
                 enable_live_enrollment=True,
-                enrollment_confidence_threshold=0.90,
                 cooldown_seconds=60.0
             )
             
-            # Unknown face (confidence = 0.0)
+            # Unknown face (name=="unknown" from recognize)
             box = (100, 100, 80, 80)
             action = behavior.on_face_seen(
                 name="unknown",
-                confidence=0.0,
+                confidence=0.45,  # Raw cosine (doesn't matter, only name=="unknown" triggers)
                 box=box,
                 image=None,
                 landmarks=None,
@@ -71,7 +70,7 @@ def test_enrollment_unknown_face():
 
 
 def test_enrollment_low_confidence_known():
-    """Test that low-confidence known faces are treated as unknown."""
+    """Test that faces rejected by threshold+margin are treated as unknown."""
     if not _HAS_NUMPY or not _HAS_OPENCV:
         print("⚠️  test_enrollment_low_confidence_known skipped (dependencies not available)")
         return True
@@ -94,15 +93,15 @@ def test_enrollment_low_confidence_known():
                 speak_fn=mock_speak,
                 recognizer=recognizer,
                 enable_live_enrollment=True,
-                enrollment_confidence_threshold=0.90,  # 90% bar
                 cooldown_seconds=60.0
             )
             
-            # Low confidence match (85% < 90%)
+            # Face rejected by recognize (name="unknown", even though db has Alice)
+            # This happens when cosine < threshold or margin < min_margin
             box = (100, 100, 80, 80)
             action = behavior.on_face_seen(
-                name="Alice",
-                confidence=0.85,
+                name="unknown",  # recognize() rejected it
+                confidence=0.52,  # Raw cosine below threshold
                 box=box,
                 image=None,
                 landmarks=None,
@@ -110,7 +109,7 @@ def test_enrollment_low_confidence_known():
                 speak=True
             )
             
-            # Should still prompt (below threshold)
+            # Should still prompt (name=="unknown")
             assert action is not None
             assert action.kind == "enrollment_prompt"
             assert len(spoken) == 1
@@ -415,7 +414,7 @@ def test_enrollment_cooldown():
 
 
 def test_high_confidence_skips_enrollment():
-    """Test that high-confidence matches skip enrollment and greet normally."""
+    """Test that accepted matches skip enrollment and greet normally."""
     if not _HAS_NUMPY or not _HAS_OPENCV:
         print("⚠️  test_high_confidence_skips_enrollment skipped (dependencies not available)")
         return True
@@ -438,15 +437,14 @@ def test_high_confidence_skips_enrollment():
                 speak_fn=mock_speak,
                 recognizer=recognizer,
                 enable_live_enrollment=True,
-                enrollment_confidence_threshold=0.90,
                 cooldown_seconds=60.0
             )
             
-            # High confidence match (95% >= 90%)
+            # Accepted match (name!="unknown", passed threshold + margin)
             box = (100, 100, 80, 80)
             action = behavior.on_face_seen(
-                name="Alice",
-                confidence=0.95,
+                name="Alice",  # recognize() accepted it
+                confidence=0.73,  # Raw cosine (typical ArcFace match)
                 box=box,
                 image=None,
                 landmarks=None,
