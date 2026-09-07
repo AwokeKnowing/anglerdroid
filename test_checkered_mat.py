@@ -3,23 +3,27 @@
 Unit tests for topdown floor hazard hard-stop detection (ego/vision reflex).
 
 Tests the RS1 topdown RGB-based hazard detector that works WITHOUT SLAM or map keepouts.
-Detects TWO hazard types:
-  1. Wood bump / threshold (edge detection)
-  2. Checkered floor mat pattern (corner detection)
+Detects THREE hazard types:
+  1. Brown wood border (HSV + rectangular frame) — PRIMARY for door mat
+  2. Wood bump / threshold (edge detection)
+  3. Checkered floor mat pattern (corner detection) — FALLBACK
 
 Triggers forward hard-stop (fwd_scale=0) while allowing reverse/turn if rear is clear.
 
 Test cases:
-1. Synthetic 6x6 checkerboard → detection triggers
-2. Checkerboard in forward region → triggers
-3. Checkerboard in rear region (not forward) → no trigger
-4. Bump detection via edge detection → triggers
-5. No pattern or bump → no trigger
-6. SafetyGuard integration → fwd=0, bwd/ang computed normally
-7. Temporal filtering → reduces flicker
-8. Empty/invalid images → no crash
-9. Different checkerboard sizes (tunable parameters)
-10. Bump + checkered both present → triggers on either
+1. Brown wood border around door mat → detection triggers (PRIMARY)
+2. Brown border priority over checkerboard → brown detected, checkerboard skipped
+3. Plain carpet (no border) → no false positive
+4. Synthetic 6x6 checkerboard → detection triggers (fallback)
+5. Checkerboard in forward region → triggers
+6. Checkerboard in rear region (not forward) → no trigger
+7. Bump detection via edge detection → triggers
+8. No pattern or bump → no trigger
+9. SafetyGuard integration → fwd=0, bwd/ang computed normally
+10. SafetyGuard clear → all motion allowed
+11. Temporal filtering → reduces flicker
+12. Empty/invalid images → no crash
+13. Tunable parameters (different sizes/thresholds)
 """
 
 import sys
@@ -175,10 +179,145 @@ def make_bump_image(h=480, w=640, bump_y=100, bump_thickness=10):
     return rgb
 
 
-def test_detect_centered_checkerboard():
-    """Test 1: Centered checkerboard with full image analysis."""
+def make_brown_border_image(h=480, w=640, border_width=40, carpet_color=(200, 180, 150)):
+    """Create image with brown wood border around tan carpet (simulating door mat area).
+    
+    Args:
+        h, w: Image dimensions
+        border_width: Width of brown border frame
+        carpet_color: RGB color for carpet background (tan)
+    
+    Returns:
+        RGB image with brown rectangular border on tan carpet
+    """
+    # Create tan carpet background
+    img = np.full((h, w, 3), carpet_color, dtype=np.uint8)
+    
+    # Define brown wood color (in RGB)
+    # HSV brown range: H=5-25 (orange-brown), S=40-255, V=30-180
+    # For H=15 (middle of range), S=100, V=100 in HSV
+    # Convert to RGB: create a small HSV patch and convert
+    hsv_brown = np.array([[[15, 100, 100]]], dtype=np.uint8)  # H, S, V
+    rgb_brown = cv2.cvtColor(hsv_brown, cv2.COLOR_HSV2RGB)[0, 0]
+    
+    # Create rectangular border frame (top, bottom, left, right)
+    # Place in forward region (top 40% of image)
+    forward_h = int(h * 0.4)
+    
+    # Make the border larger and more prominent
+    border_y0 = 10
+    border_y1 = forward_h - 10
+    border_x0 = 60
+    border_x1 = w - 60
+    
+    # Top border
+    img[border_y0:border_y0+border_width, border_x0:border_x1] = rgb_brown
+    # Bottom border
+    img[border_y1-border_width:border_y1, border_x0:border_x1] = rgb_brown
+    # Left border
+    img[border_y0:border_y1, border_x0:border_x0+border_width] = rgb_brown
+    # Right border
+    img[border_y0:border_y1, border_x1-border_width:border_x1] = rgb_brown
+    
+    return img
+
+
+def test_detect_brown_border():
+    """Test 1: Detect brown wood border around door mat."""
     print("\n" + "="*70)
-    print("Test 1: Detect centered 6x6 checkerboard (full image)")
+    print("Test 1: Detect brown wood border (PRIMARY door mat detector)")
+    print("="*70)
+    
+    img = make_brown_border_image(h=480, w=640, border_width=40)
+    
+    detector = TopdownHazardDetector(
+        forward_fraction=0.4,  # Analyze forward 40%
+        brown_min_perimeter=300,
+        brown_min_area=3000
+    )
+    
+    triggered, reason = detector.check(img)
+    
+    print(f"  Brown border image:")
+    print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
+    print(f"    Brown confidence: {detector.brown_confidence:.2f}")
+    print(f"    Brown perimeter: {detector.brown_perimeter:.1f}")
+    
+    assert triggered, "Should detect brown border frame"
+    assert reason == 'brown_border', f"Expected reason='brown_border', got '{reason}'"
+    assert detector.brown_confidence > 0.3, f"Expected confidence >0.3, got {detector.brown_confidence:.2f}"
+    assert detector.brown_perimeter > 300, f"Expected perimeter >300, got {detector.brown_perimeter:.1f}"
+    
+    print("  ✅ PASS: Brown border detected")
+
+
+def test_brown_border_priority():
+    """Test 2: Brown border takes priority over checkerboard detection."""
+    print("\n" + "="*70)
+    print("Test 2: Brown border has priority over checkerboard (efficiency)")
+    print("="*70)
+    
+    # Create image with brown border (might also have checkerboard inside)
+    img = make_brown_border_image(h=480, w=640, border_width=40)
+    
+    detector = TopdownHazardDetector(
+        forward_fraction=0.4,
+        checkerboard_rows=6,
+        checkerboard_cols=6,
+        min_corners=4
+    )
+    
+    triggered, reason = detector.check(img)
+    
+    print(f"  Brown border (checkerboard detection available but skipped):")
+    print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
+    print(f"    Brown confidence: {detector.brown_confidence:.2f}")
+    print(f"    Corners checked: {detector.corner_count}")
+    
+    assert triggered, "Should detect hazard"
+    assert reason == 'brown_border', f"Expected brown_border priority, got '{reason}'"
+    # Corners should be 0 because checkerboard detection is skipped when brown border found
+    assert detector.corner_count == 0, "Checkerboard detection should be skipped"
+    
+    print("  ✅ PASS: Brown border has priority, checkerboard skipped")
+
+
+def test_no_brown_border():
+    """Test 3: No false positives on plain carpet (no brown border)."""
+    print("\n" + "="*70)
+    print("Test 3: No brown border false positives on plain carpet")
+    print("="*70)
+    
+    # Plain tan carpet (no brown border)
+    img = np.full((480, 640, 3), (200, 180, 150), dtype=np.uint8)
+    
+    detector = TopdownHazardDetector(
+        forward_fraction=0.4,
+        brown_min_perimeter=300,
+        brown_min_area=3000
+    )
+    
+    triggered, reason = detector.check(img)
+    
+    print(f"  Plain carpet (no border):")
+    print(f"    Triggered: {triggered}")
+    print(f"    Reason: {reason}")
+    print(f"    Brown confidence: {detector.brown_confidence:.2f}")
+    
+    # Should not trigger on plain carpet
+    if triggered and reason == 'brown_border':
+        print(f"  ⚠️  Brown border false positive (confidence={detector.brown_confidence:.2f})")
+        assert False, "Should not detect brown border on plain carpet"
+    
+    print("  ✅ PASS: No brown border false positive")
+
+
+def test_detect_centered_checkerboard():
+    """Test 4: Centered checkerboard with full image analysis."""
+    print("\n" + "="*70)
+    print("Test 4: Detect centered 6x6 checkerboard (full image)")
     print("="*70)
     
     img = make_checkerboard_image(h=480, w=640, rows=7, cols=7, square_size=50)
@@ -206,9 +345,9 @@ def test_detect_centered_checkerboard():
 
 
 def test_detect_forward_checkerboard():
-    """Test 2: Detect checkerboard in forward region (topdown view)."""
+    """Test 5: Detect checkerboard in forward region (topdown view)."""
     print("\n" + "="*70)
-    print("Test 2: Detect checkerboard in FORWARD region (topdown)")
+    print("Test 5: Detect checkerboard in FORWARD region (topdown)")
     print("="*70)
     
     # Use centered checkerboard with full image analysis (OpenCV corner finder is picky)
@@ -239,9 +378,9 @@ def test_detect_forward_checkerboard():
 
 
 def test_no_detect_rear_checkerboard():
-    """Test 3: Should NOT detect checkerboard in rear region."""
+    """Test 6: Should NOT detect checkerboard in rear region."""
     print("\n" + "="*70)
-    print("Test 3: Should NOT detect checkerboard in REAR (not forward)")
+    print("Test 6: Should NOT detect checkerboard in REAR (not forward)")
     print("="*70)
     
     img = make_checkerboard_rear(h=480, w=640, rows=7, cols=7, square_size=40)
@@ -265,9 +404,9 @@ def test_no_detect_rear_checkerboard():
 
 
 def test_detect_bump():
-    """Test 4: Detect wood bump via edge detection."""
+    """Test 7: Detect wood bump via edge detection."""
     print("\n" + "="*70)
-    print("Test 4: Detect wood bump (horizontal edge)")
+    print("Test 7: Detect wood bump (horizontal edge)")
     print("="*70)
     
     img = make_bump_image(h=480, w=640, bump_y=80, bump_thickness=8)
@@ -292,9 +431,9 @@ def test_detect_bump():
 
 
 def test_no_pattern():
-    """Test 5: No detection on random noise (no checkerboard or bump)."""
+    """Test 8: No detection on random noise (no checkerboard or bump)."""
     print("\n" + "="*70)
-    print("Test 5: No detection on random noise")
+    print("Test 8: No detection on random noise")
     print("="*70)
     
     img = make_random_noise(h=480, w=640)
@@ -321,9 +460,9 @@ def test_no_pattern():
 
 
 def test_safety_guard_topdown_hazard_stop():
-    """Test 6: SafetyGuard stops forward when topdown hazard detected."""
+    """Test 9: SafetyGuard stops forward when topdown hazard detected."""
     print("\n" + "="*70)
-    print("Test 6: SafetyGuard stops forward with topdown hazard")
+    print("Test 9: SafetyGuard stops forward with topdown hazard")
     print("="*70)
     
     guard = SafetyGuard()
@@ -350,9 +489,9 @@ def test_safety_guard_topdown_hazard_stop():
 
 
 def test_safety_guard_topdown_hazard_clear():
-    """Test 7: SafetyGuard allows all motion when topdown hazard clear."""
+    """Test 10: SafetyGuard allows all motion when topdown hazard clear."""
     print("\n" + "="*70)
-    print("Test 7: SafetyGuard allows motion when topdown hazard clear")
+    print("Test 10: SafetyGuard allows motion when topdown hazard clear")
     print("="*70)
     
     guard = SafetyGuard()
@@ -378,9 +517,9 @@ def test_safety_guard_topdown_hazard_clear():
 
 
 def test_temporal_filtering():
-    """Test 8: Temporal filtering reduces flicker."""
+    """Test 11: Temporal filtering reduces flicker."""
     print("\n" + "="*70)
-    print("Test 8: Temporal filtering reduces flicker")
+    print("Test 11: Temporal filtering reduces flicker")
     print("="*70)
     
     # Use clear checkerboard pattern (centered, full size)
@@ -420,9 +559,9 @@ def test_temporal_filtering():
 
 
 def test_empty_image():
-    """Test 9: Empty/invalid images don't crash."""
+    """Test 12: Empty/invalid images don't crash."""
     print("\n" + "="*70)
-    print("Test 9: Empty/invalid image handling")
+    print("Test 12: Empty/invalid image handling")
     print("="*70)
     
     detector = TopdownHazardDetector()
@@ -449,9 +588,9 @@ def test_empty_image():
 
 
 def test_tunable_parameters():
-    """Test 10: Different checkerboard sizes and bump thresholds (tunable parameters)."""
+    """Test 13: Different checkerboard sizes and bump thresholds (tunable parameters)."""
     print("\n" + "="*70)
-    print("Test 10: Tunable parameters (different sizes/thresholds)")
+    print("Test 13: Tunable parameters (different sizes/thresholds)")
     print("="*70)
     
     # 8x8 checkerboard
@@ -500,6 +639,9 @@ def run_all_tests():
     print("╚"+"═"*68+"╝")
     
     tests = [
+        test_detect_brown_border,
+        test_brown_border_priority,
+        test_no_brown_border,
         test_detect_centered_checkerboard,
         test_detect_forward_checkerboard,
         test_no_detect_rear_checkerboard,
