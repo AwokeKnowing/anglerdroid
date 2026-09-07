@@ -27,6 +27,14 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
 - RealSense depth **decimation**: `RS_DECIMATE_MAG = 3` means **2³ = 8×** (SDK log2).
   That yields the tuned ~6k-vert cloud — not “mag 3 vs mag 8.” Changing it requires
   on-device re-benchmark.
+
+### Hardware-first (GPU > CPU NumPy)
+A “numpy algorithm” is a *shape*, not a placement. On Orin prefer **CuPy /
+CUDA / ModernGL** (or other GPU-resident ops already in `gpu_render`) for
+decimate / project / join / morph so pixels never bounce through CPU caches
+for convenience. Architect for silicon: ARM cores, GPU, ISP/USB bandwidth —
+measure each.
+
 ### Decimate: measure, don’t assume
 James has seen **numpy decimate beat the RealSense SDK filter** on Orin in
 some configs. Treat SDK vs numpy as a bake-off: benchmark grab+pc+downstream
