@@ -111,3 +111,8 @@ FOOTPRINT_BOXES = UNDER_ROBOT_BOXES + SELF_IGNORE_BOXES
 # Map metric (UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES) stays unchanged; this is viz-only.
 RS1_VIZ_SCALE = 3.5           # scale ego boxes for RS1 color overlay (3.5 from mask_tune dumps)
 RS1_VIZ_CX_SHIFT = 5          # forward shift in ego +x (pixels) to recenter scaled boxes on hull
+
+# Self-mask overlay visualization opacity
+# Fill alpha for under-robot / self-ignore boxes in both RS1 and ego footprint overlays.
+# Low opacity (~25%) lets underlay/map show through; outlines stay crisp for edges.
+SELF_MASK_VIZ_ALPHA = 0.25    # blend alpha for green/blue fills (0.25 = 25% opacity)

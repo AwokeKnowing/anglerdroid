@@ -30,7 +30,7 @@ from robot_config import (FRAME_W, FRAME_H,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
                           RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
                           FOOTPRINT_BOXES, UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES,
-                          RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT,
+                          RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT, SELF_MASK_VIZ_ALPHA,
                           WHEEL_HALF, FOOT_PAD_FWD, FOOT_PAD_BWD, FOOT_PAD_LAT,
                           MAST_RADIUS_PX)
 from cameras import RSCamera, WebCam, HAS_RS
@@ -2082,28 +2082,30 @@ class Vision:
         overlay[:, :, :3] = rgb
 
         under_boxes, ignore_boxes = scaled_boxes(RS1_VIZ_SCALE)
+        
+        alpha = SELF_MASK_VIZ_ALPHA
 
-        # Under-robot boxes: green tint (marked clear+known)
+        # Under-robot boxes: green fill at 25% alpha (marked clear+known)
         overlay[:, :, 3] = 255
+        green = np.array([0, 255, 0], dtype=np.float32)
         for x0, y0, x1, y1 in under_boxes:
             if x1 <= x0 or y1 <= y0:
                 continue
-            m = np.zeros((h, w), dtype=bool)
-            m[y0:y1, x0:x1] = True
-            overlay[m, 0] = (rgb[m, 0].astype(np.int16) * 2 // 5).astype(np.uint8)
-            overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + 120, 0, 255).astype(np.uint8)  # green
-            overlay[m, 2] = (rgb[m, 2].astype(np.int16) * 2 // 5).astype(np.uint8)
+            # Blend green at alpha over RGB
+            base = rgb[y0:y1, x0:x1].astype(np.float32)
+            blended = base * (1.0 - alpha) + green * alpha
+            overlay[y0:y1, x0:x1, :3] = blended.astype(np.uint8)
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         
-        # Self-ignore boxes: blue tint (removed from obs, NOT marked clear)
+        # Self-ignore boxes: blue fill at 25% alpha (removed from obs, NOT marked clear)
+        blue = np.array([100, 100, 200], dtype=np.float32)  # blue-gray for self-ignore
         for x0, y0, x1, y1 in ignore_boxes:
             if x1 <= x0 or y1 <= y0:
                 continue
-            m = np.zeros((h, w), dtype=bool)
-            m[y0:y1, x0:x1] = True
-            overlay[m, 0] = (rgb[m, 0].astype(np.int16) * 2 // 5).astype(np.uint8)
-            overlay[m, 1] = (rgb[m, 1].astype(np.int16) * 2 // 5).astype(np.uint8)
-            overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + 120, 0, 255).astype(np.uint8)  # blue
+            # Blend blue at alpha over RGB (may overlap green, use current overlay state)
+            base = overlay[y0:y1, x0:x1, :3].astype(np.float32)
+            blended = base * (1.0 - alpha) + blue * alpha
+            overlay[y0:y1, x0:x1, :3] = blended.astype(np.uint8)
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 255), 1)
         
         # Cyan forward crop line on body floor bumper (first under-robot box)
@@ -2347,17 +2349,22 @@ class Vision:
                 underlay[obs_mask, 2] = 0  # B stays zero
         
         # Self-mask visualization: distinguish under-robot clear (green) vs self-ignore (blue-gray)
-        # Under-robot boxes (wheels + floor): green fill → marked clear+known
-        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
-            underlay[y0:y1, x0:x1, 0] = 0    # R
-            underlay[y0:y1, x0:x1, 1] = 180  # G (green)
-            underlay[y0:y1, x0:x1, 2] = 0    # B
+        # Blend fills at 25% alpha so underlay/map shows through
+        alpha = SELF_MASK_VIZ_ALPHA
         
-        # Self-ignore boxes (mast/body): blue-gray fill → removed from obs, NOT marked clear
+        # Under-robot boxes (wheels + floor): green fill at 25% → marked clear+known
+        green = np.array([0, 180, 0], dtype=np.float32)
+        for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+            base = underlay[y0:y1, x0:x1].astype(np.float32)
+            blended = base * (1.0 - alpha) + green * alpha
+            underlay[y0:y1, x0:x1] = blended.astype(np.uint8)
+        
+        # Self-ignore boxes (mast/body): blue-gray fill at 25% → removed from obs, NOT marked clear
+        blue_gray = np.array([100, 100, 150], dtype=np.float32)
         for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
-            underlay[y0:y1, x0:x1, 0] = 100  # R
-            underlay[y0:y1, x0:x1, 1] = 100  # G
-            underlay[y0:y1, x0:x1, 2] = 150  # B (blue-gray)
+            base = underlay[y0:y1, x0:x1].astype(np.float32)
+            blended = base * (1.0 - alpha) + blue_gray * alpha
+            underlay[y0:y1, x0:x1] = blended.astype(np.uint8)
         
         # Cyan forward crop line at bumper (first under-robot box = body floor)
         if UNDER_ROBOT_BOXES:
