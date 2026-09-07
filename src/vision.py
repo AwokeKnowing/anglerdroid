@@ -28,7 +28,8 @@ from robot_config import (FRAME_W, FRAME_H,
                           CROSSHAIR_CX, CROSSHAIR_CY, EGO_PX_SIZE,
                           WHEEL_RADIUS_M, WHEELBASE_M,
                           ROBOT_W, ROBOT_H, ROBOT_CX_OFF,
-                          RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1)
+                          RCX, RCY, FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
+                          FOOTPRINT_BOXES)
 from cameras import RSCamera, WebCam, HAS_RS
 from safety import SafetyGuard
 from pose import PoseEstimator
@@ -837,8 +838,10 @@ class Vision:
 
         mask[cone] = 255
 
-        # Clear robot footprint (force-set to known+free in capture loop)
-        mask[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+        # Clear robot footprint (multi-box: body + 4 wheels approximate hull)
+        # Force-set to known+free in capture loop to prevent self-observation
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            mask[y0:y1, x0:x1] = 0
         return mask, fw_cone
 
     @staticmethod
@@ -1445,8 +1448,11 @@ class Vision:
             np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
             np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-            self._obs_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
-            self._known_combined[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 255
+            # Clear robot footprint (multi-box: body + 4 wheels)
+            # Force self-mask to known-free (prevent self-observation as obstacles)
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                self._obs_combined[y0:y1, x0:x1] = 0
+                self._known_combined[y0:y1, x0:x1] = 255
 
             _t_obs = time.monotonic()
 
@@ -1578,8 +1584,10 @@ class Vision:
             # obs_combined is height-cm (1..100) where obstacles exist
             self._persistent_obs[self._obs_combined > 0] = 255
             self._persistent_height[:] = self._obs_combined.astype(np.uint8, copy=False)
-            self._persistent_obs[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
-            self._persistent_height[FOOT_Y0:FOOT_Y1, FOOT_X0:FOOT_X1] = 0
+            # Clear robot footprint (multi-box: body + 4 wheels)
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                self._persistent_obs[y0:y1, x0:x1] = 0
+                self._persistent_height[y0:y1, x0:x1] = 0
 
             # ── Check SLAM lock status (encoder + tracking quality) ───
             self._update_slam_lock_status()
@@ -1982,91 +1990,72 @@ class Vision:
         }
 
     def get_robot_footprint_overlay(self):
-        """Create semi-transparent red footprint overlay on RS1 top-down color.
+        """Create ego-map footprint overlay showing multi-box self-mask.
         
-        Draws robot body + wheel boxes ON the live RS1 color image (camera space),
-        NOT ego-map space. Matches the physical robot size in the camera view.
+        Draws robot footprint boxes (body + 4 wheels) on ego obstacle map at
+        1 cm/px scale. This shows the topdown hull approximation used for
+        self-clearing in depth processing.
         
-        Returns RGB (rs1_h, rs1_w, 3) uint8 array showing:
-        - RGB background: RS1 topdown color (robot, floor, obstacles visible)
-        - Semi-transparent red tint: robot body + 4 wheel boxes
-        - Body ~30 cm wide, wheels as separate corner pads
+        Returns RGB (FRAME_H, FRAME_W, 3) uint8 array showing:
+        - Underlay: ego obstacle map (colorized: gray=free, obstacles=height gradient)
+        - Magenta fill: body box + 4 wheel boxes (self-mask regions)
+        - Yellow outline: forward edge of body box
         
-        Camera-space viz: footprint matches how big robot looks in RS1 color view.
+        Ego-space viz: 1 px = 1 cm, body ~30 cm wide reads as ~30 px on map.
+        Multi-box footprint covers true robot hull, not just center patch.
         """
-        if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
-            return None
+        # Create colorized ego underlay from obstacle + known maps
+        underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         
-        # RS1 color after 180° rotation to match ego orientation
-        rgb = self._rs1.color[::-1, ::-1].copy()
-        h_rs1, w_rs1 = rgb.shape[:2]
+        # Get current ego maps (use persistent obs + height for richer viz)
+        obs = getattr(self, '_persistent_obs', None)
+        height = getattr(self, '_persistent_height', None)
+        known = getattr(self, '_known_combined', None)
         
-        # Compute scale from ego (320×240) to RS1 camera resolution (e.g., 848×480)
-        scale_x = float(w_rs1) / float(FRAME_W)  # e.g., 848/320 = 2.65
-        scale_y = float(h_rs1) / float(FRAME_H)  # e.g., 480/240 = 2.0
+        if obs is None or height is None or known is None:
+            # Fallback: plain gray if maps not available
+            underlay[:] = [50, 50, 50]
+        else:
+            # Free space: dark gray
+            free_mask = (known > 0) & (obs == 0)
+            underlay[free_mask] = [40, 40, 40]
+            
+            # Unknown: black
+            unknown_mask = (known == 0)
+            underlay[unknown_mask] = [0, 0, 0]
+            
+            # Obstacles: height-based gradient (5 cm = yellow, 100 cm = red)
+            obs_mask = obs > 0
+            if np.any(obs_mask):
+                h = height.astype(np.float32)
+                h_norm = np.clip((h - 5.0) / 95.0, 0.0, 1.0)  # 5-100 cm → 0-1
+                # Yellow (low) → red (high) gradient
+                underlay[obs_mask, 0] = 255  # R stays high
+                underlay[obs_mask, 1] = (255 * (1.0 - h_norm[obs_mask] * 0.7)).astype(np.uint8)  # G dims
+                underlay[obs_mask, 2] = 0  # B stays zero
         
-        # Transform ego footprint coordinates to RS1 camera coordinates
-        # Body rectangle (excluding wheel pads for now)
-        body_x0 = int((RCX - ROBOT_W // 2) * scale_x)
-        body_y0 = int((RCY - ROBOT_H // 2) * scale_y)
-        body_x1 = int((RCX + ROBOT_W // 2) * scale_x)
-        body_y1 = int((RCY + ROBOT_H // 2) * scale_y)
+        # Draw all footprint boxes (body + 4 wheels) with magenta fill
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            underlay[y0:y1, x0:x1, 0] = 200  # R
+            underlay[y0:y1, x0:x1, 1] = 0    # G
+            underlay[y0:y1, x0:x1, 2] = 200  # B (magenta)
         
-        # Clip to image bounds
-        body_x0 = max(0, body_x0)
-        body_y0 = max(0, body_y0)
-        body_x1 = min(w_rs1, body_x1)
-        body_y1 = min(h_rs1, body_y1)
+        # Draw bright yellow forward edge on body box (first box in FOOTPRINT_BOXES)
+        body_x0, body_y0, body_x1, body_y1 = FOOTPRINT_BOXES[0]
+        x1_line = min(body_x1, FRAME_W - 1)
+        underlay[body_y0:body_y1, max(0, x1_line - 1):min(FRAME_W, x1_line + 2)] = [255, 255, 0]
         
-        # Four wheel boxes at corners (each wheel is ~8-10 cm diameter, add margin)
-        # Wheel positions relative to body center in ego space (scaled to RS1)
-        wheel_half = int(10 * scale_x)  # ~10 cm wheel radius + margin in RS1 pixels
+        # Draw yellow outline around all boxes for clarity
+        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+            # Top edge
+            underlay[y0:min(y0 + 1, FRAME_H), x0:x1] = [255, 255, 0]
+            # Bottom edge
+            underlay[max(y1 - 1, 0):y1, x0:x1] = [255, 255, 0]
+            # Left edge
+            underlay[y0:y1, x0:min(x0 + 1, FRAME_W)] = [255, 255, 0]
+            # Right edge
+            underlay[y0:y1, max(x1 - 1, 0):x1] = [255, 255, 0]
         
-        # Front-left wheel
-        fl_x0 = int((RCX + ROBOT_W // 2 - 5) * scale_x) - wheel_half
-        fl_y0 = int((RCY - ROBOT_H // 2) * scale_y) - wheel_half
-        fl_x1 = fl_x0 + 2 * wheel_half
-        fl_y1 = fl_y0 + 2 * wheel_half
-        
-        # Front-right wheel
-        fr_x0 = int((RCX + ROBOT_W // 2 - 5) * scale_x) - wheel_half
-        fr_y0 = int((RCY + ROBOT_H // 2) * scale_y) - wheel_half
-        fr_x1 = fr_x0 + 2 * wheel_half
-        fr_y1 = fr_y0 + 2 * wheel_half
-        
-        # Back-left wheel
-        bl_x0 = int((RCX - ROBOT_W // 2 + 5) * scale_x) - wheel_half
-        bl_y0 = int((RCY - ROBOT_H // 2) * scale_y) - wheel_half
-        bl_x1 = bl_x0 + 2 * wheel_half
-        bl_y1 = bl_y0 + 2 * wheel_half
-        
-        # Back-right wheel
-        br_x0 = int((RCX - ROBOT_W // 2 + 5) * scale_x) - wheel_half
-        br_y0 = int((RCY + ROBOT_H // 2) * scale_y) - wheel_half
-        br_x1 = br_x0 + 2 * wheel_half
-        br_y1 = br_y0 + 2 * wheel_half
-        
-        # Apply semi-transparent red tint (blend factor ~0.4 for visibility)
-        def apply_red_tint(img, r0, c0, r1, c1, alpha=0.4):
-            r0, r1 = max(0, r0), min(img.shape[0], r1)
-            c0, c1 = max(0, c0), min(img.shape[1], c1)
-            if r1 <= r0 or c1 <= c0:
-                return
-            region = img[r0:r1, c0:c1].astype(np.float32)
-            region[:, :, 0] = np.clip(region[:, :, 0] * (1 - alpha) + 255 * alpha, 0, 255)
-            region[:, :, 1] = region[:, :, 1] * (1 - alpha)
-            region[:, :, 2] = region[:, :, 2] * (1 - alpha)
-            img[r0:r1, c0:c1] = region.astype(np.uint8)
-        
-        # Draw body rectangle with red tint
-        apply_red_tint(rgb, body_y0, body_x0, body_y1, body_x1, alpha=0.35)
-        
-        # Draw four wheel boxes with red tint
-        apply_red_tint(rgb, fl_y0, fl_x0, fl_y1, fl_x1, alpha=0.35)
-        apply_red_tint(rgb, fr_y0, fr_x0, fr_y1, fr_x1, alpha=0.35)
-        apply_red_tint(rgb, bl_y0, bl_x0, bl_y1, bl_x1, alpha=0.35)
-        apply_red_tint(rgb, br_y0, br_x0, br_y1, br_x1, alpha=0.35)
-        
-        return rgb
+        return underlay
 
 
