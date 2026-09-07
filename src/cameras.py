@@ -14,7 +14,7 @@ except ImportError:
 from robot_config import FRAME_W, FRAME_H
 RS_DEPTH_W, RS_DEPTH_H = 848, 480
 RGB_CAP_W, RGB_CAP_H = 640, 480
-RS_DECIMATE_MAG = 3  # VERIFY verts on device (JP6 measured ~45k; mag=8 ~6k)
+RS_DECIMATE_MAG = 8  # ~6.5k verts on JP6 (mag=3 was ~45k); measured bake-off 2026-09-07
 
 
 def _set_sensor_opt(sensor, option, value):

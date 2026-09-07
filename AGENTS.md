@@ -26,7 +26,7 @@ optimized way** is the real challenge. Be hawkish. Measure. Never waste µs.
 ### Past wizardry (do not casually undo)
 - RealSense depth **decimation**: **measure verts on device**. On current JP/librealsense,
   `RS_DECIMATE_MAG=3` produced ~45k verts (≈3×3 blocks). Mag=8 → ~6k verts (old docstring).
-  James noted some stacks treat mag as log2 — **verify by counting verts**, then bake-off.
+  On this JP6 stack mag is **linear** (mag=3≈45k verts, mag=8≈6.5k). Bake-off: numpy stride+deproject ~0.6ms vs SDK mag3 pc ~3ms.
   Changing it requires on-device re-benchmark (goal 60fps).
 
 ### Hardware-first (GPU > CPU NumPy)
