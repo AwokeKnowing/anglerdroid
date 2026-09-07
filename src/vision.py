@@ -38,6 +38,7 @@ from slam import PoseGraphSLAM
 from checkered_mat import TopdownHazardDetector
 from imu import IMUPipeline
 from odom_thread import OdomThread
+from wheel_imu_prior import WheelIMUPrior
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -697,12 +698,13 @@ class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
     def __init__(self, rs1_serial, rs2_serial, rgb1_device_id, headless=True,
-                 slam_backend='self'):
+                 slam_backend='self', use_wheel_imu_prior=False):
         print("Vision: init start")
         self.rs1_serial = rs1_serial
         self.rs2_serial = rs2_serial
         self.rgb1_device_id = rgb1_device_id
         self._slam_backend = slam_backend
+        self._use_wheel_imu_prior = use_wheel_imu_prior
 
         self.frames = [
             np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8),
@@ -735,7 +737,18 @@ class Vision:
         self._topdown_hazard_edge_count = 0
         self._topdown_hazard_detector = TopdownHazardDetector()
         self._safety = SafetyGuard()
-        self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
+        
+        # Pose estimator: use wheel+IMU prior if enabled (EXPERIMENT)
+        if self._use_wheel_imu_prior:
+            self._wheel_imu_prior = WheelIMUPrior(
+                wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
+            self._wheel_imu_prior.load_latest_pose()
+            self._pose = self._create_prior_adapter(self._wheel_imu_prior)
+            print("vision: EXPERIMENT wheel+IMU prior enabled (self-slam-wheel-imu-prior-v0)")
+        else:
+            self._wheel_imu_prior = None
+            self._pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
+        
         self._cuvslam = None
         self._global_map = PoseGraphSLAM()
         self._obs_mask, self._fw_cone_mask = self._build_obs_mask()
@@ -804,6 +817,112 @@ class Vision:
         self._rs2 = None
         self._webcam = None
         self._imu = None  # IMU pipeline for D435i Motion Module
+
+    def _create_prior_adapter(self, prior: WheelIMUPrior):
+        """Wrap WheelIMUPrior to match PoseEstimator interface.
+        
+        This adapter makes WheelIMUPrior compatible with code that expects
+        PoseEstimator (OdomThread, capture loop, etc.).
+        """
+        class PriorAdapter:
+            def __init__(self, prior):
+                self._prior = prior
+                self._wb = prior.wb
+                self._wr = prior.wr
+                # Track visual health for adaptive correction
+                self._visual_accepted = 0
+                self._visual_rejected = 0
+                self._last_visual_time = 0.0
+                self._last_save_time = 0.0
+            
+            @property
+            def x(self):
+                return self._prior.x
+            
+            @property
+            def y(self):
+                return self._prior.y
+            
+            @property
+            def theta(self):
+                return self._prior.theta
+            
+            def update(self, v_left_mps, v_right_mps, dt,
+                       vis_yaw=0.0, vis_fwd=0.0, vis_confidence=0.0,
+                       using_encoder_feedback=True, imu_yaw_rate=0.0):
+                """Update pose with wheel+IMU prediction and optional visual correction."""
+                if dt <= 0:
+                    return 0.0, 0.0
+                
+                # 1. Prediction step (always runs)
+                dtheta, ds = self._prior.predict(v_left_mps, v_right_mps, 
+                                                 imu_yaw_rate, dt)
+                
+                # 2. Visual correction (only if healthy)
+                # "Healthy" = confidence > threshold and motion present
+                vis_ok = (abs(vis_yaw) > 1e-8 or abs(vis_fwd) > 1e-8) and vis_confidence > 0.1
+                
+                if vis_ok:
+                    # Apply correction with gating
+                    if self._prior.correct_visual(vis_yaw, vis_fwd, vis_confidence):
+                        self._visual_accepted += 1
+                        self._last_visual_time = time.time()
+                    else:
+                        self._visual_rejected += 1
+                else:
+                    self._visual_rejected += 1
+                
+                # 3. Periodic save
+                self._prior.save_latest_pose()
+                
+                return dtheta, ds
+            
+            def reset(self):
+                self._prior.reset()
+                self._visual_accepted = 0
+                self._visual_rejected = 0
+            
+            def get_world_history(self):
+                # WheelIMUPrior doesn't track history; return empty for now
+                # Could be extended to match PoseEstimator's history if needed
+                return np.empty((0, 2), dtype=np.float64)
+            
+            def world_to_ego_pixels(self, px_size, cx, cy):
+                # No history → no projection
+                return np.empty((0, 2), dtype=np.int32)
+            
+            def render_minimap(self):
+                # Simplified minimap: just show robot at center
+                sz = 50
+                img = np.full((sz, sz, 3), (30, 30, 30), dtype=np.uint8)
+                cx = cy = sz // 2
+                # Draw robot as triangle
+                import cv2
+                tri = np.array([[cx, cy-4], [cx-3, cy+3], [cx+3, cy+3]], dtype=np.int32)
+                cv2.fillPoly(img, [tri], (255, 200, 60))
+                cv2.rectangle(img, (0, 0), (sz-1, sz-1), (80, 80, 80), 1)
+                return img
+            
+            def get_tracking_quality(self):
+                total = max(self._visual_accepted + self._visual_rejected, 1)
+                return {
+                    'visual_accept_rate': self._visual_accepted / total,
+                    'wheel_only_rate': self._visual_rejected / total,
+                    'time_since_visual': time.time() - self._last_visual_time if self._last_visual_time > 0 else float('inf'),
+                    'visual_accepted': self._visual_accepted,
+                    'visual_rejected': self._visual_rejected,
+                }
+            
+            @property
+            def is_stuck(self):
+                # WheelIMUPrior doesn't implement stuck detection (yet)
+                return False
+            
+            @property
+            def stuck_count(self):
+                return 0
+        
+        return PriorAdapter(prior)
 
     @staticmethod
     def _build_obs_mask():
