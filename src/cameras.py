@@ -135,13 +135,57 @@ class RSCamera:
                 _set_sensor_opt(sens, rs.option.frames_queue_size, 2)
         except Exception:
             pass
+        # Keep queues tiny so we always take the newest frame (no multi-frame lag).
+        try:
+            for sens in self.profile.get_device().sensors:
+                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
+        except Exception:
+            pass
+
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
         _set_sensor_opt(sensor, rs.option.laser_power, 360)
-        _set_sensor_opt(sensor, rs.option.enable_auto_exposure, 1)
         _set_sensor_opt(sensor, rs.option.emitter_enabled, 1)
         _set_sensor_opt(sensor, rs.option.depth_units, 0.001)
         _set_sensor_opt(sensor, rs.option.receiver_gain, 16)
+        # Cap exposure so low-light AE cannot stretch past ~30Hz budget.
+        # Depth exposure is microseconds; 15000us = 15ms leaves headroom under 33ms.
+        try:
+            if sensor.supports(rs.option.enable_auto_exposure):
+                sensor.set_option(rs.option.enable_auto_exposure, 0)
+            if sensor.supports(rs.option.exposure):
+                sensor.set_option(rs.option.exposure, 15000)  # 15ms
+            if sensor.supports(rs.option.gain):
+                # bump gain a bit to compensate for capped exposure in dark rooms
+                r = sensor.get_option_range(rs.option.gain)
+                sensor.set_option(rs.option.gain, min(r.max, max(r.min, 64)))
+        except Exception as e:
+            print("cameras: depth exposure cap failed: %s" % e)
+
+        # Color sensor AE can also blow the frame period in low light.
+        try:
+            for sens in self.profile.get_device().sensors:
+                name = ""
+                try:
+                    name = sens.get_info(rs.camera_info.name).lower()
+                except Exception:
+                    pass
+                if "rgb" not in name and "color" not in name:
+                    continue
+                if sens.supports(rs.option.enable_auto_exposure):
+                    sens.set_option(rs.option.enable_auto_exposure, 0)
+                if sens.supports(rs.option.exposure):
+                    # D400 RGB exposure units are not always us; keep near default (~166)
+                    # but never unbounded AE. Prefer a mid value then raise gain.
+                    r = sens.get_option_range(rs.option.exposure)
+                    target = min(r.max, max(r.min, 200))
+                    sens.set_option(rs.option.exposure, target)
+                if sens.supports(rs.option.gain):
+                    r = sens.get_option_range(rs.option.gain)
+                    sens.set_option(rs.option.gain, min(r.max, max(r.min, 96)))
+                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
+        except Exception as e:
+            print("cameras: color exposure cap failed: %s" % e)
 
         self._compute_pc = compute_pointcloud
         if compute_pointcloud:
@@ -162,14 +206,14 @@ class RSCamera:
     def grab(self):
         """Take the newest frameset without multi-second stalls.
 
-        Prefer poll_for_frames (non-blocking). If empty, wait up to 500ms.
-        150ms was too short under dual-848 USB load (systematic ok=False).
+        Prefer poll_for_frames (non-blocking). If empty, wait briefly (~1 frame).
+        Never wait hundreds of ms — that destroys 30Hz freshness.
         Never raises — sets ok=False on miss.
         """
         try:
             frames = self._pipe.poll_for_frames()
             if not frames:
-                frames = self._pipe.wait_for_frames(500)
+                frames = self._pipe.wait_for_frames(40)
         except Exception:
             self.ok = False
             return False
@@ -219,6 +263,13 @@ class WebCam:
             self._cap.set(cv2.CAP_PROP_FPS, 30)
             try:
                 self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            # Cap exposure for 30Hz freshness in low light (V4L units vary by driver).
+            try:
+                self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1=manual on many UVC drivers
+                self._cap.set(cv2.CAP_PROP_EXPOSURE, 50)      # short; raise if too dark
+                self._cap.set(cv2.CAP_PROP_GAIN, 64)
             except Exception:
                 pass
             print("cameras: webcam opened (%dx%d MJPG -> %dx%d)" % (RGB_CAP_W, RGB_CAP_H, FRAME_W, FRAME_H))

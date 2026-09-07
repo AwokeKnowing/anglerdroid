@@ -751,6 +751,8 @@ class Vision:
                 self._cuvslam = None
 
         self._webcam = WebCam(self.rgb1_device_id)
+        self._grab_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=3, thread_name_prefix="camgrab")
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
@@ -947,8 +949,8 @@ class Vision:
                     for c in _cams:
                         c.grab()
                 else:
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(_cams)) as _ex:
-                        list(_ex.map(lambda c: c.grab(), _cams))
+                    # Reuse pool — creating a ThreadPoolExecutor every frame is expensive
+                    list(self._grab_pool.map(lambda c: c.grab(), _cams))
             except Exception as e:
                 # Never let a camera glitch kill the capture thread (blank atlas forever).
                 if not getattr(self, '_grab_err_n', 0):
@@ -1515,6 +1517,13 @@ class Vision:
                       "TOTAL=%.1fms (budget %.1fms @ 30Hz)%s" % (*avg, total_avg, 33.3, shed_info))
 
     def stop(self):
+        pool = getattr(self, "_grab_pool", None)
+        if pool is not None:
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            self._grab_pool = None
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
