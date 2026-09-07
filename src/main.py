@@ -223,12 +223,14 @@ def main():
                     if frames is not None and len(frames) >= 3:
                         rgb, rs1, rs2 = frames[0], frames[1], frames[2]
                     # Hull self-mask (multi-box) + trust/FOV overlays (throttled)
-                    mask_overlay = trust_overlay = foot_underlay = foot_overlay = None
+                    mask_overlay = trust_overlay = safety_foot_rs1 = foot_underlay = foot_overlay = safety_foot = None
                     if rerun_logger.due:
                         mask_overlay = vis.get_rs1_mask_overlay()
                         trust_overlay = vis.get_rs1_trust_mask_overlay()
+                        safety_foot_rs1 = vis.get_rs1_safety_foot_overlay()
                         foot_underlay = vis.get_robot_footprint_underlay()
                         foot_overlay = vis.get_robot_footprint_overlay()
+                        safety_foot = vis.get_safety_foot_overlay()
                     rerun_logger.maybe_log(
                         ts=ts,
                         atlas=atlas,
@@ -244,8 +246,10 @@ def main():
                         },
                         rs1_mask_overlay=mask_overlay,
                         rs1_trust_mask_overlay=trust_overlay,
+                        rs1_safety_foot_overlay=safety_foot_rs1,
                         robot_footprint_underlay=foot_underlay,
                         robot_footprint_overlay=foot_overlay,
+                        safety_foot_overlay=safety_foot,
                     )
 
             # Propagate debug flags from UI to vision

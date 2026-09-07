@@ -91,8 +91,10 @@ class KevinRerunLogger:
         safety: Optional[Mapping[str, Any]] = None,
         rs1_mask_overlay: Optional[np.ndarray] = None,
         rs1_trust_mask_overlay: Optional[np.ndarray] = None,
+        rs1_safety_foot_overlay: Optional[np.ndarray] = None,
         robot_footprint_underlay: Optional[np.ndarray] = None,
         robot_footprint_overlay: Optional[np.ndarray] = None,
+        safety_foot_overlay: Optional[np.ndarray] = None,
         force: bool = False,
     ) -> bool:
         """Log a tick. Returns True if this call actually wrote entities."""
@@ -145,22 +147,38 @@ class KevinRerunLogger:
                 if und.ndim == 3 and und.shape[2] >= 3:
                     rr.log("vision/robot_foot_underlay", rr.Image(und[:, :, :3]))
             if robot_footprint_overlay is not None:
-                # Fresh composited RGB each frame (underlay + alpha fills). Not Rerun-alpha.
                 fov = np.ascontiguousarray(robot_footprint_overlay)
-                if fov.ndim == 3 and fov.shape[2] >= 3:
+                if fov.ndim == 3 and fov.shape[2] == 4:
+                    rr.log("vision/depth_self_mask", rr.Image(fov))
+                    rr.log("vision/robot_foot_overlay", rr.Image(fov))
+                elif fov.ndim == 3 and fov.shape[2] >= 3:
                     rr.log("vision/robot_foot_overlay", rr.Image(fov[:, :, :3]))
             if rs1_mask_overlay is not None:
                 # RGBA transparent overlay (A=0 clear, A~50 green/blue fills) over rs1_color.
                 overlay = np.ascontiguousarray(rs1_mask_overlay)
                 if overlay.ndim == 3 and overlay.shape[2] == 4:
+                    rr.log("vision/rs1_depth_mask", rr.Image(overlay))
                     rr.log("vision/rs1_mask_overlay", rr.Image(overlay))
                 elif overlay.ndim == 3 and overlay.shape[2] >= 3:
                     rr.log("vision/rs1_mask_overlay", rr.Image(overlay[:, :, :3]))
             if rs1_trust_mask_overlay is not None:
-                # Trust/FOV obs_mask (green + cyan edge).
+                # Safety sensor trust/FOV (where "clear" is believed).
                 tov = np.ascontiguousarray(rs1_trust_mask_overlay)
                 if tov.ndim == 3 and tov.shape[2] >= 3:
                     rr.log("vision/rs1_trust_mask_overlay", rr.Image(tov))
+            if rs1_safety_foot_overlay is not None:
+                # Safety FOOT padded rect (forward-scan box) — orange.
+                sof = np.ascontiguousarray(rs1_safety_foot_overlay)
+                if sof.ndim == 3 and sof.shape[2] == 4:
+                    rr.log("vision/rs1_safety_foot", rr.Image(sof))
+                elif sof.ndim == 3 and sof.shape[2] >= 3:
+                    rr.log("vision/rs1_safety_foot", rr.Image(sof[:, :, :3]))
+            if safety_foot_overlay is not None:
+                sof2 = np.ascontiguousarray(safety_foot_overlay)
+                if sof2.ndim == 3 and sof2.shape[2] == 4:
+                    rr.log("vision/safety_foot", rr.Image(sof2))
+                elif sof2.ndim == 3 and sof2.shape[2] >= 3:
+                    rr.log("vision/safety_foot", rr.Image(sof2[:, :, :3]))
             return True
         except Exception as e:
             # Never let logging take down the 30 Hz loop.
