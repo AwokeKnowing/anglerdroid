@@ -12,14 +12,20 @@ NOT shipping weights in repo → deploy .onnx separately or use fallback planner
 Integration:
 - local_executive.py: add 'neural_rl' planner option
 - main.py: enable with --planner neural_rl
+
+Policy feed consumption (KEVIN_NEURAL_POLICY_FEED=1):
+- Accepts honest labels (UNKNOWN|SELF|CLEAR|OBSTACLE) + height from policy feed
+- Preprocesses into network-ready format (one-hot + height channel)
+- Falls back to legacy obs_map if policy feed unavailable
 """
 
 from __future__ import annotations
 
+import os
 import time
 import threading
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 import numpy as np
 
 # Optional ONNX runtime (graceful degradation if missing)
@@ -29,6 +35,15 @@ try:
 except ImportError:
     ONNX_AVAILABLE = False
     ort = None
+
+# Policy feed consumption gate (default off)
+KEVIN_NEURAL_POLICY_FEED = os.environ.get('KEVIN_NEURAL_POLICY_FEED', '0').strip() == '1'
+
+# Label constants (must match perception.labels)
+LABEL_UNKNOWN = 0
+LABEL_SELF = 1
+LABEL_CLEAR = 2
+LABEL_OBSTACLE = 3
 
 
 class NeuralRLPolicy:
@@ -152,6 +167,41 @@ class NeuralRLPolicy:
         obs = obs_map.astype(np.float32) / 255.0
         obs = obs[np.newaxis, np.newaxis, :, :]  # (1, 1, H, W)
         return obs
+
+    def _preprocess_policy_feed(
+        self,
+        labels: np.ndarray,
+        height: np.ndarray,
+        pose: Tuple[float, float, float]
+    ) -> np.ndarray:
+        """Preprocess policy feed (honest labels + height) for neural network.
+
+        Args:
+            labels: (H, W) uint8, UNKNOWN=0 SELF=1 CLEAR=2 OBSTACLE=3
+            height: (H, W) uint8, obstacle height in cm (0-100)
+            pose: (x, y, theta) world frame
+
+        Returns:
+            Preprocessed input (1, C, H, W) float32
+            C=5 channels: [unknown, self, clear, obstacle, height]
+        """
+        H, W = labels.shape
+
+        # One-hot encode labels (4 channels: UNKNOWN, SELF, CLEAR, OBSTACLE)
+        one_hot = np.zeros((4, H, W), dtype=np.float32)
+        for i in range(4):
+            one_hot[i] = (labels == i).astype(np.float32)
+
+        # Normalize height channel to [0, 1] (100 cm max)
+        height_norm = height.astype(np.float32) / 100.0
+
+        # Stack: [unknown, self, clear, obstacle, height]
+        obs = np.vstack([one_hot, height_norm[np.newaxis, :, :]])  # (5, H, W)
+
+        # Add batch dimension
+        obs = obs[np.newaxis, :, :, :]  # (1, 5, H, W)
+
+        return obs
     
     def _compute_goal_vector(
         self,
@@ -235,14 +285,17 @@ class NeuralRLPolicy:
         self,
         obs_map: np.ndarray,
         pose: Tuple[float, float, float],
-        dt: float
+        dt: float,
+        policy_feed: Optional[Dict[str, Any]] = None
     ) -> Optional[dict]:
         """Compute control command from observation.
         
         Args:
-            obs_map: Ego-space obstacle map (H, W) uint8
+            obs_map: Ego-space obstacle map (H, W) uint8 (legacy fallback)
             pose: (x, y, theta) world frame
             dt: Time step (seconds)
+            policy_feed: Optional dict from Vision.get_policy_feed() with
+                        'labels' and 'height' arrays (when KEVIN_NEURAL_POLICY_FEED=1)
         
         Returns:
             Command dict with keys: fwd_mps, ang_rads, source (neural/fallback)
@@ -257,7 +310,15 @@ class NeuralRLPolicy:
         
         # Try neural inference
         if self._session is not None:
-            obs_batch = self._preprocess_obs(obs_map, pose)
+            # Use policy feed if available and enabled
+            if KEVIN_NEURAL_POLICY_FEED and policy_feed is not None and policy_feed.get('valid'):
+                labels = policy_feed['labels']
+                height = policy_feed['height']
+                obs_batch = self._preprocess_policy_feed(labels, height, pose)
+            else:
+                # Fall back to legacy obs_map
+                obs_batch = self._preprocess_obs(obs_map, pose)
+            
             result = self._infer(obs_batch)
             
             if result is not None:
@@ -367,15 +428,50 @@ if __name__ == "__main__":
     
     policy.set_goal(2.5, 1.0)
     
-    # Fake observation
+    # Test with legacy obs_map
+    print("Test 1: Legacy obs_map input")
     obs_map = np.random.randint(0, 255, (240, 320), dtype=np.uint8)
     pose = (0.0, 0.0, 0.0)
     
-    cmd = policy.tick(obs_map, pose, 0.033)
+    cmd = policy.tick(obs_map, pose, 0.033, policy_feed=None)
     
     if cmd is not None:
-        print(f"Command: fwd={cmd['fwd_mps']:.2f} ang={cmd['ang_rads']:.2f} source={cmd['source']}")
+        print(f"  Command: fwd={cmd['fwd_mps']:.2f} ang={cmd['ang_rads']:.2f} source={cmd['source']}")
     else:
-        print("No command (fallback not implemented in stub)")
+        print("  No command (fallback not implemented in stub)")
+    
+    # Test with policy feed (KEVIN_NEURAL_POLICY_FEED=1 needed)
+    print("\nTest 2: Policy feed input (KEVIN_NEURAL_POLICY_FEED=%d)" % KEVIN_NEURAL_POLICY_FEED)
+    labels = np.zeros((240, 320), dtype=np.uint8)
+    labels[:, :] = LABEL_CLEAR
+    labels[100:110, 150:160] = LABEL_OBSTACLE
+    labels[115:125, 155:165] = LABEL_SELF
+    
+    height = np.zeros((240, 320), dtype=np.uint8)
+    height[100:110, 150:160] = 30  # 30 cm obstacle
+    
+    policy_feed = {
+        'labels': labels,
+        'height': height,
+        'valid': True,
+        'metadata': {'timestamp': 0.0}
+    }
+    
+    cmd = policy.tick(obs_map, pose, 0.033, policy_feed=policy_feed)
+    
+    if cmd is not None:
+        print(f"  Command: fwd={cmd['fwd_mps']:.2f} ang={cmd['ang_rads']:.2f} source={cmd['source']}")
+    else:
+        print("  No command (fallback not implemented in stub)")
     
     print(f"\nDebug state: {policy.get_debug_state()}")
+    
+    # Test preprocessing
+    print("\nTest 3: Policy feed preprocessing")
+    obs_batch = policy._preprocess_policy_feed(labels, height, pose)
+    print(f"  Preprocessed shape: {obs_batch.shape} (expected: 1, 5, 240, 320)")
+    print(f"  Channels: [unknown, self, clear, obstacle, height]")
+    print(f"  SELF pixels in channel 1: {np.sum(obs_batch[0, 1] > 0)}")
+    print(f"  CLEAR pixels in channel 2: {np.sum(obs_batch[0, 2] > 0)}")
+    print(f"  OBSTACLE pixels in channel 3: {np.sum(obs_batch[0, 3] > 0)}")
+    print(f"  Height channel max: {np.max(obs_batch[0, 4]):.3f} (expected ≤ 1.0)")

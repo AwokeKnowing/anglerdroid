@@ -184,7 +184,7 @@ timing needed).
 - On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy vs ModernGL vs CPU + Kevin)
 - ✓ ModernGL scatter into ego heightmap (policy feed; AGENTS.md) — **LANDED** (default-off `KEVIN_MODERNGL_SCATTER=1`)
 - ✓ Policy feed export (honest labels + height tensor) — **LANDED** (default-off `KEVIN_POLICY_FEED=1`; `src/perception/policy_feed.py`)
-- Neural policy consumption of policy feed (training + inference integration)
+- ✓ Neural policy consumption of policy feed — **LANDED** (default-off `KEVIN_NEURAL_POLICY_FEED=1`; `src/neural_rl.py` consumes labels+height; honesty preserved: SELF not obstacle, UNKNOWN not invented as CLEAR; unit tests in `test_neural_rl.py`)
 - Live mover exercise for ephemeral VO-ignore
 
 
