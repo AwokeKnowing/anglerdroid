@@ -47,8 +47,8 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 
 ## Delivery order
 
-1. Honest ego labeler + self exclusion (this week)
-2. Fuse RS2 without false clear; keep ≤20 ms
+1. Honest ego labeler + self exclusion — landed (RS1 `label_rs1_ego` + SELF boxes)
+2. Fuse RS2 without false clear; keep ≤20 ms — `fuse_rs2_into_ego` (cone+free-range CLEAR; SELF wins; no under-chassis CLEAR)
 3. Accumulated drivable map with decay
 4. Dynamic-tolerant SLAM
 

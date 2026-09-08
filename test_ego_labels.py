@@ -77,6 +77,80 @@ def test_x_offset_shifts_hits():
     assert len(xs0) >= 1 and len(xs1) >= 1
     assert int(xs1[0]) == int(xs0[0]) - 75
 
+def test_fuse_rs2_obstacle_adds():
+    from perception.fuse import fuse_rs2_into_ego
+    labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    # RS1 clear patch away from axle
+    labels[20:40, 200:220] = CLEAR
+    obs2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    # Obstacle in RS2 frame that lands at (30, 210) with fw_dx=0
+    obs2[30, 210] = 40
+    known2[30, 210] = 255
+    out, ht, m = fuse_rs2_into_ego(
+        labels, height, obs2, known2, fw_dx=0, fw_dy=0,
+        footprint_boxes=(), under_boxes=())
+    assert out[30, 210] == OBSTACLE
+    assert ht[30, 210] == 40
+    assert out[25, 205] == CLEAR
+
+
+def test_fuse_rejects_clear_under_chassis():
+    from perception.fuse import fuse_rs2_into_ego
+    from robot_config import BODY_BOX
+    labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    obs2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    x0, y0, x1, y1 = BODY_BOX
+    known2[y0:y1, x0:x1] = 255  # would-be CLEAR under body
+    out, ht, m = fuse_rs2_into_ego(
+        labels, height, obs2, known2, fw_dx=0, fw_dy=0)
+    assert m["rs2_clear_under_pre"] > 0
+    assert np.all(out[y0:y1, x0:x1] == SELF)
+    assert not np.any((out == CLEAR) & (labels == UNKNOWN) & False)
+    # No CLEAR inside body
+    assert not np.any(out[y0:y1, x0:x1] == CLEAR)
+
+
+def test_fuse_clear_respects_free_range():
+    from perception.fuse import fuse_rs2_into_ego
+    labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    obs2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2[50, 200] = 255
+    free = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    # free_range excludes (50,200)
+    out, _, m = fuse_rs2_into_ego(
+        labels, height, obs2, known2, fw_dx=0, fw_dy=0,
+        free_range=free, footprint_boxes=(), under_boxes=())
+    assert out[50, 200] == UNKNOWN
+    assert m["rs2_clear_accepted"] == 0
+    free[50, 200] = 255
+    out2, _, m2 = fuse_rs2_into_ego(
+        labels, height, obs2, known2, fw_dx=0, fw_dy=0,
+        free_range=free, footprint_boxes=(), under_boxes=())
+    assert out2[50, 200] == CLEAR
+    assert m2["rs2_clear_accepted"] == 1
+
+
+def test_fuse_does_not_clear_over_rs1_obstacle():
+    from perception.fuse import fuse_rs2_into_ego
+    labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    labels[60, 180] = OBSTACLE
+    height[60, 180] = 30
+    obs2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2 = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    known2[60, 180] = 255  # RS2 says clear
+    free = np.full((FRAME_H, FRAME_W), 255, dtype=np.uint8)
+    out, ht, _ = fuse_rs2_into_ego(
+        labels, height, obs2, known2, fw_dx=0, fw_dy=0,
+        free_range=free, footprint_boxes=(), under_boxes=())
+    assert out[60, 180] == OBSTACLE
+    assert ht[60, 180] == 30
 
 if __name__ == "__main__":
     test_floor_clear_outside_boxes()
@@ -89,4 +163,12 @@ if __name__ == "__main__":
     print("OK shim")
     test_x_offset_shifts_hits()
     print("OK x_offset")
+    test_fuse_rs2_obstacle_adds()
+    print("OK fuse_obs")
+    test_fuse_rejects_clear_under_chassis()
+    print("OK fuse_under")
+    test_fuse_clear_respects_free_range()
+    print("OK fuse_range")
+    test_fuse_does_not_clear_over_rs1_obstacle()
+    print("OK fuse_no_overwrite_obs")
     print("ALL PASS")

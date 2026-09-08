@@ -44,8 +44,12 @@ from odom_thread import OdomThread
 from wheel_imu_prior import WheelIMUPrior
 import os
 from perception import (
-    UNKNOWN as EGO_UNKNOWN, SELF as EGO_SELF, CLEAR as EGO_CLEAR, OBSTACLE as EGO_OBSTACLE,
+    UNKNOWN as EGO_UNKNOWN,
+    SELF as EGO_SELF,
+    CLEAR as EGO_CLEAR,
+    OBSTACLE as EGO_OBSTACLE,
     label_rs1_ego, labels_to_obs_known,
+    fuse_rs2_into_ego,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -803,6 +807,11 @@ class Vision:
         self._ego_work_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._ego_obs_shim = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._ego_known_shim = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_fuse_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_fuse_known = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_fuse_metrics = {}
+        self._ego_fuse_ms = 0.0
+        self._ego_did_label = False
         self._ego_fp_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
         for _x0, _y0, _x1, _y1 in FOOTPRINT_BOXES:
             self._ego_fp_mask[_y0:_y1, _x0:_x1] = True
@@ -1559,6 +1568,7 @@ class Vision:
             _t_rs1 = time.monotonic()
 
             # --- Honest RS1 ego labels (A/B side-path; budget: every N frames) ---
+            self._ego_did_label = False
             if (self._rs1 and self._rs1.ok and self._rs1.verts is not None
                     and (self._ego_label_n % self._ego_labels_every == 0)):
                 _t_ego0 = time.monotonic()
@@ -1572,10 +1582,8 @@ class Vision:
                     work_height=self._ego_work_height,
                     x_offset=int(TD_X_OFFSET),
                 )
-                labels_to_obs_known(
-                    self._ego_labels, self._ego_height,
-                    obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
                 self._ego_label_ms = (time.monotonic() - _t_ego0) * 1000.0
+                self._ego_did_label = True
             self._ego_label_n += 1
             
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
@@ -1658,6 +1666,25 @@ class Vision:
                 self._obs_combined[y0:y1, x0:x1] = 0
                 self._known_combined[y0:y1, x0:x1] = 0
 
+            # --- Fuse RS2 into ego labels (no false CLEAR under chassis) ---
+            if self._ego_did_label:
+                _t_fuse0 = time.monotonic()
+                _lab, _ht, self._ego_fuse_metrics = fuse_rs2_into_ego(
+                    self._ego_labels, self._ego_height,
+                    obs2, known2,
+                    fw_dx, fw_dy,
+                    fw_cone=self._fw_cone_mask,
+                    free_range=self._free_range_mask,
+                    labels_out=self._ego_labels,
+                    height_out=self._ego_height,
+                    work_obs=self._ego_fuse_obs,
+                    work_known=self._ego_fuse_known,
+                )
+                self._ego_fuse_ms = (time.monotonic() - _t_fuse0) * 1000.0
+                labels_to_obs_known(
+                    self._ego_labels, self._ego_height,
+                    obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
+
             # A/B metrics vs honest ego labels (rate-limited)
             if self._ego_label_n > 0 and (self._ego_label_n % 90 == 0):
                 _lab = self._ego_labels
@@ -1687,14 +1714,20 @@ class Vision:
                     _kn = self._known_combined[y0:y1, x0:x1]
                     _self_left += int(np.count_nonzero(_ob))
                     _self_fake_clear += int(np.count_nonzero((_kn == 255) & (_ob == 0)))
+                _fm = getattr(self, "_ego_fuse_metrics", {}) or {}
                 print(
-                    "ego_ab: ms=%.2f every=%d labels[U=%d S=%d C=%d O=%d] "
+                    "ego_ab: ms=%.2f fuse=%.2f every=%d labels[U=%d S=%d C=%d O=%d] "
                     "fake_clear_under=%d self_as_obs_pre=%d self_obs_left=%d "
-                    "self_fake_clear=%d clear_agree=%d obs_agree=%d live=%d"
-                    % (self._ego_label_ms, self._ego_labels_every,
+                    "self_fake_clear=%d rs2_clear_under=%d rs2_clear_ok=%d "
+                    "clear_agree=%d obs_agree=%d live=%d"
+                    % (self._ego_label_ms, getattr(self, "_ego_fuse_ms", 0.0),
+                       self._ego_labels_every,
                        _n_unk, _n_self, _n_clr, _n_obs,
                        _fake_clear, _self_as_obs, _self_left,
-                       _self_fake_clear, _clear_agree, _obs_agree,
+                       _self_fake_clear,
+                       int(_fm.get("rs2_clear_under_pre", 0)),
+                       int(_fm.get("rs2_clear_accepted", 0)),
+                       _clear_agree, _obs_agree,
                        int(self._ego_labels_enable)))
 
             # Optional: feed honest shim into combined map (off by default)
