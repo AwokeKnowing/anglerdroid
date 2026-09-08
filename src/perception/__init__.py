@@ -10,6 +10,9 @@ from .planner_feed import (
     apply_self_honest, ego_labels_to_planner_feed,
     evidence_to_ego_obs_known, select_planner_feed,
 )
+from .dynamic_mask import (
+    build_slam_outlier_mask, apply_mask_to_obs, mask_as_uint8,
+)
 
 __all__ = [
     "UNKNOWN", "SELF", "CLEAR", "OBSTACLE", "LABEL_NAMES",
@@ -17,4 +20,5 @@ __all__ = [
     "EvidenceMap",
     "apply_self_honest", "ego_labels_to_planner_feed",
     "evidence_to_ego_obs_known", "select_planner_feed",
+    "build_slam_outlier_mask", "apply_mask_to_obs", "mask_as_uint8",
 ]

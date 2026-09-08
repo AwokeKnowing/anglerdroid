@@ -52,11 +52,15 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 - Modern VO/SLAM that treats moving people/dog as outliers (robust residuals / dynamic masking).
 - Prefer RGB-D + wheel + IMU; no ROS.
 - Localization must not require a frozen house mesh, but a walls prior (STL) is a later assist.
+- Wedge landed: `src/perception/dynamic_mask.py` — ego-label outlier mask for SLAM/VO
+  (`SELF` always masked; optional ephemeral `OBSTACLE` vs prior). Live gate
+  `KEVIN_SLAM_DYNAMIC_MASK=1` (default off) zeros masked cells on self-SLAM
+  keyframe obs. Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
 
 ## Delivery order
 
 1. Honest ego labeler + self exclusion — landed (RS1 `label_rs1_ego` + SELF boxes)
 2. Fuse RS2 without false clear; keep ≤20 ms — `fuse_rs2_into_ego` (cone+free-range CLEAR; SELF wins; no under-chassis CLEAR)
 3. Accumulated drivable map with decay — landed (`EvidenceMap` / `evidence_map.py`; dynamic obstacle decay + clear reclaim)
-4. Dynamic-tolerant SLAM
+4. Dynamic-tolerant SLAM — wedge: dynamic mask from ego (`dynamic_mask.py`); full RGB-D+wheel+IMU still TODO
 

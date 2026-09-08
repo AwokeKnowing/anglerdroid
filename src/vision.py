@@ -52,6 +52,7 @@ from perception import (
     fuse_rs2_into_ego,
     EvidenceMap,
     select_planner_feed,
+    build_slam_outlier_mask, apply_mask_to_obs,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -833,6 +834,12 @@ class Vision:
         self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
         self._evidence_map_ms = 0.0
         self._evidence_map_metrics = {}
+        # CONTRACT step 4 wedge: dynamic mask for self-SLAM keyframes (default off)
+        self._slam_dyn_mask_enable = (
+            os.environ.get('KEVIN_SLAM_DYNAMIC_MASK', '0').strip() == '1')
+        self._slam_dyn_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+        self._slam_kf_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._slam_dyn_mask_n = 0
         
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
@@ -1910,8 +1917,23 @@ class Vision:
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE),
                         free_range_mask=self._free_range_mask)
+                    # Optional dynamic mask (KEVIN_SLAM_DYNAMIC_MASK=1): zero SELF
+                    # (and optional ephemeral OBSTACLE) cells in a scratch obs for
+                    # keyframe descriptors/thumbs only. Default off = unchanged.
+                    _kf_obs = self._obs_combined
+                    if (self._slam_dyn_mask_enable and self._ego_did_label):
+                        build_slam_outlier_mask(
+                            self._ego_labels, out=self._slam_dyn_mask)
+                        _kf_obs = apply_mask_to_obs(
+                            self._obs_combined, self._slam_dyn_mask,
+                            obs_out=self._slam_kf_obs)
+                        self._slam_dyn_mask_n += 1
+                        if self._slam_dyn_mask_n <= 2 or self._slam_dyn_mask_n % 90 == 0:
+                            print(
+                                "slam_dyn_mask: cells=%d enable=1"
+                                % int(np.count_nonzero(self._slam_dyn_mask)))
                     self._global_map.keyframe_check(
-                        self._obs_combined, self._known_combined,
+                        _kf_obs, self._known_combined,
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE))
                     
