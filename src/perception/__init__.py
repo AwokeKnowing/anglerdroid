@@ -19,7 +19,9 @@ from .color_uv_alignment import (
 )
 from .ego_rs1_fast import (
     label_rs1_ego_gpu,
+    fuse_rs2_into_ego_gpu,
     KEVIN_GPU_SCATTER,
+    KEVIN_GPU_FUSE,
     _CUPY_AVAILABLE as GPU_AVAILABLE,
 )
 
@@ -32,5 +34,6 @@ __all__ = [
     "build_slam_outlier_mask", "apply_mask_to_obs", "mask_counts", "mask_as_uint8",
     "apply_ignore_to_gray", "build_forward_ignore_from_verts",
     "CameraIntrinsics", "DepthToColorAlignment", "extract_rs_intrinsics_extrinsics",
-    "label_rs1_ego_gpu", "KEVIN_GPU_SCATTER", "GPU_AVAILABLE",
+    "label_rs1_ego_gpu", "fuse_rs2_into_ego_gpu",
+    "KEVIN_GPU_SCATTER", "KEVIN_GPU_FUSE", "GPU_AVAILABLE",
 ]

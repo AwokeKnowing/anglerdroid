@@ -130,16 +130,23 @@ when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz h
    `label_rs1_ego` via CuPy when available, behind **`KEVIN_GPU_SCATTER=1`** (default
    off). Keeps verts → project → scatter → rotate → blit on GPU; falls back to CPU
    `label_rs1_ego` when CuPy missing or flag off (try-import; no import-time CuPy).
-   Correctness tests in `test_ego_gpu_correctness.py`. Live `vision.py` wire still
-   open (module exported from `perception`).
+   Correctness tests in `test_ego_gpu_correctness.py`. **Live wire in `vision.py`**
+   (PR#49): `KEVIN_GPU_SCATTER=1` selects `label_rs1_ego_gpu` over CPU path.
+
+5. **Optional GPU fuse path** (`src/perception/ego_rs1_fast.py`) — GPU-resident
+   `fuse_rs2_into_ego` via CuPy when available, behind **`KEVIN_GPU_FUSE=1`** (default
+   off). Keeps RS2 blit → mask → merge → self on GPU; falls back to CPU
+   `fuse_rs2_into_ego` when CuPy missing or flag off. Correctness tests in
+   `test_fuse_gpu_correctness.py`. **Live wire in `vision.py`** (PR#49): `KEVIN_GPU_FUSE=1`
+   selects `fuse_rs2_into_ego_gpu` over CPU path. Never invents CLEAR under chassis;
+   SELF wins; honesty preserved.
 
 **Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`;
-GPU scatter reclaim TBD on Orin with CuPy.
+GPU scatter + fuse reclaim TBD on Orin with CuPy (offline tests show correctness; on-device
+timing needed).
 
 **Still open:**
-- Wire `KEVIN_GPU_SCATTER=1` into live `vision.py` call site (default-off)
-- On-device Orin measurement of GPU vs CPU `label_rs1_ego` (CuPy + Kevin)
-- GPU-resident `fuse_rs2_into_ego` path
+- On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy + Kevin)
 - ModernGL scatter into ego heightmap (policy feed; AGENTS.md)
 - Live mover exercise for ephemeral VO-ignore
 

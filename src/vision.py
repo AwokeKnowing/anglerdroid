@@ -54,6 +54,8 @@ from perception import (
     select_planner_feed, evidence_obstacle_prior_ego,
     build_slam_outlier_mask, apply_mask_to_obs, mask_counts,
     apply_ignore_to_gray, build_forward_ignore_from_verts,
+    label_rs1_ego_gpu, KEVIN_GPU_SCATTER,
+    fuse_rs2_into_ego_gpu, KEVIN_GPU_FUSE,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -1630,7 +1632,9 @@ class Vision:
                 _t_ego0 = time.monotonic()
                 _v_ego = _clip_decimated_border(
                     self._rs1.verts, out=self._rs1_work_verts)
-                label_rs1_ego(
+                # KEVIN_GPU_SCATTER=1 enables GPU-resident scatter (CuPy)
+                _label_fn = label_rs1_ego_gpu if KEVIN_GPU_SCATTER else label_rs1_ego
+                _label_fn(
                     _v_ego,
                     labels_out=self._ego_labels,
                     height_out=self._ego_height,
@@ -1725,7 +1729,9 @@ class Vision:
             # --- Fuse RS2 into ego labels (no false CLEAR under chassis) ---
             if self._ego_did_label:
                 _t_fuse0 = time.monotonic()
-                _lab, _ht, self._ego_fuse_metrics = fuse_rs2_into_ego(
+                # KEVIN_GPU_FUSE=1 enables GPU-resident fuse (CuPy)
+                _fuse_fn = fuse_rs2_into_ego_gpu if KEVIN_GPU_FUSE else fuse_rs2_into_ego
+                _lab, _ht, self._ego_fuse_metrics = _fuse_fn(
                     self._ego_labels, self._ego_height,
                     obs2, known2,
                     fw_dx, fw_dy,

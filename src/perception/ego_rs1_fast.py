@@ -7,6 +7,9 @@ KEVIN_GPU_SCATTER=1 flag is set. CPU path uses original ego_rs1.label_rs1_ego
 GPU path keeps verts → projection → scatter → rotate → blit on GPU to avoid
 host-device transfer overhead. Requires CuPy installed.
 
+Also provides GPU-resident fuse_rs2_into_ego_gpu behind KEVIN_GPU_FUSE=1
+(default off). CPU path (fuse.fuse_rs2_into_ego) unchanged.
+
 See docs/perception/CONTRACT.md step 4 (CAPTURE Hz reclaim).
 """
 from __future__ import annotations
@@ -25,6 +28,7 @@ except ImportError:
     pass
 
 KEVIN_GPU_SCATTER = os.environ.get("KEVIN_GPU_SCATTER", "0") == "1"
+KEVIN_GPU_FUSE = os.environ.get("KEVIN_GPU_FUSE", "0") == "1"
 
 
 def label_rs1_ego_gpu(
@@ -150,3 +154,156 @@ def _blit_x_gpu(dst, src, dx: int) -> None:
         if -dx >= w:
             return
         dst[:, : w + dx] = src[:, -dx:]
+
+
+def fuse_rs2_into_ego_gpu(
+    labels_rs1: np.ndarray,
+    height_rs1: np.ndarray,
+    obs2: np.ndarray,
+    known2: np.ndarray,
+    fw_dx: int,
+    fw_dy: int = 0,
+    *,
+    fw_cone: np.ndarray | None = None,
+    free_range: np.ndarray | None = None,
+    footprint_boxes=None,
+    under_boxes=None,
+    labels_out: np.ndarray | None = None,
+    height_out: np.ndarray | None = None,
+    work_obs: np.ndarray | None = None,
+    work_known: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """GPU-resident fuse RS2 into RS1 ego labels using CuPy.
+
+    Keeps blit → mask → merge → self on GPU. Falls back to CPU 
+    (fuse.fuse_rs2_into_ego) if CuPy unavailable.
+
+    Parameters
+    ----------
+    Same as fuse.fuse_rs2_into_ego.
+
+    Returns
+    -------
+    labels, height, metrics : CPU numpy arrays (same as original).
+
+    Notes
+    -----
+    GPU path avoids host-device transfer for intermediate arrays. Useful on Orin
+    when CuPy is installed. CPU path (original fuse.fuse_rs2_into_ego) is already
+    efficient — do not replace it with slower code.
+    """
+    from .labels import CLEAR, OBSTACLE, SELF
+    from .fuse import fuse_rs2_into_ego
+    from robot_config import FOOTPRINT_BOXES, UNDER_ROBOT_BOXES
+
+    if not _CUPY_AVAILABLE or _cp is None:
+        # Fall back to CPU
+        return fuse_rs2_into_ego(
+            labels_rs1, height_rs1,
+            obs2, known2,
+            fw_dx, fw_dy,
+            fw_cone=fw_cone,
+            free_range=free_range,
+            footprint_boxes=footprint_boxes,
+            under_boxes=under_boxes,
+            labels_out=labels_out,
+            height_out=height_out,
+            work_obs=work_obs,
+            work_known=work_known,
+        )
+
+    # GPU path: keep everything on device until final transfer
+    h, w = labels_rs1.shape
+    labels_gpu = _cp.asarray(labels_rs1, dtype=_cp.uint8)
+    height_gpu = _cp.asarray(height_rs1, dtype=_cp.uint8)
+
+    obs_e_gpu = _cp.zeros((h, w), dtype=_cp.uint8)
+    kn_e_gpu = _cp.zeros((h, w), dtype=_cp.uint8)
+
+    # Blit RS2 with offsets on GPU
+    obs2_gpu = _cp.asarray(obs2, dtype=_cp.uint8)
+    known2_gpu = _cp.asarray(known2, dtype=_cp.uint8)
+    _blit_gpu(obs_e_gpu, obs2_gpu, int(fw_dx), int(fw_dy))
+    _blit_gpu(kn_e_gpu, known2_gpu, int(fw_dx), int(fw_dy))
+
+    # Apply cone masks on GPU
+    if fw_cone is not None:
+        cone_gpu = _cp.asarray(fw_cone, dtype=_cp.uint8)
+        obs_e_gpu &= cone_gpu
+        kn_e_gpu &= cone_gpu
+
+    # Count would-be false CLEAR under chassis from RS2 before SELF wins
+    under = under_boxes if under_boxes is not None else UNDER_ROBOT_BOXES
+    rs2_clear_under = 0
+    for x0, y0, x1, y1 in under:
+        rs2_clear_under += int(
+            _cp.count_nonzero((kn_e_gpu[y0:y1, x0:x1] == 255) & (obs_e_gpu[y0:y1, x0:x1] == 0))
+        )
+
+    # Obstacles: max height; never leave as CLEAR
+    obs_m_gpu = obs_e_gpu > 0
+    rs2_obs_px = int(_cp.count_nonzero(obs_m_gpu))
+    labels_gpu[obs_m_gpu] = OBSTACLE
+    _cp.maximum(height_gpu, obs_e_gpu, out=height_gpu)
+
+    # CLEAR only from RS2 known∩¬obs, range-limited, never over OBSTACLE/SELF
+    clear_m_gpu = (kn_e_gpu == 255) & (obs_e_gpu == 0)
+    if free_range is not None:
+        free_range_gpu = _cp.asarray(free_range, dtype=_cp.uint8)
+        clear_m_gpu &= free_range_gpu > 0
+    # Do not invent CLEAR over existing obstacle evidence from RS1
+    clear_m_gpu &= labels_gpu != OBSTACLE
+    clear_m_gpu &= labels_gpu != SELF
+    rs2_clear_accepted = int(_cp.count_nonzero(clear_m_gpu))
+    labels_gpu[clear_m_gpu] = CLEAR
+
+    # Paint SELF on GPU
+    boxes = footprint_boxes if footprint_boxes is not None else FOOTPRINT_BOXES
+    for x0, y0, x1, y1 in boxes:
+        labels_gpu[y0:y1, x0:x1] = SELF
+
+    # Zero height for non-obstacle labels on GPU
+    height_gpu[labels_gpu == SELF] = 0
+    height_gpu[labels_gpu == CLEAR] = 0
+    height_gpu[labels_gpu == 0] = 0  # UNKNOWN
+
+    # Transfer to CPU
+    if labels_out is None:
+        labels_out = np.empty((h, w), dtype=np.uint8)
+    if height_out is None:
+        height_out = np.empty((h, w), dtype=np.uint8)
+    _cp.copyto(labels_out, labels_gpu)
+    _cp.copyto(height_out, height_gpu)
+
+    # Compute final metrics on GPU then transfer
+    n_self = int(_cp.count_nonzero(labels_gpu == SELF))
+    n_clear = int(_cp.count_nonzero(labels_gpu == CLEAR))
+    n_obs = int(_cp.count_nonzero(labels_gpu == OBSTACLE))
+    n_unk = int(labels_gpu.size - n_self - n_clear - n_obs)
+
+    metrics = {
+        "rs2_clear_under_pre": rs2_clear_under,
+        "rs2_obs_px": rs2_obs_px,
+        "rs2_clear_accepted": rs2_clear_accepted,
+        "labels_U": n_unk,
+        "labels_S": n_self,
+        "labels_C": n_clear,
+        "labels_O": n_obs,
+    }
+    return labels_out, height_out, metrics
+
+
+def _blit_gpu(dst, src, dx: int, dy: int = 0) -> None:
+    """Blit on GPU (CuPy arrays) with (dx, dy) offset."""
+    h, w = dst.shape[:2]
+    if dy >= 0:
+        sr0, sr1, dr0, dr1 = 0, h - dy, dy, h
+    else:
+        sr0, sr1, dr0, dr1 = -dy, h, 0, h + dy
+    if dx >= 0:
+        sc0, sc1, dc0, dc1 = 0, w - dx, dx, w
+    else:
+        sc0, sc1, dc0, dc1 = -dx, w, 0, w + dx
+    if sr0 >= sr1 or sc0 >= sc1:
+        return
+    dst[dr0:dr1, dc0:dc1] = src[sr0:sr1, sc0:sc1]
