@@ -184,13 +184,19 @@ class KevinRerunLogger:
         
         robot_footprint_underlay = log_job.get("robot_footprint_underlay")
         if robot_footprint_underlay is not None:
-                pass  # do not log underlay — stacks over/under overlay and kills image-2 look
+                und = np.ascontiguousarray(robot_footprint_underlay)
+                if und.ndim == 3 and und.shape[2] >= 3:
+                    rr.log("vision/robot_foot_underlay", rr.Image(und[:, :, :3]))
         
         robot_footprint_overlay = log_job.get("robot_footprint_overlay")
         if robot_footprint_overlay is not None:
                 fov = np.ascontiguousarray(robot_footprint_overlay)
+                # RGB plane always has intact map + additive tint (procedural show-through)
                 rgb_o = fov[:, :, :3] if (fov.ndim == 3 and fov.shape[2] >= 3) else fov
                 rr.log("vision/robot_foot_overlay", rr.Image(rgb_o))
+                # Optional alpha layer for stacking on underlay (trust-style)
+                if fov.ndim == 3 and fov.shape[2] == 4:
+                    rr.log("vision/robot_foot_tint", rr.Image(fov))
                 if (self._n // max(1, self.every_n)) % 8 == 0:
                     try:
                         import cv2
