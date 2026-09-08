@@ -74,14 +74,15 @@ def test_slam_locked_usage():
     """Verify that slam_locked is correctly extracted from vision instance."""
     with open('src/local_executive.py') as f:
         content = f.read()
-    
-    # Check the pattern: vis.slam_locked if vis else False
-    if 'vis.slam_locked if vis else False' in content:
-        print("✓ slam_locked is correctly extracted with fallback")
+
+    # Live path: default False, then set from vision when available.
+    has_default = 'slam_locked = False' in content
+    has_assign = 'slam_locked = vis.slam_locked' in content
+    if has_default and has_assign:
+        print("✓ slam_locked defaults False then set from vision")
         return True
-    else:
-        print("✗ slam_locked extraction pattern not found")
-        return False
+    print("✗ slam_locked extraction pattern not found")
+    return False
 
 
 def main():

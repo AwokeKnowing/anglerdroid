@@ -11,8 +11,9 @@ Rules (docs/perception/CONTRACT.md):
   - Obstacle evidence decays when not re-observed; clear decays slower and can reclaim
 
 Expected cost on Orin CPU (sparse splat of labeled ego cells, no GPU):
-  ~2–8 ms for a typical 320×240 ego frame with a few thousand CLEAR/OBSTACLE
-  hits into the 960×720 world grid. Full-array decay is one float mul (~0.5 ms).
+  ~2–8 ms for a typical 320×240 ego frame with tens of thousands of CLEAR/OBSTACLE
+  hits into the 960×720 world grid. Always full-grid decay (~0.5 ms contiguous
+  mul); never fancy-index "untouched" masks (those were ~7–15 ms on Orin).
 """
 from __future__ import annotations
 
@@ -66,9 +67,6 @@ class EvidenceMap:
         self.last_seen = np.zeros((self.map_h, self.map_w), dtype=np.int32)
         self._frame_i = 0
         self._last_update_ms = 0.0
-        # Scratch for refreshed-cell mask (reused; avoid per-frame alloc of full grid
-        # by only marking sparse indices — see update()).
-        self._touch_buf: Optional[np.ndarray] = None
 
     @property
     def frame_i(self) -> int:
@@ -84,16 +82,10 @@ class EvidenceMap:
         self.last_seen.fill(0)
         self._frame_i = 0
 
-    def decay(self, *, touch_mask: Optional[np.ndarray] = None) -> None:
-        """Decay evidence. If touch_mask given, skip cells refreshed this frame."""
-        if touch_mask is None:
-            self.obstacle_evidence *= self.obs_decay
-            self.clear_evidence *= self.clear_decay
-            return
-        # Decay only untouched cells (vectorized)
-        unt = ~touch_mask
-        self.obstacle_evidence[unt] *= self.obs_decay
-        self.clear_evidence[unt] *= self.clear_decay
+    def decay(self) -> None:
+        """Full-grid decay (cheap contiguous mul; avoid fancy-index touch masks)."""
+        self.obstacle_evidence *= self.obs_decay
+        self.clear_evidence *= self.clear_decay
 
     def update(
         self,
@@ -132,14 +124,17 @@ class EvidenceMap:
         if labels.shape != height.shape:
             raise ValueError("ego_labels and height_cm shape mismatch")
 
+        # Full-grid decay first (~0.5 ms contiguous mul). Fancy-index
+        # "untouched only" masks were 7–15 ms on 960×720 and blew the budget.
+        # Touched cells are re-boosted below; CLEAR reclaim is the same single
+        # obs_decay already applied here (no second sparse mul).
+        self.decay()
+
         # Sparse splat: only CLEAR / OBSTACLE (SELF and UNKNOWN contribute nothing)
         clear_yx = np.nonzero(labels == CLEAR)
         obs_yx = np.nonzero(labels == OBSTACLE)
         n_clear = int(clear_yx[0].size)
         n_obs = int(obs_yx[0].size)
-
-        touch_rows: list = []
-        touch_cols: list = []
 
         if n_clear or n_obs:
             M = GlobalMap._forward_affine(
@@ -147,8 +142,13 @@ class EvidenceMap:
 
             def _to_world(rows, cols):
                 # M maps [col, row, 1] → [gx, gy]
-                ones = np.ones(rows.size, dtype=np.float64)
-                pts = np.vstack([cols.astype(np.float64), rows.astype(np.float64), ones])
+                n = int(rows.size)
+                if n == 0:
+                    empty = np.empty(0, dtype=np.int32)
+                    return empty, empty, np.empty(0, dtype=bool)
+                ones = np.ones(n, dtype=np.float64)
+                pts = np.vstack([cols.astype(np.float64, copy=False),
+                                 rows.astype(np.float64, copy=False), ones])
                 g = M @ pts
                 gx = np.rint(g[0]).astype(np.int32)
                 gy = np.rint(g[1]).astype(np.int32)
@@ -156,45 +156,34 @@ class EvidenceMap:
                 return gy[ok], gx[ok], ok
 
             if n_clear:
-                rows = clear_yx[0].astype(np.int32)
-                cols = clear_yx[1].astype(np.int32)
+                rows = clear_yx[0].astype(np.int32, copy=False)
+                cols = clear_yx[1].astype(np.int32, copy=False)
                 gy, gx, _ = _to_world(rows, cols)
                 if gy.size:
-                    np.add.at(self.clear_evidence, (gy, gx), CLEAR_BOOST)
-                    np.minimum(self.clear_evidence, MAX_EVIDENCE, out=self.clear_evidence)
-                    # Clear observation reclaim: pull obstacle evidence down so
-                    # movers/chairs can free the cell without waiting for full decay.
-                    self.obstacle_evidence[gy, gx] *= self.obs_decay
-                    self.last_seen[gy, gx] = fi
-                    touch_rows.append(gy)
-                    touch_cols.append(gx)
+                    # Aggregate duplicate world hits (ego→world many-to-one).
+                    # Unique+add beats np.add.at on ~25–30k clear samples.
+                    flat = gy.astype(np.int64) * self.map_w + gx
+                    uniq, counts = np.unique(flat, return_counts=True)
+                    uy = (uniq // self.map_w).astype(np.int32)
+                    ux = (uniq % self.map_w).astype(np.int32)
+                    self.clear_evidence[uy, ux] = np.minimum(
+                        self.clear_evidence[uy, ux]
+                        + counts.astype(np.float32) * CLEAR_BOOST,
+                        MAX_EVIDENCE)
+                    self.last_seen[uy, ux] = fi
 
             if n_obs:
-                rows = obs_yx[0].astype(np.int32)
-                cols = obs_yx[1].astype(np.int32)
+                rows = obs_yx[0].astype(np.int32, copy=False)
+                cols = obs_yx[1].astype(np.int32, copy=False)
                 hvals = height[rows, cols].astype(np.float32)
                 gy, gx, ok = _to_world(rows, cols)
                 if gy.size:
                     boost = OBS_BOOST_BASE + OBS_BOOST_PER_CM * hvals[ok]
+                    # n_obs is small (~2–3k); add.at is fine here
                     np.add.at(self.obstacle_evidence, (gy, gx), boost)
-                    np.minimum(self.obstacle_evidence, MAX_EVIDENCE, out=self.obstacle_evidence)
+                    self.obstacle_evidence[gy, gx] = np.minimum(
+                        self.obstacle_evidence[gy, gx], MAX_EVIDENCE)
                     self.last_seen[gy, gx] = fi
-                    touch_rows.append(gy)
-                    touch_cols.append(gx)
-
-        # Decay cells not refreshed this frame (full-grid mul is cheap vs building mask)
-        if touch_rows:
-            tr = np.concatenate(touch_rows)
-            tc = np.concatenate(touch_cols)
-            # Mark touch on a bool scratch, decay elsewhere, then clear scratch
-            if self._touch_buf is None or self._touch_buf.shape != self.clear_evidence.shape:
-                self._touch_buf = np.zeros_like(self.clear_evidence, dtype=bool)
-            else:
-                self._touch_buf.fill(False)
-            self._touch_buf[tr, tc] = True
-            self.decay(touch_mask=self._touch_buf)
-        else:
-            self.decay()
 
         self._last_update_ms = (time.monotonic() - t0) * 1000.0
         return {
