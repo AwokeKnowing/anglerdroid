@@ -103,7 +103,8 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 
 ### CAPTURE Hz reclaim (toward 30 Hz / 60 Hz headroom)
 
-**Status**: Partial wedge landed (evidence frequency gate + metrics reduction).
+**Status**: Two offline wedges landed (evidence frequency gate + optional GPU scatter).
+No live Orin Hz claims yet (Kevin unreachable).
 
 **Problem**: Evidence map update (~14–23 ms on Orin) was holding smoke loop at ~18–19 Hz
 when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz headroom.
@@ -119,12 +120,29 @@ when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz h
    (`ego_ab:` log line) now run 3x less frequently. Reclaim: ~1–2 ms on 2/3 of
    prior metric cycles. No correctness impact (logging only).
 
-**Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`.
+3. **Performance benchmarks / profiling** (`test_ego_perf.py`, `test_ego_perf_profile.py`,
+   `test_ego_fast_bench.py`) — host CPU baseline ~3.6 ms for `label_rs1_ego` +
+   `fuse_rs2_into_ego` (under 20 ms budget; Orin timings differ). Scatter ~45% /
+   projection ~36% of label_rs1_ego; NumPy fancy indexing + `np.maximum.at` already
+   efficient on CPU.
 
-**Open work** (not in this wedge):
-- On-device Orin validation of reclaimed Hz (Kevin unreachable; no fabricated timings)
-- Further algorithmic wins in `label_rs1_ego` / `fuse_rs2_into_ego` hot path
-- GPU-resident ego label scatter (currently CPU scatter; ~2–3 ms opportunity)
+4. **Optional GPU scatter path** (`src/perception/ego_rs1_fast.py`) — GPU-resident
+   `label_rs1_ego` via CuPy when available, behind **`KEVIN_GPU_SCATTER=1`** (default
+   off). Keeps verts → project → scatter → rotate → blit on GPU; falls back to CPU
+   `label_rs1_ego` when CuPy missing or flag off (try-import; no import-time CuPy).
+   Correctness tests in `test_ego_gpu_correctness.py`. Live `vision.py` wire still
+   open (module exported from `perception`).
+
+**Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`;
+GPU scatter reclaim TBD on Orin with CuPy.
+
+**Still open:**
+- Wire `KEVIN_GPU_SCATTER=1` into live `vision.py` call site (default-off)
+- On-device Orin measurement of GPU vs CPU `label_rs1_ego` (CuPy + Kevin)
+- GPU-resident `fuse_rs2_into_ego` path
+- ModernGL scatter into ego heightmap (policy feed; AGENTS.md)
+- Live mover exercise for ephemeral VO-ignore
+
 
 ## Delivery order
 
