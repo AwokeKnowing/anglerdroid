@@ -830,6 +830,8 @@ class Vision:
             os.environ.get('KEVIN_EGO_PLAN', '0').strip() == '1'
             or self._ego_labels_enable
         )
+        # ModernGL scatter for ego labels (default off)
+        self._moderngl_scatter_enable = os.environ.get('KEVIN_MODERNGL_SCATTER', '0').strip() == '1'
         self._ego_plan_source = 'legacy'
         self._ego_shim_valid = False
         self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
@@ -894,6 +896,12 @@ class Vision:
             out_h=FRAME_H, out_w=FRAME_W,
             obs_mask=self._obs_mask,
             fw_cone_mask=self._fw_cone_mask)
+        # ModernGL ego labels scatter (default off)
+        if self._moderngl_scatter_enable:
+            self._gpu.configure_ego_labels(
+                out_w=FRAME_W, out_h=FRAME_H,
+                px_size=float(TD_PX_SIZE),
+                floor_clip_m=float(TD_FLOOR_CLIP))
         self._gpu.configure_odom(fx=307.0, ds_factor=4, search=8)
         self._gpu.configure_gmap(MAP_W, MAP_H, FRAME_W, FRAME_H,
                                  ORIGIN_X, ORIGIN_Y, MAP_PX_SIZE)
@@ -1632,16 +1640,30 @@ class Vision:
                 _t_ego0 = time.monotonic()
                 _v_ego = _clip_decimated_border(
                     self._rs1.verts, out=self._rs1_work_verts)
-                # KEVIN_GPU_SCATTER=1 enables GPU-resident scatter (CuPy)
-                _label_fn = label_rs1_ego_gpu if KEVIN_GPU_SCATTER else label_rs1_ego
-                _label_fn(
-                    _v_ego,
-                    labels_out=self._ego_labels,
-                    height_out=self._ego_height,
-                    work_labels=self._ego_work_labels,
-                    work_height=self._ego_work_height,
-                    x_offset=int(TD_X_OFFSET),
-                )
+                if self._moderngl_scatter_enable:
+                    # GPU path: ModernGL scatter (honest ego labels)
+                    self._gpu.label_rs1_ego_moderngl(
+                        _v_ego,
+                        out_h=FRAME_H,
+                        out_w=FRAME_W,
+                        floor_clip_m=float(TD_FLOOR_CLIP),
+                        px_size=float(TD_PX_SIZE),
+                        labels_out=self._ego_labels,
+                        height_out=self._ego_height,
+                        x_offset=int(TD_X_OFFSET),
+                        self_boxes=FOOTPRINT_BOXES,
+                    )
+                else:
+                    # KEVIN_GPU_SCATTER=1 enables GPU-resident scatter (CuPy)
+                    _label_fn = label_rs1_ego_gpu if KEVIN_GPU_SCATTER else label_rs1_ego
+                    _label_fn(
+                        _v_ego,
+                        labels_out=self._ego_labels,
+                        height_out=self._ego_height,
+                        work_labels=self._ego_work_labels,
+                        work_height=self._ego_work_height,
+                        x_offset=int(TD_X_OFFSET),
+                    )
                 self._ego_label_ms = (time.monotonic() - _t_ego0) * 1000.0
                 self._ego_did_label = True
             self._ego_label_n += 1
