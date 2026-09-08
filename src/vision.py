@@ -51,7 +51,7 @@ from perception import (
     label_rs1_ego, labels_to_obs_known,
     fuse_rs2_into_ego,
     EvidenceMap,
-    select_planner_feed,
+    select_planner_feed, evidence_obstacle_prior_ego,
     build_slam_outlier_mask, apply_mask_to_obs,
 )
 
@@ -839,6 +839,7 @@ class Vision:
             os.environ.get('KEVIN_SLAM_DYNAMIC_MASK', '0').strip() == '1')
         self._slam_dyn_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
         self._slam_kf_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._slam_prior_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._slam_dyn_mask_n = 0
         
         # SLAM lock state (critical for operator awareness)
@@ -1922,16 +1923,47 @@ class Vision:
                     # keyframe descriptors/thumbs only. Default off = unchanged.
                     _kf_obs = self._obs_combined
                     if (self._slam_dyn_mask_enable and self._ego_did_label):
+                        _prior = None
+                        _mask_eph = False
+                        _n_prior = 0
+                        if (
+                            self._evidence_map is not None
+                            and int(getattr(self._evidence_map, "frame_i", 0)) > 0
+                        ):
+                            try:
+                                _pose = (
+                                    float(pose_src.x),
+                                    float(pose_src.y),
+                                    float(pose_src.theta),
+                                )
+                            except Exception:
+                                _pose = (0.0, 0.0, 0.0)
+                            evidence_obstacle_prior_ego(
+                                self._evidence_map, _pose,
+                                out=self._slam_prior_obs)
+                            _prior = self._slam_prior_obs
+                            _mask_eph = True
+                            _n_prior = int(np.count_nonzero(_prior))
                         build_slam_outlier_mask(
-                            self._ego_labels, out=self._slam_dyn_mask)
+                            self._ego_labels,
+                            prior_obstacle=_prior,
+                            mask_ephemeral=_mask_eph,
+                            out=self._slam_dyn_mask)
+                        # Mask live ego obs (not planner evidence feed) so
+                        # ephemeral movers actually get zeroed for keyframes.
+                        _kf_base = (
+                            self._ego_obs_shim
+                            if getattr(self, "_ego_shim_valid", False)
+                            else self._obs_combined)
                         _kf_obs = apply_mask_to_obs(
-                            self._obs_combined, self._slam_dyn_mask,
+                            _kf_base, self._slam_dyn_mask,
                             obs_out=self._slam_kf_obs)
                         self._slam_dyn_mask_n += 1
                         if self._slam_dyn_mask_n <= 2 or self._slam_dyn_mask_n % 90 == 0:
                             print(
-                                "slam_dyn_mask: cells=%d enable=1"
-                                % int(np.count_nonzero(self._slam_dyn_mask)))
+                                "slam_dyn_mask: cells=%d ephemeral=%d prior=%d enable=1"
+                                % (int(np.count_nonzero(self._slam_dyn_mask)),
+                                   int(_mask_eph), _n_prior))
                     self._global_map.keyframe_check(
                         _kf_obs, self._known_combined,
                         cap_x, cap_y, cap_theta,

@@ -53,9 +53,10 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 - Prefer RGB-D + wheel + IMU; no ROS.
 - Localization must not require a frozen house mesh, but a walls prior (STL) is a later assist.
 - Wedge landed: `src/perception/dynamic_mask.py` — ego-label outlier mask for SLAM/VO
-  (`SELF` always masked; optional ephemeral `OBSTACLE` vs prior). Live gate
-  `KEVIN_SLAM_DYNAMIC_MASK=1` (default off) zeros masked cells on self-SLAM
-  keyframe obs. Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
+  (`SELF` always masked; ephemeral `OBSTACLE` vs pose-warped EvidenceMap prior
+  when `KEVIN_EVIDENCE_MAP=1` has updates). Live gate `KEVIN_SLAM_DYNAMIC_MASK=1`
+  (default off) zeros masked cells on self-SLAM keyframe obs. Full
+  RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
 
 ## Delivery order
 

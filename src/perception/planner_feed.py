@@ -107,6 +107,50 @@ def evidence_to_ego_obs_known(
     return obs, known
 
 
+def evidence_obstacle_prior_ego(
+    evidence_map: EvidenceMap,
+    pose_xy_theta: Tuple[float, float, float],
+    *,
+    ego_h: int = FRAME_H,
+    ego_w: int = FRAME_W,
+    ego_cx: float = float(RCX),
+    ego_cy: float = float(RCY),
+    ego_px_size: float = float(EGO_PX_SIZE),
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Warp EvidenceMap.obstacle_mask() world → ego as uint8 prior (nonzero=static).
+
+    Used by SLAM dynamic mask (`mask_ephemeral=True`) so movers without
+    accumulated obstacle evidence are outliers while persistent furniture
+    remains trusted. Does not invent CLEAR or rewrite ego labels.
+    """
+    import cv2
+
+    world = evidence_map.obstacle_mask().astype(np.uint8)
+    x, y, theta = (
+        float(pose_xy_theta[0]),
+        float(pose_xy_theta[1]),
+        float(pose_xy_theta[2]),
+    )
+    M = GlobalMap._inverse_affine(
+        x, y, theta, float(ego_cx), float(ego_cy), float(ego_px_size))
+    M = np.asarray(M, dtype=np.float32)
+    shape = (int(ego_h), int(ego_w))
+    if out is None:
+        dst = np.zeros(shape, dtype=np.uint8)
+    else:
+        dst = out
+        if dst.shape != shape:
+            raise ValueError("out must be (ego_h, ego_w), got %s" % (dst.shape,))
+        if dst.dtype != np.uint8:
+            raise TypeError("out must be uint8, got %s" % dst.dtype)
+        dst.fill(0)
+    cv2.warpAffine(
+        world, M, (int(ego_w), int(ego_h)),
+        dst=dst, flags=cv2.INTER_NEAREST, borderValue=0)
+    return dst
+
+
 def select_planner_feed(
     *,
     gated: bool,

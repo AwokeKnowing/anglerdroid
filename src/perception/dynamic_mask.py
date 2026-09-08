@@ -20,10 +20,11 @@ Env gate (live wire, default off): ``KEVIN_SLAM_DYNAMIC_MASK=1`` — vision
 feeds the mask into self-SLAM keyframe obs (zeros masked cells before
 descriptor / thumb). Full RGB-D+wheel+IMU dynamic SLAM remains TODO.
 
-Later (dynamic obstacle decay): pass a pose-warped EvidenceMap obstacle
-prior into ``prior_obstacle`` with ``mask_ephemeral=True`` so movers that
-have not accumulated static evidence are excluded from VO/SLAM while
-persistent furniture remains.
+Live wire: when ``KEVIN_EVIDENCE_MAP=1`` and the evidence grid has
+updates, vision passes a pose-warped EvidenceMap obstacle prior with
+``mask_ephemeral=True`` so movers without accumulated static evidence are
+excluded from VO/SLAM while persistent furniture remains. Still gated by
+``KEVIN_SLAM_DYNAMIC_MASK=1`` (default off).
 """
 from __future__ import annotations
 
