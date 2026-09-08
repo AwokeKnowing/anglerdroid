@@ -70,6 +70,8 @@ DEBUG_CAMERAS = False
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(EGO_PX_SIZE)
 TD_FLOOR_CLIP = np.float32(0.91) # reject floor (farther than this Z). Fixed.
+# Known-pixel floor for "RS1 invalid → immobilize". Capture loop uses this.
+TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
 
 # --- RS2 (forward camera) → bird's-eye rotation ---
 # Pitch = 25.6° - 90° = -64.4° (camera mounting angle compensation)
@@ -1615,7 +1617,6 @@ class Vision:
             # Top-down depth is ground truth for open-space. No valid known
             # coverage ⇒ immobilize (empty map must NOT look like free space).
             self._topdown_known_px = int(np.count_nonzero(known1))
-            TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
             self._topdown_ok = bool(
                 self._rs1 is not None
                 and getattr(self._rs1, 'ok', False)
