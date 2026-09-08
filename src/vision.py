@@ -51,6 +51,7 @@ from perception import (
     label_rs1_ego, labels_to_obs_known,
     fuse_rs2_into_ego,
     EvidenceMap,
+    select_planner_feed,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -819,6 +820,13 @@ class Vision:
         self._ego_label_n = 0
         self._ego_label_ms = 0.0
         self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
+        # Gated planner/costmap feed (default off). EGO_LABELS=1 also enables feed.
+        self._ego_plan_enable = (
+            os.environ.get('KEVIN_EGO_PLAN', '0').strip() == '1'
+            or self._ego_labels_enable
+        )
+        self._ego_plan_source = 'legacy'
+        self._ego_shim_valid = False
         self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
         self._evidence_map_enable = os.environ.get('KEVIN_EVIDENCE_MAP', '0').strip() == '1'
         self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
@@ -1689,6 +1697,7 @@ class Vision:
                 labels_to_obs_known(
                     self._ego_labels, self._ego_height,
                     obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
+                self._ego_shim_valid = True
 
             # A/B metrics vs honest ego labels (rate-limited; skip empty warmup)
             if (self._ego_did_label and self._ego_label_n > 0
@@ -1757,10 +1766,34 @@ class Vision:
                            float(self._evidence_map_metrics.get("update_ms", 0.0)),
                            int(self._evidence_map_metrics.get("frame_i", 0))))
 
-            # Optional: feed honest shim into combined map (off by default)
-            if self._ego_labels_enable:
-                np.copyto(self._obs_combined, self._ego_obs_shim)
-                np.copyto(self._known_combined, self._ego_known_shim)
+            # Optional gated planner feed: ego labels and/or evidence → obs/known
+            # (KEVIN_EGO_PLAN=1 and/or KEVIN_EGO_LABELS=1; default off = legacy).
+            # When KEVIN_EVIDENCE_MAP=1 and evidence has updates, prefer warped evidence.
+            if self._ego_plan_enable:
+                try:
+                    _plan_pose = (float(pose_src.x), float(pose_src.y), float(pose_src.theta))
+                except Exception:
+                    _plan_pose = (0.0, 0.0, 0.0)
+                _use_labels = bool(self._ego_did_label)
+                _shim_ok = bool(getattr(self, '_ego_shim_valid', False))
+                _, _, self._ego_plan_source = select_planner_feed(
+                    gated=True,
+                    ego_labels=self._ego_labels if _use_labels else None,
+                    ego_height=self._ego_height if _use_labels else None,
+                    ego_obs_shim=self._ego_obs_shim if _shim_ok else None,
+                    ego_known_shim=self._ego_known_shim if _shim_ok else None,
+                    evidence_map=self._evidence_map,
+                    pose_xy_theta=_plan_pose,
+                    prefer_evidence=bool(self._evidence_map_enable),
+                    obs_out=self._obs_combined,
+                    known_out=self._known_combined,
+                    legacy_obs=self._obs_combined,
+                    legacy_known=self._known_combined,
+                )
+                if (self._ego_label_n <= 2 or self._ego_label_n % 90 == 0):
+                    print("ego_plan: source=%s" % self._ego_plan_source)
+            else:
+                self._ego_plan_source = 'legacy'
             
             # Diagnostic logging (rate-limited)
             if not hasattr(self, '_kdiag_n'):

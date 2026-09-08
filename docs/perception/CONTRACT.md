@@ -42,6 +42,10 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
   decay on cells not refreshed; clear decays slower and actively pulls obstacle
   evidence down on CLEAR hits so movers can free a cell. Optional live wire:
   `KEVIN_EVIDENCE_MAP=1` (default off) → `ego_ev:` metrics in vision.
+- Gated planner feed (default off): `KEVIN_EGO_PLAN=1` and/or `KEVIN_EGO_LABELS=1`
+  → costmap/planner/safety see ego-derived `(obs,known)` (`ego_plan: source=ego|evidence|legacy`).
+  With `KEVIN_EVIDENCE_MAP=1`, prefer pose-warped `EvidenceMap.to_obs_known` in ego.
+  SELF stays honest (not known-clear, not obstacle). Does **not** complete SLAM.
 
 ## SLAM (after ego labels are honest)
 
