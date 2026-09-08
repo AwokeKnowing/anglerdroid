@@ -188,8 +188,51 @@ when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz h
 GPU scatter + fuse reclaim TBD on Orin with CuPy (offline tests show correctness; on-device
 timing needed).
 
+**Bake-off harness** (offline Orin/host timing & correctness):
+
+Offline harness (`tests/test_ego_bakeoff.py`) times and correctness-checks the three
+ego label paths (CPU, GPU/CuPy, ModernGL) on identical synthetic RS1 (+RS2) verts:
+- **CPU path**: `label_rs1_ego` + `fuse_rs2_into_ego` (baseline)
+- **GPU (CuPy) path**: `label_rs1_ego_gpu` + `fuse_rs2_into_ego_gpu` (when `KEVIN_GPU_SCATTER=1` / `KEVIN_GPU_FUSE=1`)
+- **ModernGL path**: `label_rs1_ego_moderngl` + CPU fuse (when `KEVIN_MODERNGL_SCATTER=1`)
+
+**Honesty assertions** (fail on violation):
+1. **SELF core leak == 0**: SELF pixels only inside `FOOTPRINT_BOXES`
+2. **No CLEAR under chassis**: zero CLEAR pixels in `UNDER_ROBOT_BOXES`
+3. **Valid label set**: labels only in {UNKNOWN, SELF, CLEAR, OBSTACLE}
+4. **GPU/ModernGL vs CPU SELF match**: SELF mask identical to CPU
+5. **No invented CLEAR**: GPU/ModernGL do not invent CLEAR where CPU has UNKNOWN/SELF
+
+**Usage**:
+```bash
+# Host CPU (+ optional GPU/ModernGL if deps present)
+python tests/test_ego_bakeoff.py
+
+# On Orin: enable CuPy scatter (default off)
+KEVIN_GPU_SCATTER=1 python tests/test_ego_bakeoff.py
+
+# On Orin: enable CuPy fuse (default off)
+KEVIN_GPU_FUSE=1 python tests/test_ego_bakeoff.py
+
+# On Orin: enable ModernGL scatter (default off)
+KEVIN_MODERNGL_SCATTER=1 python tests/test_ego_bakeoff.py
+
+# On Orin: all GPU paths together
+KEVIN_GPU_SCATTER=1 KEVIN_GPU_FUSE=1 KEVIN_MODERNGL_SCATTER=1 python tests/test_ego_bakeoff.py
+```
+
+**Reports**:
+- Wall-clock timing: median / p95 / max ms over 50 warm trials
+- Honesty metrics: SELF pixels, leak pixels, under-chassis CLEAR
+- Speedup vs CPU baseline (when GPU/ModernGL available)
+
+**Graceful skip**: CuPy/ModernGL sections skip (not fail) when deps missing → host CI stays green.
+
+**Live validation**: Still needs Kevin (battery-dead) to run on Orin and confirm on-device
+timings. Defaults stay off until Orin timing proves GPU wins on 30 Hz budget.
+
 **Still open:**
-- On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy vs ModernGL vs CPU + Kevin)
+- On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy vs ModernGL vs CPU + Kevin) — **harness landed, waiting for Kevin battery**
 - ✓ ModernGL scatter into ego heightmap (policy feed; AGENTS.md) — **LANDED** (default-off `KEVIN_MODERNGL_SCATTER=1`)
 - ✓ Policy feed export (honest labels + height tensor) — **LANDED** (default-off `KEVIN_POLICY_FEED=1`; `src/perception/policy_feed.py`)
 - ✓ Neural policy consumption of policy feed — **LANDED** (default-off `KEVIN_NEURAL_POLICY_FEED=1`; `src/neural_rl.py` consumes labels+height; honesty preserved: SELF not obstacle, UNKNOWN not invented as CLEAR; unit tests in `test_neural_rl.py`)
