@@ -38,6 +38,10 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 - `SELF` never adds obstacle evidence.
 - Dynamic objects: obstacle evidence decays when not re-observed; clear can reclaim.
 - Do not assume static furniture forever (dog, people, chairs).
+- Landed: `src/perception/evidence_map.py` (`EvidenceMap`). Per-update obstacle
+  decay on cells not refreshed; clear decays slower and actively pulls obstacle
+  evidence down on CLEAR hits so movers can free a cell. Optional live wire:
+  `KEVIN_EVIDENCE_MAP=1` (default off) → `ego_ev:` metrics in vision.
 
 ## SLAM (after ego labels are honest)
 
@@ -49,6 +53,6 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 
 1. Honest ego labeler + self exclusion — landed (RS1 `label_rs1_ego` + SELF boxes)
 2. Fuse RS2 without false clear; keep ≤20 ms — `fuse_rs2_into_ego` (cone+free-range CLEAR; SELF wins; no under-chassis CLEAR)
-3. Accumulated drivable map with decay
+3. Accumulated drivable map with decay — landed (`EvidenceMap` / `evidence_map.py`; dynamic obstacle decay + clear reclaim)
 4. Dynamic-tolerant SLAM
 

@@ -50,6 +50,7 @@ from perception import (
     OBSTACLE as EGO_OBSTACLE,
     label_rs1_ego, labels_to_obs_known,
     fuse_rs2_into_ego,
+    EvidenceMap,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -819,6 +820,10 @@ class Vision:
         self._ego_label_ms = 0.0
         self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
         self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
+        self._evidence_map_enable = os.environ.get('KEVIN_EVIDENCE_MAP', '0').strip() == '1'
+        self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
+        self._evidence_map_ms = 0.0
+        self._evidence_map_metrics = {}
         
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
@@ -1730,6 +1735,27 @@ class Vision:
                        int(_fm.get("rs2_clear_accepted", 0)),
                        _clear_agree, _obs_agree,
                        int(self._ego_labels_enable)))
+
+            # Optional: accumulate world evidence map (KEVIN_EVIDENCE_MAP=1; default off)
+            if (self._evidence_map is not None and self._ego_did_label):
+                _t_ev0 = time.monotonic()
+                try:
+                    _ev_pose = (float(pose_src.x), float(pose_src.y), float(pose_src.theta))
+                except Exception:
+                    _ev_pose = (0.0, 0.0, 0.0)
+                self._evidence_map_metrics = self._evidence_map.update(
+                    self._ego_labels, self._ego_height, _ev_pose,
+                    frame_i=self._ego_label_n)
+                self._evidence_map_ms = (time.monotonic() - _t_ev0) * 1000.0
+                if self._ego_label_n % 90 == 0:
+                    _ec = self._evidence_map.counts()
+                    print(
+                        "ego_ev: clear=%d obs=%d unk=%d update_ms=%.2f "
+                        "splat_ms=%.2f frame=%d"
+                        % (_ec["clear"], _ec["obs"], _ec["unk"],
+                           self._evidence_map_ms,
+                           float(self._evidence_map_metrics.get("update_ms", 0.0)),
+                           int(self._evidence_map_metrics.get("frame_i", 0))))
 
             # Optional: feed honest shim into combined map (off by default)
             if self._ego_labels_enable:
