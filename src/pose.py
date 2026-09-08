@@ -98,6 +98,10 @@ class PoseEstimator:
         self._last_visual_time = 0.0
         self._excessive_disagreement_count = 0
         
+        # IMU fusion tracking
+        self._imu_used_count = 0
+        self._imu_fallback_count = 0  # IMU with boosted weight (visual weak/rejected)
+        
         # Stuck detection (CRITICAL SAFETY)
         self._commanded_forward_sum = 0.0  # Commanded displacement
         self._actual_forward_sum = 0.0     # Actual visual displacement
@@ -114,6 +118,8 @@ class PoseEstimator:
         self._wheel_only_frames = 0
         self._last_visual_time = 0.0
         self._excessive_disagreement_count = 0
+        self._imu_used_count = 0
+        self._imu_fallback_count = 0
 
     # ── main entry point ───────────────────────────────────────────
 
@@ -150,7 +156,7 @@ class PoseEstimator:
             dtheta_w, ds_w, v, omega, dt,
             vis_yaw, vis_fwd, vis_confidence)
 
-        # ── 3. Fuse or use wheel-only ──
+        # ── 3. Fuse or use wheel-only (IMU blended later) ──
         if vis_ok:
             r_scale = 1.0 / max(vis_confidence, 0.1)
             dtheta, ds = self._fuse(dtheta_w, ds_w,
@@ -158,6 +164,7 @@ class PoseEstimator:
             self._visual_accepted += 1
             self._last_visual_time = time.time()
         else:
+            # Visual rejected → wheel-only for now (IMU blended in step 3b below)
             dtheta, ds = dtheta_w, ds_w
             self._visual_rejected += 1
             self._wheel_only_frames += 1
@@ -165,6 +172,11 @@ class PoseEstimator:
                 self._excessive_disagreement_count += 1
         
         # ── 3b. Blend in IMU yaw rate (if available) ──
+        # CRITICAL: IMU fusion happens REGARDLESS of visual acceptance.
+        # When visual is weak/rejected, IMU weight is BOOSTED to compensate.
+        # This ensures we use wheel+IMU fusion, NOT wheel-only.
+        imu_used = False
+        imu_weight_used = 0.0
         if abs(imu_yaw_rate) > 1e-6 and dt > 0:
             dtheta_imu = imu_yaw_rate * dt
             
@@ -172,10 +184,15 @@ class PoseEstimator:
             if vis_ok and vis_confidence >= IMU_VIS_CONF_THRESH:
                 imu_weight = IMU_YAW_WEIGHT_BASE
             else:
+                # Visual weak/rejected → BOOST IMU weight from 0.15 to 0.50
                 imu_weight = IMU_YAW_WEIGHT_FALLBACK
+                self._imu_fallback_count += 1
             
             # Complementary blend: dtheta_fused = (1-w)*dtheta + w*dtheta_imu
             dtheta = (1.0 - imu_weight) * dtheta + imu_weight * dtheta_imu
+            imu_used = True
+            imu_weight_used = imu_weight
+            self._imu_used_count += 1
 
         # ── 4. Integrate into global pose ──
         self.theta += dtheta
@@ -357,12 +374,15 @@ class PoseEstimator:
         
         Returns dict with:
           - visual_accept_rate: fraction of frames with accepted visual odom
-          - wheel_only_rate: fraction of frames using wheel-only
+          - wheel_only_rate: fraction of frames using wheel-only (before IMU blend)
           - time_since_visual: seconds since last visual correction
           - excessive_disagreement: count of agreement gate failures
+          - imu_used_rate: fraction of frames where IMU contributed
+          - imu_fallback_rate: fraction of frames where IMU weight was boosted
         """
         import time
         total = max(self._visual_accepted + self._visual_rejected, 1)
+        imu_total = max(self._imu_used_count, 1)
         return {
             'visual_accept_rate': self._visual_accepted / total,
             'wheel_only_rate': self._wheel_only_frames / total,
@@ -370,6 +390,10 @@ class PoseEstimator:
             'excessive_disagreement': self._excessive_disagreement_count,
             'visual_accepted': self._visual_accepted,
             'visual_rejected': self._visual_rejected,
+            'imu_used_count': self._imu_used_count,
+            'imu_fallback_count': self._imu_fallback_count,
+            'imu_used_rate': self._imu_used_count / total,
+            'imu_fallback_rate': self._imu_fallback_count / imu_total if self._imu_used_count > 0 else 0.0,
         }
     
     # ── Stuck detection (CRITICAL SAFETY) ──────────────────────────

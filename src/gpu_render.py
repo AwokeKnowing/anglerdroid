@@ -15,6 +15,8 @@ import numpy as np
 # - Wider search window (more forward view context)
 # - Variance-based featureless detection
 # - Stricter confidence thresholds
+# On rejection, pose.py uses wheel+IMU fusion (IMU weight boosted 0.15→0.50)
+# instead of visual, avoiding spurious rotation on empty floors.
 # Default OFF to preserve prior behavior (fail-open). Enable with KEVIN_ROBUST_MORPH_MATCH=1.
 KEVIN_ROBUST_MORPH_MATCH = os.getenv('KEVIN_ROBUST_MORPH_MATCH', '0') == '1'
 

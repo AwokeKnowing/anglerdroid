@@ -97,17 +97,18 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
    (`test_color_uv_alignment.py`). Fixes CONTRACT.md line 89 + `dynamic_mask.py`
    line 228 documented gap. Never invents CLEAR; SELF wins; honesty preserved.
 
-4. **Robust morph-match (featureless rejection)** (`src/gpu_render.py` `odom_gpu`) —
+   4. **Robust morph-match (featureless rejection)** (`src/gpu_render.py` `odom_gpu`) —
    When GPU visual odometry encounters featureless/empty floors, the SAD template
    match can find a spurious minimum and invent a rotation (stuck-turn behavior).
    Live gate `KEVIN_ROBUST_MORPH_MATCH=1` (default off) adds: (a) wider search
    window (±12 px, was ±8) for more forward-view context; (b) variance-based
    featureless detection (rejects flat SAD maps); (c) stricter sharpness thresholds.
    Failed/featureless matches return confidence=0.0 → visual update rejected →
-   wheel-odom pose retained (no invented spin). Tested offline
-   (`test_morph_match_fallback.py`): featureless → conf=0, successful match → conf>0,
-   wheel-odom retained on rejection. Fail-closed: when match quality is poor,
-   trust wheel encoders (SELF wins principle for odometry).
+   **wheel+IMU fusion via pose.py** (IMU weight boosted from 0.15 to 0.50) carries
+   the pose (no invented spin). Tested offline (`test_morph_match_fallback.py`):
+   featureless → conf=0, successful match → conf>0, wheel+IMU retained on rejection.
+   Fail-closed: when match quality is poor, trust wheel encoders + IMU gyro
+   (SELF wins principle for odometry).
 
 ### Still TODO:
 
