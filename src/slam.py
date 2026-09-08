@@ -60,36 +60,60 @@ def _norm_angle(a):
     return math.atan2(math.sin(a), math.cos(a))
 
 
-def _radial_descriptor(obs, cx, cy, n_rings=DESC_N_RINGS, max_r=DESC_MAX_R):
+def _radial_descriptor(obs, cx, cy, n_rings=DESC_N_RINGS, max_r=DESC_MAX_R,
+                       dynamic_mask=None):
     """Rotation-invariant descriptor: mean normalised obstacle height per ring.
 
     obs values: 0=free/unobserved, 1-100=obstacle height in cm.
     Each ring's descriptor value = mean(obs) / 100 within the annulus.
+    
+    If dynamic_mask is provided (255=dynamic, 0=static), dynamic cells are
+    down-weighted by 50% to reduce their contribution to place recognition.
     """
     h, w = obs.shape
     yy, xx = np.ogrid[0:h, 0:w]
     dist_sq = (xx - cx).astype(np.float32) ** 2 + (yy - cy).astype(np.float32) ** 2
     ring_width = float(max_r) / n_rings
+    
+    # Dynamic weight: 0.5 for dynamic (mask=255), 1.0 for static (mask=0)
+    if dynamic_mask is not None:
+        weights = np.where(dynamic_mask > 127, 0.5, 1.0).astype(np.float32)
+    else:
+        weights = np.ones((h, w), dtype=np.float32)
+    
     desc = np.zeros(n_rings, dtype=np.float32)
     for i in range(n_rings):
         r0_sq = (i * ring_width) ** 2
         r1_sq = ((i + 1) * ring_width) ** 2
         mask = (dist_sq >= r0_sq) & (dist_sq < r1_sq)
-        cnt = mask.sum()
-        if cnt > 0:
-            desc[i] = obs[mask].sum() / (cnt * 100.0)
+        w_sum = weights[mask].sum()
+        if w_sum > 0:
+            desc[i] = (obs[mask] * weights[mask]).sum() / (w_sum * 100.0)
     return desc
 
 
-def _scan_match(obs_a, obs_b, n_angles=36, thumb_sz=THUMB_SZ):
+def _scan_match(obs_a, obs_b, n_angles=36, thumb_sz=THUMB_SZ,
+                dynamic_a=None, dynamic_b=None):
     """Brute-force scan match: returns (dx_px, dy_px, dtheta, score).
 
     Tries n_angles rotations of obs_b, uses phase correlation for
     translation, returns the best (highest overlap) match.
+    
+    If dynamic masks are provided (255=dynamic, 0=static), dynamic regions
+    are zeroed out before matching to prevent transient obstacles from
+    dominating the alignment.
     """
     sz = thumb_sz
     a = cv2.resize(obs_a, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 100.0
     b_full = cv2.resize(obs_b, (sz, sz), interpolation=cv2.INTER_AREA).astype(np.float32) / 100.0
+
+    # Mask dynamic regions if provided
+    if dynamic_a is not None:
+        mask_a = cv2.resize(dynamic_a, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        a = np.where(mask_a > 127, 0.0, a)
+    if dynamic_b is not None:
+        mask_b = cv2.resize(dynamic_b, (sz, sz), interpolation=cv2.INTER_NEAREST)
+        b_full = np.where(mask_b > 127, 0.0, b_full)
 
     best_score = -1.0
     best = (0.0, 0.0, 0.0, 0.0)
@@ -225,6 +249,7 @@ class Keyframe:
         'descriptor', 'thumb',
         'cx', 'cy', 'px_size',
         'timestamp',
+        'dynamic_mask',
     )
 
     def approx_bytes(self):
@@ -235,6 +260,8 @@ class Keyframe:
             s += self.thumb.nbytes
         if self.descriptor is not None:
             s += self.descriptor.nbytes
+        if self.dynamic_mask is not None:
+            s += self.dynamic_mask.nbytes
         return s
 
 
@@ -265,11 +292,18 @@ class PoseGraphSLAM:
     # ── SlamBackend interface ───────────────────────────────────────
 
     def keyframe_check(self, obs_ego, known_ego, x, y, theta,
-                       ego_cx, ego_cy, ego_px_size=0.01):
-        """Check keyframing (GPU handles the actual map update)."""
+                       ego_cx, ego_cy, ego_px_size=0.01, dynamic_mask=None):
+        """Check keyframing (GPU handles the actual map update).
+        
+        Parameters
+        ----------
+        dynamic_mask : (H, W) uint8, optional
+            255 where cell is dynamic, 0 where static. Dynamic regions are
+            down-weighted in descriptors and scan-matching.
+        """
         if self._should_keyframe(x, y, theta):
             self._create_keyframe(obs_ego, known_ego, x, y, theta,
-                                  ego_cx, ego_cy, ego_px_size)
+                                  ego_cx, ego_cy, ego_px_size, dynamic_mask)
 
     # ── Keyframe management ─────────────────────────────────────────
 
@@ -281,7 +315,8 @@ class PoseGraphSLAM:
         dtheta = abs(_norm_angle(theta - lt))
         return dist >= KF_DIST or dtheta >= KF_ANGLE
 
-    def _create_keyframe(self, obs, known, x, y, theta, cx, cy, px_size):
+    def _create_keyframe(self, obs, known, x, y, theta, cx, cy, px_size,
+                         dynamic_mask=None):
         kf = Keyframe()
         kf.id = self._next_id
         self._next_id += 1
@@ -298,12 +333,20 @@ class PoseGraphSLAM:
             kf.obs_roi = obs[r0:r1, c0:c1].copy()
             kf.known_roi = known[r0:r1, c0:c1].copy()
             kf.roi_bounds = (r0, r1, c0, c1)
+            
+            # Store dynamic mask ROI if provided
+            if dynamic_mask is not None:
+                kf.dynamic_mask = dynamic_mask[r0:r1, c0:c1].copy()
+            else:
+                kf.dynamic_mask = None
         else:
             kf.obs_roi = None
             kf.known_roi = None
             kf.roi_bounds = None
+            kf.dynamic_mask = None
 
-        kf.descriptor = _radial_descriptor(obs, cx, cy)
+        # Descriptor: down-weight dynamic regions if mask provided
+        kf.descriptor = _radial_descriptor(obs, cx, cy, dynamic_mask=dynamic_mask)
         kf.thumb = cv2.resize(obs, (THUMB_SZ, THUMB_SZ),
                                interpolation=cv2.INTER_AREA)
 
@@ -377,7 +420,10 @@ class PoseGraphSLAM:
             # Scan-match verification
             if kf.thumb is None or cand_kf.thumb is None:
                 continue
-            sm_dx, sm_dy, sm_dt, sm_score = _scan_match(kf.thumb, cand_kf.thumb)
+            sm_dx, sm_dy, sm_dt, sm_score = _scan_match(
+                kf.thumb, cand_kf.thumb,
+                dynamic_a=kf.dynamic_mask, dynamic_b=cand_kf.dynamic_mask
+            )
             if sm_score < LOOP_MATCH_THRESH:
                 continue
 
@@ -444,6 +490,15 @@ class PoseGraphSLAM:
                      c0:c0 + kf.obs_roi.shape[1]] = kf.obs_roi
             known_full[r0:r0 + kf.known_roi.shape[0],
                        c0:c0 + kf.known_roi.shape[1]] = kf.known_roi
+
+            # Mask dynamic regions: clear obs/known where dynamic mask is set
+            if kf.dynamic_mask is not None:
+                dynamic_full = np.zeros_like(obs_full)
+                dynamic_full[r0:r0 + kf.dynamic_mask.shape[0],
+                             c0:c0 + kf.dynamic_mask.shape[1]] = kf.dynamic_mask
+                # Zero out obs and known where mask > 127 (dynamic)
+                obs_full[dynamic_full > 127] = 0
+                known_full[dynamic_full > 127] = 0
 
             M = GlobalMap._forward_affine(kf.x, kf.y, kf.theta,
                                           kf.cx, kf.cy, kf.px_size)

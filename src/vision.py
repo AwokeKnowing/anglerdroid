@@ -820,6 +820,15 @@ class Vision:
         self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
         self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
         
+        # Dynamic SLAM: track transient obstacles (CONTRACT step 4)
+        self._dynamic_slam_enable = os.environ.get('KEVIN_DYNAMIC_SLAM', '0').strip() == '1'
+        self._dynamic_tracker = None
+        self._dynamic_mask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        if self._dynamic_slam_enable:
+            from perception.dynamic_tracker import DynamicTracker
+            self._dynamic_tracker = DynamicTracker()
+            print("vision: EXPERIMENT dynamic-tolerant SLAM enabled (CONTRACT step 4)")
+        
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
         self._slam_lock_reason = "not_initialized"
@@ -1681,6 +1690,11 @@ class Vision:
                     work_known=self._ego_fuse_known,
                 )
                 self._ego_fuse_ms = (time.monotonic() - _t_fuse0) * 1000.0
+                
+                # Update dynamic tracker if enabled (CONTRACT step 4)
+                if self._dynamic_tracker is not None:
+                    self._dynamic_mask = self._dynamic_tracker.update(self._ego_labels)
+                
                 labels_to_obs_known(
                     self._ego_labels, self._ego_height,
                     obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
@@ -1845,10 +1859,14 @@ class Vision:
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE),
                         free_range_mask=self._free_range_mask)
+                    
+                    # Pass dynamic mask to SLAM if dynamic-tolerant mode is enabled
+                    dynamic_mask_arg = self._dynamic_mask if self._dynamic_tracker is not None else None
                     self._global_map.keyframe_check(
                         self._obs_combined, self._known_combined,
                         cap_x, cap_y, cap_theta,
-                        rcx_f, rcy_f, float(TD_PX_SIZE))
+                        rcx_f, rcy_f, float(TD_PX_SIZE),
+                        dynamic_mask=dynamic_mask_arg)
                     
                     # Sync GPU map after loop closure rebuild
                     if self._global_map.needs_gpu_sync():
