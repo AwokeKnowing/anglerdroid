@@ -50,9 +50,9 @@ def main():
     parser.add_argument("--wheel-imu-prior", action="store_true",
                         help="EXPERIMENT: Use wheel+IMU prediction prior (for self-slam-wheel-imu-prior-v0)")
     parser.add_argument("--auto-local", action="store_true",
-                        help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI)")
-    parser.add_argument("--local-planner", default="vfh", choices=["vfh", "mppi"],
-                        help="LocalExecutive backend: vfh (default) or mppi (NumPy MPPI on ego costmap)")
+                        help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI/NeuralRL)")
+    parser.add_argument("--local-planner", default="vfh", choices=["vfh", "mppi", "neural_rl"],
+                        help="LocalExecutive backend: vfh (default), mppi (NumPy MPPI on ego costmap), or neural_rl (learned policy)")
     parser.add_argument("--wander", action="store_true",
                         help="With --auto-local, start continuous ~1m wander immediately")
     parser.add_argument("--house-bot", action="store_true",
