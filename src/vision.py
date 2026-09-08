@@ -2013,7 +2013,7 @@ class Vision:
             )
     
     def get_rs1_mask_overlay(self):
-        """Image-2 style self-mask on ego-aligned RS1 color."""
+        """Image-2 soft wash on ego-aligned RS1 color."""
         import cv2
         if self._rs1 is None or not self._rs1.ok or self._rs1.color is None:
             return None
@@ -2021,7 +2021,7 @@ class Vision:
         h, w = rgb.shape[:2]
         out = rgb.astype(np.float32).copy()
         a = float(_mask_viz_alpha())
-        a = 0.50 if a < 0.35 or a > 0.60 else max(0.45, min(0.55, a))
+        a = 0.25 if a < 0.15 or a > 0.35 else a
 
         def paint(x0, y0, x1, y1, tint):
             x0, y0 = max(0, min(w, int(x0))), max(0, min(h, int(y0)))
@@ -2034,9 +2034,9 @@ class Vision:
             cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 1)
 
         for box in UNDER_ROBOT_BOXES:
-            paint(*box, tint=(30, 255, 70))
+            paint(*box, tint=(70, 200, 90))
         for box in SELF_IGNORE_BOXES:
-            paint(*box, tint=(40, 100, 255))
+            paint(*box, tint=(70, 130, 210))
         if UNDER_ROBOT_BOXES:
             bx0, by0, bx1, by1 = UNDER_ROBOT_BOXES[0]
             fx = min(w - 1, max(0, int(bx1) - 1))
@@ -2044,7 +2044,7 @@ class Vision:
             x0c, x1c = max(0, fx - 1), min(w, fx + 2)
             if y1 > y0 and x1c > x0c:
                 edge = out[y0:y1, x0c:x1c]
-                edge[:] = edge * 0.5 + np.array([0, 255, 255], np.float32) * 0.5
+                edge[:] = edge * 0.65 + np.array([0, 220, 255], np.float32) * 0.35
         return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -2288,7 +2288,7 @@ class Vision:
         }
 
     def get_robot_footprint_underlay(self):
-        """Ego map for foot viz — continuous gray under robot (NO black punch-out)."""
+        """Ego map underlay — continuous known-free gray, no black punch under robot."""
         underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         obs = getattr(self, "_viz_obs_premask", None)
         if obs is None:
@@ -2300,7 +2300,8 @@ class Vision:
             underlay[:] = (55, 55, 55)
             return underlay
 
-        underlay[(known == 0) & (obs == 0)] = (28, 28, 28)
+        # Match image-2 map gray (not near-black)
+        underlay[(known == 0) & (obs == 0)] = (32, 32, 32)
         underlay[(known > 0) & (obs == 0)] = (55, 55, 55)
         hit = obs > 0
         if np.any(hit):
@@ -2308,27 +2309,29 @@ class Vision:
             underlay[hit, 1] = 200
             underlay[hit, 2] = 0
 
+        # Inside footprint: lift only near-black to same known-free gray (keep yellow hits)
         for x0, y0, x1, y1 in FOOTPRINT_BOXES:
             x0, y0 = max(0, int(x0)), max(0, int(y0))
             x1, y1 = min(FRAME_W, int(x1)), min(FRAME_H, int(y1))
             if x1 <= x0 or y1 <= y0:
                 continue
             region = underlay[y0:y1, x0:x1]
-            dark = region.max(axis=2) < 40
-            region[dark] = (58, 58, 58)
+            dark = region.max(axis=2) < 35
+            region[dark] = (55, 55, 55)
         return underlay
 
 
     def get_robot_footprint_overlay(self):
-        """Image-2 style: gray map + translucent green/blue fills (map shows through)."""
+        """Image-2: continuous map + soft (~25%) green/blue wash (ghost, not solid plates)."""
         import cv2
         rgb = self.get_robot_footprint_underlay()
         if rgb is None:
             return None
         h, w = rgb.shape[:2]
         out = rgb.astype(np.float32).copy()
+        # Soft wash — image-2 ghost. Hard plates were ~0.5 neon.
         a = float(_mask_viz_alpha())
-        a = 0.50 if a < 0.35 or a > 0.60 else max(0.45, min(0.55, a))
+        a = 0.25 if a < 0.15 or a > 0.35 else a
 
         def paint(x0, y0, x1, y1, tint):
             x0, y0 = max(0, min(w, int(x0))), max(0, min(h, int(y0)))
@@ -2341,9 +2344,9 @@ class Vision:
             cv2.rectangle(out, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 1)
 
         for box in UNDER_ROBOT_BOXES:
-            paint(*box, tint=(30, 255, 70))
+            paint(*box, tint=(70, 200, 90))
         for box in SELF_IGNORE_BOXES:
-            paint(*box, tint=(40, 100, 255))
+            paint(*box, tint=(70, 130, 210))
         if UNDER_ROBOT_BOXES:
             bx0, by0, bx1, by1 = UNDER_ROBOT_BOXES[0]
             fx = min(w - 1, max(0, int(bx1) - 1))
@@ -2351,20 +2354,21 @@ class Vision:
             x0c, x1c = max(0, fx - 1), min(w, fx + 2)
             if y1 > y0 and x1c > x0c:
                 edge = out[y0:y1, x0c:x1c]
-                edge[:] = edge * 0.5 + np.array([0, 255, 255], np.float32) * 0.5
-                out_u8 = np.clip(out, 0, 255).astype(np.uint8)
+                edge[:] = edge * 0.65 + np.array([0, 220, 255], np.float32) * 0.35
+
+        out_u8 = np.clip(out, 0, 255).astype(np.uint8)
         n = getattr(self, '_foot_dump_n', 0) + 1
         self._foot_dump_n = n
         if n % 15 == 1:
             try:
-                import cv2, os
-                os.makedirs('/home/jetbot/.kevin/overlays', exist_ok=True)
-                big = cv2.resize(cv2.cvtColor(out_u8, cv2.COLOR_RGB2BGR), (w*3, h*3), interpolation=cv2.INTER_NEAREST)
-                cv2.imwrite('/home/jetbot/.kevin/overlays/live_foot.png', big)
-                und = cv2.resize(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), (w*3, h*3), interpolation=cv2.INTER_NEAREST)
-                cv2.imwrite('/home/jetbot/.kevin/overlays/live_under.png', und)
+                import cv2 as _cv
+                import os as _os
+                _os.makedirs('/home/jetbot/.kevin/overlays', exist_ok=True)
+                big = _cv.resize(_cv.cvtColor(out_u8, _cv.COLOR_RGB2BGR), (w*3, h*3), interpolation=_cv.INTER_NEAREST)
+                _cv.imwrite('/home/jetbot/.kevin/overlays/live_foot.png', big)
+                und = _cv.resize(_cv.cvtColor(rgb, _cv.COLOR_RGB2BGR), (w*3, h*3), interpolation=_cv.INTER_NEAREST)
+                _cv.imwrite('/home/jetbot/.kevin/overlays/live_under.png', und)
             except Exception:
                 pass
         return out_u8
-
 
