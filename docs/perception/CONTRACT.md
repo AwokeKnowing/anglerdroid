@@ -18,6 +18,7 @@ Each cell is exactly one of:
 **Hard rules**
 1. `SELF` wins over everything. Geometric axle boxes (body 30×33, wheels 18×6×2, mast) are applied in ego after scatter. Self pixels must never enter obstacle or clear.
 2. `CLEAR` is only from sensed floor (RS1 z ≥ floor_clip, in trust FOV). Never invent clear by punching the footprint.
+   Dual `(obs,known)` compat: SELF encodes as `obs=0, known=0` (not known-clear).
 3. `OBSTACLE` is only non-self. Height = floor_clip − z (cm), tallest wins.
 4. RGB is not on the 30 Hz clear/obstacle critical path (faces/hazards ~3 Hz).
 5. Budget: perception stages (RS1 project+label + RS2 project+label + fuse + self) ≤ **20 ms**. Grab/odom/render are outside this budget but must not starve it.

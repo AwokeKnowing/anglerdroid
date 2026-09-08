@@ -1642,26 +1642,21 @@ class Vision:
                 np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
                 np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-                # Self-mask: under-robot — strip obs only (no invented known-clear)
-                for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+                # Self-mask: FOOTPRINT → SELF in dual (obs,known): neither obstacle nor clear.
+                # Stripping obs alone while leaving known=255 invents CLEAR from self-hits.
+                for x0, y0, x1, y1 in FOOTPRINT_BOXES:
                     self._obs_combined[y0:y1, x0:x1] = 0
-                # Self-mask: ignore zones (mast self-hits → obs=0, do NOT force known-clear)
-                for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
-                    self._obs_combined[y0:y1, x0:x1] = 0
+                    self._known_combined[y0:y1, x0:x1] = 0
             
             # Self-as-obstacle leakage count BEFORE strip (FOOTPRINT)
             _self_as_obs = 0
             for x0, y0, x1, y1 in FOOTPRINT_BOXES:
                 _self_as_obs += int(np.count_nonzero(self._obs_combined[y0:y1, x0:x1]))
 
-            # Self-mask: under-robot — strip obs only; do NOT force known=255
-            # (contract: never invent CLEAR under chassis; leave known as sensed)
-            # NOTE: CPU fallback already stripped obs; GPU path needs post-clear
-            for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+            # Self-mask: FOOTPRINT → SELF (obs=0, known=0). Idempotent with CPU branch.
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
                 self._obs_combined[y0:y1, x0:x1] = 0
-            # Self-mask: ignore zones (mast/body self-reflection → remove from obs, do NOT mark clear)
-            for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
-                self._obs_combined[y0:y1, x0:x1] = 0
+                self._known_combined[y0:y1, x0:x1] = 0
 
             # A/B metrics vs honest ego labels (rate-limited)
             if self._ego_label_n > 0 and (self._ego_label_n % 90 == 0):
@@ -1686,16 +1681,21 @@ class Vision:
                 _clear_agree = int(np.count_nonzero(_clear_old & _clear_new))
                 _obs_agree = int(np.count_nonzero(_obs_old & _obs_new))
                 _self_left = 0
+                _self_fake_clear = 0
                 for x0, y0, x1, y1 in FOOTPRINT_BOXES:
-                    _self_left += int(np.count_nonzero(self._obs_combined[y0:y1, x0:x1]))
+                    _ob = self._obs_combined[y0:y1, x0:x1]
+                    _kn = self._known_combined[y0:y1, x0:x1]
+                    _self_left += int(np.count_nonzero(_ob))
+                    _self_fake_clear += int(np.count_nonzero((_kn == 255) & (_ob == 0)))
                 print(
                     "ego_ab: ms=%.2f every=%d labels[U=%d S=%d C=%d O=%d] "
                     "fake_clear_under=%d self_as_obs_pre=%d self_obs_left=%d "
-                    "clear_agree=%d obs_agree=%d live=%d"
+                    "self_fake_clear=%d clear_agree=%d obs_agree=%d live=%d"
                     % (self._ego_label_ms, self._ego_labels_every,
                        _n_unk, _n_self, _n_clr, _n_obs,
                        _fake_clear, _self_as_obs, _self_left,
-                       _clear_agree, _obs_agree, int(self._ego_labels_enable)))
+                       _self_fake_clear, _clear_agree, _obs_agree,
+                       int(self._ego_labels_enable)))
 
             # Optional: feed honest shim into combined map (off by default)
             if self._ego_labels_enable:
