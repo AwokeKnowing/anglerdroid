@@ -14,6 +14,9 @@ from .dynamic_mask import (
     build_slam_outlier_mask, apply_mask_to_obs, mask_counts, mask_as_uint8,
     apply_ignore_to_gray, build_forward_ignore_from_verts,
 )
+from .color_uv_alignment import (
+    CameraIntrinsics, DepthToColorAlignment, extract_rs_intrinsics_extrinsics,
+)
 
 __all__ = [
     "UNKNOWN", "SELF", "CLEAR", "OBSTACLE", "LABEL_NAMES",
@@ -23,4 +26,5 @@ __all__ = [
     "evidence_to_ego_obs_known", "evidence_obstacle_prior_ego", "select_planner_feed",
     "build_slam_outlier_mask", "apply_mask_to_obs", "mask_counts", "mask_as_uint8",
     "apply_ignore_to_gray", "build_forward_ignore_from_verts",
+    "CameraIntrinsics", "DepthToColorAlignment", "extract_rs_intrinsics_extrinsics",
 ]

@@ -29,6 +29,11 @@ updates, vision passes a pose-warped EvidenceMap obstacle prior with
 excluded from VO/SLAM while persistent furniture remains. Still gated by
 ``KEVIN_SLAM_DYNAMIC_MASK=1`` (default off).
 Live metrics lines ``slam_mask:`` / ``vo_ignore:`` report counts / ms.
+
+Color UV alignment: ``KEVIN_VO_COLOR_ALIGN=1`` (default off) enables proper
+depth→color UV projection using camera intrinsics/extrinsics when available.
+Falls back to depth-grid remap (existing behavior) when calibration unavailable
+or flag off. Fixes CONTRACT.md line 89 gap.
 """
 from __future__ import annotations
 
@@ -217,6 +222,7 @@ def build_forward_ignore_from_verts(
     z_min: float = 0.28,
     stamp: int = 1,
     out: Optional[np.ndarray] = None,
+    uv_alignment: Optional = None,
 ) -> tuple:
     """Sparse RS2 verts → ego ignore → gray bool mask for VO.
 
@@ -225,10 +231,20 @@ def build_forward_ignore_from_verts(
     Only marks gray pixels tied to depth samples that land in
     ``ego_ignore_mask`` (SELF / ephemeral) — never invents CLEAR.
 
-    **Gap (documented):** color UV is a nearest remap of the decimated depth
-    grid index → ``(gray_h, gray_w)``, not ``rs.align`` / stereo map_to_color.
+    **Gap fix:** when ``uv_alignment`` is provided and has calibration,
+    projects depth verts to calibrated color UV using camera intrinsics/
+    extrinsics (rs2_project-style). Otherwise uses depth-grid remap
+    (existing behavior). Env gate ``KEVIN_VO_COLOR_ALIGN=1`` (default off).
+    
     Sparse ``stride`` + small ``stamp`` keep Orin cost low; metrics report
     sample / hit / gray counts.
+    
+    Parameters
+    ----------
+    uv_alignment : optional DepthToColorAlignment
+        When provided and has calibration, uses proper depth→color UV
+        projection instead of depth-grid remap. Pass None to use existing
+        linear remap behavior (default).
 
     Returns ``(ignore_gray, n_samp, n_hit, n_gray)``.
     """
@@ -300,15 +316,28 @@ def build_forward_ignore_from_verts(
     sy = sy[hit]
     n_hit = int(idx.shape[0])
 
-    gh, gw = _estimate_depth_grid(n)
-    if gh > 0 and gw > 0:
-        gy = idx // gw
-        gx = idx - gy * gw
-        cu = (gx * int(gray_w)) // gw
-        cv = (gy * int(gray_h)) // gh
+    # Color UV projection: use calibrated intrinsics when available
+    if uv_alignment is not None and uv_alignment.has_calibration():
+        # Proper depth→color UV using camera calibration
+        cu, cv = uv_alignment.project_verts_to_color_uv(v_all, idx)
+        # Bounds check
+        in_gray = (cu >= 0) & (cv >= 0) & (cu < gray_w) & (cv < gray_h)
+        if not np.any(in_gray):
+            return ignore, n_samp, n_hit, 0
+        cu = cu[in_gray]
+        cv = cv[in_gray]
+        n_hit = int(cu.shape[0])  # update hit count after bounds check
     else:
-        cu = (sx * int(gray_w)) // int(scatter_w)
-        cv = (sy * int(gray_h)) // int(scatter_h)
+        # Fallback: depth-grid linear remap (existing behavior)
+        gh, gw = _estimate_depth_grid(n)
+        if gh > 0 and gw > 0:
+            gy = idx // gw
+            gx = idx - gy * gw
+            cu = (gx * int(gray_w)) // gw
+            cv = (gy * int(gray_h)) // gh
+        else:
+            cu = (sx * int(gray_w)) // int(scatter_w)
+            cv = (sy * int(gray_h)) // int(scatter_h)
 
     st = int(stamp)
     for k in range(n_hit):

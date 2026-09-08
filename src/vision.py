@@ -851,6 +851,10 @@ class Vision:
         self._vo_gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._vo_ignore_n = 0
         self._vo_ignore_ms = 0.0
+        # VO color UV alignment (default off): proper depth→color UV using intrinsics
+        self._vo_color_align_enable = (
+            os.environ.get('KEVIN_VO_COLOR_ALIGN', '0').strip() == '1')
+        self._vo_uv_alignment = None  # Initialized after RS2 pipeline starts
         self._fw_scatter_h = int(FRAME_W)  # matches configure_depth_forward out_h
         self._fw_scatter_w = int(FRAME_H)  # matches configure_depth_forward out_w
         self._fw_scatter_scale = float(1.0 / float(FW_PX_SIZE))
@@ -1177,6 +1181,17 @@ class Vision:
             if self.rs2_serial:
                 self._rs2 = RSCamera(self.rs2_serial, compute_pointcloud=True,
                                      capture_ir=use_ir)
+                # Extract depth/color calibration for VO color UV alignment
+                if self._vo_color_align_enable and self._rs2.profile:
+                    from perception import extract_rs_intrinsics_extrinsics, DepthToColorAlignment
+                    d_intr, c_intr, d_to_c_trans = extract_rs_intrinsics_extrinsics(
+                        self._rs2.profile)
+                    if d_intr and c_intr and d_to_c_trans is not None:
+                        self._vo_uv_alignment = DepthToColorAlignment(
+                            d_intr, c_intr, d_to_c_trans)
+                        print("vision: VO color UV alignment enabled (intrinsics OK)")
+                    else:
+                        print("vision: KEVIN_VO_COLOR_ALIGN=1 but intrinsics unavailable (fallback remap)")
         except Exception as e:
             print("vision: RealSense init failed: %s" % e)
             self._running = True
@@ -1877,6 +1892,7 @@ class Vision:
                             stride=8,
                             stamp=1,
                             out=self._vo_ignore_mask,
+                            uv_alignment=self._vo_uv_alignment if self._vo_color_align_enable else None,
                         )
                         _fw_for_odom = apply_ignore_to_gray(
                             fw_gray, self._vo_ignore_mask, out=self._vo_gray)
