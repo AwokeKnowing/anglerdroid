@@ -42,6 +42,11 @@ from checkered_mat import TopdownHazardDetector
 from imu import IMUPipeline
 from odom_thread import OdomThread
 from wheel_imu_prior import WheelIMUPrior
+import os
+from perception import (
+    UNKNOWN as EGO_UNKNOWN, SELF as EGO_SELF, CLEAR as EGO_CLEAR, OBSTACLE as EGO_OBSTACLE,
+    label_rs1_ego, labels_to_obs_known,
+)
 
 CAM_ROW_H = FRAME_H                          # 240
 ATLAS_W = FRAME_W * 3                        # 960
@@ -790,6 +795,21 @@ class Vision:
         self._known_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._obs_combined = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._obs_tmp = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+
+        # Honest ego-label A/B side-path (perception contract); prealloc — no per-frame alloc
+        self._ego_labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_work_labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_work_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_obs_shim = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_known_shim = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._ego_fp_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+        for _x0, _y0, _x1, _y1 in FOOTPRINT_BOXES:
+            self._ego_fp_mask[_y0:_y1, _x0:_x1] = True
+        self._ego_label_n = 0
+        self._ego_label_ms = 0.0
+        self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
+        self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
         
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
@@ -1537,6 +1557,26 @@ class Vision:
                                            td_dx, c0 + td_dx, c1 + td_dx,
                                            len(nz[0])))
             _t_rs1 = time.monotonic()
+
+            # --- Honest RS1 ego labels (A/B side-path; budget: every N frames) ---
+            if (self._rs1 and self._rs1.ok and self._rs1.verts is not None
+                    and (self._ego_label_n % self._ego_labels_every == 0)):
+                _t_ego0 = time.monotonic()
+                _v_ego = _clip_decimated_border(
+                    self._rs1.verts, out=self._rs1_work_verts)
+                label_rs1_ego(
+                    _v_ego,
+                    labels_out=self._ego_labels,
+                    height_out=self._ego_height,
+                    work_labels=self._ego_work_labels,
+                    work_height=self._ego_work_height,
+                    x_offset=int(TD_X_OFFSET),
+                )
+                labels_to_obs_known(
+                    self._ego_labels, self._ego_height,
+                    obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
+                self._ego_label_ms = (time.monotonic() - _t_ego0) * 1000.0
+            self._ego_label_n += 1
             
             # RS2 forward depth → (obstacles, known, raw_scatter) at (W,H), then CW 90°
             # DROPPABLE: Can fallback to topdown-only if budget tight
@@ -1602,23 +1642,65 @@ class Vision:
                 np.bitwise_and(self._obs_combined, self._obs_mask, out=self._obs_combined)
                 np.bitwise_and(self._known_combined, self._obs_mask, out=self._known_combined)
 
-                # Self-mask: under-robot clear (wheels+floor → obs=0, known=255)
+                # Self-mask: under-robot — strip obs only (no invented known-clear)
                 for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
                     self._obs_combined[y0:y1, x0:x1] = 0
-                    self._known_combined[y0:y1, x0:x1] = 255
                 # Self-mask: ignore zones (mast self-hits → obs=0, do NOT force known-clear)
                 for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
                     self._obs_combined[y0:y1, x0:x1] = 0
             
-            # Self-mask: under-robot clear (wheels+floor → known-free, prevent self-observation)
-            # NOTE: CPU fallback already cleared; GPU path needs post-clear
+            # Self-as-obstacle leakage count BEFORE strip (FOOTPRINT)
+            _self_as_obs = 0
+            for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                _self_as_obs += int(np.count_nonzero(self._obs_combined[y0:y1, x0:x1]))
+
+            # Self-mask: under-robot — strip obs only; do NOT force known=255
+            # (contract: never invent CLEAR under chassis; leave known as sensed)
+            # NOTE: CPU fallback already stripped obs; GPU path needs post-clear
             for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
                 self._obs_combined[y0:y1, x0:x1] = 0
-                self._known_combined[y0:y1, x0:x1] = 255
             # Self-mask: ignore zones (mast/body self-reflection → remove from obs, do NOT mark clear)
-            # We can't see through ourselves; leaving known unchanged prevents force-clearing real obstacles
             for x0, y0, x1, y1 in SELF_IGNORE_BOXES:
                 self._obs_combined[y0:y1, x0:x1] = 0
+
+            # A/B metrics vs honest ego labels (rate-limited)
+            if self._ego_label_n > 0 and (self._ego_label_n % 90 == 0):
+                _lab = self._ego_labels
+                _n_unk = int(np.count_nonzero(_lab == EGO_UNKNOWN))
+                _n_self = int(np.count_nonzero(_lab == EGO_SELF))
+                _n_clr = int(np.count_nonzero(_lab == EGO_CLEAR))
+                _n_obs = int(np.count_nonzero(_lab == EGO_OBSTACLE))
+                _fake_clear = 0
+                for x0, y0, x1, y1 in UNDER_ROBOT_BOXES:
+                    _k = self._known_combined[y0:y1, x0:x1]
+                    _el = _lab[y0:y1, x0:x1]
+                    _fake_clear += int(np.count_nonzero(
+                        (_k == 255) & ((_el == EGO_SELF) | (_el == EGO_UNKNOWN))))
+                _ego_obs = self._ego_obs_shim
+                _ego_known = self._ego_known_shim
+                _out = ~self._ego_fp_mask
+                _clear_old = (self._known_combined == 255) & (self._obs_combined == 0) & _out
+                _clear_new = (_ego_known == 255) & (_ego_obs == 0) & _out
+                _obs_old = (self._obs_combined > 0) & _out
+                _obs_new = (_ego_obs > 0) & _out
+                _clear_agree = int(np.count_nonzero(_clear_old & _clear_new))
+                _obs_agree = int(np.count_nonzero(_obs_old & _obs_new))
+                _self_left = 0
+                for x0, y0, x1, y1 in FOOTPRINT_BOXES:
+                    _self_left += int(np.count_nonzero(self._obs_combined[y0:y1, x0:x1]))
+                print(
+                    "ego_ab: ms=%.2f every=%d labels[U=%d S=%d C=%d O=%d] "
+                    "fake_clear_under=%d self_as_obs_pre=%d self_obs_left=%d "
+                    "clear_agree=%d obs_agree=%d live=%d"
+                    % (self._ego_label_ms, self._ego_labels_every,
+                       _n_unk, _n_self, _n_clr, _n_obs,
+                       _fake_clear, _self_as_obs, _self_left,
+                       _clear_agree, _obs_agree, int(self._ego_labels_enable)))
+
+            # Optional: feed honest shim into combined map (off by default)
+            if self._ego_labels_enable:
+                np.copyto(self._obs_combined, self._ego_obs_shim)
+                np.copyto(self._known_combined, self._ego_known_shim)
             
             # Diagnostic logging (rate-limited)
             if not hasattr(self, '_kdiag_n'):

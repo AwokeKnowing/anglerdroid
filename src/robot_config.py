@@ -96,9 +96,11 @@ MAST_CLEAR_CM = 45          # cm above floor → dangerous for mast
 MAST_RADIUS_PX = int(round(MAST_WID_CM / 2.0))
 MAST_INFLATE_PX = 12
 
-# Self-mask semantics (James map metric):
-# 1. UNDER_ROBOT_BOXES: floor under chassis/wheels → mark clear+known
+# Self-mask semantics (James map metric / perception CONTRACT):
+# 1. UNDER_ROBOT_BOXES: body+wheels footprint → strip obs only; do NOT force known=255
+#    (invented under-chassis CLEAR is forbidden; leave known as sensed / unknown)
 # 2. SELF_IGNORE_BOXES: mast (and similar) self-hits → strip obs, do NOT force known-clear
+# Honest SELF is geometric paint on the ego-label path (perception.ego_rs1), not known-clear.
 UNDER_ROBOT_BOXES = [
     BODY_BOX,       # body floor
     WHEEL_L_BOX,    # left wheel
