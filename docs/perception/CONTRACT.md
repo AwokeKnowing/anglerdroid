@@ -100,6 +100,13 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 ### Still TODO:
 
 - Live mover exercise (person/dog lap counts) to validate ephemeral masking under motion
+- ✓ **Walls STL prior assist** — **LANDED** (default-off `KEVIN_WALLS_STL_PRIOR=/path/to/walls.stl`):
+  Optional static walls mesh (STL) for SLAM/localization assistance. Loads wall geometry,
+  projects wall segments into map coordinate frame, and injects wall evidence after loop
+  closure / map rebuild. Fail-closed: missing file or flag off → identical legacy behavior.
+  Does not require frozen house mesh; assists when available. Module: `src/perception/walls_stl_prior.py`.
+  Tests: `test_walls_stl_prior.py`, `test_slam_walls_prior.py`. Tiny synthetic test fixture:
+  `test_fixtures/walls_test.stl` (3m × 2m room, 4 walls).
 
 ### CAPTURE Hz reclaim (toward 30 Hz / 60 Hz headroom)
 
