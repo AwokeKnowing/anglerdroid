@@ -200,7 +200,7 @@ def test_wheel_odom_retained_on_rejection():
     vis_fwd = 0.05  # Spurious forward (should be rejected)
     vis_conf = 0.0  # Rejected by featureless detection
     
-    # Update pose with wheel + rejected visual
+    # Update pose with wheel + rejected visual (no IMU for this test)
     fused_yaw, fused_fwd = pose.update(
         v_left, v_right, dt,
         vis_yaw=vis_yaw, vis_fwd=vis_fwd, vis_confidence=vis_conf,
@@ -227,6 +227,127 @@ def test_wheel_odom_retained_on_rejection():
     assert quality['visual_accepted'] == 0, "Visual should not be accepted"
     
     print("✓ Wheel-odom retained on rejection (no spurious spin)")
+
+
+def test_imu_wheel_fusion_on_visual_rejection():
+    """Test that IMU+wheel fusion is used when visual odometry is rejected.
+    
+    CRITICAL: When visual fails (featureless, low confidence), we must use
+    wheel+IMU fusion, NOT wheel-only. IMU weight should be boosted from
+    0.15 (base) to 0.50 (fallback) to compensate for missing visual.
+    """
+    from pose import PoseEstimator, IMU_YAW_WEIGHT_FALLBACK
+    
+    # Create pose estimator
+    pose = PoseEstimator(wheelbase_m=0.235, wheel_radius_m=0.066)
+    pose.reset()
+    
+    # Simulate wheel odometry: straight forward
+    v_left = v_right = 0.1  # m/s
+    dt = 1.0  # 1 second
+    
+    # Simulate rejected visual odometry (featureless → conf=0.0)
+    vis_yaw = 0.5  # Spurious rotation (should be rejected)
+    vis_fwd = 0.05  # Spurious forward (should be rejected)
+    vis_conf = 0.0  # Rejected by featureless detection
+    
+    # Simulate IMU reporting a small yaw rate
+    imu_yaw_rate = 0.1  # rad/s (turning left)
+    
+    # Update pose with wheel + rejected visual + IMU
+    fused_yaw, fused_fwd = pose.update(
+        v_left, v_right, dt,
+        vis_yaw=vis_yaw, vis_fwd=vis_fwd, vis_confidence=vis_conf,
+        using_encoder_feedback=True,
+        imu_yaw_rate=imu_yaw_rate)
+    
+    # Expected: visual rejected, wheel says no turn, IMU says turning
+    wheel_fwd = (v_left + v_right) * 0.5 * dt
+    wheel_yaw = 0.0  # Straight forward
+    imu_dtheta = imu_yaw_rate * dt  # 0.1 rad
+    
+    # With visual rejected, IMU weight should be FALLBACK (0.50)
+    # Fused yaw = (1 - 0.50) * wheel_yaw + 0.50 * imu_dtheta
+    #           = 0.50 * 0.0 + 0.50 * 0.1 = 0.05 rad
+    expected_fused_yaw = (1.0 - IMU_YAW_WEIGHT_FALLBACK) * wheel_yaw + \
+                         IMU_YAW_WEIGHT_FALLBACK * imu_dtheta
+    
+    print(f"Wheel: fwd={wheel_fwd:.3f} yaw={wheel_yaw:.3f}")
+    print(f"Visual (rejected): fwd={vis_fwd:.3f} yaw={vis_yaw:.3f} conf={vis_conf:.2f}")
+    print(f"IMU: yaw_rate={imu_yaw_rate:.3f} dtheta={imu_dtheta:.3f}")
+    print(f"Fused: fwd={fused_fwd:.3f} yaw={fused_yaw:.3f}")
+    print(f"Expected fused yaw: {expected_fused_yaw:.3f} (IMU weight={IMU_YAW_WEIGHT_FALLBACK})")
+    print(f"Pose: x={pose.x:.3f} y={pose.y:.3f} theta={pose.theta:.3f}")
+    
+    # Verify: fused yaw should include IMU contribution with FALLBACK weight
+    assert abs(fused_yaw - expected_fused_yaw) < 0.001, \
+        f"Fused yaw should blend wheel+IMU with fallback weight, got {fused_yaw:.3f}, expected {expected_fused_yaw:.3f}"
+    
+    # Verify: spurious visual yaw was rejected (not used)
+    assert abs(fused_yaw - vis_yaw) > 0.1, \
+        "Spurious visual yaw should be rejected (not close to fused yaw)"
+    
+    # Verify: IMU did contribute (fused != wheel-only)
+    assert abs(fused_yaw - wheel_yaw) > 0.01, \
+        "IMU should contribute (fused yaw != wheel-only yaw)"
+    
+    # Check tracking quality metrics
+    quality = pose.get_tracking_quality()
+    assert quality['visual_rejected'] > 0, "Visual should be marked as rejected"
+    assert quality['imu_used_count'] > 0, "IMU should be used"
+    assert quality['imu_fallback_count'] > 0, "IMU fallback weight should be used"
+    assert quality['imu_fallback_rate'] == 1.0, "100% of IMU usage should be fallback"
+    
+    print("✓ IMU+wheel fusion on visual rejection (IMU weight boosted to fallback)")
+
+
+def test_imu_base_weight_on_visual_acceptance():
+    """Test that IMU uses base weight when visual odometry is accepted.
+    
+    When visual is accepted with good confidence, IMU should use the
+    base weight (0.15) rather than the fallback weight (0.50).
+    """
+    from pose import PoseEstimator, IMU_YAW_WEIGHT_BASE, IMU_VIS_CONF_THRESH
+    
+    # Create pose estimator
+    pose = PoseEstimator(wheelbase_m=0.235, wheel_radius_m=0.066)
+    pose.reset()
+    
+    # Simulate wheel odometry: straight forward
+    v_left = v_right = 0.1  # m/s
+    dt = 1.0  # 1 second
+    
+    # Simulate accepted visual odometry (good confidence)
+    vis_yaw = 0.02  # Small rotation (plausible, will be accepted)
+    vis_fwd = 0.095  # Close to wheel prediction (plausible)
+    vis_conf = 0.8  # Good confidence (> IMU_VIS_CONF_THRESH=0.20)
+    
+    # Simulate IMU reporting a different yaw rate
+    imu_yaw_rate = 0.05  # rad/s (slightly different from visual)
+    
+    # Update pose with wheel + accepted visual + IMU
+    fused_yaw, fused_fwd = pose.update(
+        v_left, v_right, dt,
+        vis_yaw=vis_yaw, vis_fwd=vis_fwd, vis_confidence=vis_conf,
+        using_encoder_feedback=True,
+        imu_yaw_rate=imu_yaw_rate)
+    
+    print(f"Wheel: fwd={0.1:.3f} yaw={0.0:.3f}")
+    print(f"Visual (accepted): fwd={vis_fwd:.3f} yaw={vis_yaw:.3f} conf={vis_conf:.2f}")
+    print(f"IMU: yaw_rate={imu_yaw_rate:.3f}")
+    print(f"Fused: fwd={fused_fwd:.3f} yaw={fused_yaw:.3f}")
+    print(f"IMU weight: {IMU_YAW_WEIGHT_BASE} (base, visual confidence good)")
+    
+    # Check tracking quality metrics
+    quality = pose.get_tracking_quality()
+    assert quality['visual_accepted'] > 0, "Visual should be accepted"
+    assert quality['imu_used_count'] > 0, "IMU should be used"
+    # Fallback count should be 0 because visual was accepted with good confidence
+    assert quality['imu_fallback_count'] == 0, \
+        "IMU fallback should NOT be used when visual confidence is good"
+    
+    print("✓ IMU base weight on visual acceptance (confidence good)")
+
 
 
 def test_legacy_behavior_without_flag():
@@ -298,6 +419,8 @@ if __name__ == '__main__':
         test_weak_match_rejected,
         test_strong_match_accepted,
         test_wheel_odom_retained_on_rejection,
+        test_imu_wheel_fusion_on_visual_rejection,
+        test_imu_base_weight_on_visual_acceptance,
         test_legacy_behavior_without_flag,
     ]
     
