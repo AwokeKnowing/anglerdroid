@@ -151,6 +151,19 @@ when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz h
    `test_ego_moderngl_correctness.py`. **Offline only** (no live Orin Hz claims
    without Kevin). Addresses CONTRACT.md "Still open" + AGENTS.md policy-feed note.
 
+6. **Policy feed export** (`src/perception/policy_feed.py` + `src/vision.py`) —
+   Stable tensor export API for neural policy consumption (AGENTS.md "labeled heightmap @ 30 Hz").
+   Behind **`KEVIN_POLICY_FEED=1`** (default off). Exports current-frame ego labels + height
+   via `export_policy_feed`: HxW uint8 labels (UNKNOWN=0, SELF=1, CLEAR=2, OBSTACLE=3) +
+   HxW uint8 height (cm above floor, 0-100 cap). Zero-copy to preallocated buffers when provided
+   (30 Hz pattern). Honesty preserved: SELF wins (upstream labeling enforces), no invented CLEAR
+   under chassis, UNKNOWN stays UNKNOWN. Wired into `vision.py` capture loop after ego labels +
+   RS2 fuse; updates `_policy_feed_labels` / `_policy_feed_height` / `_policy_feed_valid`.
+   **No planner/drive changes** — export only; neural policy consumption TBD. Tested offline
+   (`test_policy_feed.py`): layout, zero-copy, honesty invariants, height encoding, buffer reuse.
+   Gracefully skips when GPU/ModernGL absent (CuPy / ModernGL not required for export; upstream
+   labeling already CPU or GPU depending on flags). Completes thin wedge for policy-feed contract.
+
 **Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`;
 GPU scatter + fuse reclaim TBD on Orin with CuPy (offline tests show correctness; on-device
 timing needed).
@@ -158,6 +171,8 @@ timing needed).
 **Still open:**
 - On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy vs ModernGL vs CPU + Kevin)
 - ✓ ModernGL scatter into ego heightmap (policy feed; AGENTS.md) — **LANDED** (default-off `KEVIN_MODERNGL_SCATTER=1`)
+- ✓ Policy feed export (honest labels + height tensor) — **LANDED** (default-off `KEVIN_POLICY_FEED=1`; `src/perception/policy_feed.py`)
+- Neural policy consumption of policy feed (training + inference integration)
 - Live mover exercise for ephemeral VO-ignore
 
 

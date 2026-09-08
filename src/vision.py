@@ -54,6 +54,7 @@ from perception import (
     select_planner_feed, evidence_obstacle_prior_ego,
     build_slam_outlier_mask, apply_mask_to_obs, mask_counts,
     apply_ignore_to_gray, build_forward_ignore_from_verts,
+    export_policy_feed,
     label_rs1_ego_gpu, KEVIN_GPU_SCATTER,
     fuse_rs2_into_ego_gpu, KEVIN_GPU_FUSE,
 )
@@ -839,6 +840,11 @@ class Vision:
         self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
         self._evidence_map_ms = 0.0
         self._evidence_map_metrics = {}
+        # Policy feed export (default off): honest ego labels + height for neural policy
+        self._policy_feed_enable = os.environ.get('KEVIN_POLICY_FEED', '0').strip() == '1'
+        self._policy_feed_labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_feed_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._policy_feed_valid = False
         # CAPTURE Hz reclaim: evidence updates less frequent than ego labels (default 2 = every 6 frames)
         self._evidence_every = max(1, int(os.environ.get('KEVIN_EVIDENCE_EVERY', '2')))
         self._evidence_update_n = 0
@@ -1769,6 +1775,14 @@ class Vision:
                     self._ego_labels, self._ego_height,
                     obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
                 self._ego_shim_valid = True
+
+                # Policy feed export (KEVIN_POLICY_FEED=1; default off)
+                if self._policy_feed_enable:
+                    export_policy_feed(
+                        self._ego_labels, self._ego_height,
+                        labels_out=self._policy_feed_labels,
+                        height_out=self._policy_feed_height)
+                    self._policy_feed_valid = True
 
             # A/B metrics vs honest ego labels (rate-limited on label events;
             # must not key off raw frame n — with KEVIN_EGO_EVERY>1, post-increment

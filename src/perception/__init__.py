@@ -24,6 +24,7 @@ from .ego_rs1_fast import (
     KEVIN_GPU_FUSE,
     _CUPY_AVAILABLE as GPU_AVAILABLE,
 )
+from .policy_feed import export_policy_feed
 
 __all__ = [
     "UNKNOWN", "SELF", "CLEAR", "OBSTACLE", "LABEL_NAMES",
@@ -36,4 +37,5 @@ __all__ = [
     "CameraIntrinsics", "DepthToColorAlignment", "extract_rs_intrinsics_extrinsics",
     "label_rs1_ego_gpu", "fuse_rs2_into_ego_gpu",
     "KEVIN_GPU_SCATTER", "KEVIN_GPU_FUSE", "GPU_AVAILABLE",
+    "export_policy_feed",
 ]
