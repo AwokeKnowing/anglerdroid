@@ -25,6 +25,7 @@ updates, vision passes a pose-warped EvidenceMap obstacle prior with
 ``mask_ephemeral=True`` so movers without accumulated static evidence are
 excluded from VO/SLAM while persistent furniture remains. Still gated by
 ``KEVIN_SLAM_DYNAMIC_MASK=1`` (default off).
+Live metrics line ``slam_mask:`` reports SELF / ephemeral / ms.
 """
 from __future__ import annotations
 
@@ -108,6 +109,39 @@ def apply_mask_to_obs(
         np.copyto(out, obs)
     out[mask] = 0
     return out
+
+
+def mask_counts(
+    ego_labels: np.ndarray,
+    mask: np.ndarray,
+    *,
+    prior_obstacle: Optional[np.ndarray] = None,
+    mask_ephemeral: bool = False,
+):
+    """Return ``(self_n, ephemeral_n, total_n)`` for live ``slam_mask:`` metrics.
+
+    ``self_n`` = masked SELF cells; ``ephemeral_n`` = masked OBSTACLE cells
+    absent from prior (0 when ephemeral masking is off / no prior);
+    ``total_n`` = all True cells in ``mask``.
+    """
+    labels = np.asarray(ego_labels)
+    m = np.asarray(mask, dtype=bool)
+    if m.shape != labels.shape:
+        raise ValueError(
+            "mask shape %s != labels shape %s" % (m.shape, labels.shape))
+    self_n = int(np.count_nonzero((labels == SELF) & m))
+    total_n = int(np.count_nonzero(m))
+    if mask_ephemeral and prior_obstacle is not None:
+        prior = np.asarray(prior_obstacle)
+        if prior.shape != labels.shape:
+            raise ValueError(
+                "prior_obstacle shape %s != labels shape %s"
+                % (prior.shape, labels.shape))
+        eph_n = int(np.count_nonzero(
+            (labels == OBSTACLE) & (prior == 0) & m))
+    else:
+        eph_n = 0
+    return self_n, eph_n, total_n
 
 
 def mask_as_uint8(mask: np.ndarray, out: Optional[np.ndarray] = None) -> np.ndarray:

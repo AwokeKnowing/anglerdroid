@@ -52,7 +52,7 @@ from perception import (
     fuse_rs2_into_ego,
     EvidenceMap,
     select_planner_feed, evidence_obstacle_prior_ego,
-    build_slam_outlier_mask, apply_mask_to_obs,
+    build_slam_outlier_mask, apply_mask_to_obs, mask_counts,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -841,6 +841,7 @@ class Vision:
         self._slam_kf_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._slam_prior_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._slam_dyn_mask_n = 0
+        self._slam_mask_ms = 0.0
         
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
@@ -1923,6 +1924,7 @@ class Vision:
                     # keyframe descriptors/thumbs only. Default off = unchanged.
                     _kf_obs = self._obs_combined
                     if (self._slam_dyn_mask_enable and self._ego_did_label):
+                        _t0 = time.perf_counter()
                         _prior = None
                         _mask_eph = False
                         _n_prior = 0
@@ -1958,12 +1960,18 @@ class Vision:
                         _kf_obs = apply_mask_to_obs(
                             _kf_base, self._slam_dyn_mask,
                             obs_out=self._slam_kf_obs)
+                        _ms = (time.perf_counter() - _t0) * 1000.0
+                        _self_n, _eph_n, _tot_n = mask_counts(
+                            self._ego_labels, self._slam_dyn_mask,
+                            prior_obstacle=_prior, mask_ephemeral=_mask_eph)
+                        self._slam_mask_ms = _ms
                         self._slam_dyn_mask_n += 1
                         if self._slam_dyn_mask_n <= 2 or self._slam_dyn_mask_n % 90 == 0:
                             print(
-                                "slam_dyn_mask: cells=%d ephemeral=%d prior=%d enable=1"
-                                % (int(np.count_nonzero(self._slam_dyn_mask)),
-                                   int(_mask_eph), _n_prior))
+                                "slam_mask: self=%d eph=%d total=%d prior=%d "
+                                "ms=%.2f n=%d enable=1"
+                                % (_self_n, _eph_n, _tot_n, _n_prior,
+                                   _ms, self._slam_dyn_mask_n))
                     self._global_map.keyframe_check(
                         _kf_obs, self._known_combined,
                         cap_x, cap_y, cap_theta,

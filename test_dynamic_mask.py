@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 from robot_config import FRAME_H, FRAME_W, BODY_BOX
 from perception.labels import UNKNOWN, SELF, CLEAR, OBSTACLE
 from perception.dynamic_mask import (
-    build_slam_outlier_mask, apply_mask_to_obs, mask_as_uint8,
+    build_slam_outlier_mask, apply_mask_to_obs, mask_counts, mask_as_uint8,
 )
 from perception import build_slam_outlier_mask as exported
 
@@ -132,6 +132,29 @@ def test_shape_mismatch_raises():
         pass
 
 
+def test_mask_counts_self_and_ephemeral():
+    labels = _blank()
+    x0, y0, x1, y1 = BODY_BOX
+    labels[y0:y1, x0:x1] = SELF
+    labels[20:30, 100:110] = OBSTACLE  # ephemeral
+    labels[40:50, 120:130] = OBSTACLE  # static prior
+    prior = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    prior[40:50, 120:130] = 1
+    mask = build_slam_outlier_mask(
+        labels, prior_obstacle=prior, mask_ephemeral=True)
+    self_n, eph_n, tot_n = mask_counts(
+        labels, mask, prior_obstacle=prior, mask_ephemeral=True)
+    expect_self = int((x1 - x0) * (y1 - y0))
+    expect_eph = 10 * 10
+    assert self_n == expect_self, (self_n, expect_self)
+    assert eph_n == expect_eph, (eph_n, expect_eph)
+    assert tot_n == self_n + eph_n, (tot_n, self_n, eph_n)
+    # no ephemeral when gate off
+    mask0 = build_slam_outlier_mask(labels)
+    s0, e0, t0 = mask_counts(labels, mask0)
+    assert e0 == 0 and t0 == s0 == expect_self
+
+
 if __name__ == "__main__":
     test_self_always_masked()
     print("OK self_masked")
@@ -147,4 +170,6 @@ if __name__ == "__main__":
     print("OK budget")
     test_shape_mismatch_raises()
     print("OK shape")
+    test_mask_counts_self_and_ephemeral()
+    print("OK mask_counts")
     print("ALL PASS")
