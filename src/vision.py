@@ -835,6 +835,9 @@ class Vision:
         self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
         self._evidence_map_ms = 0.0
         self._evidence_map_metrics = {}
+        # CAPTURE Hz reclaim: evidence updates less frequent than ego labels (default 2 = every 6 frames)
+        self._evidence_every = max(1, int(os.environ.get('KEVIN_EVIDENCE_EVERY', '2')))
+        self._evidence_update_n = 0
         # CONTRACT step 4 wedge: dynamic mask for self-SLAM keyframes (default off)
         self._slam_dyn_mask_enable = (
             os.environ.get('KEVIN_SLAM_DYNAMIC_MASK', '0').strip() == '1')
@@ -1742,10 +1745,11 @@ class Vision:
             # A/B metrics vs honest ego labels (rate-limited on label events;
             # must not key off raw frame n — with KEVIN_EGO_EVERY>1, post-increment
             # n is never divisible by 90 on a label frame, so metrics would go silent.)
+            # CAPTURE Hz reclaim: reduced frequency (every 90 labels vs 30) to save ~1-2 ms.
             if self._ego_did_label:
                 self._ego_metric_i = getattr(self, '_ego_metric_i', 0) + 1
             if (self._ego_did_label and self._ego_metric_i > 0
-                    and (self._ego_metric_i % 30 == 0)):
+                    and (self._ego_metric_i % 90 == 0)):
                 _lab = self._ego_labels
                 _n_unk = int(np.count_nonzero(_lab == EGO_UNKNOWN))
                 _n_self = int(np.count_nonzero(_lab == EGO_SELF))
@@ -1790,7 +1794,10 @@ class Vision:
                        int(self._ego_labels_enable)))
 
             # Optional: accumulate world evidence map (KEVIN_EVIDENCE_MAP=1; default off)
-            if (self._evidence_map is not None and self._ego_did_label):
+            # CAPTURE Hz reclaim: KEVIN_EVIDENCE_EVERY gates updates (default 2 = every 6 frames)
+            _evidence_did_update = False
+            if (self._evidence_map is not None and self._ego_did_label
+                    and (self._evidence_update_n % self._evidence_every == 0)):
                 _t_ev0 = time.monotonic()
                 try:
                     _ev_pose = (float(pose_src.x), float(pose_src.y), float(pose_src.theta))
@@ -1800,16 +1807,20 @@ class Vision:
                     self._ego_labels, self._ego_height, _ev_pose,
                     frame_i=self._ego_label_n)
                 self._evidence_map_ms = (time.monotonic() - _t_ev0) * 1000.0
-                # Same label-event cadence as ego_ab (every 30 labels).
-                if getattr(self, '_ego_metric_i', 0) % 30 == 0:
-                    _ec = self._evidence_map.counts()
-                    print(
-                        "ego_ev: clear=%d obs=%d unk=%d update_ms=%.2f "
-                        "splat_ms=%.2f frame=%d"
-                        % (_ec["clear"], _ec["obs"], _ec["unk"],
-                           self._evidence_map_ms,
-                           float(self._evidence_map_metrics.get("update_ms", 0.0)),
-                           int(self._evidence_map_metrics.get("frame_i", 0))))
+                _evidence_did_update = True
+            if self._ego_did_label:
+                self._evidence_update_n += 1
+            # Same label-event cadence as ego_ab (every 30 labels).
+            if _evidence_did_update and (getattr(self, '_ego_metric_i', 0) % 30 == 0):
+                _ec = self._evidence_map.counts()
+                print(
+                    "ego_ev: clear=%d obs=%d unk=%d update_ms=%.2f "
+                    "splat_ms=%.2f frame=%d every=%d"
+                    % (_ec["clear"], _ec["obs"], _ec["unk"],
+                       self._evidence_map_ms,
+                       float(self._evidence_map_metrics.get("update_ms", 0.0)),
+                       int(self._evidence_map_metrics.get("frame_i", 0)),
+                       self._evidence_every))
 
             # Optional gated planner feed: ego labels and/or evidence → obs/known
             # (KEVIN_EGO_PLAN=1 and/or KEVIN_EGO_LABELS=1; default off = legacy).

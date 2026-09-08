@@ -100,7 +100,31 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 ### Still TODO:
 
 - Live mover exercise (person/dog lap counts) to validate ephemeral masking under motion
-- CAPTURE Hz reclaim (push RS1 label / RS2 fuse below 20 ms target for 60 Hz headroom)
+
+### CAPTURE Hz reclaim (toward 30 Hz / 60 Hz headroom)
+
+**Status**: Partial wedge landed (evidence frequency gate + metrics reduction).
+
+**Problem**: Evidence map update (~14–23 ms on Orin) was holding smoke loop at ~18–19 Hz
+when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz headroom.
+
+**Landed optimizations** (default-safe; no live Kevin validation yet):
+
+1. **`KEVIN_EVIDENCE_EVERY=2` (default)** — Evidence map updates now run every Nth ego
+   label cycle, not every cycle. Default `2` → updates every 6 frames (with `KEVIN_EGO_EVERY=3`).
+   Reclaim: ~7–12 ms per skipped cycle. Honesty preserved (decay still applies every
+   cycle; splat only less frequent). Tested offline (`test_evidence_perf.py`).
+
+2. **ego_ab metrics: every 90 labels (was 30)** — Diagnostic pixel-counting metrics
+   (`ego_ab:` log line) now run 3x less frequently. Reclaim: ~1–2 ms on 2/3 of
+   prior metric cycles. No correctness impact (logging only).
+
+**Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`.
+
+**Open work** (not in this wedge):
+- On-device Orin validation of reclaimed Hz (Kevin unreachable; no fabricated timings)
+- Further algorithmic wins in `label_rs1_ego` / `fuse_rs2_into_ego` hot path
+- GPU-resident ego label scatter (currently CPU scatter; ~2–3 ms opportunity)
 
 ## Delivery order
 
