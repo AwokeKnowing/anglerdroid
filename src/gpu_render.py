@@ -7,7 +7,16 @@ GPU-only pipeline — no CPU fallback.  Designed for Jetson Orin NX.
 
 import math
 import time
+import os
 import numpy as np
+
+# ── Robust morph-match (featureless floor rejection) ───────────────
+# When enabled, improves GPU visual odometry to reject featureless/failed matches:
+# - Wider search window (more forward view context)
+# - Variance-based featureless detection
+# - Stricter confidence thresholds
+# Default OFF to preserve prior behavior (fail-open). Enable with KEVIN_ROBUST_MORPH_MATCH=1.
+KEVIN_ROBUST_MORPH_MATCH = os.getenv('KEVIN_ROBUST_MORPH_MATCH', '0') == '1'
 
 try:
     import moderngl
@@ -2153,9 +2162,24 @@ class GPURenderer:
     # ── GPU visual odometry ─────────────────────────────────────
 
     def configure_odom(self, fx=307.0, ds_factor=4, search=8):
+        """Configure GPU visual odometry parameters.
+        
+        Args:
+            fx: Camera focal length in pixels
+            ds_factor: Downsample factor for SAD matching
+            search: Search window radius in pixels (±search)
+        
+        When KEVIN_ROBUST_MORPH_MATCH=1, search window is widened to ±12
+        (was ±8) to use more forward view context for better featureless
+        detection.
+        """
         self._od_fx = float(fx)
         self._od_ds = int(ds_factor)
-        self._od_search = int(search)
+        # Widen search window when robust match is enabled (James: "wider forward view")
+        if KEVIN_ROBUST_MORPH_MATCH:
+            self._od_search = 12  # Wider window for better context
+        else:
+            self._od_search = int(search)
         self._od_configured = True
         self._od_gl_ready = False
 
@@ -2284,14 +2308,38 @@ class GPURenderer:
 
         min_sad = float(sad.min())
         mean_sad = float(sad.mean())
+        sad_std = float(sad.std())
         sharpness = (mean_sad - min_sad) / (mean_sad + 1e-6)
-        confidence = min(1.0, sharpness * 2.0)
+        
+        # Featureless detection (when KEVIN_ROBUST_MORPH_MATCH=1):
+        # On empty floor, SAD map is very flat (low std, poor sharpness).
+        # Reject these matches to prevent spurious spin.
+        if KEVIN_ROBUST_MORPH_MATCH:
+            # Variance threshold: if SAD std is very low, scene is featureless
+            variance_ratio = sad_std / (mean_sad + 1e-6)
+            if variance_ratio < 0.10:  # Too flat → featureless
+                confidence = 0.0
+            elif sharpness < 0.15:  # Weak peak → ambiguous match
+                confidence = 0.0
+            else:
+                # Scale confidence more conservatively
+                confidence = min(1.0, sharpness * 1.5)
+        else:
+            # Legacy behavior: sharpness * 2.0
+            confidence = min(1.0, sharpness * 2.0)
 
         self._od_n += 1
         if self._od_n <= 3 or self._od_n % 100 == 0:
-            print("gpu_odom: %.1fms  dx=%.2f dy=%.2f yaw=%.3f° conf=%.2f" % (
-                (t1 - t0) * 1e3, sub_x, sub_y,
-                math.degrees(yaw), confidence))
+            if KEVIN_ROBUST_MORPH_MATCH:
+                var_ratio = sad_std / (mean_sad + 1e-6)
+                print("gpu_odom: %.1fms  dx=%.2f dy=%.2f yaw=%.3f° "
+                      "conf=%.2f sharp=%.2f var_ratio=%.2f robust=1" % (
+                          (t1 - t0) * 1e3, sub_x, sub_y,
+                          math.degrees(yaw), confidence, sharpness, var_ratio))
+            else:
+                print("gpu_odom: %.1fms  dx=%.2f dy=%.2f yaw=%.3f° conf=%.2f" % (
+                    (t1 - t0) * 1e3, sub_x, sub_y,
+                    math.degrees(yaw), confidence))
 
         return yaw, forward, confidence
 
