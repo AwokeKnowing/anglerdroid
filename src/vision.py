@@ -1685,8 +1685,9 @@ class Vision:
                     self._ego_labels, self._ego_height,
                     obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
 
-            # A/B metrics vs honest ego labels (rate-limited)
-            if self._ego_label_n > 0 and (self._ego_label_n % 90 == 0):
+            # A/B metrics vs honest ego labels (rate-limited; skip empty warmup)
+            if (self._ego_did_label and self._ego_label_n > 0
+                    and (self._ego_label_n % 90 == 0)):
                 _lab = self._ego_labels
                 _n_unk = int(np.count_nonzero(_lab == EGO_UNKNOWN))
                 _n_self = int(np.count_nonzero(_lab == EGO_SELF))
