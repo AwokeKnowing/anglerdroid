@@ -40,7 +40,8 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 - Do not assume static furniture forever (dog, people, chairs).
 - Landed: `src/perception/evidence_map.py` (`EvidenceMap`). Per-update obstacle
   decay on cells not refreshed; clear decays slower and actively pulls obstacle
-  evidence down on CLEAR hits so movers can free a cell. Optional live wire:
+  evidence down on CLEAR hits so movers can free a cell. Clear splat uses
+  sort-unique (faster than np.unique on Orin) toward 30 Hz. Optional live wire:
   `KEVIN_EVIDENCE_MAP=1` (default off) → `ego_ev:` metrics in vision.
 - Gated planner feed (default off): `KEVIN_EGO_PLAN=1` and/or `KEVIN_EGO_LABELS=1`
   → costmap/planner/safety see ego-derived `(obs,known)` (`ego_plan: source=ego|evidence|legacy`).
@@ -60,8 +61,13 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
   labels fire — including ``--no-wheelbase`` when keyframe writes skip.
   Same gate also optionally zeros VO gray pixels whose RS2 depth samples
   project into masked ego cells (`apply_ignore_to_gray` /
-  `build_forward_ignore_from_verts`; ``vo_ignore:`` metrics). Color UV is a
-  depth-grid remap (not `rs.align`) — gap noted; still no invented CLEAR.
+  `build_forward_ignore_from_verts`; ``vo_ignore:`` metrics). Ephemeral path
+  covered by synthetic test `test_ephemeral_vo_ignore_hit_and_gray_zeros`
+  (inject OBSTACLE vs prior → hit>0 / gray zeros; no live movers required).
+  Color UV is a depth-grid remap (not `rs.align`) — gap noted; still no
+  invented CLEAR. Keyframe obs writes require trusted encoders
+  (`skip_slam_update` on encoder_fallback/stuck) and reuse the last outlier
+  mask between ego-label cycles so SELF/ephemeral stay excluded.
   Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
 
 ## Delivery order

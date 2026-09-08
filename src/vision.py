@@ -2021,8 +2021,27 @@ class Vision:
                         "ms=%.2f n=%d enable=1 skip_slam=%d"
                         % (_self_n, _eph_n, _tot_n, _n_prior,
                            _ms, self._slam_dyn_mask_n, int(skip_slam_update)))
+            elif (
+                self._slam_dyn_mask_enable
+                and self._slam_dyn_mask_n > 0
+                and not skip_slam_update
+            ):
+                # Ego labels every N frames; reuse last outlier mask so
+                # keyframe writes stay masked between label cycles.
+                # CONTRACT: keyframes only write when encoders trusted
+                # (skip_slam_update gates the write below).
+                _kf_base = (
+                    self._ego_obs_shim
+                    if getattr(self, "_ego_shim_valid", False)
+                    else self._obs_combined)
+                _kf_obs = apply_mask_to_obs(
+                    _kf_base, self._slam_dyn_mask,
+                    obs_out=self._slam_kf_obs)
 
             # GMAP updates - DROPPABLE (expensive GPU ops, non-safety-critical)
+            # CONTRACT: never write keyframes when encoders untrusted / stuck
+            # (skip_slam_update). When KEVIN_SLAM_DYNAMIC_MASK=1, _kf_obs is
+            # the masked buffer (SELF + ephemeral), never raw obs.
             if not skip_slam_update and self._capture_budget.should_run("gmap"):
                 with self._capture_budget.stage("gmap"):
                     self._gpu.gmap_update_gpu(

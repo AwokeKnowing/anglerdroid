@@ -238,6 +238,103 @@ def test_build_forward_ignore_marks_hit_pixel():
         stride=1, stamp=1)
     assert nh2 == 0 and ng2 == 0
 
+
+def test_ephemeral_vo_ignore_hit_and_gray_zeros():
+    """Inject ephemeral OBSTACLE vs prior → VO ignore hit>0 + gray zeros.
+
+    Movers are unavailable on this fire; synthetic verts stand in for a
+    person/dog blob so apply_ignore_to_gray / build_forward_ignore_from_verts
+    exercise the ephemeral path without waiting for live movers.
+    """
+    import math, cv2
+    pitch = math.radians(25.6 - 90.0)
+    rot, _ = cv2.Rodrigues(np.float64([pitch, 0, 0]))
+    rot = rot.astype(np.float32)
+    piv = np.array([0.0, -1.0, 0.02], dtype=np.float32)
+    trans = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    scatter_h, scatter_w = FRAME_W, FRAME_H
+    scale = 100.0
+    offset = np.float32([scatter_w / 2.0, scatter_h / 2.0 + scale])
+    fw_dx = -75 + 132
+    fw_dy = -1
+
+    def _ego_of(p):
+        p = np.asarray(p, dtype=np.float32)
+        r = (p - piv) @ rot + piv - trans
+        sx = int(np.floor(r[0] * scale + offset[0]))
+        sy = int(np.floor(r[1] * scale + offset[1]))
+        ei = sx + fw_dy
+        ej = (scatter_h - 1 - sy) + fw_dx
+        return sx, sy, ei, ej
+
+    # Ephemeral mover ~1.1m ahead-left; static furniture ~1.1m ahead-right.
+    p_eph = np.array([-0.35, -0.05, 1.1], dtype=np.float32)
+    p_static = np.array([0.35, -0.05, 1.1], dtype=np.float32)
+    _, _, ei_e, ej_e = _ego_of(p_eph)
+    _, _, ei_s, ej_s = _ego_of(p_static)
+    assert 0 <= ei_e < FRAME_H and 0 <= ej_e < FRAME_W, (ei_e, ej_e)
+    assert 0 <= ei_s < FRAME_H and 0 <= ej_s < FRAME_W, (ei_s, ej_s)
+
+    labels = _blank()
+    # Small OBSTACLE patches around projected cells
+    for ei, ej, val in (
+        (ei_e, ej_e, OBSTACLE),
+        (ei_s, ej_s, OBSTACLE),
+    ):
+        labels[max(0, ei - 2):ei + 3, max(0, ej - 2):ej + 3] = val
+    prior = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+    prior[max(0, ei_s - 2):ei_s + 3, max(0, ej_s - 2):ej_s + 3] = 1
+
+    mask = build_slam_outlier_mask(
+        labels, prior_obstacle=prior, mask_ephemeral=True)
+    assert np.any(mask[max(0, ei_e - 2):ei_e + 3, max(0, ej_e - 2):ej_e + 3]), (
+        "ephemeral patch must be masked")
+    assert not np.any(
+        mask[max(0, ei_s - 2):ei_s + 3, max(0, ej_s - 2):ej_s + 3]), (
+        "prior/static OBSTACLE must stay trusted for SLAM/VO")
+
+    gh, gw = 160, 283
+    verts = np.zeros((gh * gw, 3), dtype=np.float32)
+    # Place both points on the fake depth grid
+    i_eph = (gh // 2) * gw + (gw // 3)
+    i_static = (gh // 2) * gw + (2 * gw // 3)
+    verts[i_eph] = p_eph
+    verts[i_static] = p_static
+
+    common = dict(
+        rotation=rot, pivot=piv, translation=trans,
+        scale=scale, offset=offset,
+        scatter_h=scatter_h, scatter_w=scatter_w,
+        fw_dx=fw_dx, fw_dy=fw_dy,
+        gray_h=FRAME_H, gray_w=FRAME_W,
+        stride=1, stamp=1,
+    )
+    ign, ns, nh, ng = build_forward_ignore_from_verts(verts, mask, **common)
+    assert ns >= 2, ns
+    assert nh >= 1, (nh, "ephemeral vert must hit ignore mask")
+    assert ng > 0, ng
+
+    gray = np.full((FRAME_H, FRAME_W), 180, dtype=np.uint8)
+    out = apply_ignore_to_gray(gray, ign)
+    assert int(np.count_nonzero(out[ign] == 0)) == int(ng)
+    assert np.all(out[~ign] == 180), "unmasked gray must stay intact"
+    # Static-only mask → ephemeral vert alone would still miss; prove prior path
+    # does not zero the static vert's gray when only ephemeral is masked.
+    # Rebuild mask SELF-only (no ephemeral) — hits must be 0 for these verts
+    # if neither lands in SELF (BODY_BOX). Our patches are away from axle.
+    mask_self = build_slam_outlier_mask(labels)  # no ephemeral
+    # Clear any accidental SELF overlap in labels for this check
+    ign2, ns2, nh2, ng2 = build_forward_ignore_from_verts(
+        verts, mask_self, **common)
+    assert nh2 == 0 and ng2 == 0, (
+        "without ephemeral, synthetic verts must not hit SELF-only mask",
+        nh2, ng2)
+
+    # Honesty: apply_ignore never invents CLEAR — only zeros gray
+    assert out.dtype == gray.dtype
+    assert not np.any(out[ign] != 0)
+
+
 def test_build_forward_ignore_shape_and_empty():
     # Empty verts → empty ignore
     ego = np.zeros((FRAME_H, FRAME_W), dtype=bool)
@@ -278,6 +375,8 @@ if __name__ == "__main__":
     print("OK apply_ignore_gray")
     test_build_forward_ignore_marks_hit_pixel()
     print("OK forward_ignore_hit")
+    test_ephemeral_vo_ignore_hit_and_gray_zeros()
+    print("OK ephemeral_vo_ignore")
     test_build_forward_ignore_shape_and_empty()
     print("OK forward_ignore_empty")
     print("ALL PASS")
