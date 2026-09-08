@@ -141,13 +141,23 @@ when `KEVIN_EVIDENCE_MAP=1` + `KEVIN_EGO_LABELS=1`. Target: 30 Hz floor, 60 Hz h
    selects `fuse_rs2_into_ego_gpu` over CPU path. Never invents CLEAR under chassis;
    SELF wins; honesty preserved.
 
+5. **ModernGL ego heightmap scatter** (`src/gpu_render.py` + `src/vision.py`) —
+   GPU-resident `label_rs1_ego_moderngl` for policy-feed heightmap scatter, behind
+   **`KEVIN_MODERNGL_SCATTER=1`** (default off). Scatters RS1 verts into honest ego
+   labels (UNKNOWN|SELF|CLEAR|OBSTACLE) + height on GPU via ModernGL MRT (Multiple
+   Render Targets), avoiding CPU transfer overhead. Falls back to CPU
+   `label_rs1_ego` when GPU unavailable. Wired into `vision.py` capture loop;
+   replaces CPU scatter when flag enabled. Correctness tests in
+   `test_ego_moderngl_correctness.py`. **Offline only** (no live Orin Hz claims
+   without Kevin). Addresses CONTRACT.md "Still open" + AGENTS.md policy-feed note.
+
 **Expected gain** (flags on): ~7–12 ms reclaimed per ego cycle with `KEVIN_EVIDENCE_EVERY=2`;
 GPU scatter + fuse reclaim TBD on Orin with CuPy (offline tests show correctness; on-device
 timing needed).
 
 **Still open:**
-- On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy + Kevin)
-- ModernGL scatter into ego heightmap (policy feed; AGENTS.md)
+- On-device Orin measurement of GPU vs CPU `label_rs1_ego` + `fuse_rs2_into_ego` (CuPy vs ModernGL vs CPU + Kevin)
+- ✓ ModernGL scatter into ego heightmap (policy feed; AGENTS.md) — **LANDED** (default-off `KEVIN_MODERNGL_SCATTER=1`)
 - Live mover exercise for ephemeral VO-ignore
 
 

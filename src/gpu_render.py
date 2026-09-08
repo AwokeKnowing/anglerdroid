@@ -825,6 +825,75 @@ out vec4 fc;
 void main() { fc = vec4(v_h / 255.0, 0.0, 0.0, 1.0); }
 """
 
+# ── Ego label scatter shaders (honest UNKNOWN|SELF|CLEAR|OBSTACLE + height) ───
+
+_VERT_SCATTER_EGO_LABELS = """
+#version 330
+uniform float u_scale;
+uniform vec2  u_offset;
+uniform float u_floor_clip;
+uniform vec2  u_fbo_sz;
+uniform int   u_border;
+uniform ivec2 u_grid_size;
+in vec3 in_v;
+flat out float v_label;
+flat out float v_height;
+void main() {
+    v_label = 0.0;  // UNKNOWN
+    v_height = 0.0;
+    gl_PointSize = 1.0;
+    vec3 p = in_v;
+    
+    // Early discard: invalid depth, NaN, inf
+    if (p.z <= 0.01 || any(isnan(p)) || any(isinf(p))) {
+        gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+    }
+    
+    // Early discard: border clipping (same as topdown)
+    vec2 uv_grid = vec2(gl_VertexID % u_grid_size.x, gl_VertexID / u_grid_size.x);
+    if (uv_grid.x < float(u_border) || uv_grid.x >= float(u_grid_size.x - u_border) ||
+        uv_grid.y < float(u_border) || uv_grid.y >= float(u_grid_size.y - u_border)) {
+        gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+    }
+    
+    // Project to ego frame (camera-centered, will rotate 180° later)
+    vec2 proj = (p.xy * u_scale) + u_offset;
+    
+    // Bounds check
+    if (proj.x < 0.0 || proj.x >= u_fbo_sz.x || proj.y < 0.0 || proj.y >= u_fbo_sz.y) {
+        gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
+    }
+    
+    // Classify: CLEAR (2) if floor, OBSTACLE (3) if below floor
+    if (p.z >= u_floor_clip) {
+        v_label = 2.0;  // CLEAR
+        v_height = 0.0;
+    } else {
+        v_label = 3.0;  // OBSTACLE
+        // Height in cm above floor (clamped 1-100)
+        float h_cm = clamp((u_floor_clip - p.z) * 100.0, 1.0, 100.0);
+        v_height = h_cm;
+    }
+    
+    // NDC coordinates for scatter
+    vec2 ndc = (proj / u_fbo_sz) * 2.0 - 1.0;
+    // Use height as depth for max-blending (taller wins)
+    gl_Position = vec4(ndc, v_height / 100.0, 1.0);
+}
+"""
+
+_FRAG_SCATTER_EGO_LABELS = """
+#version 330
+flat in float v_label;
+flat in float v_height;
+layout(location = 0) out vec4 out_label;
+layout(location = 1) out vec4 out_height;
+void main() {
+    out_label = vec4(v_label / 255.0, 0.0, 0.0, 1.0);
+    out_height = vec4(v_height / 255.0, 0.0, 0.0, 1.0);
+}
+"""
+
 # ── Global-map evidence-update shader (MRT: conf + hmap) ────────
 
 _FRAG_GMAP_UPDATE = """
@@ -1742,6 +1811,210 @@ class GPURenderer:
                 (t1 - t0) * 1e3, n_floor, n_obs, n_empty))
 
         return obs, known
+
+    # ── Ego label scatter (ModernGL: honest UNKNOWN|SELF|CLEAR|OBSTACLE + height) ───
+
+    def configure_ego_labels(self, out_w: int, out_h: int, px_size: float, floor_clip_m: float):
+        """Configure ModernGL ego label scatter.
+        
+        Args:
+            out_w, out_h: Output ego frame size (typically 320x240)
+            px_size: Metres per pixel (typically 0.01 = 1cm/px)
+            floor_clip_m: Floor threshold in metres (typically -0.05)
+        """
+        self._el_configured = True
+        self._el_out_w = out_w
+        self._el_out_h = out_h
+        self._el_px_size = px_size
+        self._el_floor = floor_clip_m
+        self._el_scale = 1.0 / px_size
+        self._el_offset = np.array([out_w * 0.5, out_h * 0.5], dtype=np.float32)
+        self._el_gl_ready = False
+
+    def _init_ego_labels_gl(self):
+        """Initialize GPU ego label scatter (MRT: labels + height)."""
+        ctx = self._ctx
+        ow, oh = self._el_out_w, self._el_out_h
+
+        # Two output textures: labels and height
+        self._el_label_tex = ctx.texture((ow, oh), 1)
+        self._el_label_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._el_label_tex.repeat_x = False
+        self._el_label_tex.repeat_y = False
+
+        self._el_height_tex = ctx.texture((ow, oh), 1)
+        self._el_height_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+        self._el_height_tex.repeat_x = False
+        self._el_height_tex.repeat_y = False
+
+        self._el_depth = ctx.depth_renderbuffer((ow, oh))
+        self._el_fbo = ctx.framebuffer(
+            color_attachments=[self._el_label_tex, self._el_height_tex],
+            depth_attachment=self._el_depth)
+
+        max_pts = 320 * 240
+        self._el_vbo = ctx.buffer(reserve=max_pts * 12)
+
+        self._el_prog = ctx.program(
+            vertex_shader=_VERT_SCATTER_EGO_LABELS,
+            fragment_shader=_FRAG_SCATTER_EGO_LABELS)
+
+        self._el_vao = ctx.vertex_array(
+            self._el_prog, [(self._el_vbo, '3f', 'in_v')])
+
+        p = self._el_prog
+        p['u_scale'].value = self._el_scale
+        p['u_offset'].value = tuple(self._el_offset.tolist())
+        p['u_floor_clip'].value = self._el_floor
+        p['u_fbo_sz'].value = (float(ow), float(oh))
+        p['u_border'].value = 4
+        p['u_grid_size'].value = (283, 160)  # typical D435 decimated mag=3
+
+        try:
+            ctx.enable(moderngl.PROGRAM_POINT_SIZE)
+        except Exception:
+            pass
+
+        self._el_gl_ready = True
+        print("gpu_render: ego_labels ready %dx%d (ModernGL honest scatter)" % (ow, oh))
+
+    def label_rs1_ego_moderngl(
+        self,
+        verts,
+        *,
+        out_h: int,
+        out_w: int,
+        floor_clip_m: float,
+        px_size: float,
+        labels_out: np.ndarray,
+        height_out: np.ndarray,
+        x_offset: int = 0,
+        self_boxes=None,
+    ):
+        """GPU-resident label_rs1_ego using ModernGL (honest ego labels).
+        
+        Scatters RS1 verts into ego labels (UNKNOWN|SELF|CLEAR|OBSTACLE) + height
+        on GPU, avoiding CPU transfer overhead. Falls back to CPU if GPU unavailable.
+        
+        Parameters
+        ----------
+        Same as ego_rs1.label_rs1_ego.
+        
+        Returns
+        -------
+        labels : (H,W) uint8 — UNKNOWN|SELF|CLEAR|OBSTACLE
+        height_cm : (H,W) uint8 — obstacle height above floor (0 if none)
+        
+        Notes
+        -----
+        - Honest ego labels: SELF wins, no invented CLEAR under chassis
+        - GPU path keeps verts → scatter → rotate → blit on GPU
+        - CPU fallback uses ego_rs1.label_rs1_ego (already optimized)
+        - x_offset and SELF boxes applied on CPU (trivial cost, avoid GPU transfer)
+        """
+        # CPU fallback if GPU unavailable
+        if not self.available or not getattr(self, '_el_configured', False):
+            from src.perception.ego_rs1 import label_rs1_ego
+            return label_rs1_ego(
+                verts,
+                out_h=out_h,
+                out_w=out_w,
+                floor_clip_m=floor_clip_m,
+                px_size=px_size,
+                labels_out=labels_out,
+                height_out=height_out,
+                x_offset=x_offset,
+                self_boxes=self_boxes,
+            )
+
+        # Initialize GPU path if needed
+        if not self._gl_ready:
+            try:
+                self._init_gl()
+                self._gl_ready = True
+            except Exception as e:
+                print("gpu_render: init failed: %s" % e)
+                self.available = False
+                # Fall back to CPU
+                from src.perception.ego_rs1 import label_rs1_ego
+                return label_rs1_ego(
+                    verts,
+                    out_h=out_h,
+                    out_w=out_w,
+                    floor_clip_m=floor_clip_m,
+                    px_size=px_size,
+                    labels_out=labels_out,
+                    height_out=height_out,
+                    x_offset=x_offset,
+                    self_boxes=self_boxes,
+                )
+
+        if not getattr(self, '_el_gl_ready', False):
+            try:
+                self._init_ego_labels_gl()
+            except Exception as e:
+                print("gpu_render: ego_labels init failed: %s" % e)
+                import traceback
+                traceback.print_exc()
+                # Fall back to CPU
+                from src.perception.ego_rs1 import label_rs1_ego
+                return label_rs1_ego(
+                    verts,
+                    out_h=out_h,
+                    out_w=out_w,
+                    floor_clip_m=floor_clip_m,
+                    px_size=px_size,
+                    labels_out=labels_out,
+                    height_out=height_out,
+                    x_offset=x_offset,
+                    self_boxes=self_boxes,
+                )
+
+        # GPU scatter path
+        oh, ow = out_h, out_w
+        n_pts = min(len(verts) if verts is not None else 0, 320 * 240)
+
+        if n_pts == 0:
+            # No verts: return UNKNOWN everywhere (before SELF paint)
+            labels_out.fill(0)
+            height_out.fill(0)
+        else:
+            self._el_vbo.write(
+                np.ascontiguousarray(verts[:n_pts], dtype=np.float32).tobytes())
+
+            # Scatter to MRT (labels + height)
+            self._el_fbo.use()
+            self._el_fbo.clear(0.0, 0.0, 0.0, 0.0, depth=0.0)
+            self._ctx.enable(moderngl.DEPTH_TEST)
+            self._ctx.depth_func = '>'  # taller obstacle wins
+            self._el_vao.render(moderngl.POINTS, vertices=n_pts)
+
+            # Readback camera-centered scatter (pre-rotation)
+            label_raw = self._el_fbo.read(components=1, alignment=1, attachment=0)
+            height_raw = self._el_fbo.read(components=1, alignment=1, attachment=1)
+            cam_l = np.frombuffer(label_raw, dtype=np.uint8).reshape(oh, ow)
+            cam_h = np.frombuffer(height_raw, dtype=np.uint8).reshape(oh, ow)
+
+            # Rotate 180° on CPU (cheap, matches ego_rs1.py)
+            cam_l_f = cam_l[::-1, ::-1].copy()
+            cam_h_f = cam_h[::-1, ::-1].copy()
+
+            # Blit with x_offset on CPU
+            if x_offset == 0:
+                np.copyto(labels_out, cam_l_f)
+                np.copyto(height_out, cam_h_f)
+            else:
+                from src.perception.ego_rs1 import _blit_x
+                _blit_x(labels_out, cam_l_f, int(x_offset))
+                _blit_x(height_out, cam_h_f, int(x_offset))
+
+        # Paint SELF on CPU (box ops trivial, avoid GPU complexity)
+        if self_boxes is not None:
+            from src.perception.labels import SELF
+            for x0, y0, x1, y1 in self_boxes:
+                labels_out[y0:y1, x0:x1] = SELF
+
+        return labels_out, height_out
     
     # ── GPU depth combination ─────────────────────────────────────
     
