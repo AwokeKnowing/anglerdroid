@@ -47,6 +47,11 @@ THUMB_SZ = 48           # scan-match thumbnail size
 ODOM_INFO = np.diag([100.0, 100.0, 200.0]).astype(np.float64)
 LOOP_INFO = np.diag([40.0, 40.0, 80.0]).astype(np.float64)
 
+# Wheel+IMU prior scaling (default confidence levels when no prior)
+ODOM_INFO_MIN_SCALE = 0.25   # minimum info scale when prior is very uncertain
+ODOM_INFO_MAX_SCALE = 2.0    # maximum info scale when prior is very confident
+PRIOR_COV_NOMINAL = 0.01     # nominal prior covariance (1 cm std for x/y, ~0.1 rad for theta)
+
 MEM_HIGH = 500 * 1024 * 1024   # 500 MB
 MEM_LOW  = 200 * 1024 * 1024   # 200 MB
 MEM_CHECK_EVERY = 50            # keyframes between memory checks
@@ -265,11 +270,22 @@ class PoseGraphSLAM:
     # ── SlamBackend interface ───────────────────────────────────────
 
     def keyframe_check(self, obs_ego, known_ego, x, y, theta,
-                       ego_cx, ego_cy, ego_px_size=0.01):
-        """Check keyframing (GPU handles the actual map update)."""
+                       ego_cx, ego_cy, ego_px_size=0.01,
+                       prior_cov_x=None, prior_cov_y=None, prior_cov_theta=None):
+        """Check keyframing (GPU handles the actual map update).
+        
+        Optional wheel+IMU prior covariance parameters:
+            prior_cov_x: Prior x covariance (m²)
+            prior_cov_y: Prior y covariance (m²)
+            prior_cov_theta: Prior theta covariance (rad²)
+        
+        When provided, these scale the odometry edge information matrix
+        (tighter when prior is confident, looser when uncertain).
+        """
         if self._should_keyframe(x, y, theta):
             self._create_keyframe(obs_ego, known_ego, x, y, theta,
-                                  ego_cx, ego_cy, ego_px_size)
+                                  ego_cx, ego_cy, ego_px_size,
+                                  prior_cov_x, prior_cov_y, prior_cov_theta)
 
     # ── Keyframe management ─────────────────────────────────────────
 
@@ -281,7 +297,8 @@ class PoseGraphSLAM:
         dtheta = abs(_norm_angle(theta - lt))
         return dist >= KF_DIST or dtheta >= KF_ANGLE
 
-    def _create_keyframe(self, obs, known, x, y, theta, cx, cy, px_size):
+    def _create_keyframe(self, obs, known, x, y, theta, cx, cy, px_size,
+                         prior_cov_x=None, prior_cov_y=None, prior_cov_theta=None):
         kf = Keyframe()
         kf.id = self._next_id
         self._next_id += 1
@@ -313,7 +330,8 @@ class PoseGraphSLAM:
         # Odometry edge to previous keyframe
         if self._last_kf_id >= 0:
             prev = self._keyframes[self._last_kf_id]
-            self._add_odom_edge(prev, kf)
+            self._add_odom_edge(prev, kf,
+                                prior_cov_x, prior_cov_y, prior_cov_theta)
 
         self._last_kf_pose = (x, y, theta)
         self._last_kf_id = len(self._keyframes) - 1
@@ -329,7 +347,14 @@ class PoseGraphSLAM:
 
     # ── Odometry edges ──────────────────────────────────────────────
 
-    def _add_odom_edge(self, kf_i, kf_j):
+    def _add_odom_edge(self, kf_i, kf_j,
+                       prior_cov_x=None, prior_cov_y=None, prior_cov_theta=None):
+        """Add odometry edge between consecutive keyframes.
+        
+        Optional wheel+IMU prior covariances scale the edge information matrix:
+        - Low covariance (confident prior) → higher info weight
+        - High covariance (uncertain prior) → lower info weight
+        """
         ct = math.cos(kf_i.theta)
         st = math.sin(kf_i.theta)
         dpx = kf_j.x - kf_i.x
@@ -337,8 +362,42 @@ class PoseGraphSLAM:
         local_dx = ct * dpx + st * dpy
         local_dy = -st * dpx + ct * dpy
         local_dt = _norm_angle(kf_j.theta - kf_i.theta)
-        self._edges.append((kf_i.id, kf_j.id, local_dx, local_dy, local_dt,
-                            ODOM_INFO))
+        
+        # Compute adaptive information matrix if prior covariances provided
+        if (prior_cov_x is not None and prior_cov_y is not None and 
+            prior_cov_theta is not None):
+            info = self._compute_adaptive_odom_info(
+                prior_cov_x, prior_cov_y, prior_cov_theta)
+        else:
+            info = ODOM_INFO
+        
+        self._edges.append((kf_i.id, kf_j.id, local_dx, local_dy, local_dt, info))
+    
+    def _compute_adaptive_odom_info(self, cov_x, cov_y, cov_theta):
+        """Compute adaptive odometry information matrix from prior covariance.
+        
+        Information matrix is inverse of covariance. We scale the nominal
+        ODOM_INFO by the ratio of nominal/actual covariance, bounded to
+        [ODOM_INFO_MIN_SCALE, ODOM_INFO_MAX_SCALE] range.
+        """
+        # Scale factor for each dimension: nominal_cov / actual_cov
+        # Higher actual covariance → lower scale → lower info weight
+        scale_x = PRIOR_COV_NOMINAL / max(cov_x, 1e-6)
+        scale_y = PRIOR_COV_NOMINAL / max(cov_y, 1e-6)
+        scale_theta = PRIOR_COV_NOMINAL / max(cov_theta, 1e-6)
+        
+        # Clamp scales to reasonable bounds
+        scale_x = np.clip(scale_x, ODOM_INFO_MIN_SCALE, ODOM_INFO_MAX_SCALE)
+        scale_y = np.clip(scale_y, ODOM_INFO_MIN_SCALE, ODOM_INFO_MAX_SCALE)
+        scale_theta = np.clip(scale_theta, ODOM_INFO_MIN_SCALE, ODOM_INFO_MAX_SCALE)
+        
+        # Scale the nominal information matrix
+        info = ODOM_INFO.copy()
+        info[0, 0] *= scale_x
+        info[1, 1] *= scale_y
+        info[2, 2] *= scale_theta
+        
+        return info
 
     # ── Place recognition & loop closure ────────────────────────────
 

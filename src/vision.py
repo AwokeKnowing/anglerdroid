@@ -843,6 +843,9 @@ class Vision:
         self._slam_prior_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._slam_dyn_mask_n = 0
         self._slam_mask_ms = 0.0
+        # CONTRACT step 4 wheel+IMU prior: feed prior covariance to SLAM edges (default off)
+        self._slam_wheel_imu_prior_enable = (
+            os.environ.get('KEVIN_SLAM_WHEEL_IMU_PRIOR', '0').strip() == '1')
         # VO gray ignore (same KEVIN_SLAM_DYNAMIC_MASK gate; reuse last ego mask)
         self._vo_ignore_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
         self._vo_gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -2049,10 +2052,20 @@ class Vision:
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE),
                         free_range_mask=self._free_range_mask)
+                    
+                    # Optional wheel+IMU prior covariances for SLAM edges
+                    prior_cov_x, prior_cov_y, prior_cov_theta = None, None, None
+                    if (self._slam_wheel_imu_prior_enable and 
+                        self._wheel_imu_prior is not None):
+                        prior_cov_x = float(self._wheel_imu_prior.P[0, 0])
+                        prior_cov_y = float(self._wheel_imu_prior.P[1, 1])
+                        prior_cov_theta = float(self._wheel_imu_prior.P[2, 2])
+                    
                     self._global_map.keyframe_check(
                         _kf_obs, self._known_combined,
                         cap_x, cap_y, cap_theta,
-                        rcx_f, rcy_f, float(TD_PX_SIZE))
+                        rcx_f, rcy_f, float(TD_PX_SIZE),
+                        prior_cov_x, prior_cov_y, prior_cov_theta)
                     
                     # Sync GPU map after loop closure rebuild
                     if self._global_map.needs_gpu_sync():

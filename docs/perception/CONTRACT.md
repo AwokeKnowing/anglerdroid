@@ -53,27 +53,47 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
 - Modern VO/SLAM that treats moving people/dog as outliers (robust residuals / dynamic masking).
 - Prefer RGB-D + wheel + IMU; no ROS.
 - Localization must not require a frozen house mesh, but a walls prior (STL) is a later assist.
-- Wedge landed: `src/perception/dynamic_mask.py` — ego-label outlier mask for SLAM/VO
-  (`SELF` always masked; ephemeral `OBSTACLE` vs pose-warped EvidenceMap prior
-  when `KEVIN_EVIDENCE_MAP=1` has updates). Live gate `KEVIN_SLAM_DYNAMIC_MASK=1`
-  (default off) zeros masked cells on self-SLAM keyframe obs; live
-  ``slam_mask:`` metrics (SELF / ephemeral / ms) compute whenever ego
-  labels fire — including ``--no-wheelbase`` when keyframe writes skip.
-  Same gate also optionally zeros VO gray pixels whose RS2 depth samples
-  project into masked ego cells (`apply_ignore_to_gray` /
-  `build_forward_ignore_from_verts`; ``vo_ignore:`` metrics). Ephemeral path
-  covered by synthetic test `test_ephemeral_vo_ignore_hit_and_gray_zeros`
-  (inject OBSTACLE vs prior → hit>0 / gray zeros; no live movers required).
-  Color UV is a depth-grid remap (not `rs.align`) — gap noted; still no
-  invented CLEAR. Keyframe obs writes require trusted encoders
-  (`skip_slam_update` on encoder_fallback/stuck) and reuse the last outlier
-  mask between ego-label cycles so SELF/ephemeral stay excluded.
-  Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
+
+### Wedges landed:
+
+1. **Dynamic mask** (`src/perception/dynamic_mask.py`) — ego-label outlier mask for SLAM/VO
+   (`SELF` always masked; ephemeral `OBSTACLE` vs pose-warped EvidenceMap prior
+   when `KEVIN_EVIDENCE_MAP=1` has updates). Live gate `KEVIN_SLAM_DYNAMIC_MASK=1`
+   (default off) zeros masked cells on self-SLAM keyframe obs; live
+   ``slam_mask:`` metrics (SELF / ephemeral / ms) compute whenever ego
+   labels fire — including ``--no-wheelbase`` when keyframe writes skip.
+   Same gate also optionally zeros VO gray pixels whose RS2 depth samples
+   project into masked ego cells (`apply_ignore_to_gray` /
+   `build_forward_ignore_from_verts`; ``vo_ignore:`` metrics). Ephemeral path
+   covered by synthetic test `test_ephemeral_vo_ignore_hit_and_gray_zeros`
+   (inject OBSTACLE vs prior → hit>0 / gray zeros; no live movers required).
+   Color UV is a depth-grid remap (not `rs.align`) — gap noted; still no
+   invented CLEAR. Keyframe obs writes require trusted encoders
+   (`skip_slam_update` on encoder_fallback/stuck) and reuse the last outlier
+   mask between ego-label cycles so SELF/ephemeral stay excluded.
+
+2. **Wheel+IMU prior integration** (`src/wheel_imu_prior.py` + `src/slam.py`) —
+   when encoders are trusted (not `skip_slam_update`), feed wheel+IMU prior
+   covariance into self-SLAM odometry edge information matrices. Live gate
+   `KEVIN_SLAM_WHEEL_IMU_PRIOR=1` (default off). Prior covariance scales edge
+   info: confident prior (low cov) → tighter constraints (higher info weight);
+   uncertain prior (high cov) → looser constraints (lower info weight). Scale
+   factors bounded to [0.25, 2.0]. Infrastructure: `WheelIMUPrior` EKF tracks
+   pose (x, y, θ) + covariance from wheel velocities + IMU yaw rate;
+   `odom_thread.py` runs high-rate (~100 Hz) odometry; `slam.py` accepts
+   optional `prior_cov_{x,y,theta}` in `keyframe_check` and computes adaptive
+   info matrices in `_add_odom_edge`. Tested offline (`test_slam_wheel_imu_prior_integration.py`).
+
+### Still TODO:
+
+- RGB-D VO color UV alignment (stereo map_to_color vs depth-grid remap gap)
+- Live mover exercise (person/dog lap counts) to validate ephemeral masking under motion
+- CAPTURE Hz reclaim (push RS1 label / RS2 fuse below 20 ms target for 60 Hz headroom)
 
 ## Delivery order
 
-1. Honest ego labeler + self exclusion — landed (RS1 `label_rs1_ego` + SELF boxes)
-2. Fuse RS2 without false clear; keep ≤20 ms — `fuse_rs2_into_ego` (cone+free-range CLEAR; SELF wins; no under-chassis CLEAR)
-3. Accumulated drivable map with decay — landed (`EvidenceMap` / `evidence_map.py`; dynamic obstacle decay + clear reclaim)
-4. Dynamic-tolerant SLAM — wedge: dynamic mask from ego (`dynamic_mask.py`); full RGB-D+wheel+IMU still TODO
+1. Honest ego labeler + self exclusion — ✓ landed (RS1 `label_rs1_ego` + SELF boxes)
+2. Fuse RS2 without false clear; keep ≤20 ms — ✓ landed (`fuse_rs2_into_ego`: cone+free-range CLEAR; SELF wins; no under-chassis CLEAR)
+3. Accumulated drivable map with decay — ✓ landed (`EvidenceMap` / `evidence_map.py`: dynamic obstacle decay + clear reclaim)
+4. Dynamic-tolerant SLAM — ✓ wedges landed (dynamic mask from ego; wheel+IMU prior integration); remaining gaps documented above
 
