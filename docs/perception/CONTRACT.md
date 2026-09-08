@@ -56,8 +56,9 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
   (`SELF` always masked; ephemeral `OBSTACLE` vs pose-warped EvidenceMap prior
   when `KEVIN_EVIDENCE_MAP=1` has updates). Live gate `KEVIN_SLAM_DYNAMIC_MASK=1`
   (default off) zeros masked cells on self-SLAM keyframe obs; live
-  ``slam_mask:`` metrics report SELF / ephemeral / ms. Full
-  RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
+  ``slam_mask:`` metrics (SELF / ephemeral / ms) compute whenever ego
+  labels fire — including ``--no-wheelbase`` when keyframe writes skip.
+  Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
 
 ## Delivery order
 

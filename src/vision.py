@@ -1911,6 +1911,62 @@ class Vision:
                     skip_slam_update = True
                     skip_reason = "stuck"
             
+            # Optional dynamic mask (KEVIN_SLAM_DYNAMIC_MASK=1): compute even when
+            # self-SLAM keyframe updates are skipped (e.g. --no-wheelbase /
+            # encoder_fallback). Mask uses ego labels + EvidenceMap prior only —
+            # does not trust wheel pose for map writes. keyframe_check still
+            # gated below so bad pose cannot corrupt SLAM.
+            _kf_obs = self._obs_combined
+            if (self._slam_dyn_mask_enable and self._ego_did_label):
+                _t0 = time.perf_counter()
+                _prior = None
+                _mask_eph = False
+                _n_prior = 0
+                if (
+                    self._evidence_map is not None
+                    and int(getattr(self._evidence_map, "frame_i", 0)) > 0
+                ):
+                    try:
+                        _pose = (
+                            float(pose_src.x),
+                            float(pose_src.y),
+                            float(pose_src.theta),
+                        )
+                    except Exception:
+                        _pose = (0.0, 0.0, 0.0)
+                    evidence_obstacle_prior_ego(
+                        self._evidence_map, _pose,
+                        out=self._slam_prior_obs)
+                    _prior = self._slam_prior_obs
+                    _mask_eph = True
+                    _n_prior = int(np.count_nonzero(_prior))
+                build_slam_outlier_mask(
+                    self._ego_labels,
+                    prior_obstacle=_prior,
+                    mask_ephemeral=_mask_eph,
+                    out=self._slam_dyn_mask)
+                # Mask live ego obs (not planner evidence feed) so
+                # ephemeral movers actually get zeroed for keyframes.
+                _kf_base = (
+                    self._ego_obs_shim
+                    if getattr(self, "_ego_shim_valid", False)
+                    else self._obs_combined)
+                _kf_obs = apply_mask_to_obs(
+                    _kf_base, self._slam_dyn_mask,
+                    obs_out=self._slam_kf_obs)
+                _ms = (time.perf_counter() - _t0) * 1000.0
+                _self_n, _eph_n, _tot_n = mask_counts(
+                    self._ego_labels, self._slam_dyn_mask,
+                    prior_obstacle=_prior, mask_ephemeral=_mask_eph)
+                self._slam_mask_ms = _ms
+                self._slam_dyn_mask_n += 1
+                if self._slam_dyn_mask_n <= 2 or self._slam_dyn_mask_n % 90 == 0:
+                    print(
+                        "slam_mask: self=%d eph=%d total=%d prior=%d "
+                        "ms=%.2f n=%d enable=1 skip_slam=%d"
+                        % (_self_n, _eph_n, _tot_n, _n_prior,
+                           _ms, self._slam_dyn_mask_n, int(skip_slam_update)))
+
             # GMAP updates - DROPPABLE (expensive GPU ops, non-safety-critical)
             if not skip_slam_update and self._capture_budget.should_run("gmap"):
                 with self._capture_budget.stage("gmap"):
@@ -1919,59 +1975,6 @@ class Vision:
                         cap_x, cap_y, cap_theta,
                         rcx_f, rcy_f, float(TD_PX_SIZE),
                         free_range_mask=self._free_range_mask)
-                    # Optional dynamic mask (KEVIN_SLAM_DYNAMIC_MASK=1): zero SELF
-                    # (and optional ephemeral OBSTACLE) cells in a scratch obs for
-                    # keyframe descriptors/thumbs only. Default off = unchanged.
-                    _kf_obs = self._obs_combined
-                    if (self._slam_dyn_mask_enable and self._ego_did_label):
-                        _t0 = time.perf_counter()
-                        _prior = None
-                        _mask_eph = False
-                        _n_prior = 0
-                        if (
-                            self._evidence_map is not None
-                            and int(getattr(self._evidence_map, "frame_i", 0)) > 0
-                        ):
-                            try:
-                                _pose = (
-                                    float(pose_src.x),
-                                    float(pose_src.y),
-                                    float(pose_src.theta),
-                                )
-                            except Exception:
-                                _pose = (0.0, 0.0, 0.0)
-                            evidence_obstacle_prior_ego(
-                                self._evidence_map, _pose,
-                                out=self._slam_prior_obs)
-                            _prior = self._slam_prior_obs
-                            _mask_eph = True
-                            _n_prior = int(np.count_nonzero(_prior))
-                        build_slam_outlier_mask(
-                            self._ego_labels,
-                            prior_obstacle=_prior,
-                            mask_ephemeral=_mask_eph,
-                            out=self._slam_dyn_mask)
-                        # Mask live ego obs (not planner evidence feed) so
-                        # ephemeral movers actually get zeroed for keyframes.
-                        _kf_base = (
-                            self._ego_obs_shim
-                            if getattr(self, "_ego_shim_valid", False)
-                            else self._obs_combined)
-                        _kf_obs = apply_mask_to_obs(
-                            _kf_base, self._slam_dyn_mask,
-                            obs_out=self._slam_kf_obs)
-                        _ms = (time.perf_counter() - _t0) * 1000.0
-                        _self_n, _eph_n, _tot_n = mask_counts(
-                            self._ego_labels, self._slam_dyn_mask,
-                            prior_obstacle=_prior, mask_ephemeral=_mask_eph)
-                        self._slam_mask_ms = _ms
-                        self._slam_dyn_mask_n += 1
-                        if self._slam_dyn_mask_n <= 2 or self._slam_dyn_mask_n % 90 == 0:
-                            print(
-                                "slam_mask: self=%d eph=%d total=%d prior=%d "
-                                "ms=%.2f n=%d enable=1"
-                                % (_self_n, _eph_n, _tot_n, _n_prior,
-                                   _ms, self._slam_dyn_mask_n))
                     self._global_map.keyframe_check(
                         _kf_obs, self._known_combined,
                         cap_x, cap_y, cap_theta,
