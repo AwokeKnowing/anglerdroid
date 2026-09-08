@@ -7,112 +7,114 @@ CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 # Ego-space pixel size (metres)
 EGO_PX_SIZE = 0.010           # 1 px = 10 mm
 
-# Physical robot dimensions (metres)
+# Physical robot dimensions (metres / cm)
 WHEEL_DIAMETER_CM = 17.13
-WHEELBASE_CM = 34.0
+WHEELBASE_CM = 34.0            # distance between left/right wheel centers
 WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0   # ~0.08565
 WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
 
-# Robot footprint on costmap (pixels). Robot faces RIGHT in ego frame.
-ROBOT_W = 30                  # front-back (x direction)
-ROBOT_H = 42                  # side-to-side (y direction)
-ROBOT_CX_OFF = -78            # x offset from crosshair center
+# ---------------------------------------------------------------------------
+# Self-mask / footprint geometry — ALL offsets in cm relative to the axle
+# midpoint (point halfway between the two wheel centers).
+#
+# Ego frame: robot faces +X (right on the image). +Y is robot-left
+# (up on the image → decreasing row). EGO_PX_SIZE = 1 cm/px so cm == px.
+# Axle origin in ego pixels: (RCX, RCY).
+# ---------------------------------------------------------------------------
 
-FOOT_PAD_FWD = 0              # no extra forward self-clear; geometric front only (tune vs box in overlay)
-FOOT_PAD_BWD = 10             # extra clear pixels backward (self-observation margin)
-FOOT_PAD_LAT = 4              # extra clear pixels lateral (mast-inflate ghosts on spin)
+# Body: 30 cm front-back × 33 cm left-right, centered on axle
+BODY_LEN_CM = 30.0            # along +X (forward)
+BODY_WID_CM = 33.0            # along +Y (left)
+BODY_CX_CM = 0.0              # body center vs axle
+BODY_CY_CM = 0.0
 
-# Derived: robot center in ego frame
+# Wheels: one box each, 18×6 cm (diameter × tire width), centers on axle line
+WHEEL_LEN_CM = 18.0           # along +X
+WHEEL_WID_CM = 6.0            # along +Y
+WHEEL_L_CX_CM = 0.0
+WHEEL_L_CY_CM = WHEELBASE_CM / 2.0    # left (+Y)
+WHEEL_R_CX_CM = 0.0
+WHEEL_R_CY_CM = -WHEELBASE_CM / 2.0   # right (−Y)
+
+# Mast column (self-hits, not floor-clear). Size/offset from URDF (~3 cm post
+# near back wall); slightly fattened so depth self-returns get stripped.
+MAST_LEN_CM = 8.0
+MAST_WID_CM = 8.0
+MAST_CX_CM = -13.0            # behind axle (URDF mast_cx ≈ −0.135 m)
+MAST_CY_CM = 0.0
+
+# Legacy aliases (consumers still import these names)
+ROBOT_W = int(round(BODY_LEN_CM))   # front-back
+ROBOT_H = int(round(BODY_WID_CM))   # side-to-side
+ROBOT_CX_OFF = -78            # x offset of axle from crosshair center
+WHEEL_HALF = int(round(WHEEL_LEN_CM / 2.0))  # compat import only
+
+# Safety scan pads (NOT baked into self-mask boxes)
+FOOT_PAD_FWD = 0
+FOOT_PAD_BWD = 10
+FOOT_PAD_LAT = 4
+
+# Axle origin in ego pixels
 RCX = CROSSHAIR_CX + ROBOT_CX_OFF   # 81
 RCY = CROSSHAIR_CY                   # 119
 
-# Multi-box footprint approximating robot 3D hull top-down projection.
-# Body box (~30 wide) + 4 wheel boxes (corners) cover the true physical footprint.
-# All boxes cleared to known-free in ego topdown map (self-mask for depth).
 
-# Body box (central chassis, excluding wheels)
-BODY_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
-BODY_Y0 = max(0, RCY - ROBOT_H // 2)
-BODY_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
-BODY_Y1 = min(FRAME_H, RCY + ROBOT_H // 2)
+def _ego_box_from_axle(cx_cm, cy_cm, sx_cm, sy_cm):
+    """Axis-aligned ego pixel box from axle-relative cm (center + size).
 
-# Wheel boxes (4 corners, ~17 cm diameter wheels + margin)
-WHEEL_HALF = 10  # pixels at 1 cm/px (~10 cm radius including margin)
+    +x_cm forward → +col; +y_cm left → −row.
+    Returns (x0, y0, x1, y1) with exclusive x1/y1 so (x1-x0, y1-y0) == size.
+    """
+    sx = int(round(sx_cm))
+    sy = int(round(sy_cm))
+    pcx = RCX + float(cx_cm)
+    pcy = RCY - float(cy_cm)  # left → up on image
+    x0 = int(round(pcx - sx / 2.0))
+    y0 = int(round(pcy - sy / 2.0))
+    x1 = x0 + sx
+    y1 = y0 + sy
+    return (max(0, x0), max(0, y0), min(FRAME_W, x1), min(FRAME_H, y1))
 
-# Front-left wheel
-WHEEL_FL_X0 = max(0, RCX + ROBOT_W // 2 - 5 - WHEEL_HALF)
-WHEEL_FL_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT - WHEEL_HALF)
-WHEEL_FL_X1 = min(FRAME_W, WHEEL_FL_X0 + 2 * WHEEL_HALF)
-WHEEL_FL_Y1 = min(FRAME_H, WHEEL_FL_Y0 + 2 * WHEEL_HALF)
 
-# Front-right wheel
-WHEEL_FR_X0 = max(0, RCX + ROBOT_W // 2 - 5 - WHEEL_HALF)
-WHEEL_FR_Y0 = max(0, RCY + ROBOT_H // 2 + FOOT_PAD_LAT - WHEEL_HALF)
-WHEEL_FR_X1 = min(FRAME_W, WHEEL_FR_X0 + 2 * WHEEL_HALF)
-WHEEL_FR_Y1 = min(FRAME_H, WHEEL_FR_Y0 + 2 * WHEEL_HALF)
+BODY_BOX = _ego_box_from_axle(BODY_CX_CM, BODY_CY_CM, BODY_LEN_CM, BODY_WID_CM)
+WHEEL_L_BOX = _ego_box_from_axle(WHEEL_L_CX_CM, WHEEL_L_CY_CM, WHEEL_LEN_CM, WHEEL_WID_CM)
+WHEEL_R_BOX = _ego_box_from_axle(WHEEL_R_CX_CM, WHEEL_R_CY_CM, WHEEL_LEN_CM, WHEEL_WID_CM)
+MAST_BOX = _ego_box_from_axle(MAST_CX_CM, MAST_CY_CM, MAST_LEN_CM, MAST_WID_CM)
 
-# Back-left wheel
-WHEEL_BL_X0 = max(0, RCX - ROBOT_W // 2 + 5 - WHEEL_HALF)
-WHEEL_BL_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT - WHEEL_HALF)
-WHEEL_BL_X1 = min(FRAME_W, WHEEL_BL_X0 + 2 * WHEEL_HALF)
-WHEEL_BL_Y1 = min(FRAME_H, WHEEL_BL_Y0 + 2 * WHEEL_HALF)
+# Named pixel aliases for body (compat)
+BODY_X0, BODY_Y0, BODY_X1, BODY_Y1 = BODY_BOX
 
-# Back-right wheel
-WHEEL_BR_X0 = max(0, RCX - ROBOT_W // 2 + 5 - WHEEL_HALF)
-WHEEL_BR_Y0 = max(0, RCY + ROBOT_H // 2 + FOOT_PAD_LAT - WHEEL_HALF)
-WHEEL_BR_X1 = min(FRAME_W, WHEEL_BR_X0 + 2 * WHEEL_HALF)
-WHEEL_BR_Y1 = min(FRAME_H, WHEEL_BR_Y0 + 2 * WHEEL_HALF)
+# Legacy FOOT_* AABB around hull + safety pads (safety.py forward/back scans)
+_hull = [BODY_BOX, WHEEL_L_BOX, WHEEL_R_BOX, MAST_BOX]
+FOOT_X0 = max(0, min(b[0] for b in _hull) - FOOT_PAD_BWD)
+FOOT_Y0 = max(0, min(b[1] for b in _hull) - FOOT_PAD_LAT)
+FOOT_X1 = min(FRAME_W, max(b[2] for b in _hull) + FOOT_PAD_FWD)
+FOOT_Y1 = min(FRAME_H, max(b[3] for b in _hull) + FOOT_PAD_LAT)
 
-# Legacy single-rect footprint bounds (for backward compat; prefer multi-box above)
-# Encompasses body + wheels but as single rect (doesn't match actual hull shape)
-FOOT_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
-FOOT_Y0 = max(0, RCY - ROBOT_H // 2 - FOOT_PAD_LAT)
-FOOT_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
-FOOT_Y1 = min(FRAME_H, RCY + ROBOT_H // 2 + FOOT_PAD_LAT)
-
-# Mast / tall payload: floor can look free under a table while the mast hits the top.
-# Obstacles at or above MAST_CLEAR_CM are treated as mast-colliders (overhangs).
+# Mast / tall payload planning constants
 MAST_CLEAR_CM = 45          # cm above floor → dangerous for mast
-MAST_RADIUS_PX = 8           # ego-map half-width of mast column around centerline
-MAST_INFLATE_PX = 12         # extra inflation for tall obstacles in safety/planning
+MAST_RADIUS_PX = int(round(MAST_WID_CM / 2.0))
+MAST_INFLATE_PX = 12
 
 # Self-mask semantics (James map metric):
-# 1. UNDER_ROBOT_BOXES: floor under chassis/wheels footprint → mark clear+known (obs=0, known=255)
-# 2. SELF_IGNORE_BOXES: robot body/mast self-hits → strip from obstacles but do NOT force known-clear
-#    (obs=0, leave known unchanged — we can't see through ourselves)
-
-# Under-robot clear zones: wheels + body floor (excluding mast column to avoid clearing real obstacles)
+# 1. UNDER_ROBOT_BOXES: floor under chassis/wheels → mark clear+known
+# 2. SELF_IGNORE_BOXES: mast (and similar) self-hits → strip obs, do NOT force known-clear
 UNDER_ROBOT_BOXES = [
-    (BODY_X0, BODY_Y0, BODY_X1, BODY_Y1),        # body floor
-    (WHEEL_FL_X0, WHEEL_FL_Y0, WHEEL_FL_X1, WHEEL_FL_Y1),  # front-left wheel
-    (WHEEL_FR_X0, WHEEL_FR_Y0, WHEEL_FR_X1, WHEEL_FR_Y1),  # front-right wheel
-    (WHEEL_BL_X0, WHEEL_BL_Y0, WHEEL_BL_X1, WHEEL_BL_Y1),  # back-left wheel
-    (WHEEL_BR_X0, WHEEL_BR_Y0, WHEEL_BR_X1, WHEEL_BR_Y1),  # back-right wheel
+    BODY_BOX,       # body floor
+    WHEEL_L_BOX,    # left wheel
+    WHEEL_R_BOX,    # right wheel
 ]
-
-# Self-ignore zones: mast column (vertical strip around robot centerline)
-# Mast self-reflection shows as fake obstacles → remove from obs but do NOT mark known-clear
-MAST_SELF_X0 = max(0, RCX - ROBOT_W // 2 - FOOT_PAD_BWD)
-MAST_SELF_Y0 = max(0, RCY - MAST_RADIUS_PX)
-MAST_SELF_X1 = min(FRAME_W, RCX + ROBOT_W // 2 + FOOT_PAD_FWD)
-MAST_SELF_Y1 = min(FRAME_H, RCY + MAST_RADIUS_PX)
-
 SELF_IGNORE_BOXES = [
-    (MAST_SELF_X0, MAST_SELF_Y0, MAST_SELF_X1, MAST_SELF_Y1),  # mast column
+    MAST_BOX,       # mast column
 ]
-
-# Legacy: combined footprint (all boxes) for backward compat with viz code
 FOOTPRINT_BOXES = UNDER_ROBOT_BOXES + SELF_IGNORE_BOXES
 
-# RS1 camera-space visualization scale
-# Ego-map boxes (1 cm/px orthographic) need scaling when drawn on RS1 color (perspective camera).
-# RS1 color shows ~wider FOV with varying GSD; scale ~3–4× makes boxes cover robot hull + wheels.
-# Tune these constants live in Rerun to align green/blue boxes with robot body in vision/rs1_mask_overlay.
-# Map metric (UNDER_ROBOT_BOXES, SELF_IGNORE_BOXES) stays unchanged; this is viz-only.
-RS1_VIZ_SCALE = 3.5           # scale ego boxes for RS1 color overlay (3.5 from mask_tune dumps)
-RS1_VIZ_CX_SHIFT = 5          # forward shift in ego +x (pixels) to recenter scaled boxes on hull
+# Compat aliases for old mast strip names
+MAST_SELF_X0, MAST_SELF_Y0, MAST_SELF_X1, MAST_SELF_Y1 = MAST_BOX
 
-# Self-mask overlay visualization opacity
-# Fill alpha for under-robot / self-ignore boxes in both RS1 and ego footprint overlays.
-# Low opacity (~25%) lets underlay/map show through; outlines stay crisp for edges.
-SELF_MASK_VIZ_ALPHA = 0.20    # blend alpha for green/blue fills (0.20 = 20% opacity); override via ~/.kevin/mask_viz.json
+# RS1 camera-space visualization scale (viz-only; map metric unchanged)
+RS1_VIZ_SCALE = 3.5
+RS1_VIZ_CX_SHIFT = 5
+
+# Self-mask overlay visualization opacity (override via ~/.kevin/mask_viz.json)
+SELF_MASK_VIZ_ALPHA = 0.20
