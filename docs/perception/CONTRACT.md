@@ -58,6 +58,10 @@ So the map lies in two directions: pretends clear under the chassis, and lets ma
   (default off) zeros masked cells on self-SLAM keyframe obs; live
   ``slam_mask:`` metrics (SELF / ephemeral / ms) compute whenever ego
   labels fire — including ``--no-wheelbase`` when keyframe writes skip.
+  Same gate also optionally zeros VO gray pixels whose RS2 depth samples
+  project into masked ego cells (`apply_ignore_to_gray` /
+  `build_forward_ignore_from_verts`; ``vo_ignore:`` metrics). Color UV is a
+  depth-grid remap (not `rs.align`) — gap noted; still no invented CLEAR.
   Full RGB-D+wheel+IMU dynamic-tolerant SLAM still TODO.
 
 ## Delivery order

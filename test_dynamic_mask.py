@@ -8,10 +8,11 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 
-from robot_config import FRAME_H, FRAME_W, BODY_BOX
+from robot_config import FRAME_H, FRAME_W, BODY_BOX, RCX, RCY
 from perception.labels import UNKNOWN, SELF, CLEAR, OBSTACLE
 from perception.dynamic_mask import (
     build_slam_outlier_mask, apply_mask_to_obs, mask_counts, mask_as_uint8,
+    apply_ignore_to_gray, build_forward_ignore_from_verts,
 )
 from perception import build_slam_outlier_mask as exported
 
@@ -155,6 +156,107 @@ def test_mask_counts_self_and_ephemeral():
     assert e0 == 0 and t0 == s0 == expect_self
 
 
+
+
+def test_apply_ignore_to_gray_zeros_only_masked():
+    gray = np.arange(FRAME_H * FRAME_W, dtype=np.uint8).reshape(FRAME_H, FRAME_W)
+    src = gray.copy()
+    mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+    mask[10:20, 30:40] = True
+    out = np.zeros_like(gray)
+    apply_ignore_to_gray(gray, mask, out=out)
+    assert np.all(out[10:20, 30:40] == 0)
+    assert np.all(out[~mask] == src[~mask])
+    assert np.all(gray == src), "source gray must be unchanged when out separate"
+    # shape mismatch
+    try:
+        apply_ignore_to_gray(gray, np.zeros((10, 10), dtype=bool))
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+
+
+def test_build_forward_ignore_marks_hit_pixel():
+    """Synthetic vert that maps into masked ego cell must mark some gray px."""
+    import math, cv2
+    # Mirror vision FW constants (keep test self-contained / no vision import).
+    pitch = math.radians(25.6 - 90.0)
+    rot, _ = cv2.Rodrigues(np.float64([pitch, 0, 0]))
+    rot = rot.astype(np.float32)
+    piv = np.array([0.0, -1.0, 0.02], dtype=np.float32)
+    trans = np.array([0.0, -1.0, 0.0], dtype=np.float32)
+    scatter_h, scatter_w = FRAME_W, FRAME_H
+    scale = 100.0
+    offset = np.float32([scatter_w / 2.0, scatter_h / 2.0 + scale])
+    fw_dx = -75 + 132  # TD_X_OFFSET + FW_TD_X_DELTA as in vision defaults
+    fw_dy = -1
+
+    # Build a dense-enough fake grid (283x160 like GPU default) of zeros,
+    # then place one valid forward point that should land in-bounds.
+    gh, gw = 160, 283
+    verts = np.zeros((gh * gw, 3), dtype=np.float32)
+    # Pick a camera-frame point ~1m ahead, slightly down
+    verts[gh // 2 * gw + gw // 2] = np.array([0.0, 0.05, 1.0], dtype=np.float32)
+
+    # Compute expected ego cell with same math as helper (GPU-matched)
+    p = verts[gh // 2 * gw + gw // 2].copy()
+    r = (p - piv) @ rot + piv - trans
+    sx = int(np.floor(r[0] * scale + offset[0]))
+    sy = int(np.floor(r[1] * scale + offset[1]))
+    if not (0 <= sx < scatter_w and 0 <= sy < scatter_h):
+        print("skip_geom sx,sy", sx, sy, "r", r)
+        return
+    ei = sx + fw_dy
+    ej = (scatter_h - 1 - sy) + fw_dx
+    if not (0 <= ei < FRAME_H and 0 <= ej < FRAME_W):
+        print("skip_ego", ei, ej)
+        return
+    ego = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+    ego[ei, ej] = True
+    ign, ns, nh, ng = build_forward_ignore_from_verts(
+        verts, ego,
+        rotation=rot, pivot=piv, translation=trans,
+        scale=scale, offset=offset,
+        scatter_h=scatter_h, scatter_w=scatter_w,
+        fw_dx=fw_dx, fw_dy=fw_dy,
+        gray_h=FRAME_H, gray_w=FRAME_W,
+        stride=1, stamp=1)
+    assert ns >= 1
+    assert nh == 1, (nh, sx, sy, ei, ej)
+    assert ng > 0
+    # Unmasked ego → no hits
+    ego2 = np.zeros_like(ego)
+    ign2, ns2, nh2, ng2 = build_forward_ignore_from_verts(
+        verts, ego2,
+        rotation=rot, pivot=piv, translation=trans,
+        scale=scale, offset=offset,
+        scatter_h=scatter_h, scatter_w=scatter_w,
+        fw_dx=fw_dx, fw_dy=fw_dy,
+        gray_h=FRAME_H, gray_w=FRAME_W,
+        stride=1, stamp=1)
+    assert nh2 == 0 and ng2 == 0
+
+def test_build_forward_ignore_shape_and_empty():
+    # Empty verts → empty ignore
+    ego = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+    ego[RCY, RCX] = True
+    rot = np.eye(3, dtype=np.float32)
+    piv = np.zeros(3, dtype=np.float32)
+    trans = np.zeros(3, dtype=np.float32)
+    off = np.float32([FRAME_H / 2.0, FRAME_W / 2.0])
+    out = np.ones((FRAME_H, FRAME_W), dtype=bool)
+    ign, ns, nh, ng = build_forward_ignore_from_verts(
+        np.zeros((0, 3), dtype=np.float32), ego,
+        rotation=rot, pivot=piv, translation=trans,
+        scale=100.0, offset=off,
+        scatter_h=FRAME_W, scatter_w=FRAME_H,
+        gray_h=FRAME_H, gray_w=FRAME_W,
+        out=out)
+    assert ign is out and not np.any(out)
+    assert ns == nh == ng == 0
+
 if __name__ == "__main__":
     test_self_always_masked()
     print("OK self_masked")
@@ -172,4 +274,10 @@ if __name__ == "__main__":
     print("OK shape")
     test_mask_counts_self_and_ephemeral()
     print("OK mask_counts")
+    test_apply_ignore_to_gray_zeros_only_masked()
+    print("OK apply_ignore_gray")
+    test_build_forward_ignore_marks_hit_pixel()
+    print("OK forward_ignore_hit")
+    test_build_forward_ignore_shape_and_empty()
+    print("OK forward_ignore_empty")
     print("ALL PASS")

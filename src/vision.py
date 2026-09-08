@@ -53,6 +53,7 @@ from perception import (
     EvidenceMap,
     select_planner_feed, evidence_obstacle_prior_ego,
     build_slam_outlier_mask, apply_mask_to_obs, mask_counts,
+    apply_ignore_to_gray, build_forward_ignore_from_verts,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -842,6 +843,17 @@ class Vision:
         self._slam_prior_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._slam_dyn_mask_n = 0
         self._slam_mask_ms = 0.0
+        # VO gray ignore (same KEVIN_SLAM_DYNAMIC_MASK gate; reuse last ego mask)
+        self._vo_ignore_mask = np.zeros((FRAME_H, FRAME_W), dtype=bool)
+        self._vo_gray = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        self._vo_ignore_n = 0
+        self._vo_ignore_ms = 0.0
+        self._fw_scatter_h = int(FRAME_W)  # matches configure_depth_forward out_h
+        self._fw_scatter_w = int(FRAME_H)  # matches configure_depth_forward out_w
+        self._fw_scatter_scale = float(1.0 / float(FW_PX_SIZE))
+        self._fw_scatter_offset = np.float32([
+            self._fw_scatter_w / 2.0,
+            self._fw_scatter_h / 2.0 + self._fw_scatter_scale])
         
         # SLAM lock state (critical for operator awareness)
         self._slam_locked = False
@@ -1832,7 +1844,50 @@ class Vision:
                 # Frame-tied visual odometry → queue into fast odom thread (no double wheel integrate).
                 if self._rs2 and self._rs2.ok and self._odom_thread is not None:
                     fw_gray = cv2.cvtColor(self._rs2.color, cv2.COLOR_RGB2GRAY)
-                    _odom_result = self._gpu.odom_gpu(fw_gray)
+                    _fw_for_odom = fw_gray
+                    # Optional VO ignore: reuse last slam_dyn_mask (built on ego
+                    # label cycles). Sparse verts→ego project (same FW scatter
+                    # math as GPU) then depth-grid→gray remap; gated off by default.
+                    if (
+                        self._slam_dyn_mask_enable
+                        and self._slam_dyn_mask_n > 0
+                        and self._rs2.verts is not None
+                    ):
+                        _t_voi = time.perf_counter()
+                        _fw_dx = int(TD_X_OFFSET) + FW_TD_X_DELTA
+                        _fw_dy = int(FW_Y_OFFSET)
+                        _, _ns, _nh, _ng = build_forward_ignore_from_verts(
+                            self._rs2.verts,
+                            self._slam_dyn_mask,
+                            rotation=FW_ROTATION,
+                            pivot=FW_PIVOT,
+                            translation=FW_TRANSLATION,
+                            scale=self._fw_scatter_scale,
+                            offset=self._fw_scatter_offset,
+                            scatter_h=self._fw_scatter_h,
+                            scatter_w=self._fw_scatter_w,
+                            fw_dx=_fw_dx,
+                            fw_dy=_fw_dy,
+                            y_offset=float(RS2_EXTRINSIC_Y),
+                            gray_h=FRAME_H,
+                            gray_w=FRAME_W,
+                            stride=8,
+                            stamp=1,
+                            out=self._vo_ignore_mask,
+                        )
+                        _fw_for_odom = apply_ignore_to_gray(
+                            fw_gray, self._vo_ignore_mask, out=self._vo_gray)
+                        self._vo_ignore_ms = (
+                            time.perf_counter() - _t_voi) * 1000.0
+                        self._vo_ignore_n += 1
+                        if (self._vo_ignore_n <= 2
+                                or self._vo_ignore_n % 90 == 0):
+                            print(
+                                "vo_ignore: n=%d samp=%d hit=%d gray=%d "
+                                "ms=%.2f enable=1"
+                                % (self._vo_ignore_n, _ns, _nh, _ng,
+                                   self._vo_ignore_ms))
+                    _odom_result = self._gpu.odom_gpu(_fw_for_odom)
                     if _odom_result is not None:
                         vis_yaw, vis_fwd, vis_conf = _odom_result
                         fused_yaw, fused_fwd = vis_yaw, vis_fwd

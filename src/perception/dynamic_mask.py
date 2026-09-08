@@ -18,14 +18,17 @@ for 320×240 on Orin CPU. No ROS.
 
 Env gate (live wire, default off): ``KEVIN_SLAM_DYNAMIC_MASK=1`` — vision
 feeds the mask into self-SLAM keyframe obs (zeros masked cells before
-descriptor / thumb). Full RGB-D+wheel+IMU dynamic SLAM remains TODO.
+descriptor / thumb) and optionally zeros VO gray pixels whose RS2 depth
+samples project into masked ego cells (``apply_ignore_to_gray`` /
+``build_forward_ignore_from_verts``). Full RGB-D+wheel+IMU dynamic SLAM
+remains TODO.
 
 Live wire: when ``KEVIN_EVIDENCE_MAP=1`` and the evidence grid has
 updates, vision passes a pose-warped EvidenceMap obstacle prior with
 ``mask_ephemeral=True`` so movers without accumulated static evidence are
 excluded from VO/SLAM while persistent furniture remains. Still gated by
 ``KEVIN_SLAM_DYNAMIC_MASK=1`` (default off).
-Live metrics line ``slam_mask:`` reports SELF / ephemeral / ms.
+Live metrics lines ``slam_mask:`` / ``vo_ignore:`` report counts / ms.
 """
 from __future__ import annotations
 
@@ -151,3 +154,171 @@ def mask_as_uint8(mask: np.ndarray, out: Optional[np.ndarray] = None) -> np.ndar
     out.fill(0)
     out[mask] = 255
     return out
+
+
+def apply_ignore_to_gray(
+    gray: np.ndarray,
+    ignore_mask: np.ndarray,
+    *,
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Zero gray pixels where ``ignore_mask`` is True (VO SAD ignore).
+
+    Does not invent labels — only darkens pixels the caller marked. Prefer
+    ``out`` prealloc so the live color→gray buffer is not mutated when the
+    caller still needs the unmasked gray.
+    """
+    g = np.asarray(gray)
+    m = np.asarray(ignore_mask, dtype=bool)
+    if m.shape != g.shape[:2]:
+        raise ValueError(
+            "ignore_mask shape %s != gray shape %s" % (m.shape, g.shape[:2]))
+    if out is None:
+        result = np.array(g, copy=True, dtype=g.dtype)
+    else:
+        result = out
+        if result.shape != g.shape:
+            raise ValueError(
+                "out shape %s != gray shape %s" % (result.shape, g.shape))
+        np.copyto(result, g)
+    result[m] = 0
+    return result
+
+
+def _estimate_depth_grid(n: int, orig_w: int = 848, orig_h: int = 480):
+    """Estimate (gh, gw) for a decimated RS depth vertex buffer."""
+    if n < 100:
+        return 0, 0
+    aspect = float(orig_w) / float(orig_h)
+    w_est = int(round((n * aspect) ** 0.5))
+    for w_try in (w_est, w_est - 1, w_est + 1, w_est + 2, w_est - 2):
+        if w_try > 0 and n % w_try == 0:
+            return n // w_try, w_try
+    return 0, 0
+
+
+def build_forward_ignore_from_verts(
+    verts: np.ndarray,
+    ego_ignore_mask: np.ndarray,
+    *,
+    rotation: np.ndarray,
+    pivot: np.ndarray,
+    translation: np.ndarray,
+    scale: float,
+    offset: np.ndarray,
+    scatter_h: int,
+    scatter_w: int,
+    fw_dx: int = 0,
+    fw_dy: int = 0,
+    y_offset: float = 0.0,
+    gray_h: int,
+    gray_w: int,
+    stride: int = 8,
+    z_min: float = 0.28,
+    stamp: int = 1,
+    out: Optional[np.ndarray] = None,
+) -> tuple:
+    """Sparse RS2 verts → ego ignore → gray bool mask for VO.
+
+    Reuses the same rigid+scale math as GPU ``_VERT_SCATTER_OBS``, then the
+    same ``rot90(k=-1)`` + ``(fw_dx, fw_dy)`` blit as vision's RS2 path.
+    Only marks gray pixels tied to depth samples that land in
+    ``ego_ignore_mask`` (SELF / ephemeral) — never invents CLEAR.
+
+    **Gap (documented):** color UV is a nearest remap of the decimated depth
+    grid index → ``(gray_h, gray_w)``, not ``rs.align`` / stereo map_to_color.
+    Sparse ``stride`` + small ``stamp`` keep Orin cost low; metrics report
+    sample / hit / gray counts.
+
+    Returns ``(ignore_gray, n_samp, n_hit, n_gray)``.
+    """
+    mask = np.asarray(ego_ignore_mask, dtype=bool)
+    ego_h, ego_w = mask.shape
+    if out is None:
+        ignore = np.zeros((gray_h, gray_w), dtype=bool)
+    else:
+        ignore = out
+        if ignore.shape != (gray_h, gray_w):
+            raise ValueError(
+                "out shape %s != (%d, %d)" % (ignore.shape, gray_h, gray_w))
+        if ignore.dtype != np.bool_:
+            raise TypeError("out must be bool dtype, got %s" % ignore.dtype)
+        ignore.fill(False)
+
+    v_all = np.asarray(verts, dtype=np.float32).reshape(-1, 3)
+    n = int(v_all.shape[0])
+    if n == 0 or stride < 1:
+        return ignore, 0, 0, 0
+
+    idx = np.arange(0, n, int(stride), dtype=np.int32)
+    v = v_all[idx]
+    z = v[:, 2]
+    valid = (z >= float(z_min)) & np.isfinite(z)
+    if not np.any(valid):
+        return ignore, 0, 0, 0
+    idx = idx[valid]
+    v = v[valid]
+    n_samp = int(v.shape[0])
+
+    rot = np.asarray(rotation, dtype=np.float32).reshape(3, 3)
+    piv = np.asarray(pivot, dtype=np.float32).reshape(3)
+    trans = np.asarray(translation, dtype=np.float32).reshape(3)
+    off = np.asarray(offset, dtype=np.float32).reshape(2)
+    sc = np.float32(scale)
+
+    # Match GPU: p.y += y_off; r = R*(p-piv)+piv-trans
+    p = np.empty_like(v)
+    np.copyto(p, v)
+    p[:, 1] = p[:, 1] + np.float32(y_offset)
+    # Match GLSL u_rot*v with moderngl column-major upload of numpy R → R.T@v
+    r = (p - piv) @ rot + piv - trans
+    sx = np.floor(r[:, 0] * sc + off[0]).astype(np.int32)
+    sy = np.floor(r[:, 1] * sc + off[1]).astype(np.int32)
+    in_sc = (
+        (sx >= 0) & (sy >= 0) & (sx < int(scatter_w)) & (sy < int(scatter_h)))
+    if not np.any(in_sc):
+        return ignore, n_samp, 0, 0
+    idx = idx[in_sc]
+    sx = sx[in_sc]
+    sy = sy[in_sc]
+
+    ei = sx + int(fw_dy)
+    ej = (int(scatter_h) - 1 - sy) + int(fw_dx)
+    in_ego = (ei >= 0) & (ej >= 0) & (ei < ego_h) & (ej < ego_w)
+    if not np.any(in_ego):
+        return ignore, n_samp, 0, 0
+    idx = idx[in_ego]
+    sx = sx[in_ego]
+    sy = sy[in_ego]
+    ei = ei[in_ego]
+    ej = ej[in_ego]
+    hit = mask[ei, ej]
+    if not np.any(hit):
+        return ignore, n_samp, 0, 0
+    idx = idx[hit]
+    sx = sx[hit]
+    sy = sy[hit]
+    n_hit = int(idx.shape[0])
+
+    gh, gw = _estimate_depth_grid(n)
+    if gh > 0 and gw > 0:
+        gy = idx // gw
+        gx = idx - gy * gw
+        cu = (gx * int(gray_w)) // gw
+        cv = (gy * int(gray_h)) // gh
+    else:
+        cu = (sx * int(gray_w)) // int(scatter_w)
+        cv = (sy * int(gray_h)) // int(scatter_h)
+
+    st = int(stamp)
+    for k in range(n_hit):
+        u = int(cu[k])
+        vv = int(cv[k])
+        r0 = 0 if vv < st else vv - st
+        r1 = gray_h if vv + st + 1 > gray_h else vv + st + 1
+        c0 = 0 if u < st else u - st
+        c1 = gray_w if u + st + 1 > gray_w else u + st + 1
+        ignore[r0:r1, c0:c1] = True
+
+    n_gray = int(np.count_nonzero(ignore))
+    return ignore, n_samp, n_hit, n_gray
