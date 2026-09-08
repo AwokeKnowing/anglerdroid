@@ -2697,6 +2697,42 @@ class Vision:
             }
         }
 
+    def get_policy_feed(self):
+        """Get policy feed tensors (honest labels + height) for neural policy.
+
+        Returns a dict with labels + height tensors, or None if feed is invalid.
+        Requires KEVIN_POLICY_FEED=1 to be enabled.
+
+        Returns:
+            dict with keys:
+                'labels': (H, W) uint8, UNKNOWN=0 SELF=1 CLEAR=2 OBSTACLE=3
+                'height': (H, W) uint8, obstacle height in cm (0-100)
+                'valid': bool, True if feed is current-frame fresh
+                'metadata': dict with ego frame info
+            or None if feed disabled or invalid
+        """
+        with self._lock:
+            if not self._policy_feed_enable:
+                return None
+            if not self._policy_feed_valid:
+                return None
+            if not getattr(self, '_topdown_ok', False):
+                return None
+
+            return {
+                'labels': self._policy_feed_labels,
+                'height': self._policy_feed_height,
+                'valid': True,
+                'metadata': {
+                    'ego_h': FRAME_H,
+                    'ego_w': FRAME_W,
+                    'ego_px_size': float(TD_PX_SIZE),
+                    'robot_cx': int(CROSSHAIR_CX + ROBOT_CX_OFF),
+                    'robot_cy': int(CROSSHAIR_CY),
+                    'timestamp': float(self.timestamp),
+                }
+            }
+
     def get_robot_footprint_underlay(self):
         """Ego map from PRE-obs_mask snapshot. Keep real black — do not lift it to gray."""
         underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
