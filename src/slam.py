@@ -8,17 +8,36 @@ Provides:
       • Scan-matching verification for loop closures
       • Gauss-Newton 2D pose-graph optimisation (scipy sparse)
       • In-memory map with 200–500 MB budget (no database)
+      • Optional walls STL prior assist (KEVIN_WALLS_STL_PRIOR env var)
 
 The SLAM backend *owns* a GlobalMap and exposes the same update/render/project
 API so it can be dropped in wherever GlobalMap was used.
+
+Walls prior assist (CONTRACT.md step 4):
+  - Optional static walls mesh (STL) for localization assistance
+  - Default OFF via KEVIN_WALLS_STL_PRIOR=/path/to/walls.stl
+  - Provides wall line segments for pose constraint / map evidence
+  - Fail-closed: missing file or flag off → identical legacy behavior
 """
 
 import math
 import os
+import sys
 import time
 
 import cv2
 import numpy as np
+
+# Import walls STL prior (fail-closed if module missing)
+try:
+    _PERCEPTION_PATH = os.path.join(os.path.dirname(__file__), '..')
+    if _PERCEPTION_PATH not in sys.path:
+        sys.path.insert(0, _PERCEPTION_PATH)
+    from perception.walls_stl_prior import WallsSTLPrior
+    _HAS_WALLS_PRIOR = True
+except ImportError:
+    _HAS_WALLS_PRIOR = False
+    WallsSTLPrior = None
 
 try:
     import scipy.sparse as sp
@@ -266,6 +285,16 @@ class PoseGraphSLAM:
         self._last_loop_closure_shift = 0.0
         self._last_loop_closure_time = 0.0
         self._needs_gpu_sync = False  # Flag to signal GPU map needs rebuild
+        
+        # Walls STL prior assist (default off)
+        self._walls_prior = None
+        if _HAS_WALLS_PRIOR and WallsSTLPrior is not None:
+            self._walls_prior = WallsSTLPrior()
+            if self._walls_prior.is_loaded():
+                print(f"slam: walls STL prior enabled "
+                      f"({len(self._walls_prior.get_wall_segments())} segments)")
+        
+        self._walls_constraint_count = 0
 
     # ── SlamBackend interface ───────────────────────────────────────
 
@@ -547,13 +576,65 @@ class PoseGraphSLAM:
                 hm_roi[obs_mask] = np.maximum(hm_roi[obs_mask], obs_h)
 
         t2 = time.monotonic()
-        print("slam: optimise=%.1fms  rebuild=%.1fms  max_shift=%.3fm  "
+        
+        # Apply walls prior if enabled (inject wall evidence into map)
+        if self._walls_prior is not None and self._walls_prior.is_loaded():
+            self._apply_walls_prior_to_map()
+        
+        t3 = time.monotonic()
+        
+        print("slam: optimise=%.1fms  rebuild=%.1fms  walls=%.1fms  max_shift=%.3fm  "
               "keyframes=%d  edges=%d  loops=%d" %
-              ((t1 - t0) * 1000, (t2 - t1) * 1000, max_shift,
+              ((t1 - t0) * 1000, (t2 - t1) * 1000, (t3 - t2) * 1000, max_shift,
                len(self._keyframes), len(self._edges), self._loop_count))
         
         # Signal that GPU map needs to be synchronized
         self._needs_gpu_sync = True
+
+    # ── Walls prior assist ──────────────────────────────────────────
+    
+    def _apply_walls_prior_to_map(self):
+        """Inject wall evidence into map from walls STL prior.
+        
+        Draws wall line segments as obstacle evidence in the map, helping
+        localization against known static walls. Called after map rebuild
+        (not on hot path).
+        """
+        if self._walls_prior is None or not self._walls_prior.is_loaded():
+            return
+        
+        # Project wall segments to map pixel coordinates
+        segments_px = self._walls_prior.project_walls_to_map(
+            map_origin_x=ORIGIN_X,
+            map_origin_y=ORIGIN_Y,
+            map_px_size=PX_SIZE,
+        )
+        
+        if len(segments_px) == 0:
+            return
+        
+        # Draw wall segments as obstacles in the map
+        # Use a moderate obstacle value (not too strong to override fresh obs)
+        wall_value = 128  # Mid-range obstacle evidence
+        
+        for (r0, c0, r1, c1) in segments_px:
+            # Clip to map bounds
+            if (r0 < 0 and r1 < 0) or (r0 >= MAP_H and r1 >= MAP_H):
+                continue
+            if (c0 < 0 and c1 < 0) or (c0 >= MAP_W and c1 >= MAP_W):
+                continue
+            
+            # Draw line segment using OpenCV
+            # Note: cv2.line uses (x, y) = (col, row) convention
+            cv2.line(
+                self._gmap._map,
+                (c0, r0), (c1, r1),
+                color=wall_value,
+                thickness=2,  # 2 px wide (≈2 cm for 1 cm/px maps)
+                lineType=cv2.LINE_AA,
+            )
+        
+        self._walls_constraint_count += len(segments_px)
 
     # ── Memory management ───────────────────────────────────────────
 
@@ -623,7 +704,7 @@ class PoseGraphSLAM:
     # ── Stats ───────────────────────────────────────────────────────
 
     def stats(self):
-        return {
+        stats_dict = {
             'keyframes': len(self._keyframes),
             'edges': len(self._edges),
             'loop_closures': self._loop_count,
@@ -631,6 +712,14 @@ class PoseGraphSLAM:
             'last_loop_shift_m': self._last_loop_closure_shift,
             'needs_gpu_sync': self._needs_gpu_sync,
         }
+        
+        # Include walls prior status if available
+        if self._walls_prior is not None and self._walls_prior.is_loaded():
+            stats_dict['walls_prior_segments'] = len(
+                self._walls_prior.get_wall_segments())
+            stats_dict['walls_constraints'] = self._walls_constraint_count
+        
+        return stats_dict
     
     def needs_gpu_sync(self):
         """Check if GPU map needs to be synchronized after loop closure."""
