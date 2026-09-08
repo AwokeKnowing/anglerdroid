@@ -2295,7 +2295,7 @@ class Vision:
         }
 
     def get_robot_footprint_underlay(self):
-        """Ego map from PRE-obs_mask snapshot so content remains under robot boxes."""
+        """Ego map from PRE-obs_mask snapshot. Keep real black — do not lift it to gray."""
         underlay = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         obs = getattr(self, "_viz_obs_premask", None)
         known = getattr(self, "_viz_known_premask", None)
@@ -2307,32 +2307,20 @@ class Vision:
             underlay[:] = (55, 55, 55)
             return underlay
 
-        underlay[(known == 0) & (obs == 0)] = (32, 32, 32)
+        # Unknown = true black (must remain visible through translucent green)
+        underlay[(known == 0) & (obs == 0)] = (0, 0, 0)
         underlay[(known > 0) & (obs == 0)] = (55, 55, 55)
         hit = obs > 0
         if np.any(hit):
             underlay[hit, 0] = 255
             underlay[hit, 1] = 200
             underlay[hit, 2] = 0
-
-        # Empty unknown cells inside footprint → floor gray (never wipe yellow hits)
-        for x0, y0, x1, y1 in FOOTPRINT_BOXES:
-            x0, y0 = max(0, int(x0)), max(0, int(y0))
-            x1, y1 = min(FRAME_W, int(x1)), min(FRAME_H, int(y1))
-            if x1 <= x0 or y1 <= y0:
-                continue
-            region = underlay[y0:y1, x0:x1]
-            empty = (region[:, :, 0] == 32) & (region[:, :, 1] == 32) & (region[:, :, 2] == 32)
-            region[empty] = (55, 55, 55)
+        # NO footprint gray-fill cheat — black must survive under boxes
         return underlay
 
 
     def get_robot_footprint_overlay(self):
-        """Image-2 procedural fix: intact map + additive green/blue boost (not lerp-to-solid).
-
-        Trust-style: keep every underlay pixel; only raise G/B inside boxes and set
-        partial alpha so Rerun can composite. Yellow outlines on top.
-        """
+        """Intact underlay (incl. black) + additive G/B boost inside boxes."""
         import cv2
         rgb = self.get_robot_footprint_underlay()
         if rgb is None:
@@ -2340,7 +2328,7 @@ class Vision:
         h, w = rgb.shape[:2]
         overlay = np.zeros((h, w, 4), dtype=np.uint8)
         overlay[:, :, :3] = rgb
-        overlay[:, :, 3] = 255  # full map always visible in RGB
+        overlay[:, :, 3] = 255
 
         def paint(x0, y0, x1, y1, add_g=0, add_b=0):
             x0, y0 = max(0, min(w, int(x0))), max(0, min(h, int(y0)))
@@ -2349,12 +2337,11 @@ class Vision:
                 return
             m = np.zeros((h, w), dtype=bool)
             m[y0:y1, x0:x1] = True
-            # ADDITIVE boost — preserves map structure (obstacles/gray texture)
+            # Additive only — black stays dark (0,0,0)->(0,70,0); yellow/gray keep structure
             if add_g:
                 overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + add_g, 0, 255).astype(np.uint8)
             if add_b:
                 overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + add_b, 0, 255).astype(np.uint8)
-            # Partial alpha on fills only so stacked views stay translucent; RGB keeps map
             overlay[m, 3] = 110
             cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 220), 1)
 
@@ -2368,13 +2355,8 @@ class Vision:
             y0, y1 = max(0, int(by0)), min(h, int(by1))
             x0c, x1c = max(0, fx - 1), min(w, fx + 2)
             if y1 > y0 and x1c > x0c:
-                overlay[y0:y1, x0c:x1c, 0] = 0
-                overlay[y0:y1, x0c:x1c, 1] = 255
-                overlay[y0:y1, x0c:x1c, 2] = 255
-                overlay[y0:y1, x0c:x1c, 3] = 200
+                overlay[y0:y1, x0c:x1c] = (0, 255, 255, 200)
 
-        # Outside boxes: keep A=255 so solo view still shows full map (not black)
-        # Re-assert: only box interiors got A=110; restore A=255 elsewhere
         boxmask = np.zeros((h, w), dtype=bool)
         for x0, y0, x1, y1 in list(UNDER_ROBOT_BOXES) + list(SELF_IGNORE_BOXES):
             x0, y0 = max(0, int(x0)), max(0, int(y0))
@@ -2389,7 +2371,6 @@ class Vision:
             try:
                 import cv2 as _cv, os as _os
                 _os.makedirs('/home/jetbot/.kevin/overlays', exist_ok=True)
-                # Dump RGB (what you see) — map detail must be visible inside boxes
                 rgb_o = overlay[:, :, :3]
                 big = _cv.resize(_cv.cvtColor(rgb_o, _cv.COLOR_RGB2BGR), (w*3, h*3), interpolation=_cv.INTER_NEAREST)
                 _cv.imwrite('/home/jetbot/.kevin/overlays/live_foot.png', big)
