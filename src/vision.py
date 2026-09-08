@@ -818,6 +818,7 @@ class Vision:
         for _x0, _y0, _x1, _y1 in FOOTPRINT_BOXES:
             self._ego_fp_mask[_y0:_y1, _x0:_x1] = True
         self._ego_label_n = 0
+        self._ego_metric_i = 0
         self._ego_label_ms = 0.0
         self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
         # Gated planner/costmap feed (default off). EGO_LABELS=1 also enables feed.
@@ -1699,9 +1700,13 @@ class Vision:
                     obs_out=self._ego_obs_shim, known_out=self._ego_known_shim)
                 self._ego_shim_valid = True
 
-            # A/B metrics vs honest ego labels (rate-limited; skip empty warmup)
-            if (self._ego_did_label and self._ego_label_n > 0
-                    and (self._ego_label_n % 90 == 0)):
+            # A/B metrics vs honest ego labels (rate-limited on label events;
+            # must not key off raw frame n — with KEVIN_EGO_EVERY>1, post-increment
+            # n is never divisible by 90 on a label frame, so metrics would go silent.)
+            if self._ego_did_label:
+                self._ego_metric_i = getattr(self, '_ego_metric_i', 0) + 1
+            if (self._ego_did_label and self._ego_metric_i > 0
+                    and (self._ego_metric_i % 30 == 0)):
                 _lab = self._ego_labels
                 _n_unk = int(np.count_nonzero(_lab == EGO_UNKNOWN))
                 _n_self = int(np.count_nonzero(_lab == EGO_SELF))
@@ -1756,7 +1761,8 @@ class Vision:
                     self._ego_labels, self._ego_height, _ev_pose,
                     frame_i=self._ego_label_n)
                 self._evidence_map_ms = (time.monotonic() - _t_ev0) * 1000.0
-                if self._ego_label_n % 90 == 0:
+                # Same label-event cadence as ego_ab (every 30 labels).
+                if getattr(self, '_ego_metric_i', 0) % 30 == 0:
                     _ec = self._evidence_map.counts()
                     print(
                         "ego_ev: clear=%d obs=%d unk=%d update_ms=%.2f "
