@@ -1925,7 +1925,7 @@ class GPURenderer:
         """
         # CPU fallback if GPU unavailable
         if not self.available or not getattr(self, '_el_configured', False):
-            from src.perception.ego_rs1 import label_rs1_ego
+            from perception.ego_rs1 import label_rs1_ego
             return label_rs1_ego(
                 verts,
                 out_h=out_h,
@@ -1947,7 +1947,7 @@ class GPURenderer:
                 print("gpu_render: init failed: %s" % e)
                 self.available = False
                 # Fall back to CPU
-                from src.perception.ego_rs1 import label_rs1_ego
+                from perception.ego_rs1 import label_rs1_ego
                 return label_rs1_ego(
                     verts,
                     out_h=out_h,
@@ -1968,7 +1968,7 @@ class GPURenderer:
                 import traceback
                 traceback.print_exc()
                 # Fall back to CPU
-                from src.perception.ego_rs1 import label_rs1_ego
+                from perception.ego_rs1 import label_rs1_ego
                 return label_rs1_ego(
                     verts,
                     out_h=out_h,
@@ -2015,13 +2015,13 @@ class GPURenderer:
                 np.copyto(labels_out, cam_l_f)
                 np.copyto(height_out, cam_h_f)
             else:
-                from src.perception.ego_rs1 import _blit_x
+                from perception.ego_rs1 import _blit_x
                 _blit_x(labels_out, cam_l_f, int(x_offset))
                 _blit_x(height_out, cam_h_f, int(x_offset))
 
         # Paint SELF on CPU (box ops trivial, avoid GPU complexity)
         if self_boxes is not None:
-            from src.perception.labels import SELF
+            from perception.labels import SELF
             for x0, y0, x1, y1 in self_boxes:
                 labels_out[y0:y1, x0:x1] = SELF
 
