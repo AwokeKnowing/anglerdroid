@@ -1,0 +1,53 @@
+verdict: wandering
+stopped_before_wall: False
+wall_overlap: False
+min_footprint_clearance_m: 0.1659
+gate_blocked_forward: 52
+gate_blocked_yaw: 105
+min_distance_to_wall_mesh_m: 0.1659
+min_front_clearance_m: 0.1659
+min_plus_x_wall_clearance_m: 0.3025
+nose_crossed_wall: False
+wall_box_count: 86
+rs1_wall_hits: frames=664/1760 px_sum=4785731
+path_length_m: 31.5115
+net_displacement_m: 4.2433
+got_unstuck: True
+wall_recoveries: 34
+stuck_abort: False
+stuck_reason: none
+time_s forward=61.000 creep=58.250 turn_left=78.750 turn_right=22.000 stop=0.000
+mode_frac forward=0.277 creep=0.265 turn_left=0.358 turn_right=0.100 stop=0.000
+pose_source_counts visual=0 imu+wheel=1760
+visual_accepted: 0
+visual_rejected: 35200
+wheel_imu_frames: 1760
+match_attempts: 1759
+fused_path_length_m: 26.7187
+fused_net_displacement_m: 5.6756
+slip_noise: ANGULAR_SLIP_SCALE=0.92 LINEAR_SLIP_SCALE=1.00 depth=2pct_z+3mm wall_hits_protected dropout=1.5pct
+slam_pose_input: fused PoseEstimator (not chassis truth)
+position_stopped_gt_2s: True (longest_within_3cm_s=3.625)
+slam_keyframes: 479
+slam_edges: 478
+slam_loops: 0
+start_xy_world: (-2.321, -6.165)
+end_xy_world: (-0.954, -2.148)
+path_samples_world: (-2.321, -6.165) (-0.492, -1.660) (-0.694, -1.721) (-0.680, -1.711) (-0.954, -2.148)
+rs1_valid: 1760/1760
+rs2_clear_accepted_frames: 0/1760
+evidence_updates_ok: 1760 fail: 0 counts: {'clear': 9266, 'obs': 4364, 'unk': 677570}
+depth: RS1 = visual STL raycast (walls+floor) with Newton fill-in; wall collision boxes for stop/physics; STL not a mesh collider
+self_core_ok: True leak_px=0
+frames: 1760 sense_dt_s: 0.1250
+spawn: (-2.321, -6.165)
+visit_cells: 85 / 667
+visit_fraction: 0.127
+rooms_visited: center,south,sw,west_mid
+entered_second_room: yes
+room_counts: {'sw': 162, 'south': 65, 'center': 1477, 'west_mid': 56}
+stuck_recoveries: 32
+solver_nudges: 9
+snap_backs: 53
+wp_skips: 0
+wander_plan: wp2-door (-1.1,-3.0)

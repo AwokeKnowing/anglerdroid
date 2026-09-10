@@ -211,3 +211,10 @@ database.pkl
 
 # ASPIRE trace logs
 traces/
+
+# Newton local (Grok Bot / Cursor handoff)
+.venv-newton/
+sim/runs/
+sim/__pycache__/
+sim/kevin_newton_drive.gif
+sim/kevin_headon_check.gif
