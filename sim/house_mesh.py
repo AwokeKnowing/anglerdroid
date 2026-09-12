@@ -505,6 +505,13 @@ class VisualMeshCaster:
             indices=wp.array(idx, dtype=wp.int32, device=device),
         )
         self._kernel = None
+        self._dx_wp = None
+        self._dy_wp = None
+        self._out_fwd = None
+        self._orig_wp = None
+        self._dir_wp = None
+        self._out_t = None
+        self._buf_n = 0
 
     def _kernel_fn(self):
         if self._kernel is not None:
@@ -754,7 +761,11 @@ class VisualMeshCaster:
         dx = np.ascontiguousarray(dx, dtype=np.float32)
         dy = np.ascontiguousarray(dy, dtype=np.float32)
         h, w = dx.shape
-        out = wp.zeros((h, w), dtype=wp.float32, device=self.device)
+        if self._out_fwd is None or tuple(self._out_fwd.shape) != (h, w):
+            self._out_fwd = wp.zeros((h, w), dtype=wp.float32, device=self.device)
+            self._dx_wp = wp.array(dx, dtype=wp.float32, device=self.device)
+            self._dy_wp = wp.array(dy, dtype=wp.float32, device=self.device)
+        # Pinhole is constant — do not re-upload dx/dy every grab.
         ox, oy, oz = [float(v) for v in origin]
         qx, qy, qz, qw = [float(v) for v in quat_xyzw]
         wp.launch(
@@ -764,14 +775,14 @@ class VisualMeshCaster:
                 self.mesh.id,
                 wp.vec3(ox, oy, oz),
                 qx, qy, qz, qw,
-                wp.array(dx, dtype=wp.float32, device=self.device),
-                wp.array(dy, dtype=wp.float32, device=self.device),
+                self._dx_wp,
+                self._dy_wp,
                 float(max_t),
             ],
-            outputs=[out],
+            outputs=[self._out_fwd],
             device=self.device,
         )
-        return out.numpy()
+        return self._out_fwd.numpy()
 
 
     def _ray_kernel_fn(self):
@@ -816,20 +827,27 @@ class VisualMeshCaster:
         mag = np.linalg.norm(d, axis=1, keepdims=True)
         mag = np.maximum(mag, 1e-8)
         d = d / mag
-        out = wp.zeros(n, dtype=wp.float32, device=self.device)
+        if self._out_t is None or self._buf_n != n:
+            self._orig_wp = wp.array(o, dtype=wp.vec3, device=self.device)
+            self._dir_wp = wp.array(d, dtype=wp.vec3, device=self.device)
+            self._out_t = wp.zeros(n, dtype=wp.float32, device=self.device)
+            self._buf_n = n
+        else:
+            self._orig_wp.assign(o)
+            self._dir_wp.assign(d)
         wp.launch(
             self._ray_kernel_fn(),
             dim=n,
             inputs=[
                 self.mesh.id,
-                wp.array(o, dtype=wp.vec3, device=self.device),
-                wp.array(d, dtype=wp.vec3, device=self.device),
+                self._orig_wp,
+                self._dir_wp,
                 float(max_t),
             ],
-            outputs=[out],
+            outputs=[self._out_t],
             device=self.device,
         )
-        return out.numpy()
+        return self._out_t.numpy()
 
 
 

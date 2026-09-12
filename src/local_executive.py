@@ -8,6 +8,8 @@ Async goal mailbox for high-level agents (Kevins Doctor / tools):
 Each main-loop tick (~30 Hz): drive via planner backend:
   - 'vfh'  (default): rolling subgoal → VFH on atlas quadrant
   - 'mppi': MppiCostmapPlanner on ego-space vis._persistent_obs
+  - 'insect': 5 Hz reachable (v,w) scored 5 s on ego heightmap + visit doughnut
+  - 'neural_rl': learned policy with mppi/vfh fallback
 
 Never blocks. Capture/map thread stays untouched.
 """
@@ -33,9 +35,10 @@ _goal_xy = None  # (x, y) world m
 _active = False
 _last_wander_t = 0.0
 _dbg = {}
-_planner = "vfh"  # 'vfh' | 'mppi' | 'neural_rl'
+_planner = "vfh"  # 'vfh' | 'mppi' | 'neural_rl' | 'insect'
 _mppi = None  # lazy MppiCostmapPlanner
 _neural_rl = None  # lazy NeuralRLPolicy
+_insect = None  # lazy InsectPlanner
 
 
 def _ensure_mppi():
@@ -61,18 +64,29 @@ def _ensure_neural_rl():
     return _neural_rl
 
 
+def _ensure_insect():
+    global _insect
+    if _insect is None:
+        from insect_planner import InsectPlanner
+        _insect = InsectPlanner()
+    return _insect
+
+
 def set_planner(name: str) -> None:
-    """Select backend: 'vfh' (default), 'mppi', or 'neural_rl'."""
+    """Select backend: 'vfh' (default), 'mppi', 'neural_rl', or 'insect'."""
     global _planner
     name = (name or "vfh").strip().lower()
-    if name not in ("vfh", "mppi", "neural_rl"):
-        raise ValueError("planner must be 'vfh', 'mppi', or 'neural_rl', got %r" % name)
+    if name not in ("vfh", "mppi", "neural_rl", "insect"):
+        raise ValueError(
+            "planner must be 'vfh', 'mppi', 'neural_rl', or 'insect', got %r" % name)
     with _lock:
         _planner = name
     if name == "mppi":
         _ensure_mppi()
     elif name == "neural_rl":
         _ensure_neural_rl()
+    elif name == "insect":
+        _ensure_insect()
     print("local_executive: planner backend = %s" % name)
 
 
@@ -93,6 +107,8 @@ def set_goal_xy(x, y):
         _ensure_mppi().set_goal(float(x), float(y))
     elif planner == "neural_rl":
         _ensure_neural_rl().set_goal(float(x), float(y))
+    elif planner == "insect":
+        _ensure_insect().set_goal(float(x), float(y))
 
 
 def set_wander():
@@ -108,6 +124,8 @@ def set_wander():
         _ensure_mppi().set_wander_mode(True)
     elif planner == "neural_rl":
         _ensure_neural_rl().set_wander_mode(True)
+    elif planner == "insect":
+        _ensure_insect().set_wander_mode(True)
 
 
 def clear():
@@ -122,6 +140,8 @@ def clear():
         _mppi.cancel()
     elif planner == "neural_rl" and _neural_rl is not None:
         _neural_rl.cancel()
+    elif planner == "insect" and _insect is not None:
+        _insect.cancel()
 
 
 def is_active():
@@ -143,6 +163,8 @@ def status():
         out["mppi"] = _mppi.get_debug_state()
     elif planner == "neural_rl" and _neural_rl is not None:
         out["neural_rl"] = _neural_rl.get_debug_state()
+    elif planner == "insect" and _insect is not None:
+        out["insect"] = _insect.get_debug_state()
     return out
 
 
@@ -234,6 +256,67 @@ def _tick_mppi(obs_map, pose_x, pose_y, pose_theta):
                 "mppi_ms": mppi.get_debug_state().get("tick_ms"),
                 "using_policy_obs": using_policy_obs,
                 "using_heightmap": mppi.get_debug_state().get("using_heightmap", False),
+            }
+    if cmd is None:
+        return None
+    return (float(cmd["fwd_mps"]), float(cmd["ang_rads"]))
+
+
+def _tick_insect(obs_map, pose_x, pose_y, pose_theta):
+    """5 Hz reachable (v,w) on ego heightmap + visit doughnut."""
+    global _dbg, _active, _mode
+
+    insect = _ensure_insect()
+    if pose_x is None or pose_y is None:
+        return None
+
+    policy_obs = None
+    slam_locked = False
+    try:
+        vis = tools.get_vision()
+        if vis:
+            policy_obs = vis.get_policy_observation()
+            slam_locked = vis.slam_locked
+    except Exception as e:
+        print("local_executive: get_policy_observation failed: %s" % e)
+
+    if policy_obs is not None and policy_obs.get("metadata", {}).get("topdown_ok"):
+        insect_input = policy_obs
+    else:
+        if obs_map is None:
+            from robot_config import FRAME_H, FRAME_W
+            obs_map = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
+        insect_input = obs_map
+
+    pose = (float(pose_x), float(pose_y), float(pose_theta or 0.0))
+    try:
+        if isinstance(insect_input, dict):
+            ego_pers = insect_input.get("ego_persistent")
+            if ego_pers is not None:
+                painted = keepouts.paint_ego(
+                    np.array(ego_pers, copy=True), pose, slam_locked=slam_locked)
+                insect_input = dict(insect_input)
+                insect_input["ego_persistent"] = painted
+        else:
+            insect_input = keepouts.paint_ego(insect_input, pose, slam_locked=slam_locked)
+    except Exception as e:
+        print("keepouts: paint skip %s" % e)
+
+    cmd = insect.tick(insect_input, pose, 0.033)
+    with _lock:
+        if not insect.is_active():
+            _active = False
+            _mode = "idle"
+            _dbg = {"event": "insect_inactive"}
+        else:
+            st = insect.get_debug_state()
+            _dbg = {
+                "mode": _mode,
+                "planner": "insect",
+                "cmd": cmd,
+                "prim_ms": st.get("prim_ms"),
+                "hot": st.get("hot"),
+                "throt": st.get("throt"),
             }
     if cmd is None:
         return None
@@ -444,7 +527,10 @@ def tick(atlas, pose_x=None, pose_y=None, pose_theta=None, obs_map=None):
 
     if planner == "mppi":
         return _tick_mppi(obs_map, pose_x, pose_y, pose_theta)
-    
+
+    if planner == "insect":
+        return _tick_insect(obs_map, pose_x, pose_y, pose_theta)
+
     if planner == "neural_rl":
         return _tick_neural_rl(obs_map, pose_x, pose_y, pose_theta)
 

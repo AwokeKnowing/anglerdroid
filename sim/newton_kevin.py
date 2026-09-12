@@ -213,44 +213,33 @@ def add_house(builder: newton.ModelBuilder, stl_path: Path):
     return mins, maxs
 
 
-def add_random_obstacles(builder: newton.ModelBuilder, mins, maxs, n=6, seed=3, static=False):
-    rng = random.Random(seed)
-    cfg = newton.ModelBuilder.ShapeConfig(density=80.0, mu=0.7)
-    placed = []
-    colors = (
-        (0.75, 0.35, 0.2),
-        (0.3, 0.55, 0.3),
-        (0.45, 0.4, 0.65),
-        (0.7, 0.65, 0.3),
-    )
-    for i in range(n):
-        hx = rng.uniform(0.08, 0.22)
-        hy = rng.uniform(0.08, 0.22)
-        hz = rng.uniform(0.08, 0.35)
-        x = rng.uniform(float(mins[0]) + 0.6, float(maxs[0]) - 0.6)
-        y = rng.uniform(float(mins[1]) + 0.6, float(maxs[1]) - 0.6)
-        if static:
-            body = -1
-            xf = wp.transform(p=wp.vec3(x, y, hz), q=wp.quat_identity())
-        else:
-            body = builder.add_body(
-                xform=wp.transform(p=wp.vec3(x, y, hz), q=wp.quat_identity()),
-                label=f"obstacle_{i}",
-            )
-            xf = None
-        builder.add_shape_box(
-            body,
-            xform=xf,
-            hx=hx,
-            hy=hy,
-            hz=hz,
-            cfg=cfg,
-            color=colors[i % len(colors)],
-            label=f"obstacle_{i}",
-        )
-        placed.append({"cx": float(x), "cy": float(y), "yaw": 0.0, "hx": float(hx), "hy": float(hy), "hz": float(hz)})
+def add_random_obstacles(
+    builder: newton.ModelBuilder,
+    mins,
+    maxs,
+    n=6,
+    seed=3,
+    static=False,
+    clutter="random",
+    spawn=None,
+    people_xy=None,
+):
+    """Couches/desks/tables with vacuum-width aisles. `n` kept for old callers."""
+    del n, mins, maxs
+    from room_clutter import add_furniture_shapes, layout_furniture
 
-    add_random_obstacles.placed = placed
+    pieces = layout_furniture(
+        seed=int(seed), spec=clutter, spawn=spawn, people_xy=people_xy,
+    )
+    add_furniture_shapes(builder, pieces, static=static)
+    add_random_obstacles.placed = pieces
+    add_random_obstacles.spec = getattr(layout_furniture, "spec", clutter)
+    add_random_obstacles.rooms = getattr(layout_furniture, "rooms", "")
+    print(
+        "clutter spec=%s n=%d %s"
+        % (add_random_obstacles.spec, len(pieces), add_random_obstacles.rooms),
+        flush=True,
+    )
 
 
 def main():
@@ -262,10 +251,15 @@ def main():
     ap.add_argument("--fwd", type=float, default=0.25)
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--drive", action="store_true")
-    ap.add_argument("--seconds", type=float, default=9.0)
-    ap.add_argument("--capture-fps", type=float, default=12.0)
+    ap.add_argument("--seconds", type=float, default=40.0)
+    ap.add_argument("--capture-fps", type=float, default=6.0)
     ap.add_argument("--gif", default="")
     ap.add_argument("--head-on", action="store_true")
+    ap.add_argument(
+        "--clutter",
+        default="random",
+        help="empty|sparse|medium|dense|packed|random  (per-room mix if random)",
+    )
     args = ap.parse_args()
 
     if args.drive:

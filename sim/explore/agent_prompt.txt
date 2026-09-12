@@ -1,0 +1,49 @@
+30-minute insect-explore evaluator. Read:
+  sim/explore/agent_prompt.txt (this file)
+  sim/explore/heartbeat.txt
+  sim/explore/watchdog_heartbeat.txt
+  sim/explore/STATUS.txt
+  sim/explore/snapshot.json
+  sim/explore/PLAN.txt
+  sim/explore/hparams.json
+  sim/explore/metrics.json
+  sim/explore/ledger.jsonl (last 25 rows)
+  sim/explore/train.log (tail ~40)
+  sim/explore/last_eval.txt (if any)
+  sim/explore/deadline.txt
+
+Goal: keep sim/explore_24h.py running until the unix deadline (20h from this start).
+Do NOT reset sim/explore/deadline.txt. Do not touch sim/overnight/.
+
+If watchdog pid is dead or heartbeat unix is >3 minutes stale AND hours_left > 0:
+  cd /home/james/gits/awokeknowing/anglerdroid
+  mkdir -p sim/explore
+  DISPLAY=:1 setsid .venv-newton/bin/python -u sim/explore_24h.py >> sim/explore/watchdog.log 2>&1 < /dev/null &
+Do not kill a healthy trainer unless log+heartbeat are both stale >3 min.
+
+If deadline passed (hours_left <= 0 or status=done): stop this agent loop (kill AGENT_LOOP_TICK_explore sleeper). Summarize chord, win_frac, coverage, GPU. Do not commit. Do not arm Jetson.
+
+This is a 5 Hz REACHABLE-(v,w) explorer. plant must stay 0. curve_mode stays 1.
+Every 0.2 s sample 64 (v,w) in the accel box from CURRENT speed, score a 5 s
+imagined rollout (plus-x zeros v = stuck), execute the argmax for 0.2 s.
+Do not sticky-follow a Bézier. Do not point spawn yaw at an opening.
+Actor a[0],a[1] are one of the 64 samples (clipped into the reachable box).
+Win_frac = fraction of 0.2 s slices whose imagined 5 s path is ≥0.5 m with
+throttle <0.30. mean_chord = mean imagined 5 s path length (not bead chord).
+HUD cont= is throttle fraction of the winner. HUD hot= is visit-heat of the winner.
+
+If healthy and hours remain: read metrics.json (rolling 25). Apply at most ONE change using PLAN.txt table:
+  win_frac, mean_chord, mean_cov_cells, crash_frac, curve_cont (throttle), prim_hot
+Do not re-enable plant. Do not go back to 10 s Bézier commit. Do not cut max_v
+unless speed is clearly the issue (crash is often heading-freeze / plus-x pin).
+Do not re-add spawn-facing-open. Circling a doughnut → raise visit_coef, not cover_coef.
+
+Then:
+  - edit sim/explore/hparams.json (trainer reloads mtime), and/or
+  - edit PLAN.txt status/next note, and/or
+  - one small bugfix in sim/explore_*.py (never waypoints / XYZ slips / textures / plant)
+  - write sim/explore/last_eval.txt with one line: win_frac/chord/cells + what you changed
+  - touch sim/explore/RESTART only if env must rebuild (rand_house/code)
+
+Keep LIVE + HUD on DISPLAY=:1. Do not commit. Do not arm Jetson.
+Re-arm the 30-minute AGENT_LOOP_TICK_explore sleeper unless stopping.

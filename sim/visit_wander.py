@@ -49,6 +49,10 @@ def _norm(a: float) -> float:
 
 def _point_in_boxes(px, py, boxes, pad: float) -> bool:
     for b in boxes:
+        if abs(float(px) - float(b["cx"])) + abs(float(py) - float(b["cy"])) > (
+            float(b["hx"]) + float(b["hy"]) + pad + 0.8
+        ):
+            continue
         yaw = float(b["yaw"])
         cb, sb = math.cos(yaw), math.sin(yaw)
         dx = float(px) - float(b["cx"])
@@ -153,6 +157,7 @@ class VisitWander:
                 self.blocked[iy, ix] = hit
                 self.free[iy, ix] = not hit
         self._mark_portals()
+        self._build_clear()
         self.vis = np.zeros((self.ny, self.nx), dtype=np.float32)
         self.stamps = 0
         self.recoveries = 0
@@ -171,16 +176,40 @@ class VisitWander:
         self.n_free = int(self.free.sum())
         self.origin = None
         self.left_first = False
-        self.wps = [
-            (-2.30, -4.50),  # north in SW; avoid east open-floor furniture pin
-            (-1.15, -3.60),  # approach pad: door-x, south of SW portal
-            (-1.15, -3.05),  # doorway open cell (portal)
-            (-0.50, -2.00),  # through into center / west_mid
-            (0.20, -1.40),   # center
-            (1.40, 0.30),
-            (-1.50, 2.10),
-            (0.20, 5.90),
+        self.door_x, self.door_y = self._sw_door_xy()
+        print(
+            "SW portal door_x=%.2f door_y=%.2f (not -1.15)"
+            % (self.door_x, self.door_y),
+            flush=True,
+        )
+        raw_wps = [
+            (-2.30, -4.50),
+            (self.door_x, self.door_y - 0.75),
+            (self.door_x, self.door_y),
+            (self.door_x + 0.08, self.door_y + 0.80),
+            (0.20, -1.40),
+            (-0.65, 1.40),
+            # Mesh has a solid E-W wall at y=2.43 from x=-0.88 to 1.83.
+            # x≈0.05 is a 12 cm partition, not an aisle — A* to y=4.2/5.6
+            # fails and overnight ground the anteroom at y≈1.9 for 800 runs.
+            # West alcove (north_w, x<-0.88, y<2.8) is the reachable room.
+            # Opening is y≈0.80-1.18 at x≈-1.0; (-1.10,1.25) sat in the wall
+            # (overnight: 9/27 died on wp6 at x≈-0.65, y≈0.77).
+            (-1.35, 1.00),
+            # Aisle between west_mid couch (east face x≈-1.65) and the
+            # x=-1.00 wall. (-1.70, 0.92) sat on the couch; overnight then
+            # snag-escape free=2.7 at x≈-1.58, never north_w.
+            (-1.35, 2.00),
+            # Vacuum north_w before east_mid. Overnight completed the aisle
+            # pad then wp8 (1.4,1.0) through the y=2.43 wall (7/8 north_w
+            # froze at x≈-1.3, y≈2.1). Couch east face x≈-1.65, y 1.55–2.15.
+            (-2.15, 1.40),
+            (-2.15, 2.50),
+            (1.55, 0.90),
         ]
+        self.wps = [self._snap_free(xy) for xy in raw_wps]
+        self._tour_ready = False
+        self._sniff_t = 5.0
         self.wp_i = 0
         self.spin_s = 0.0
         self.bad_heading = None
@@ -224,7 +253,88 @@ class VisitWander:
                 squeeze_x = side(ix, iy, 1, 0) and side(ix, iy, -1, 0)
                 squeeze_y = side(ix, iy, 0, 1) and side(ix, iy, 0, -1)
                 if squeeze_x or squeeze_y:
+                    cx, cy = self._cell_xy(ix, iy)
+                    # West alcove furniture aisles are not doors. Overnight
+                    # last 8 all reached north_w then door (-1.5, 2.3) /
+                    # door-unstick in the couch-wall squeeze.
+                    if cx < -0.80 and cy > 1.10:
+                        continue
+                    # South table (0.25,-5.72) hx=0.52 hy=0.42. The squeeze
+                    # under/south of it is not the SW door. Overnight
+                    # door-unstick aimed (-0.2,-6.7) from the north face
+                    # (3/10 south-only this window).
+                    if self._south_table_trap(cx, cy):
+                        continue
                     self.portal[iy, ix] = True
+
+    def _build_clear(self):
+        inf = 99.0
+        d = np.where(self.blocked, 0.0, inf).astype(np.float32)
+        ny, nx = self.ny, self.nx
+        for iy in range(ny):
+            for ix in range(nx):
+                if d[iy, ix] == 0.0:
+                    continue
+                best = d[iy, ix]
+                if ix:
+                    best = min(best, d[iy, ix - 1] + 1.0)
+                if iy:
+                    best = min(best, d[iy - 1, ix] + 1.0)
+                if ix and iy:
+                    best = min(best, d[iy - 1, ix - 1] + 1.414)
+                d[iy, ix] = best
+        for iy in range(ny - 1, -1, -1):
+            for ix in range(nx - 1, -1, -1):
+                if d[iy, ix] == 0.0:
+                    continue
+                best = d[iy, ix]
+                if ix + 1 < nx:
+                    best = min(best, d[iy, ix + 1] + 1.0)
+                if iy + 1 < ny:
+                    best = min(best, d[iy + 1, ix] + 1.0)
+                if ix + 1 < nx and iy + 1 < ny:
+                    best = min(best, d[iy + 1, ix + 1] + 1.414)
+                d[iy, ix] = best
+        self.clear = d * self.cs
+        self.clear[self.blocked] = 0.0
+
+    def _sw_door_xy(self):
+        pts = []
+        for iy in range(self.ny):
+            for ix in range(self.nx):
+                if not self.portal[iy, ix]:
+                    continue
+                cx, cy = self._cell_xy(ix, iy)
+                if -1.30 <= cx <= 0.20 and -3.50 <= cy <= -2.30:
+                    pts.append((cx, cy))
+        if pts:
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            return float(np.median(xs)), float(np.median(ys))
+        return -0.60, -2.81
+
+    def _south_table_trap(self, x, y):
+        """North face + under/south of the south table — not a doorway."""
+        return -0.70 <= float(x) <= 1.05 and -6.85 <= float(y) <= -4.95
+
+    def _snap_free(self, xy):
+        x, y = float(xy[0]), float(xy[1])
+        hit = self.nearest_free(x, y)
+        if hit is None:
+            return (x, y)
+        cx, cy = self._cell_xy(*hit)
+        # Overnight: snapping the north pad 2 m south dumped him in center.
+        if math.hypot(cx - x, cy - y) > 0.55:
+            return (x, y)
+        if y >= 1.15 and cy < 1.16:
+            return (x, y)
+        if y >= 5.50 and cy < 5.50:
+            return (x, y)
+        # Don't pull west-alcove pads east into the doorway (overnight
+        # skipped (-1.70, 0.92) and aimed at y=2 from x≈-1.15).
+        if x <= -1.50 and cx > -1.40:
+            return (x, y)
+        return (cx, cy)
 
     def _idx(self, x, y):
         ix = int((float(x) - self.x0) / self.cs)
@@ -375,6 +485,79 @@ class VisitWander:
                     self.vis[y2, x2] += w
         self.stamps += 1
 
+    def _easy_frac(self, room):
+        n = v = 0
+        for ix, iy in room:
+            if self.portal[iy, ix]:
+                continue
+            if float(self.clear[iy, ix]) < 0.36:
+                continue
+            n += 1
+            if self.vis[iy, ix] > 0.45:
+                v += 1
+        return (v / float(n)) if n else 1.0
+
+    def _vacuum_goal(self, start, room, x, y):
+        del start
+        best = None
+        best_s = -1e9
+        for ix, iy in room:
+            if self.portal[iy, ix] or not self.free[iy, ix]:
+                continue
+            if self.vis[iy, ix] > 0.5:
+                continue
+            if float(self.clear[iy, ix]) < 0.36:
+                continue
+            cx, cy = self._cell_xy(ix, iy)
+            d = math.hypot(cx - x, cy - y)
+            if d < 0.70 or d > 5.5:
+                continue
+            jitter = ((ix * 131 + iy * 17 + self.stamps) % 100) / 100.0
+            s = (
+                1.4 * float(self.clear[iy, ix])
+                - 0.18 * d
+                - 0.8 * float(self.vis[iy, ix])
+                + 0.25 * jitter
+            )
+            if s > best_s:
+                best_s = s
+                best = (ix, iy, cx, cy, d)
+        return best
+
+    def _sniff_goal(self, x, y, start, t):
+        del start
+        if float(t) < float(getattr(self, "_sniff_t", 0.0)):
+            return None
+        best = None
+        best_s = -1e9
+        ix0, iy0 = self._clamp_idx(x, y)
+        for dy in range(-10, 11):
+            for dx in range(-10, 11):
+                ix, iy = ix0 + dx, iy0 + dy
+                if not (0 <= ix < self.nx and 0 <= iy < self.ny):
+                    continue
+                if not self.free[iy, ix] or self.portal[iy, ix]:
+                    continue
+                if float(self.clear[iy, ix]) < 0.36:
+                    continue
+                edge = False
+                for a, b in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    x2, y2 = ix + a, iy + b
+                    if 0 <= x2 < self.nx and 0 <= y2 < self.ny and self.blocked[y2, x2]:
+                        edge = True
+                        break
+                if not edge or self.vis[iy, ix] > 0.7:
+                    continue
+                cx, cy = self._cell_xy(ix, iy)
+                d = math.hypot(cx - x, cy - y)
+                if d < 0.9 or d > 3.4:
+                    continue
+                s = -d + 0.4 * float(self.clear[iy, ix])
+                if s > best_s:
+                    best_s = s
+                    best = (ix, iy, cx, cy)
+        return best
+
     def _neighbors(self, ix, iy, allow_portal=True):
         out = []
         for dy in (-1, 0, 1):
@@ -500,6 +683,9 @@ class VisitWander:
                 # mild extra cost through already-trampled cells so we do not
                 # orbit the same trail, but do not forbid the only path.
                 ng += 0.05 * min(6.0, float(self.vis[y2, x2]))
+                cl = float(self.clear[y2, x2]) if getattr(self, "clear", None) is not None else 0.6
+                if cl < 0.45:
+                    ng += 2.8 * (0.45 - cl)
                 nxt = (x2, y2)
                 if ng + 1e-6 < gscore.get(nxt, 1e18):
                     gscore[nxt] = ng
@@ -509,7 +695,7 @@ class VisitWander:
         return None
 
     def _heading_free(self, x, y, heading, max_r=2.2):
-        step = 0.10
+        step = 0.16
         r = 0.12
         while r <= max_r:
             px = x + math.cos(heading) * r
@@ -520,11 +706,12 @@ class VisitWander:
         return max_r
 
     def _lookahead_heading(self, x, y, path, landing):
-        # Far from the door, hold the bearing to the landing. A nearby
-        # path kink changes every yaw and he never translates.
+        # Door approach: hold bearing so path kinks don't spin him.
+        # North tour: follow the A* path — bee-lining far landings is why
+        # overnight A* still camped on wp7 and never hit far_north.
         if landing is not None:
             dland = math.hypot(landing[0] - x, landing[1] - y)
-            if dland > 1.4:
+            if dland > 1.4 and float(landing[1]) < -1.0:
                 return math.atan2(landing[1] - y, landing[0] - x)
         if path and len(path) >= 2:
             best = None
@@ -555,9 +742,73 @@ class VisitWander:
         if here not in ("sw", "south", "other"):
             self.left_first = True
 
-        # After the first doorway, sweep the room we just entered before
-        # any door that would send us back toward the spawn cell.
-        if self.left_first:
+        easy_frac = self._easy_frac(room)
+        if easy_frac >= 0.60 or float(t) >= 40.0:
+            self._tour_ready = True
+
+        sniff = self._sniff_goal(x, y, start, t)
+        if sniff is not None:
+            path = self._astar(start, (sniff[0], sniff[1]))
+            if path:
+                self._sniff_t = float(t) + 9.0
+                self.path = path
+                self.landing = (sniff[2], sniff[3])
+                self.goal = self.landing
+                self.heading = self._lookahead_heading(x, y, path, self.landing)
+                self.plan_note = "sniff (%.1f,%.1f)" % (sniff[2], sniff[3])
+                return self.heading
+
+        # Overnight: after SW, vacuuming the current room starved north/east.
+        # Only sweep a room we just entered; otherwise take doors to unseen floor.
+        vacuum_ok = easy_frac < (0.38 if self.left_first else 0.68)
+        if vacuum_ok:
+            vac = self._vacuum_goal(start, room, x, y)
+            if vac is not None:
+                path = self._astar(start, (vac[0], vac[1]))
+                if path:
+                    self.path = path
+                    self.landing = (vac[2], vac[3])
+                    self.goal = self.landing
+                    self.heading = self._lookahead_heading(x, y, path, self.landing)
+                    self.plan_note = "vacuum d=%.1f frac=%.2f" % (vac[4], easy_frac)
+                    return self.heading
+
+        # Doorways into unseen floor once this room's aisles are mostly seen.
+        portals = self._portals_touching(room)
+        best = None
+        for p in portals:
+            key = (p[0], p[1])
+            if self.fail_until.get(key, -1.0) > t:
+                continue
+            px, py = self._cell_xy(*p)
+            if self._south_table_trap(px, py):
+                continue
+            lands = self._landings(p, room)
+            if not lands:
+                continue
+            unk, nout = self._flood_outside(lands, room)
+            if nout < 3:
+                continue
+            def land_key(s):
+                cx, cy = self._cell_xy(*s)
+                px, py = self._cell_xy(*p)
+                return math.hypot(cx - px, cy - py) - 0.4 * float(self.vis[s[1], s[0]])
+            land = max(lands, key=land_key)
+            path = self._astar(start, land)
+            if not path:
+                continue
+            dist = max(1, len(path) - 1) * self.cs
+            lx, ly = self._cell_xy(*land)
+            score = 3.0 * unk + 0.35 * nout - 0.40 * dist
+            d_home = math.hypot(lx - ox, ly - oy)
+            d_now = math.hypot(x - ox, y - oy)
+            if d_home + 0.6 < d_now:
+                score -= 120.0
+            if best is None or score > best[0]:
+                best = (score, path, (lx, ly), p, unk, dist)
+        take_door = best is not None and (best[0] >= 12.0 or not self.left_first or best[4] >= 20)
+
+        if (not take_door) and self.left_first:
             frontier = None
             best_d = 1.0
             for ix, iy in room:
@@ -585,102 +836,74 @@ class VisitWander:
                     self.plan_note = "room-frontier d=%.1f" % frontier[4]
                     return self.heading
 
-        portals = self._portals_touching(room)
-        best = None
-        for p in portals:
-            key = (p[0], p[1])
-            if self.fail_until.get(key, -1.0) > t:
-                continue
-            lands = self._landings(p, room)
-            if not lands:
-                continue
-            unk, nout = self._flood_outside(lands, room)
-            if nout < 3:
-                continue
-            # Aim well past the jamb so he drives through, not yaw at the gap.
-            def land_key(s):
-                cx, cy = self._cell_xy(*s)
-                px, py = self._cell_xy(*p)
-                return math.hypot(cx - px, cy - py) - 0.4 * float(self.vis[s[1], s[0]])
-            land = max(lands, key=land_key)
-            path = self._astar(start, land)
-            if not path:
-                continue
-            dist = max(1, len(path) - 1) * self.cs
-            lx, ly = self._cell_xy(*land)
-            # Prefer a doorway into a lot of unseen floor, nearer door if tied.
-            score = 3.0 * unk + 0.35 * nout - 0.40 * dist
-            d_home = math.hypot(lx - ox, ly - oy)
-            d_now = math.hypot(x - ox, y - oy)
-            # Do not U-turn back into the first room just because it is unseen.
-            if d_home + 0.6 < d_now:
-                score -= 120.0
-            if self.left_first and unk < 25:
-                score -= 40.0
-            if best is None or score > best[0]:
-                best = (score, path, (lx, ly), p, unk, dist)
-        if best is None:
-            # Fallback: farthest low-visit free cell, still leave the stamped blob.
-            goal = None
-            best_s = -1e9
-            for iy in range(self.ny):
-                for ix in range(self.nx):
-                    if not self.free[iy, ix]:
-                        continue
-                    if self.vis[iy, ix] > 1.5:
-                        continue
-                    cx, cy = self._cell_xy(ix, iy)
-                    d = math.hypot(cx - x, cy - y)
-                    if d < 1.2 or d > 8.0:
-                        continue
-                    s = d - 2.0 * float(self.vis[iy, ix])
-                    if s > best_s:
-                        best_s = s
-                        goal = (ix, iy, cx, cy, d)
-            if goal is None:
-                self.plan_note = "no exit"
-                self.goal = None
-                return self.heading
-            path = self._astar(start, (goal[0], goal[1]))
-            if path and len(path) >= 2:
-                self.path = path
-                wx, wy = goal[2], goal[3]
-            else:
-                self.path = None
-                wx, wy = goal[2], goal[3]
-            self.landing = (wx, wy)
-            self.goal = (wx, wy)
-            self.heading = self._lookahead_heading(x, y, path, (wx, wy))
-            self.plan_note = "frontier fallback d=%.1f" % goal[4]
+        if best is not None:
+            _score, path, landing, portal, unk, dist = best
+            self.path = path
+            self.landing = landing
+            self.goal = landing
+            self.heading = self._lookahead_heading(x, y, path, landing)
+            px, py = self._cell_xy(*portal)
+            self.plan_note = "door (%.1f,%.1f) unk=%d dist=%.1f" % (px, py, unk, dist)
+            self._last_portal = portal
             return self.heading
 
-        _score, path, landing, portal, unk, dist = best
-        self.path = path
-        self.landing = landing
-        self.goal = landing
-        self.heading = self._lookahead_heading(x, y, path, landing)
-        px, py = self._cell_xy(*portal)
-        self.plan_note = "door (%.1f,%.1f) unk=%d dist=%.1f" % (px, py, unk, dist)
-        self._last_portal = portal
+        # Fallback: farthest low-visit free cell, still leave the stamped blob.
+        goal = None
+        best_s = -1e9
+        for iy in range(self.ny):
+            for ix in range(self.nx):
+                if not self.free[iy, ix]:
+                    continue
+                if self.vis[iy, ix] > 1.5:
+                    continue
+                cx, cy = self._cell_xy(ix, iy)
+                d = math.hypot(cx - x, cy - y)
+                if d < 1.2 or d > 8.0:
+                    continue
+                s = d - 2.0 * float(self.vis[iy, ix])
+                if s > best_s:
+                    best_s = s
+                    goal = (ix, iy, cx, cy, d)
+        if goal is None:
+            self.plan_note = "no exit"
+            self.goal = None
+            return self.heading
+        path = self._astar(start, (goal[0], goal[1]))
+        if path and len(path) >= 2:
+            self.path = path
+            wx, wy = goal[2], goal[3]
+        else:
+            self.path = None
+            wx, wy = goal[2], goal[3]
+        self.landing = (wx, wy)
+        self.goal = (wx, wy)
+        self.heading = self._lookahead_heading(x, y, path, (wx, wy))
+        self.plan_note = "frontier fallback d=%.1f" % goal[4]
         return self.heading
 
     def _open_heading(self, x, y, yaw):
-        """Longest ray that increases distance from spawn. Leaves the first cell."""
+        """Longest ray into unvisited floor that also leaves the spawn cell."""
         best_h, best = yaw, -1.0
         ox, oy = self.origin if self.origin is not None else (x, y)
-        for k in range(16):
-            h = -math.pi + (2.0 * math.pi) * k / 16.0
-            free = self._heading_free(x, y, h, max_r=6.0)
-            nx = x + math.cos(h) * min(2.5, max(free, 0.2))
-            ny = y + math.sin(h) * min(2.5, max(free, 0.2))
+        for k in range(8):
+            h = -math.pi + (2.0 * math.pi) * k / 8.0
+            free = self._heading_free(x, y, h, max_r=3.5)
+            reach = min(2.5, max(free, 0.2))
+            nx = x + math.cos(h) * reach
+            ny = y + math.sin(h) * reach
             leave = math.hypot(nx - ox, ny - oy) - math.hypot(x - ox, y - oy)
-            score = free + 1.4 * max(0.0, leave)
+            vis = 6.0
+            hit = self._idx(nx, ny)
+            if hit is not None:
+                vis = float(self.vis[hit[1], hit[0]])
+            unvis = max(0.0, 4.0 - vis)
+            score = free + 1.4 * max(0.0, leave) + 0.9 * unvis
             if abs(_norm(h - yaw)) < 0.4:
                 score += 0.3
             if score > best:
                 best = score
                 best_h = h
-        return best_h, self._heading_free(x, y, best_h, max_r=6.0)
+        return best_h, self._heading_free(x, y, best_h, max_r=3.5)
 
     def note_fail(self, t, hold=8.0):
         p = getattr(self, "_last_portal", None)
@@ -766,24 +989,134 @@ class VisitWander:
                     phase = "surge"
                 else:
                     return 0.0, 0.95 * sign, "turn_left" if sign > 0 else "turn_right"
+            door_x_now = None
+            if self.wp_i < len(getattr(self, "wps", []) or []) and -4.2 <= self.wps[self.wp_i][1] <= -1.80:
+                door_x_now = float(self.wps[self.wp_i][0])
+            if (
+                getattr(self, "_door_commit", False)
+                and door_x_now is not None
+                and abs(cx - door_x_now) > 0.20
+                and cy > -3.70
+            ):
+                # Off the opening: do not surge into the partition face.
+                self._door_commit = False
+                self.escape_left = 0.0
+                heading = math.atan2(0.0, door_x_now - cx)
+                err = _norm(heading - yaw)
+                sign = 1 if err >= 0.0 else -1
+                self.plan_note = "door-x-realign x=%.2f" % cx
+                if abs(err) > 0.50:
+                    return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                return 0.20, float(max(-0.40, min(0.40, 1.3 * err))), "creep"
             # Widen surge through the portal when pad/commit latch is set.
             if getattr(self, "_door_commit", False):
-                return 0.38, float(max(-0.28, min(0.28, 1.0 * err))), "forward"
+                if abs(err) > 0.16:
+                    return 0.0, 0.95 * sign, "turn_left" if sign > 0 else "turn_right"
+                return 0.34, float(max(-0.16, min(0.16, 0.8 * err))), "forward"
             return 0.30, float(max(-0.35, min(0.35, 1.2 * err))), "forward"
 
-        # Room-tour waypoints (east of furniture, then north through doors).
-        if getattr(self, "wps", None):
+        if (not getattr(self, "_tour_ready", False)) and float(t) >= 40.0:
+            self._tour_ready = True
+        # Room-tour waypoints after this room's aisles are mostly covered.
+        if getattr(self, "wps", None) and getattr(self, "_tour_ready", False):
             while self.wp_i < len(self.wps):
                 wtx, wty = self.wps[self.wp_i]
+                # Already through the SW door: don't retarget wp0 back into SW
+                # (overnight: south/center runs ending plan=wp0).
+                if self.left_first or cy > float(getattr(self, "door_y", -2.81)) + 0.15:
+                    if room_of(wtx, wty) == "sw" or wty < float(getattr(self, "door_y", -2.81)) - 0.20:
+                        self.wp_i += 1
+                        continue
+                # Already east of the SW start pad, still south of the jamb:
+                # left_first stays false in south/sw, so the skip above misses
+                # and wp0-astar walks him back (overnight 2707 at
+                # (-1.41,-3.88) ended wp0-astar (-2.4,-4.4)).
+                if wtx < -1.80 and wty < -3.80 and cx > -1.70:
+                    self.wp_i += 1
+                    continue
+                # Already in center: skip leftover door/south pads and go north.
+                if cy > -1.85 and wty < 0.85:
+                    self.wp_i += 1
+                    continue
+                # Already east of the SW opening AND near/north of the jamb:
+                # don't retarget wp2-door-x. Gate on y so a SE-table pose
+                # (overnight 2713/2719 at (1.5,-5.3)/(1.8,-4.7)) does not
+                # skip the door and bee-line wp5-astar (-0.5,1.4).
+                if -4.2 <= wty <= -1.80 and cx > 0.40 and cy > -3.20:
+                    self.wp_i += 1
+                    continue
+                # Only skip stones we have already reached in y. Threshold
+                # 2.4 so the west-alcove pad (y=2.0) is not skipped from
+                # center after 5 s (overnight then jumped to wp8 east).
+                # Do not skip north_w vacuum pads (wtx<-0.90, y=2.5).
+                if (
+                    wty > 2.4
+                    and wtx > -0.90
+                    and cy > (wty - 1.15)
+                    and (self.no_progress_s > 4.5 or self._wp_still_s > 5.0)
+                    and math.hypot(cx - wtx, cy - wty) > 0.50
+                ):
+                    self.wp_i += 1
+                    self.wp_skips += 1
+                    self._wp_still_s = 0.0
+                    self._wp_best_dist = None
+                    continue
+                # In north_e but stuck on the mid stone (overnight: 395 samples
+                # at y≈1.9 aiming at (1.1, 3.9)). Skip to the 5 m pad; do not
+                # skip far_north (wty>=5).
+                # Skip east pocket stones only (wtx>0.7). Door-column 2.5/4.2
+                # must stay, or stall-skip dumps him onto 5.2 from y=1.9 again.
+                if (
+                    wtx > 0.70
+                    and 2.4 < wty < 4.8
+                    and cy > 1.75
+                    and (self.no_progress_s > 4.5 or self._wp_still_s > 5.0)
+                    and math.hypot(cx - wtx, cy - wty) > 0.50
+                ):
+                    self.wp_i += 1
+                    self.wp_skips += 1
+                    self._wp_still_s = 0.0
+                    self._wp_best_dist = None
+                    continue
+                # Vacuumed south of the north_w couch. Don't retarget wp7
+                # y=2.00 — overnight 10/26 gap-exited then froze at
+                # (-1.33, 1.07) still=16s on wp7-west-in.
+                if getattr(self, "_vac_south_done", False) and wtx < -0.80 and wty > 0.8:
+                    self.wp_i += 1
+                    continue
+                # In north_w: east_mid is through the y=2.43 wall. Overnight
+                # vacuumed to x≈-1.97 then wp10 (1.4,1.0) pulled him back to
+                # the aisle (10/25 since the y=2.00 slip cap).
+                if wtx > 0.70 and cx < -0.90 and cy > 1.15:
+                    self.wp_i += 1
+                    continue
                 # Doorway approach wps: require being near AND not still far
                 # south of the pad, else 0.75 m radius skips the approach and
                 # the next pad can land along the partition face.
-                if -4.2 <= wty <= -1.5:
-                    reach = 0.48
-                    if cy < wty - 0.35:
+                if -4.2 <= wty <= -1.80:
+                    reach = 0.42
+                    if abs(cx - wtx) > 0.18:
+                        break
+                    # Portal cells: must be at/north of the jamb, not merely
+                    # hypot-close while still south in the approach pad.
+                    south_need = 0.06 if wty > -3.35 else 0.32
+                    if cy < wty - south_need:
                         break
                 else:
                     reach = 0.75
+                    # West alcove sits behind x=-0.88. 0.75 m from the
+                    # anteroom pad (-0.65,1.40) "finishes" (-1.10,1.25)
+                    # without crossing (overnight: west_mid 1/27).
+                    if wtx < -0.90:
+                        reach = 0.42
+                        # Aisle pad snaps to (-1.5, 2.0); requiring cx<-1.50
+                        # there left him on wp7 at x≈-1.32 (vacuum pads never
+                        # started). Only deep north_w pads need x<-1.50.
+                        if wtx < -1.80:
+                            if cx > -1.50:
+                                break
+                        elif cx > -1.20:
+                            break
                 if math.hypot(cx - wtx, cy - wty) >= reach:
                     break
                 self.wp_i += 1
@@ -794,12 +1127,111 @@ class VisitWander:
             if self.wp_i < len(self.wps):
                 tx, ty = self.wps[self.wp_i]
                 heading = math.atan2(ty - cy, tx - cx)
+                # West alcove: A* nearest_free snaps the 0.4 m gap back to
+                # center (overnight sat at x≈-0.75, y≈0.9 on wp7-astar).
+                # Bee-line the opening, south of the y=1.18 jamb.
+                # Keep driving the opening until just inside, then hand off
+                # to the alcove pad (overnight sat on west-gap at x≈-1.20
+                # forever and never reached north_w).
+                if tx < -0.90 and cx > -1.10 and 0.55 < cy < 1.35:
+                    gx, gy = -1.35, 0.90
+                    if cy > 1.08:
+                        gy = 0.82
+                    heading = math.atan2(gy - cy, gx - cx)
+                    err = _norm(heading - yaw)
+                    sign = 1 if err >= 0.0 else -1
+                    self.heading = heading
+                    self.landing = (gx, gy)
+                    self.goal = self.landing
+                    self.path = None
+                    self.plan_note = "wp%d-west-gap (%.1f,%.1f)" % (self.wp_i, gx, gy)
+                    if abs(err) > 0.40:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    # Jamb reads as a blocked nose; still surge so kin slip can
+                    # walk the 38 cm gap (v=0 here left him on the lip).
+                    return 0.32, float(np.clip(1.2 * err, -0.35, 0.35)), "forward"
+                # Aisle: do not keep pushing into the couch at x=-1.65.
+                if tx < -1.20 and -1.55 <= cx <= -1.05 and 0.55 < cy < 1.35:
+                    if cx > -1.30:
+                        gx, gy = -1.35, 0.92
+                    else:
+                        # Inside the gap: vacuum south of the north_w couch.
+                        # y=2.00 is the chair (overnight 0/25 north_w on
+                        # wp7-west-in (-1.4,2.0) parked at (-1.33,0.79)).
+                        gx, gy = -2.15, 1.40
+                    heading = math.atan2(gy - cy, gx - cx)
+                    err = _norm(heading - yaw)
+                    sign = 1 if err >= 0.0 else -1
+                    self.heading = heading
+                    self.landing = (gx, gy)
+                    self.goal = self.landing
+                    self.path = None
+                    self.plan_note = "wp%d-west-in (%.1f,%.1f)" % (self.wp_i, gx, gy)
+                    if abs(err) > 0.40:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    return 0.30, float(np.clip(1.2 * err, -0.35, 0.35)), "forward"
+                if (
+                    tx < -1.80
+                    and -1.55 <= cx <= -1.05
+                    and 1.35 <= cy <= 1.55
+                ):
+                    # vac-south parked at y=1.40 targeting the same cell
+                    # (overnight 11/29 ended wp8-vac-south, min_x=-1.33).
+                    gx, gy = -2.15, 1.40
+                    heading = math.atan2(gy - cy, gx - cx)
+                    err = _norm(heading - yaw)
+                    sign = 1 if err >= 0.0 else -1
+                    self.heading = heading
+                    self.landing = (gx, gy)
+                    self.goal = self.landing
+                    self.path = None
+                    self.plan_note = "wp%d-west-in (%.1f,%.1f)" % (self.wp_i, gx, gy)
+                    if abs(err) > 0.40:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    return 0.30, float(np.clip(1.2 * err, -0.35, 0.35)), "forward"
+                if (
+                    tx < -1.80
+                    and -1.50 <= cx <= -1.18
+                    and 1.55 < cy < 2.25
+                ):
+                    gx, gy = -1.35, 1.40
+                    heading = math.atan2(gy - cy, gx - cx)
+                    err = _norm(heading - yaw)
+                    sign = 1 if err >= 0.0 else -1
+                    self.heading = heading
+                    self.landing = (gx, gy)
+                    self.goal = self.landing
+                    self.path = None
+                    self.plan_note = "wp%d-vac-south (%.1f,%.1f)" % (self.wp_i, gx, gy)
+                    if abs(err) > 0.40:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    return 0.28, float(np.clip(1.2 * err, -0.35, 0.35)), "forward"
+                if ty > -4.0 and ty <= -1.80 and abs(cx - tx) > 0.18 and cy > -3.70:
+                    # Aim at the opening (door-x, jamb-y), not due east into
+                    # the partition south of the gap.
+                    portal_y = float(ty) if ty > -3.35 else -3.13
+                    if self.wp_i + 1 < len(self.wps) and -3.4 <= self.wps[self.wp_i + 1][1] <= -2.8:
+                        portal_y = float(self.wps[self.wp_i + 1][1])
+                    heading = math.atan2(portal_y - cy, tx - cx)
+                    err = _norm(heading - yaw)
+                    sign = 1 if err >= 0.0 else -1
+                    self.heading = heading
+                    self.landing = (float(tx), float(portal_y))
+                    self.goal = self.landing
+                    self.plan_note = "wp%d-door-x (%.1f,%.1f)" % (self.wp_i, tx, portal_y)
+                    nose = self._heading_free(cx, cy, heading, max_r=1.0)
+                    front_close = front_m is not None and math.isfinite(front_m) and front_m < 0.36
+                    if abs(err) > 0.45:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    if nose < 0.26 or front_close:
+                        return 0.0, 0.90 * sign, "turn_left" if sign > 0 else "turn_right"
+                    return 0.22, float(np.clip(1.2 * err, -0.35, 0.35)), "creep"
                 # Doorway wps: approach the free cell in front of the door
                 # first, then cross. Never aim along the partition face while
                 # still south of the jamb (A* lookahead used to run E/W into
                 # the wall). Snap-to-cell only when the snap stays on/near the
                 # approach pad — not when it jumps onto the portal itself.
-                if ty > -4.0 and ty < -1.5:
+                if ty > -4.0 and ty <= -1.80:
                     start = self.nearest_free(cx, cy)
                     goal = self.nearest_free(tx, ty)
                     # Door-x is authoritative. nearest_free can snap into the
@@ -833,7 +1265,14 @@ class VisitWander:
                             d_start = math.hypot(sx - cx, sy - cy)
                             # Accept snap only if it is not north of the approach
                             # pad (portal snap reintroduces along-jamb aim).
-                            if d_start > 0.28 and sy <= (ay + 0.12):
+                            if (
+                                d_start > 0.28
+                                and sy <= (ay + 0.12)
+                                # South table (0.25,-5.72) hx=0.52 hy=0.42.
+                                # nearest_free parks him on the north face
+                                # or south of it (overnight door (-0.2,-6.7)).
+                                and not self._south_table_trap(sx, sy)
+                            ):
                                 heading = math.atan2(sy - cy, sx - cx)
                                 self.path = None
                                 self.plan_note = "wp%d-to-cell (%.1f,%.1f)" % (self.wp_i, sx, sy)
@@ -852,7 +1291,7 @@ class VisitWander:
                     elif start is not None and goal is not None:
                         sx, sy = self._cell_xy(*start)
                         d_start = math.hypot(sx - cx, sy - cy)
-                        if d_start > 0.28:
+                        if d_start > 0.28 and not self._south_table_trap(sx, sy):
                             heading = math.atan2(sy - cy, sx - cx)
                             self.path = None
                             self.plan_note = "wp%d-to-cell (%.1f,%.1f)" % (self.wp_i, sx, sy)
@@ -878,7 +1317,18 @@ class VisitWander:
                     else:
                         self.plan_note = "wp%d (%.1f,%.1f)" % (self.wp_i, tx, ty)
                 else:
-                    self.plan_note = "wp%d (%.1f,%.1f)" % (self.wp_i, tx, ty)
+                    start = self.nearest_free(cx, cy)
+                    goal = self.nearest_free(tx, ty)
+                    if start is not None and goal is not None:
+                        path = self._astar(start, goal)
+                        if path and len(path) >= 2:
+                            self.path = path
+                            heading = self._lookahead_heading(cx, cy, path, (tx, ty))
+                            self.plan_note = "wp%d-astar (%.1f,%.1f)" % (self.wp_i, tx, ty)
+                        else:
+                            self.plan_note = "wp%d (%.1f,%.1f)" % (self.wp_i, tx, ty)
+                    else:
+                        self.plan_note = "wp%d (%.1f,%.1f)" % (self.wp_i, tx, ty)
                 self.heading = heading
                 self.landing = (tx, ty)
                 self.goal = (tx, ty)
@@ -902,9 +1352,9 @@ class VisitWander:
                 # widen surge once the approach pad is reached under partition-
                 # shadow false-open (front_m large while still south of jamb).
                 portal_xy = self._nearest_portal_xy(cx, cy, max_r=2.0)
-                if portal_xy is None and -4.2 <= ty <= -1.5:
+                if portal_xy is None and -4.2 <= ty <= -1.80:
                     portal_xy = (float(tx), float(ty)) if ty > -3.35 else (float(tx), -3.13)
-                door_x = float(tx) if -4.2 <= ty <= -1.5 else (
+                door_x = float(tx) if -4.2 <= ty <= -1.80 else (
                     float(portal_xy[0]) if portal_xy is not None else cx
                 )
                 pad_xy = self._approach_pad(door_x, float(portal_xy[1]) if portal_xy else float(ty))
@@ -918,7 +1368,13 @@ class VisitWander:
                     math.hypot(cx - portal_xy[0], cy - portal_xy[1])
                     if portal_xy is not None else 99.0
                 )
-                if portal_xy is not None and self.escape_left <= 0.0:
+                if (
+                    portal_xy is not None
+                    and self.escape_left <= 0.0
+                    and -4.2 <= ty <= -1.80
+                    and abs(cx - float(tx)) < 1.05
+                    and abs(cy - float(ty)) < 1.8
+                ):
                     door_n = self._door_normal_heading(cx, cy, portal_xy)
                     yaw_err_door = abs(_norm(door_n - yaw))
                     # Partition-shadow false-open: depth says clear but we are
@@ -928,7 +1384,11 @@ class VisitWander:
                         and cy < (portal_xy[1] - 0.12)
                         and (front_m is None or (math.isfinite(front_m) and front_m > 1.2))
                     )
-                    commit_close = d_portal <= 0.40 and yaw_err_door <= 0.45
+                    commit_close = (
+                        d_portal <= 0.40
+                        and yaw_err_door <= 0.45
+                        and abs(cx - door_x) <= 0.18
+                    )
                     commit_pad = (
                         pad_reached
                         and d_portal <= 0.95
@@ -1001,7 +1461,11 @@ class VisitWander:
                     and (self.no_progress_s > 6.0 or self._wp_still_s > 8.0)
                     and float(t) >= float(getattr(self, "_wp_skip_cool", -99.0))
                 )
-                if near_portal and (self.no_progress_s > 5.0 or self._wp_still_s > 6.0):
+                if (
+                    near_portal
+                    and (self.no_progress_s > 5.0 or self._wp_still_s > 6.0)
+                    and not (self.left_first and cy > 0.40)
+                ):
                     # Doorway physical unstick: reverse+yaw, then A* to a
                     # landing on the far side of the nearest portal.
                     self.tip_s = 0.0
@@ -1295,7 +1759,9 @@ class VisitWander:
         if abs(err) > 0.55 and nose >= 0.34:
             return 0.16, float(np.clip(1.6 * err, -0.75, 0.75)), "creep"
         w = float(np.clip(1.6 * err, -0.45, 0.45))
-        return 0.28, w, "forward"
+        # Open aisles: 0.28 m/s never reached north_w before 50–70 s episodes ended.
+        v = 0.40 if nose >= 0.85 else 0.28
+        return v, w, "forward"
 
     def coverage(self, path_xy=None):
         visited = self.vis > 0.4
@@ -1314,8 +1780,13 @@ class VisitWander:
                 cx, cy = self._cell_xy(int(ix), int(iy))
                 name = room_of(cx, cy)
                 rooms[name] = rooms.get(name, 0) + 1
-        # A room counts if the path actually lingered there, not a graze.
-        touched = sorted(k for k, n in rooms.items() if n >= 4 and k != "other")
+        # A room counts if the path lingered, or we ended there (overnight
+        # was in north_w at y=1.35 with <4 samples so it never showed up).
+        touched = sorted(k for k, n in rooms.items() if n >= 2 and k != "other")
+        if src:
+            last_room = room_of(float(src[-1][0]), float(src[-1][1]))
+            if last_room != "other" and last_room not in touched:
+                touched = sorted(touched + [last_room])
         return {
             "visit_cells": n_vis,
             "free_cells": self.n_free,

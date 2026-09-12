@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Perception-driven Kevin in Newton.
 
-RS1 (top-down) is the boss. Depth is Newton tiled-camera plus a visual-mesh
-raycast of the repaired house STL (site, no MuJoCo collider). A wall in the
-top-down footprint ahead of the body stops the commander. The motion gate
-then refuses any step — forward, creep, or yaw — whose predicted footprint
-(body, caster, wheels, inflated) would enter that mesh. Recovery is the yaw
-or backup that increases whole-footprint clearance. Pose is the live
+RS1 (top-down) is the boss. Depth is a visual-mesh raycast of the repaired
+house STL (site, no MuJoCo collider). Newton tiled-camera is fallback only.
+A wall in the top-down footprint ahead of the body stops the commander. The
+motion gate then refuses any step — forward, creep, or yaw — whose predicted
+footprint (body, caster, wheels, inflated) would enter that mesh. Recovery is
+the yaw or backup that increases whole-footprint clearance. Pose is the live
 PoseEstimator (visual or IMU+wheel). Chassis truth never enters SLAM.
 """
 from __future__ import annotations
@@ -14,14 +14,18 @@ from __future__ import annotations
 import math
 import os
 import signal
+import subprocess
 import sys
 import threading
+import time
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton import StateFlags
 from newton.sensors import SensorTiledCamera
 
 _REPO = Path(__file__).resolve().parents[1]
@@ -59,7 +63,9 @@ from pose import (  # noqa: E402
 from odom_thread import OdomThread  # noqa: E402
 from slam import _scan_match, LOOP_MATCH_THRESH, THUMB_SZ  # noqa: E402
 from house_mesh import VisualMeshCaster, body_wall_clearance, footprint_local_samples, footprint_world, _rect_segment_overlap, _point_seg_dist, plus_x_against_boxes  # noqa: E402
-from visit_wander import VisitWander, FLOOR_X0, FLOOR_X1, FLOOR_Y0, FLOOR_Y1  # noqa: E402
+from visit_wander import VisitWander, FLOOR_X0, FLOOR_X1, FLOOR_Y0, FLOOR_Y1, _sample_clear  # noqa: E402
+from house_view import HouseView, SampleReplay  # noqa: E402
+from sim_people import SimPeople  # noqa: E402
 
 try:
     from newton._src.sensors.warp_raytrace.types import RenderConfig
@@ -193,17 +199,93 @@ def _print_free_sync_map(model, solver, free_joint: int):
     print("next step reads state.joint_q/joint_qd via convert_warp_coords_to_mj into qpos/qvel")
 
 
+def _zero_buf(buf, value=0.0):
+    if buf is None:
+        return False
+    try:
+        if hasattr(buf, "fill_"):
+            buf.fill_(value)
+            return True
+        arr = np.array(buf.numpy(), copy=True)
+        arr[:] = value
+        buf.assign(arr)
+        return True
+    except Exception:
+        try:
+            buf[:] = value
+            return True
+        except Exception:
+            return False
+
+
 def _zero_solver_warmstart(data):
-    for name in ("qacc_warmstart", "qacc", "qfrc_applied", "xfrc_applied"):
+    """Clear the buffers SolverMuJoCo.step warm-starts from (see solver.reset)."""
+    for name in ("qacc_warmstart", "qacc", "qfrc_applied", "xfrc_applied", "act", "ctrl"):
         buf = getattr(data, name, None)
         if buf is None:
             continue
-        try:
-            arr = np.array(buf.numpy(), copy=True)
-            arr[:] = 0.0
-            buf.assign(arr)
-        except Exception as e:
-            print("warmstart skip", name, type(e).__name__, e)
+        if not _zero_buf(buf, 0.0):
+            print("warmstart skip", name)
+
+
+def _clear_mj_contacts(data):
+    """Drop cached contacts so a teleported pose is not yanked by old points."""
+    for name in ("nacon", "ncon", "nefc"):
+        buf = getattr(data, name, None)
+        if buf is None:
+            continue
+        _zero_buf(buf, 0)
+    for name in ("efc_force", "efc_aref", "efc_b"):
+        buf = getattr(data, name, None)
+        if buf is None:
+            continue
+        _zero_buf(buf, 0.0)
+
+
+def _reset_solver_buffers(solver, model, state):
+    """Zero MuJoCo warm-start without resetting joint_q to model defaults."""
+    try:
+        solver.reset(state, flags=StateFlags.NONE)
+    except Exception as e:
+        print("solver.reset skip", type(e).__name__, e)
+    data = getattr(solver, "mjw_data", None)
+    if data is None:
+        data = getattr(solver, "mj_data", None)
+    if data is None:
+        return
+    _zero_solver_warmstart(data)
+    _clear_mj_contacts(data)
+    try:
+        solver._update_mjc_data(data, model, state)
+    except Exception as e:
+        print("update_mjc_data skip", type(e).__name__, e)
+    _refresh_mj_kinematics(solver, data)
+    _zero_solver_warmstart(data)
+    _clear_mj_contacts(data)
+    solver.update_data_interval = 1
+
+
+def _apply_hold_pose(model, solver, states, hold):
+    """Re-push a slid free-joint pose and clear solver warm-start/contacts."""
+    jq = hold.get("joint_q")
+    jqd = hold.get("joint_qd")
+    if jq is None or jqd is None:
+        return
+    primary = None
+    for st in states:
+        if st is None:
+            continue
+        if primary is None:
+            primary = st
+        st.joint_q.assign(np.array(jq, copy=True))
+        st.joint_qd.assign(np.array(jqd, copy=True))
+        if hold.get("body_q") is not None:
+            st.body_q.assign(np.array(hold["body_q"], copy=True))
+        if hold.get("body_qd") is not None and getattr(st, "body_qd", None) is not None:
+            st.body_qd.assign(np.array(hold["body_qd"], copy=True))
+        newton.eval_fk(model, st.joint_q, st.joint_qd, st)
+    if primary is not None:
+        _reset_solver_buffers(solver, model, primary)
 
 
 def _refresh_mj_kinematics(solver, data):
@@ -238,13 +320,16 @@ def _world_from_joint_xf(Xp, Xc, joint_xf):
     return _xf_mul(_xf_mul(Xp, joint_xf), _xf_inv(Xc))
 
 
-def _commit_free_slide(model, state, solver, free_joint, chassis, dx, dy, states, v_world):
-    """Slide chassis in HOUSE xy; sync joint_q/body_q/qpos so the pose sticks.
+def _commit_free_slide(
+    model, state, solver, free_joint, chassis, dx, dy, states, v_world,
+    wheel_dofs=None, wheel_r=0.09,
+):
+    """Slide chassis in HOUSE xy; sync joint_q so the next SolverMuJoCo.step holds.
 
-    House pose = X_p * body_q. MuJoCo FREE qpos is the body pose near the
-    origin. A house-frame delta must be rotated into MuJoCo via inv(X_p)
-    before writing qpos/joint_q. Clear warm-start; keep interval=1 with
-    matched buffers so the next step cannot throw him west.
+    House pose = X_p * body_q. joint_qd linear is COM velocity in the joint
+    *parent* frame: R_inv(X_p) * v_house (once). convert_warp_coords_to_mj
+    then writes world qvel. A second inv(R) injected south/west velocity after
+    the first slide, which is why later doorway headings snapped back.
     """
     jq, jqd, mq, mqd = _free_sync_addrs(model, solver, free_joint)
     data = getattr(solver, "mjw_data", None)
@@ -277,18 +362,24 @@ def _commit_free_slide(model, state, solver, free_joint, chassis, dx, dy, states
     flat_q[jq + 4] = np.float32(jquat[1])
     flat_q[jq + 5] = np.float32(jquat[2])
     flat_q[jq + 6] = np.float32(jquat[3])
-    # house_pos = Xp.pos + R_p * body_pos => v_house = R_p * v_body
-    # joint_qd linear is COM vel in parent frame: R_inv(Xp) * v_mujoco.
+    # joint_qd linear = COM vel in parent frame (Newton FREE contract).
     vw_house = np.asarray(v_world, dtype=np.float64).reshape(3)
     Rp = np.asarray(Xp[1], dtype=np.float64).reshape(4)
-    v_body = _quat_rot(_quat_inv(Rp), vw_house)
-    v_parent = _quat_rot(_quat_inv(Rp), v_body)
+    v_parent = _quat_rot(_quat_inv(Rp), vw_house)
     flat_qd[jqd + 0] = np.float32(v_parent[0])
     flat_qd[jqd + 1] = np.float32(v_parent[1])
     flat_qd[jqd + 2] = np.float32(v_parent[2])
     flat_qd[jqd + 3] = np.float32(0.0)
     flat_qd[jqd + 4] = np.float32(0.0)
     flat_qd[jqd + 5] = np.float32(0.0)
+    # Match hub spin to the slide so planted wheels do not yank the free joint.
+    spd = float(np.linalg.norm(vw_house[:2]))
+    if wheel_dofs and spd > 1e-4:
+        omega = spd / max(1e-4, float(wheel_r))
+        for d in wheel_dofs:
+            di = int(d)
+            if 0 <= di < flat_qd.size:
+                flat_qd[di] = np.float32(omega)
 
     targets = []
     for st in list(states or ()) + [state]:
@@ -300,21 +391,10 @@ def _commit_free_slide(model, state, solver, free_joint, chassis, dx, dy, states
         st.joint_qd.assign(np.array(jqd_arr, copy=True))
         newton.eval_fk(model, st.joint_q, st.joint_qd, st)
 
-    # joint_q -> MuJoCo qpos via solver convert (writes FREE world body pose).
+    # Convert writes qpos/qvel. Do not clobber qvel with a parent-frame twist.
     solver._update_mjc_data(data, model, state)
     q_now = np.array(data.qpos.numpy(), dtype=np.float32, copy=True).reshape(-1)
-    qvel = np.array(data.qvel.numpy(), dtype=np.float32, copy=True)
-    qvf = qvel.reshape(-1)
-    qvf[mqd + 0] = np.float32(v_body[0])
-    qvf[mqd + 1] = np.float32(v_body[1])
-    qvf[mqd + 2] = np.float32(v_body[2])
-    qvf[mqd + 3] = np.float32(0.0)
-    qvf[mqd + 4] = np.float32(0.0)
-    qvf[mqd + 5] = np.float32(0.0)
-    data.qvel.assign(qvel)
-    _refresh_mj_kinematics(solver, data)
-    _zero_solver_warmstart(data)
-    solver.update_data_interval = 1
+    _reset_solver_buffers(solver, model, state)
 
     after, _aq = chassis_world_pose(model, state, chassis, free_joint)
     print(
@@ -327,8 +407,6 @@ def _commit_free_slide(model, state, solver, free_joint, chassis, dx, dy, states
     )
     body_q = np.array(state.body_q.numpy(), copy=True)
     body_qd = np.array(state.body_qd.numpy(), copy=True) if getattr(state, "body_qd", None) is not None else None
-    # Refresh qpos snapshot after kinematics for hold buffers.
-    q_now = np.array(data.qpos.numpy(), dtype=np.float32, copy=True)
     for st in targets:
         st.joint_q.assign(np.array(jq_arr, copy=True))
         st.joint_qd.assign(np.array(jqd_arr, copy=True))
@@ -338,20 +416,39 @@ def _commit_free_slide(model, state, solver, free_joint, chassis, dx, dy, states
     return jq_arr.reshape(-1)[jq:jq + 7]
 
 
-def _step_or_die(solver, state_in, state_out, control, contacts, dt, limit=30.0):
-    done = threading.Event()
+_WATCHDOG = None
 
-    def _watch():
-        if done.wait(limit):
-            return
-        print("STEP HANG >%.0fs killing" % limit, flush=True)
-        os.kill(os.getpid(), signal.SIGKILL)
 
-    threading.Thread(target=_watch, daemon=True).start()
-    try:
-        solver.step(state_in, state_out, control, contacts, dt)
-    finally:
-        done.set()
+class _HangWatchdog:
+    """One thread for the whole run. Do not spawn this per solver.step."""
+
+    def __init__(self, limit=120.0):
+        self.limit = float(limit)
+        self._last = time.monotonic()
+        self._alive = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def kick(self):
+        self._last = time.monotonic()
+
+    def _run(self):
+        while self._alive:
+            time.sleep(1.0)
+            if (time.monotonic() - self._last) > self.limit:
+                print("STEP HANG >%.0fs killing" % self.limit, flush=True)
+                os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _watchdog_kick(limit=120.0):
+    global _WATCHDOG
+    if _WATCHDOG is None:
+        _WATCHDOG = _HangWatchdog(limit)
+    _WATCHDOG.kick()
+
+
+def _step_or_die(solver, state_in, state_out, control, contacts, dt, limit=120.0):
+    _watchdog_kick(limit)
+    solver.step(state_in, state_out, control, contacts, dt)
 
 
 def _nudge_chassis(
@@ -368,6 +465,10 @@ def _nudge_chassis(
     half_w: float = 0.165,
     states=None,
     speed: float = 0.28,
+    boxes=None,
+    wheel_dofs=None,
+    wheel_r: float = 0.09,
+    open_floor: bool = False,
 ) -> bool:
     """Fail-closed open-floor pin break. Never slide through a wall box.
 
@@ -417,7 +518,10 @@ def _nudge_chassis(
                 state.body_qd.assign(bqd0)
             newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
-        cands = ((dx, dy), (dy, -dx), (-dy, dx), (-dx, -dy))
+        cands = [(dx, dy), (dy, -dx), (-dy, dx), (-dx, -dy)]
+        if open_floor:
+            d = float(dist)
+            cands.extend([(0.0, d), (0.70 * d, 0.70 * d), (-0.70 * d, 0.70 * d)])
         best = None
         best_along = -1e9
         best_clr = float(clr0)
@@ -428,6 +532,8 @@ def _nudge_chassis(
             ddy = float(jdy)
             moved = math.hypot(ddx, ddy)
             along = (ddx * dx + ddy * dy) / (float(dist) + 1e-9)
+            if open_floor:
+                along = max(along, ddy / (float(dist) + 1e-9))
             if moved < 0.05 or moved > 0.28:
                 continue
             if not _inside_floor(after_xy):
@@ -443,12 +549,21 @@ def _nudge_chassis(
                 if math.isfinite(clr) and clr < 0.12:
                     continue
                 cand_clr = float(clr)
+            if boxes:
+                mid = (0.5 * (float(before[0]) + after_xy[0]), 0.5 * (float(before[1]) + after_xy[1]))
+                box_clr = min(
+                    _sample_clear(after_xy[0], after_xy[1], float(before_yaw), boxes, pad=0.02),
+                    _sample_clear(mid[0], mid[1], float(before_yaw), boxes, pad=0.02),
+                )
+                if box_clr < 0.18:
+                    continue
+                cand_clr = min(cand_clr, float(box_clr))
             if along > best_along:
                 best_along = along
                 best = (jdx, jdy, float(after_xy[0]), float(after_xy[1]))
                 best_clr = cand_clr
-        if best is None or best_along < 0.08:
-            print("nudge reject along=%.3f" % best_along)
+        if best is None or best_along < (0.05 if open_floor else 0.08):
+            print("nudge reject along=%.3f open=%s" % (best_along, open_floor))
             return False
         spd = max(0.12, min(0.35, abs(float(speed))))
         v_world = np.array([math.cos(float(yaw)) * spd, math.sin(float(yaw)) * spd, 0.0], dtype=np.float64)
@@ -459,6 +574,7 @@ def _nudge_chassis(
                     targets.append(st)
         jpos = _commit_free_slide(
             model, state, solver, free_joint, chassis, best[0], best[1], targets, v_world,
+            wheel_dofs=wheel_dofs, wheel_r=wheel_r,
         )
         after, aq = chassis_world_pose(model, state, chassis, free_joint)
         print(
@@ -493,13 +609,20 @@ def _nudge_chassis(
         return False
 
 
+_XP_CACHE = {}
+_WHEEL_QD_BUF = None
+
+
 def chassis_world_pose(model, state, chassis: int, free_joint: int):
     """Chassis pose in the HOUSE/map frame.
 
     MuJoCo FREE qpos/body_q sit near the origin; joint_X_p carries the spawn
     yaw/offset. House coordinates used by walls/wander are X_p * body_q.
     """
-    parent = _unpack_xf(model.joint_X_p.numpy()[free_joint])
+    parent = _XP_CACHE.get(id(model))
+    if parent is None:
+        parent = _unpack_xf(model.joint_X_p.numpy()[free_joint])
+        _XP_CACHE[id(model)] = parent
     child = _unpack_xf(state.body_q.numpy()[chassis])
     return _xf_mul(parent, child)
 
@@ -507,6 +630,38 @@ def chassis_world_pose(model, state, chassis: int, free_joint: int):
 def _yaw_of(quat) -> float:
     x, y, z, w = [float(t) for t in quat]
     return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def _yaw_quat(yaw):
+    h = 0.5 * float(yaw)
+    return (0.0, 0.0, math.sin(h), math.cos(h))
+
+
+def _furniture_ok(p, spawn):
+    from room_clutter import in_door_corridor
+
+    x, y = float(p["cx"]), float(p["cy"])
+    hx, hy = float(p.get("hx", 0.2)), float(p.get("hy", 0.2))
+    if in_door_corridor(x, y, hx, hy, pad=0.10):
+        return False
+    if math.hypot(x - float(spawn[0]), y - float(spawn[1])) < 0.70:
+        return False
+    return True
+
+
+def _nearby_boxes(x, y, boxes, r=1.5):
+    out = []
+    for b in boxes:
+        if abs(float(b["cx"]) - x) + abs(float(b["cy"]) - y) <= r + float(b["hx"]) + float(b["hy"]):
+            out.append(b)
+    return out
+
+
+def _kin_ok(x, y, yaw, boxes, pad=0.10):
+    if not ((FLOOR_X0 + 0.20) <= float(x) <= (FLOOR_X1 - 0.20) and (FLOOR_Y0 + 0.20) <= float(y) <= (FLOOR_Y1 - 0.20)):
+        return False
+    near = _nearby_boxes(x, y, boxes)
+    return float(_sample_clear(x, y, yaw, near, pad=0.02)) >= float(pad)
 
 
 def _pinhole_dxdy(h: int, w: int, vfov_rad: float):
@@ -1389,10 +1544,15 @@ def _vw_to_wheels(v, omega, track, wheel_r):
 
 
 def _set_wheel_qd(control, wheel_dofs, w_l, w_r):
-    vel = control.joint_target_qd.numpy().copy()
-    vel[int(wheel_dofs[0])] = w_l
-    vel[int(wheel_dofs[1])] = w_r
-    control.joint_target_qd.assign(vel)
+    """Upload wheel targets without reading the GPU buffer back every tick."""
+    global _WHEEL_QD_BUF
+    tgt = control.joint_target_qd
+    n = int(np.prod(tgt.shape))
+    if _WHEEL_QD_BUF is None or _WHEEL_QD_BUF.size != n:
+        _WHEEL_QD_BUF = np.zeros(n, dtype=np.float32)
+    _WHEEL_QD_BUF[int(wheel_dofs[0])] = float(w_l)
+    _WHEEL_QD_BUF[int(wheel_dofs[1])] = float(w_r)
+    tgt.assign(_WHEEL_QD_BUF)
 
 
 def _colorize_labels(labels: np.ndarray) -> np.ndarray:
@@ -1425,7 +1585,7 @@ def _quat_rot_batch(q, v):
     return vv + 2.0 * (w * uv + uuv)
 
 
-def _rs1_visual_depth(caster, origin, quat, h, w, vfov_rad):
+def _rs1_visual_depth(caster, origin, quat, h, w, vfov_rad, dx=None, dy=None, cam_unit=None):
     """Downward mast rays against the visual STL, floor filled in.
 
     The house mesh has walls and no floor. Rays that miss the wall return the
@@ -1434,13 +1594,16 @@ def _rs1_visual_depth(caster, origin, quat, h, w, vfov_rad):
     near the ground — that hit is a wall, not floor noise.
     """
     origin = np.asarray(origin, dtype=np.float64)
-    dx, dy = _pinhole_dxdy(h, w, vfov_rad)
-    rdx = dx.reshape(-1).astype(np.float64)
-    rdy = dy.reshape(-1).astype(np.float64)
-    cam = np.stack([rdx, rdy, np.full(rdx.shape, -1.0)], axis=1)
-    inv = 1.0 / np.maximum(np.linalg.norm(cam, axis=1), 1e-8)
-    cam *= inv[:, None]
-    dirs = _quat_rot_batch(quat, cam)
+    if cam_unit is None:
+        if dx is None or dy is None:
+            dx, dy = _pinhole_dxdy(h, w, vfov_rad)
+        rdx = dx.reshape(-1).astype(np.float64)
+        rdy = dy.reshape(-1).astype(np.float64)
+        cam = np.stack([rdx, rdy, np.full(rdx.shape, -1.0)], axis=1)
+        inv = 1.0 / np.maximum(np.linalg.norm(cam, axis=1), 1e-8)
+        cam *= inv[:, None]
+        cam_unit = cam
+    dirs = _quat_rot_batch(quat, cam_unit)
     look = _quat_rot(quat, np.array([0.0, 0.0, -1.0]))
     look = np.asarray(look, dtype=np.float64)
     ln = float(np.linalg.norm(look))
@@ -1590,27 +1753,29 @@ def _inject_wall_slab(verts, plus_x, nose_x=0.15):
 
 
 class SimRsCameras:
-    """RS1 (down) + RS2 (forward). Visual STL raycast fills wall hits."""
+    """RS1 (down) + RS2 (forward). Visual STL raycast is the depth source.
+
+    Newton tiled-camera is a fallback only when the visual caster cannot be
+    built. The 3090 path must not BVH-refit and raytrace the MuJoCo geoms
+    *and* the house STL every grab.
+    """
 
     def __init__(self, model, house_verts=None, house_faces=None):
         self.model = model
         self.n_world = max(1, int(getattr(model, "world_count", 1) or 1))
-        cfg = None
-        if RenderConfig is not None:
-            cfg = RenderConfig(enable_backface_culling=False, enable_shadows=False)
-        self.sensor = SensorTiledCamera(
-            model, default_render_config=cfg, load_textures=False,
-        ) if cfg is not None else SensorTiledCamera(model, load_textures=False)
-        self.h = RS_DEPTH_H // RS_DECIMATE_MAG
-        self.w = RS_DEPTH_W // RS_DECIMATE_MAG
+        self.sensor = None
+        self.rays = None
+        self.fwd = None
+        self.h = max(48, RS_DEPTH_H // 8)
+        self.w = max(80, RS_DEPTH_W // 8)
         vfov = math.radians(D435_VFOV_DEG)
-        self.rays = self.sensor.utils.compute_camera_rays_pinhole(
-            self.w, self.h, camera_fovs=[vfov, vfov],
-        )
-        self.fwd = self.sensor.utils.create_forward_depth_image_output(
-            self.w, self.h, camera_count=2,
-        )
         self.dx, self.dy = _pinhole_dxdy(self.h, self.w, vfov)
+        rdx = self.dx.reshape(-1).astype(np.float64)
+        rdy = self.dy.reshape(-1).astype(np.float64)
+        cam = np.stack([rdx, rdy, np.full(rdx.shape, -1.0)], axis=1)
+        inv = 1.0 / np.maximum(np.linalg.norm(cam, axis=1), 1e-8)
+        cam *= inv[:, None]
+        self._rs1_cam_unit = cam
         self.z_bias = float(TD_FLOOR_CLIP) - float(RS1_ORIGIN_Z)
         r_rs1 = np.column_stack((
             np.array([-1.0, 0.0, 0.0]),
@@ -1640,6 +1805,20 @@ class SimRsCameras:
                 print("visual mesh caster", house_verts.shape, house_faces.shape, "device", model.device)
             except Exception as e:
                 print("visual caster skip:", type(e).__name__, e)
+        if self.caster is None:
+            cfg = None
+            if RenderConfig is not None:
+                cfg = RenderConfig(enable_backface_culling=False, enable_shadows=False)
+            self.sensor = SensorTiledCamera(
+                model, default_render_config=cfg, load_textures=False,
+            ) if cfg is not None else SensorTiledCamera(model, load_textures=False)
+            self.rays = self.sensor.utils.compute_camera_rays_pinhole(
+                self.w, self.h, camera_fovs=[vfov, vfov],
+            )
+            self.fwd = self.sensor.utils.create_forward_depth_image_output(
+                self.w, self.h, camera_count=2,
+            )
+            print("newton tiled camera fallback (no visual caster)")
 
     def _xform(self, pos, quat, local_p, local_q):
         wp_pos = np.asarray(pos, dtype=np.float64) + _quat_rot(quat, local_p)
@@ -1669,41 +1848,36 @@ class SimRsCameras:
     def grab(self, state, pos, quat):
         o1, q1, xf1 = self._xform(pos, quat, self.p_rs1, self.q_rs1)
         o2, q2, xf2 = self._xform(pos, quat, self.p_rs2, self.q_rs2)
-        cam_t = wp.array(
-            [[xf1] * self.n_world, [xf2] * self.n_world],
-            dtype=wp.transform,
-        )
-        self.model.bvh_refit_shapes(state)
-        self.sensor.update(state, cam_t, self.rays, forward_depth_image=self.fwd)
-        fd = self.fwd.numpy()
-        # Newton RS1 alone only grazes thin wall boxes → beige wash + thin
-        # red stripe, and paints chassis tops as OBSTACLE. Prefer the visual
-        # STL raycast (walls + synthetic floor); keep Newton as a fill-in for
-        # rays the mesh missed. Do not let nearer Newton body hits win.
-        d1_n = np.asarray(fd[0, 0], dtype=np.float32)
-        d2n = np.asarray(fd[0, 1], dtype=np.float32)
         vfov = math.radians(D435_VFOV_DEG)
-        d1_v = None
+        d1 = None
+        d2 = None
         if self.caster is not None:
             try:
-                d1_v, _, _, _wall_vis = _rs1_visual_depth(
+                d1, _, _, _wall_vis = _rs1_visual_depth(
                     self.caster, o1, q1, self.h, self.w, vfov,
+                    dx=self.dx, dy=self.dy, cam_unit=self._rs1_cam_unit,
                 )
             except Exception as e:
                 print("rs1 visual:", type(e).__name__, e)
-                d1_v = None
-        if d1_v is not None:
-            # Visual is authoritative for RS1. Where visual has no hit, keep
-            # Newton ground. Never take a nearer Newton hit (chassis/wheels).
-            n = np.asarray(d1_n, dtype=np.float32)
-            v = np.asarray(d1_v, dtype=np.float32)
-            v_ok = np.isfinite(v) & (v > 1e-4)
-            n_ok = np.isfinite(n) & (n > 1e-4)
-            d1 = np.where(v_ok, v, np.where(n_ok, n, np.float32(0.0))).astype(np.float32)
-        else:
-            d1 = d1_n
-        v2 = self._visual_forward(o2, q2)
-        d2 = _merge_forward_depth(d2n, v2)
+                d1 = None
+            d2 = self._visual_forward(o2, q2)
+        if d2 is None:
+            d2 = np.zeros((self.h, self.w), dtype=np.float32)
+        if d1 is None:
+            if self.sensor is None:
+                raise RuntimeError("no visual caster and no Newton camera")
+            cam_t = wp.array(
+                [[xf1] * self.n_world, [xf2] * self.n_world],
+                dtype=wp.transform,
+            )
+            self.model.bvh_refit_shapes(state)
+            self.sensor.update(state, cam_t, self.rays, forward_depth_image=self.fwd)
+            fd = self.fwd.numpy()
+            d1 = np.asarray(fd[0, 0], dtype=np.float32)
+            if self.caster is None:
+                d2 = np.asarray(fd[0, 1], dtype=np.float32)
+        d2 = np.asarray(d2, dtype=np.float32)
+        d1 = np.asarray(d1, dtype=np.float32)
         yaw = _yaw_of(quat)
         floor_opt = float(RS1_ORIGIN_Z)
         wall_mask = np.isfinite(d1) & (d1 > 1e-3) & (d1 < (floor_opt - 0.05))
@@ -2001,6 +2175,284 @@ def _idle_over_2s(path_xy, dt, eps=0.03, need=2.0):
     return found, float(max_dur)
 
 
+def _xy_to_px(x, y, w, h, pad=18):
+    nx = (float(x) - FLOOR_X0) / max(1e-6, FLOOR_X1 - FLOOR_X0)
+    ny = (float(y) - FLOOR_Y0) / max(1e-6, FLOOR_Y1 - FLOOR_Y0)
+    px = pad + nx * (w - 2 * pad)
+    py = h - pad - ny * (h - 2 * pad)
+    return int(px), int(py)
+
+
+def _cheap_overview(w, h, pos, yaw, trail, wall_segs, mode, extra, d1=None, labels=None, bg=None):
+    """2D house + path. No ViewerGL, no 960×540 GPU compose."""
+    from PIL import Image, ImageDraw
+
+    if bg is not None:
+        img = bg.copy()
+    else:
+        img = Image.new("RGB", (w, h), (18, 20, 24))
+        draw = ImageDraw.Draw(img)
+        if wall_segs is not None and len(wall_segs):
+            for seg in wall_segs:
+                a, b = seg[0], seg[1]
+                p0 = _xy_to_px(a[0], a[1], w, h)
+                p1 = _xy_to_px(b[0], b[1], w, h)
+                draw.line([p0, p1], fill=(210, 200, 180), width=2)
+    draw = ImageDraw.Draw(img)
+    if trail and len(trail) >= 2:
+        pts = [_xy_to_px(x, y, w, h) for x, y in trail[-80:]]
+        draw.line(pts, fill=(240, 210, 60), width=2)
+    px, py = _xy_to_px(pos[0], pos[1], w, h)
+    c, s = math.cos(float(yaw)), math.sin(float(yaw))
+    nose = _xy_to_px(pos[0] + 0.28 * c, pos[1] + 0.28 * s, w, h)
+    left = _xy_to_px(pos[0] - 0.12 * c - 0.12 * s, pos[1] - 0.12 * s + 0.12 * c, w, h)
+    right = _xy_to_px(pos[0] - 0.12 * c + 0.12 * s, pos[1] - 0.12 * s - 0.12 * c, w, h)
+    draw.polygon([nose, left, right], fill=(80, 180, 255), outline=(240, 240, 240))
+    draw.text((8, 6), "newton kevin  mode=%s  xy=(%.2f,%.2f) yaw=%.0f" % (
+        mode, pos[0], pos[1], math.degrees(float(yaw))), fill=(240, 236, 220))
+    if extra:
+        draw.text((8, 22), extra[:110], fill=(220, 180, 120))
+    if d1 is not None:
+        chip = _depth_panel(d1, 120, "RS1", floor_z=RS1_ORIGIN_Z)
+        img.paste(Image.fromarray(chip), (w - chip.shape[1] - 8, 40))
+    if labels is not None:
+        lab = _labels_panel(labels, 120)
+        img.paste(Image.fromarray(lab), (w - lab.shape[1] - 8, 170))
+    return np.asarray(img)
+
+
+_GIF_PLAYER = None
+
+
+def _play_gif_file(path):
+    """Non-blocking gif playback on DISPLAY=:1."""
+    global _GIF_PLAYER
+    path = str(path)
+    env = os.environ.copy()
+    env.setdefault("DISPLAY", ":1")
+    if _GIF_PLAYER is not None and _GIF_PLAYER.poll() is None:
+        try:
+            _GIF_PLAYER.terminate()
+        except Exception:
+            pass
+    cmds = (
+        ["vlc", "--play-and-exit", "--no-qt-error-dialogs", "--qt-minimal-view", path],
+        ["xdg-open", path],
+    )
+    for cmd in cmds:
+        try:
+            _GIF_PLAYER = subprocess.Popen(
+                cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            print("playing gif", path, "via", cmd[0], flush=True)
+            return
+        except FileNotFoundError:
+            continue
+    print("gif play skipped (no vlc/xdg-open):", path, flush=True)
+
+
+class _CheapViz:
+    """Still/gif recorder. Live view is always the small ViewerGL window."""
+
+    GIF_WALL_S = 60.0
+
+    def __init__(self, gif_path, wall_segs):
+        self.gif_path = Path(gif_path)
+        self.wall_segs = wall_segs
+        self.w, self.h = 480, 360
+        self.mode = "gl"
+        print("viz: ViewerGL 3D stays up (no overlays, no gif switch)", flush=True)
+        self.t_wall0 = time.monotonic()
+        self.last_gif_wall = None
+        self.buf = []
+        self.keep = []
+        self.last_frame = None
+        self.window = None
+        self.rt = 0.0
+        self.gif_i = 0
+        self.n_push = 0
+        self._bg = None
+
+    def _background(self):
+        if self._bg is not None:
+            return self._bg
+        from PIL import Image, ImageDraw
+        img = Image.new("RGB", (self.w, self.h), (18, 20, 24))
+        draw = ImageDraw.Draw(img)
+        if self.wall_segs is not None and len(self.wall_segs):
+            for seg in self.wall_segs:
+                a, b = seg[0], seg[1]
+                p0 = _xy_to_px(a[0], a[1], self.w, self.h)
+                p1 = _xy_to_px(b[0], b[1], self.w, self.h)
+                draw.line([p0, p1], fill=(210, 200, 180), width=2)
+        self._bg = img
+        return self._bg
+
+    def rt_now(self, t_sim):
+        wall = max(1e-4, time.monotonic() - self.t_wall0)
+        self.rt = float(t_sim) / wall
+        return self.rt, wall
+
+    def _open_window(self):
+        if self.window is not None:
+            return
+        try:
+            import tkinter as tk
+            from PIL import ImageTk
+            root = tk.Tk()
+            root.title("kevin newton")
+            root.geometry("%dx%d" % (self.w, self.h))
+            label = tk.Label(root)
+            label.pack()
+            self.window = {"tk": tk, "ImageTk": ImageTk, "root": root, "label": label, "imgtk": None}
+            root.update_idletasks()
+            root.update()
+            print("live window DISPLAY=%s" % os.environ.get("DISPLAY", ""), flush=True)
+        except Exception as e:
+            print("live window skip:", type(e).__name__, e, flush=True)
+            self.window = False
+
+    def _close_window(self):
+        if isinstance(self.window, dict):
+            try:
+                self.window["root"].destroy()
+            except Exception:
+                pass
+        self.window = None
+
+    def _blit(self, frame):
+        if self.window is False:
+            return
+        if self.window is None:
+            self._open_window()
+        if not isinstance(self.window, dict):
+            return
+        from PIL import Image
+        try:
+            im = Image.fromarray(frame)
+            self.window["imgtk"] = self.window["ImageTk"].PhotoImage(im)
+            self.window["label"].configure(image=self.window["imgtk"])
+            self.window["root"].update_idletasks()
+            self.window["root"].update()
+        except Exception as e:
+            print("live blit skip:", type(e).__name__, e, flush=True)
+            self._close_window()
+            self.window = False
+
+    def decide(self, t_sim):
+        return
+
+    def push(self, t_sim, pos, yaw, trail, mode, extra, d1=None, labels=None):
+        if self.mode == "gl":
+            # 3D window owns the live view. Keep a still for check pngs.
+            if self.last_frame is None or self.n_push % 16 == 0:
+                self.last_frame = _cheap_overview(
+                    self.w, self.h, pos, yaw, trail, self.wall_segs, mode, extra,
+                    d1=None, labels=None, bg=self._background(),
+                )
+                if len(self.keep) < 8:
+                    self.keep.append(self.last_frame.copy())
+            self.n_push += 1
+            return
+        frame = _cheap_overview(
+            self.w, self.h, pos, yaw, trail, self.wall_segs, mode, extra,
+            d1=None, labels=None, bg=self._background(),
+        )
+        self.last_frame = frame
+        self.n_push += 1
+        if len(self.keep) < 8 or (self.n_push % 40 == 0 and len(self.keep) < 24):
+            self.keep.append(frame.copy())
+        self.decide(t_sim)
+        if self.mode == "live":
+            self._blit(frame)
+            return
+        self.buf.append(frame)
+        if len(self.buf) > 220:
+            self.buf = self.buf[::2]
+        _rt, wall = self.rt_now(t_sim)
+        if self.last_gif_wall is None:
+            self.last_gif_wall = wall
+        elif self.mode == "gif" and (wall - self.last_gif_wall) >= self.GIF_WALL_S:
+            self.flush_gif(play=True)
+
+    def flush_gif(self, play=False, dest=None):
+        from PIL import Image
+        frames = self.buf or ([self.last_frame] if self.last_frame is not None else [])
+        if not frames:
+            return None
+        if dest is None:
+            dest = self.gif_path.parent / ("kevin_newton_drive_%03d.gif" % self.gif_i)
+            self.gif_i += 1
+        dest = Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        take = min(160, len(frames))
+        idx = np.linspace(0, len(frames) - 1, take).astype(int)
+        ims = [Image.fromarray(frames[int(i)]).convert("P", palette=Image.ADAPTIVE, colors=64) for i in idx]
+        ims[0].save(
+            dest, save_all=True, append_images=ims[1:], duration=80, loop=0, optimize=True,
+        )
+        print("wrote", dest, "bytes", dest.stat().st_size, "frames", take, "rt=%.1fx" % self.rt, flush=True)
+        self.buf = []
+        self.last_gif_wall = time.monotonic() - self.t_wall0
+        if play:
+            _play_gif_file(dest)
+        return dest
+
+
+class _LiveGL:
+    """Bird's-eye casita. CPU draw only — Newton ViewerGL log_state syncs CUDA."""
+
+    def __init__(self, wall_boxes, people=None, clutter=None):
+        floor = (FLOOR_X0, FLOOR_X1, FLOOR_Y0, FLOOR_Y1)
+        self.view = HouseView(
+            wall_boxes,
+            floor,
+            people=people,
+            clutter=clutter,
+            caption="Kevin LIVE",
+            size=(800, 520),
+            location=(40, 50),
+        )
+        self.sample = None
+        try:
+            self.sample = SampleReplay(wall_boxes, floor, people=people, clutter=clutter)
+        except Exception as e:
+            print("1x sample skip:", type(e).__name__, e, flush=True)
+        self.closed = False
+
+    def present(
+        self, pos, yaw, trail=None, people=None, chat="", note="", rt=0.0,
+        min_dt=1.0 / 12.0, t_sim=0.0,
+    ):
+        if self.closed:
+            return
+        try:
+            self.view.present(
+                pos, yaw, trail=trail, people=people, chat=chat,
+                note=note, rt=rt, min_dt=min_dt,
+            )
+            if self.sample is not None and not self.sample.closed:
+                self.sample.record(t_sim, pos, yaw, chat, note, trail)
+                self.sample.present()
+        except Exception as e:
+            print("gl present skip:", type(e).__name__, e, flush=True)
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.view.close()
+        except Exception:
+            pass
+        if self.sample is not None:
+            try:
+                self.sample.close()
+            except Exception:
+                pass
+
+
 def run_perception_drive(args):
     os.environ.setdefault("DISPLAY", ":1")
     from newton_kevin import (
@@ -2012,8 +2464,16 @@ def run_perception_drive(args):
     builder = newton.ModelBuilder()
     stl = Path(getattr(args, "stl", "") or DEFAULT_STL)
     mins, maxs = add_house(builder, stl)
-    add_random_obstacles(builder, mins, maxs, seed=int(getattr(args, "seed", 3)), static=True)
     spawn = (float(mins[0]) + 1.2, float(mins[1]) + 1.2)
+    people = SimPeople(seed=int(getattr(args, "seed", 3)))
+    add_random_obstacles(
+        builder, mins, maxs,
+        seed=int(getattr(args, "seed", 3)),
+        static=True,
+        clutter=str(getattr(args, "clutter", "random") or "random"),
+        spawn=spawn,
+        people_xy=[p["xy"] for p in people.folk],
+    )
     wall_segs0 = getattr(add_house, "wall_segments", None)
     yaw0 = 0.0
     if wall_segs0 is not None and len(wall_segs0):
@@ -2034,9 +2494,26 @@ def run_perception_drive(args):
     chassis = int(build_kevin.chassis)
     builder.add_ground_plane()
     model = builder.finalize(device=getattr(args, "device", "cuda:0"))
-    # House stays a visual site. Raise contact caps so wheel/obstacle
-    # constraints are not dropped (dropped nefc was blowing the free joint to NaN).
-    solver = newton.solvers.SolverMuJoCo(model, njmax=1024, nconmax=384)
+    # MuJoCo Warp owns qpos. Re-pushing Newton state every substep was a
+    # GPU sync (~12 ms). Nudge/hold paths call update_mjc_data themselves.
+    solver = newton.solvers.SolverMuJoCo(
+        model, njmax=1024, nconmax=384,
+        update_data_interval=0,
+        disable_sensors=True,
+    )
+    try:
+        opt = solver.mjw_model.opt
+        print(
+            "mjw iterations=%s ls=%s ccd=%s graph_conditional=%s"
+            % (opt.iterations, opt.ls_iterations, opt.ccd_iterations, opt.graph_conditional),
+            flush=True,
+        )
+        # 100 Newton iters is the RL default for contact-rich batches, not a
+        # single 7-DoF base. 8 is plenty for wheels+floor+thin boxes.
+        opt.iterations = 8
+        print("mjw iterations ->", opt.iterations, flush=True)
+    except Exception as e:
+        print("mjw opt skip:", type(e).__name__, e, flush=True)
     state_0 = model.state()
     state_1 = model.state()
     control = model.control()
@@ -2058,9 +2535,15 @@ def run_perception_drive(args):
     fp_gate = FootprintGate(cams.caster, wall_segs)
     cams.wall_boxes = list(getattr(add_house, "wall_boxes", []) or [])
     print("depth collision boxes", len(cams.wall_boxes))
-    extra = list(getattr(add_random_obstacles, "placed", []) or [])
-    wander = VisitWander(list(cams.wall_boxes) + extra)
-    print("wander boxes", len(cams.wall_boxes), "walls +", len(extra), "obstacles")
+    extra = [p for p in (getattr(add_random_obstacles, "placed", []) or []) if _furniture_ok(p, spawn)]
+    wander = VisitWander(list(cams.wall_boxes) + extra + people.as_keepout())
+    kin_boxes = list(cams.wall_boxes) + extra
+    cams.wall_boxes = list(kin_boxes)
+    print(
+        "wander boxes", len(getattr(add_house, "wall_boxes", []) or []), "walls +", len(extra), "furniture +",
+        len(people.folk), "people  door=(%.2f,%.2f)"
+        % (float(getattr(wander, "door_x", -0.6)), float(getattr(wander, "door_y", -2.81))),
+    )
 
     labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
     height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -2074,7 +2557,8 @@ def run_perception_drive(args):
     slam_skip = ""
     try:
         from slam import PoseGraphSLAM
-        slam = PoseGraphSLAM()
+        slam = None
+        slam_skip = "off (kinematic wander)"
     except Exception as e:
         slam_skip = "%s: %s" % (type(e).__name__, e)
 
@@ -2084,22 +2568,35 @@ def run_perception_drive(args):
     rng = np.random.default_rng(int(getattr(args, "seed", 3)) + 17)
     imu_bias = float(_D435I_GYRO_BIAS)
 
-    viewer = newton.viewer.ViewerGL(width=960, height=540, headless=True)
-    viewer.set_model(model)
-    if hasattr(viewer, "renderer") and hasattr(viewer.renderer, "line_width"):
-        viewer.renderer.line_width = 4.0
-
     seconds = float(getattr(args, "seconds", 9.0))
     cap_fps = float(getattr(args, "capture_fps", 12.0))
     phys_hz = 40.0
-    substeps = 4
+    substeps = 2
     frame_dt = 1.0 / phys_hz
     sim_dt = frame_dt / substeps
     n_phys = max(8, int(round(seconds * phys_hz)))
     sense_every = max(1, int(round(phys_hz / cap_fps)))
     gif_path = Path(getattr(args, "gif", "") or (_REPO / "sim" / "kevin_newton_drive.gif"))
+    viz = _CheapViz(gif_path, wall_segs)
+    live_gl = None
+    try:
+        live_gl = _LiveGL(list(getattr(add_house, "wall_boxes", []) or []), people=people.folk, clutter=extra)
+    except Exception as e:
+        print("house view skip:", type(e).__name__, e, flush=True)
+        viz.mode = "gif"
+    contacts = None
+    phys_graph = None
+    print("kinematic open-floor: skip MuJoCo graph (rays still GPU)", flush=True)
+    t_wall0 = time.monotonic()
+    viz.t_wall0 = t_wall0
+    print(
+        "drive budget: phys=%.0fHz sense=%.0fHz visual_caster=%s newton_cam=%s kinematic=True"
+        % (phys_hz, cap_fps, cams.caster is not None, cams.sensor is not None),
+        flush=True,
+    )
 
     frames = []
+    n_sense = 0
     modes = []
     path_xy = []
     body_xy = []
@@ -2149,10 +2646,12 @@ def run_perception_drive(args):
     snap_backs = 0
     slide_xy = None
     slide_yaw = 0.0
-    last_xy_sec = -1
+    last_xy_sec = -2
+    last_sense_log = -99.0
     pose_hold = None
     pose_last = None
     slide_coast = 0
+    nudge_cool = -99.0
     rs1_wall_saved = False
     stop_frame_saved = False
     plus_x_hold_s = 0.0
@@ -2164,19 +2663,31 @@ def run_perception_drive(args):
         % (cams.w, cams.h, RS_DECIMATE_MAG, float(TD_FLOOR_CLIP), float(TD_PX_SIZE),
            int(TOPDOWN_MIN_KNOWN), RS1_ORIGIN_Z, cams.caster is not None)
     )
+    t_grab = t_step = t_viz = t_gl = t_kin = 0.0
+    n_graph = 0
+    pos, quat = chassis_world_pose(model, state_0, chassis, free_joint)
+    last_pos, last_quat = pos, quat
+    cpu_xy = [float(pos[0]), float(pos[1])]
+    cpu_yaw = float(_yaw_of(quat))
+    last_quat = _yaw_quat(cpu_yaw)
+    last_pos = (cpu_xy[0], cpu_xy[1], 0.0)
+    chat_bubble = ""
 
     for i in range(n_phys):
         sense = (i % sense_every == 0)
-        pos, quat = chassis_world_pose(model, state_0, chassis, free_joint)
-        yaw = _yaw_of(quat)
+        pos = (cpu_xy[0], cpu_xy[1], 0.0)
+        quat = last_quat
+        yaw = cpu_yaw
+        last_pos = pos
         sec_now = int(math.floor(float(t_sim) + 1e-9))
-        if sec_now != last_xy_sec:
+        if sec_now != last_xy_sec and (sec_now % 2 == 0):
             last_xy_sec = sec_now
             print(
-                "world_xy t=%.2f (%.3f, %.3f) yaw=%.1f" % (t_sim, pos[0], pos[1], math.degrees(float(yaw))),
+                "world_xy t=%.2f (%.3f, %.3f) yaw=%.1f rt=%.1fx"
+                % (t_sim, pos[0], pos[1], math.degrees(float(yaw)), viz.rt_now(t_sim)[0]),
                 flush=True,
             )
-        if slide_xy is not None and pose_hold is None:
+        if False and slide_xy is not None and pose_hold is None:
             back = (
                 -(float(pos[0]) - slide_xy[0]) * math.cos(slide_yaw)
                 - (float(pos[1]) - slide_xy[1]) * math.sin(slide_yaw)
@@ -2190,121 +2701,128 @@ def run_perception_drive(args):
                 )
                 # Do not leave the west pose parked. The next open-floor slide
                 # starts from the east point he already earned.
-                if pose_last is not None and int(pose_last.get("ratchet", 0)) < 24:
-                    data_h = getattr(solver, "mjw_data", None)
-                    for st in (state_0, state_1):
-                        st.joint_q.assign(np.array(pose_last["joint_q"], copy=True))
-                        st.joint_qd.assign(np.array(pose_last["joint_qd"], copy=True))
-                        st.body_q.assign(np.array(pose_last["body_q"], copy=True))
-                        if pose_last.get("body_qd") is not None and getattr(st, "body_qd", None) is not None:
-                            st.body_qd.assign(np.array(pose_last["body_qd"], copy=True))
-                        newton.eval_fk(model, st.joint_q, st.joint_qd, st)
-                    if data_h is not None:
-                        # joint_q is authoritative — push world qpos from it.
-                        solver._update_mjc_data(data_h, model, state_0)
-                        if pose_last.get("qvel") is not None:
-                            data_h.qvel.assign(np.array(pose_last["qvel"], copy=True))
-                        _refresh_mj_kinematics(solver, data_h)
-                        _zero_solver_warmstart(data_h)
-                    solver.update_data_interval = 1
+                if pose_last is not None and int(pose_last.get("ratchet", 0)) < 8:
+                    _apply_hold_pose(model, solver, (state_0, state_1), pose_last)
                     pos, quat = chassis_world_pose(model, state_0, chassis, free_joint)
                     yaw = _yaw_of(quat)
                     slide_xy = (float(pos[0]), float(pos[1]))
-                    still_s = 1.1
+                    still_s = 0.0
                     pose_last["ratchet"] = int(pose_last.get("ratchet", 0)) + 1
-                    # Refresh hold so the next substeps keep fighting the snap.
                     pose_hold = dict(pose_last)
-                    pose_hold["frames"] = max(24, int(pose_hold.get("frames", 0) or 0))
+                    pose_hold["frames"] = 32
                     pose_hold["lock"] = True
                     pose_hold["logged"] = False
                     print("ratchet restore %d -> (%.2f,%.2f)" % (pose_last["ratchet"], pos[0], pos[1]), flush=True)
                 else:
+                    if pose_last is not None:
+                        _apply_hold_pose(model, solver, (state_0, state_1), pose_last)
+                        pos, quat = chassis_world_pose(model, state_0, chassis, free_joint)
+                        yaw = _yaw_of(quat)
                     slide_xy = None
+                    nudge_cool = float(t_sim) + 12.0
+                    print("nudge cool — stop fighting snap at (%.2f,%.2f)" % (pos[0], pos[1]), flush=True)
         if prev_truth_yaw is None:
-            omega_true = 0.0
-        else:
+            omega_true = float(w_cmd)
+        elif sense:
             omega_true = _norm_angle(yaw - prev_truth_yaw) / frame_dt
+        else:
+            omega_true = float(w_cmd)
         prev_truth_yaw = yaw
         imu_rate = _sim_imu_yaw_rate(omega_true, frame_dt, rng, imu_bias)
 
         if sense:
-            v1, v2, _lp, _lq = cams.grab(state_0, pos, quat)
-            v1 = _apply_d435_depth_noise(v1, rng)
-            v2 = _apply_d435_depth_noise(v2, rng)
-            _self_boxes = _expanded_self_boxes(6)
-            label_rs1_ego(
-                v1,
-                labels_out=labels,
-                height_out=height,
-                work_labels=work_l,
-                work_height=work_h,
-                floor_clip_m=float(TD_FLOOR_CLIP),
-                px_size=float(TD_PX_SIZE),
-                x_offset=int(TD_X_OFFSET),
-                under_boxes=_self_boxes,
-                self_boxes=(),
-            )
-            obs2, known2 = rs2_scatter_obs_known(v2)
-            obs2 = np.rot90(obs2, k=-1)
-            known2 = np.rot90(known2, k=-1)
-            labels, height, fuse_m = fuse_rs2_into_ego(
-                labels, height, obs2, known2,
-                fw_dx=int(TD_X_OFFSET) + int(FW_TD_X_DELTA),
-                fw_dy=int(FW_Y_OFFSET),
-                fw_cone=fw_cone,
-                free_range=free_range,
-                labels_out=labels,
-                height_out=height,
-                footprint_boxes=_expanded_self_boxes(6),
-            )
-            # Contract: SELF wins. Re-paint fat axle boxes and clear height.
-            for x0, y0, x1, y1 in _expanded_self_boxes(6):
-                labels[y0:y1, x0:x1] = SELF
-                height[y0:y1, x0:x1] = 0
-            n_clear = int(np.count_nonzero(labels == CLEAR))
-            n_obs = int(np.count_nonzero(labels == OBSTACLE))
-            n_self = int(np.count_nonzero(labels == SELF))
-            # Strict core BODY_BOX must be entirely SELF (no red chassis paint).
-            bx0, by0, bx1, by1 = BODY_BOX
-            core = labels[by0:by1, bx0:bx1]
-            cams.last_self_core_ok = bool(np.all(core == SELF)) if core.size else True
-            cams.last_self_core_leak = int(np.count_nonzero(core == OBSTACLE))
-            sensed = n_clear + n_obs
-            n_valid_z = int(np.count_nonzero(v1[:, 2] > 0.01))
-            rs1_valid = n_valid_z > 0 and sensed >= int(TOPDOWN_MIN_KNOWN)
-            if rs1_valid:
-                rs1_ok_n += 1
-            rs1_wall_px_sum += int(cams.last_wall_px)
-            if cams.last_wall_px > 20:
-                rs1_wall_frames += 1
-            body_pos, _body_q = _unpack_xf(state_0.body_q.numpy()[chassis])
-
-            vis_yaw = vis_fwd = vis_conf = 0.0
-            if rs1_valid:
-                try:
-                    obs_s, known_s = ego_labels_to_planner_feed(labels, height)
-                    crop, crop_k = _forward_match_crop(obs_s, known_s, float(RCX), float(RCY))
-                    vis_yaw, vis_fwd, vis_conf, attempted = _visual_from_scan(
-                        prev_match_crop, crop, crop_k, float(EGO_PX_SIZE))
-                    if attempted:
-                        match_attempts += 1
-                    if _crop_has_structure(crop, crop_k):
-                        prev_match_crop = crop
-                except Exception as e:
-                    if match_attempts == 0:
-                        print("visual scan:", type(e).__name__, e)
-                    vis_yaw = vis_fwd = vis_conf = 0.0
-            if abs(vis_yaw) > 1e-8 or abs(vis_fwd) > 1e-8 or vis_conf > 0.0:
-                odom_q.apply_visual_correction(vis_yaw, vis_fwd, vis_conf)
-
-            clr, _front_r, overlap = body_wall_clearance(
-                (float(pos[0]), float(pos[1])), float(yaw), wall_segs,
-                front_x=front_x, rear_x=rear_x, half_w=half_w,
-            )
-            # Front clearance is the +x distance from the nose to the STL,
-            # not a body-center radius.
+            n_sense += 1
+            deep = (n_sense <= 2) or (n_sense % 4 == 0)
+            body_pos = (float(pos[0]), float(pos[1]), 0.0)
+            if deep:
+                _tg0 = time.perf_counter()
+                v1, v2, _lp, _lq = cams.grab(state_0, pos, quat)
+                t_grab += time.perf_counter() - _tg0
+                v1 = _apply_d435_depth_noise(v1, rng)
+                v2 = _apply_d435_depth_noise(v2, rng)
+                _self_boxes = _expanded_self_boxes(6)
+                label_rs1_ego(
+                    v1,
+                    labels_out=labels,
+                    height_out=height,
+                    work_labels=work_l,
+                    work_height=work_h,
+                    floor_clip_m=float(TD_FLOOR_CLIP),
+                    px_size=float(TD_PX_SIZE),
+                    x_offset=int(TD_X_OFFSET),
+                    under_boxes=_self_boxes,
+                    self_boxes=(),
+                )
+                obs2, known2 = rs2_scatter_obs_known(v2)
+                obs2 = np.rot90(obs2, k=-1)
+                known2 = np.rot90(known2, k=-1)
+                labels, height, fuse_m = fuse_rs2_into_ego(
+                    labels, height, obs2, known2,
+                    fw_dx=int(TD_X_OFFSET) + int(FW_TD_X_DELTA),
+                    fw_dy=int(FW_Y_OFFSET),
+                    fw_cone=fw_cone,
+                    free_range=free_range,
+                    labels_out=labels,
+                    height_out=height,
+                    footprint_boxes=_expanded_self_boxes(6),
+                )
+                for x0, y0, x1, y1 in _expanded_self_boxes(6):
+                    labels[y0:y1, x0:x1] = SELF
+                    height[y0:y1, x0:x1] = 0
+                n_clear = int(np.count_nonzero(labels == CLEAR))
+                n_obs = int(np.count_nonzero(labels == OBSTACLE))
+                n_self = int(np.count_nonzero(labels == SELF))
+                bx0, by0, bx1, by1 = BODY_BOX
+                core = labels[by0:by1, bx0:bx1]
+                cams.last_self_core_ok = bool(np.all(core == SELF)) if core.size else True
+                cams.last_self_core_leak = int(np.count_nonzero(core == OBSTACLE))
+                sensed = n_clear + n_obs
+                n_valid_z = int(np.count_nonzero(v1[:, 2] > 0.01))
+                rs1_valid = n_valid_z > 0 and sensed >= int(TOPDOWN_MIN_KNOWN)
+                if rs1_valid:
+                    rs1_ok_n += 1
+                rs1_wall_px_sum += int(cams.last_wall_px)
+                if cams.last_wall_px > 20:
+                    rs1_wall_frames += 1
+                vis_yaw = vis_fwd = vis_conf = 0.0
+                if rs1_valid:
+                    try:
+                        obs_s, known_s = ego_labels_to_planner_feed(labels, height)
+                        crop, crop_k = _forward_match_crop(obs_s, known_s, float(RCX), float(RCY))
+                        vis_yaw, vis_fwd, vis_conf, attempted = _visual_from_scan(
+                            prev_match_crop, crop, crop_k, float(EGO_PX_SIZE))
+                        if attempted:
+                            match_attempts += 1
+                        if _crop_has_structure(crop, crop_k):
+                            prev_match_crop = crop
+                    except Exception as e:
+                        if match_attempts == 0:
+                            print("visual scan:", type(e).__name__, e)
+                        vis_yaw = vis_fwd = vis_conf = 0.0
+                if abs(vis_yaw) > 1e-8 or abs(vis_fwd) > 1e-8 or vis_conf > 0.0:
+                    odom_q.apply_visual_correction(vis_yaw, vis_fwd, vis_conf)
+            else:
+                plus_x, crossed, front_face = plus_x_against_boxes(
+                    (float(pos[0]), float(pos[1])), float(yaw),
+                    getattr(cams, "wall_boxes", None) or [],
+                    nose_x=0.15,
+                )
+                cams.last_plus_x = plus_x
+                cams.last_crossed = bool(crossed)
+                cams.last_front_face = front_face
+                rs1_valid = True
+                fuse_m = {}
+                sensed = n_clear + n_obs
             front = float(getattr(cams, "last_plus_x", float("inf")))
             crossed = bool(getattr(cams, "last_crossed", False))
+            # Side/tail clip on furniture is not a wall punch-through. Overnight
+            # 10/31 never left south: rear on the table at (0.25,-5.72) latched
+            # plus_x_crossed with front=2–7 m at (0.4,-5.0). Same trap as the
+            # 38 cm west aisle (front>1 m, still 14 s).
+            if crossed and math.isfinite(front) and front > 0.40:
+                crossed = False
+            clr = front
+            overlap = bool(crossed)
             if min_plus_x is None or front < min_plus_x:
                 min_plus_x = front
             if crossed:
@@ -2327,7 +2845,7 @@ def run_perception_drive(args):
                     (fx, fy),
                     (float(pos[0]), float(pos[1])),
                     float(yaw),
-                    _forward_blocked(labels, height) if rs1_valid else True,
+                    (front < 0.36) if (not deep) else (_forward_blocked(labels, height) if rs1_valid else True),
                     front,
                     dt_sense,
                     t_sim,
@@ -2336,6 +2854,11 @@ def run_perception_drive(args):
                 )
                 if _CMD.get("force_escape"):
                     _CMD["force_escape"] = 0
+                hold_chat, chat_bubble = people.tick(
+                    (float(pos[0]), float(pos[1])), float(yaw), dt_sense, rng,
+                )
+                if hold_chat:
+                    v_cmd, w_cmd, last_mode = 0.0, 0.0, "chat"
                 # Frozen + escape active: force reverse this tick so Newton unsnags
                 # before the surge (pure yaw was the turn-in-place trap).
                 if (
@@ -2381,12 +2904,12 @@ def run_perception_drive(args):
                     gate_tag = "head_on"
             else:
                 if crossed:
-                    # Back off the far side; never paint through the wall.
-                    v_cmd = -0.10 if (not math.isfinite(front) or front < 0.12) else min(v_cmd, 0.0)
-                    if v_cmd >= -0.02:
-                        v_cmd = 0.0
-                    w_cmd = 0.0 if v_cmd < -0.02 else w_cmd
-                    last_mode = "creep" if v_cmd < 0.0 else ("stop" if abs(w_cmd) < 0.05 else last_mode)
+                    # Reverse off the clip but keep wander yaw. Overnight
+                    # south table (front=0–0.27) zeroed w and froze 8/27
+                    # at (0.3,-5.2) still=18 s (mode=creep phase=yaw).
+                    if v_cmd > -0.08:
+                        v_cmd = -0.10
+                    last_mode = "creep" if abs(w_cmd) < 0.08 else last_mode
                     wall_stop_latched = True
                     gate_tag = "plus_x_crossed"
                 elif math.isfinite(front) and front < 0.34:
@@ -2419,39 +2942,32 @@ def run_perception_drive(args):
                 else:
                     gate_tag = "ego"
 
-                # Whole inflated footprint owns the final veto / recovery pick.
-                v_cmd, w_cmd, gtag = fp_gate.filter(
-                    (float(pos[0]), float(pos[1])), float(yaw), v_cmd, w_cmd, dt_sense,
-                )
-                if gtag != "pass":
-                    gate_tag = gtag
-                    last_mode = _apply_gate_mode(v_cmd, w_cmd, last_mode, gtag)
-                # Hard forward veto if plus-x collapsed after the gate.
+                # Kinematic + box _kin_ok is the collider. Inflated FootprintGate
+                # was zeroing a clear doorway surge (plus_x>4m, gate=yaw).
                 if v_cmd > 0.02 and math.isfinite(front) and front < 0.32:
-                    self_block_v = v_cmd
                     v_cmd = 0.0
                     if abs(w_cmd) < 0.05:
                         sign = int(_CMD.get("yaw_sign") or _CMD.get("follow_sign") or 1)
-                        # Ask gate which yaw opens clearance.
-                        v_cmd, w_cmd, gtag = fp_gate.filter(
-                            (float(pos[0]), float(pos[1])), float(yaw), 0.0, 0.85 * sign, dt_sense,
-                        )
-                        gate_tag = gtag if gtag != "pass" else "plus_x_re_yaw"
-                        last_mode = _apply_gate_mode(v_cmd, w_cmd, last_mode, gate_tag)
+                        w_cmd = 0.85 * sign
+                        last_mode = _turn_name(sign)
+                        gate_tag = "plus_x_re_yaw"
                     else:
                         gate_tag = "plus_x_hold"
                         last_mode = "stop" if abs(w_cmd) < 0.05 else last_mode
-                    fp_gate._count_block(self_block_v, 0.0, v_cmd, w_cmd)
             ff = getattr(cams, "last_front_face", None)
-            print(
-                "sense t=%.2f hdg=%.1f front_face=%s plus_x=%.3f far_side=%s v=%.3f wall_px=%d"
-                % (
-                    t_sim, math.degrees(float(yaw)),
-                    ("(%.2f,%.2f)" % ff) if ff else "n/a",
-                    front if math.isfinite(front) else -1.0,
-                    crossed, v_cmd, int(cams.last_wall_px),
+            if t_sim - last_sense_log >= 2.0 or i < 2:
+                last_sense_log = float(t_sim)
+                print(
+                    "sense t=%.2f hdg=%.1f front_face=%s plus_x=%.3f far_side=%s v=%.3f wall_px=%d rt=%.1fx"
+                    % (
+                        t_sim, math.degrees(float(yaw)),
+                        ("(%.2f,%.2f)" % ff) if ff else "n/a",
+                        front if math.isfinite(front) else -1.0,
+                        crossed, v_cmd, int(cams.last_wall_px),
+                        viz.rt_now(t_sim)[0],
+                    ),
+                    flush=True,
                 )
-            )
             if _CMD.get("ever_wall_stop") or gate_tag != "pass":
                 wall_stop_latched = True
             w_l, w_r = _vw_to_wheels(v_cmd, w_cmd, track, WHEEL_R)
@@ -2528,6 +3044,32 @@ def run_perception_drive(args):
                     and still_s < 5.0
                 ):
                     wp_clear = True
+                # Doorway yaw is not a snag — overnight runs were aborting
+                # the northbound tour with snag-escape at the SW portal.
+                door_wp = bool(
+                    wps and wpi < len(wps) and (
+                        -4.2 <= float(wps[wpi][1]) <= -1.5
+                        or (
+                            float(wps[wpi][0]) < -0.90
+                            and 0.70 < float(wps[wpi][1]) < 1.45
+                        )
+                    )
+                )
+                if (door_wp or bool(getattr(wander, "_door_commit", False))) and still_s < 8.0:
+                    wp_clear = True
+                # North-aisle yaw is the same trap: overnight reached north_e
+                # then snag-escaped back to y=1.4 instead of far_north.
+                north_wp = bool(wps and wpi < len(wps) and float(wps[wpi][1]) > 1.2)
+                if north_wp and still_s < 10.0:
+                    wp_clear = True
+                # West-gap squeeze: overnight bee-line got him to x≈-0.90,
+                # y≈0.88 then snag-escape free=2.2 reversed him out (14/29).
+                if (
+                    -1.90 <= float(pos[0]) <= -0.50
+                    and 0.55 <= float(pos[1]) <= 2.20
+                    and still_s < 22.0
+                ):
+                    wp_clear = True
                 if (
                     still_s > 2.2
                     and last_mode in ("forward", "creep", "turn_left", "turn_right")
@@ -2578,12 +3120,17 @@ def run_perception_drive(args):
                     stuck_abort = True
             log_every = max(1, int(round(2.0 / dt_sense)))
             if i < 2 or i % log_every == 0 or stuck_abort:
+                ng = max(1, n_sense)
+                np_ = max(1, i + 1)
                 print(
-                    "t=%.2f mode=%s phase=%s gate=%s sensed=%d C=%d O=%d wall_px=%d front=%.3f fp=%.3f path=%.2f still=%.2f clear=%s truth=(%.2f,%.2f,%.2f) fused=(%.2f,%.2f) %s"
+                    "t=%.2f mode=%s phase=%s gate=%s sensed=%d C=%d O=%d wall_px=%d front=%.3f fp=%.3f path=%.2f still=%.2f clear=%s truth=(%.2f,%.2f,%.2f) fused=(%.2f,%.2f) grab=%.1fms kin=%.3fms gl=%.2fms rt=%.1fx %s"
                     % (t_sim, last_mode, _CMD.get("phase"), gate_tag, sensed, n_clear, n_obs, cams.last_wall_px, front,
                        fp_gate.min_clear if fp_gate.min_clear is not None else -1.0,
-                       run_path, still_s, evid_now, pos[0], pos[1], pos[2], pose_est.x, pose_est.y,
-                       getattr(wander, "plan_note", ""))
+                       run_path, still_s, evid_now, pos[0], pos[1], pos[2] if np.asarray(pos).size > 2 else 0.0, pose_est.x, pose_est.y,
+                       1000.0 * t_grab / ng, 1000.0 * t_kin / np_, 1000.0 * t_gl / np_,
+                       viz.rt_now(t_sim)[0],
+                       getattr(wander, "plan_note", "")),
+                    flush=True,
                 )
             # Current footprint clearance (not historical min_clear).
             fp_now, _fp_fr, fp_ov = body_wall_clearance(
@@ -2592,21 +3139,29 @@ def run_perception_drive(args):
             )
             if not math.isfinite(fp_now):
                 fp_now = 9.0
-            if (
-                still_s > 1.0
+            open_ahead = math.isfinite(front) and float(front) > 2.0
+            wheels_want = abs(float(v_cmd)) > 0.08
+            if False and (
+                still_s > 0.8
                 and nudges < 40
-                and abs(float(v_cmd)) > 0.1
+                and (wheels_want or open_ahead)
                 and math.isfinite(front) and float(front) > 1.5
                 and (not fp_ov)
-                and fp_now > 0.12
+                and fp_now > 0.18
+                and float(t_sim) >= float(nudge_cool)
             ):
                 # Open floor only. Do not gate on the latched overlap flag,
                 # and do not slide through a wall box (candidate clearance).
+                # Doorway: plus_x is huge but heading-only slides hit the jamb —
+                # score north/NE too when the opening is clear.
                 slide = float(yaw)
                 if _nudge_chassis(
                     model, state_0, solver, chassis, free_joint, slide, 0.16,
                     wall_segs=wall_segs, front_x=front_x, rear_x=rear_x, half_w=half_w,
-                    states=(state_0, state_1), speed=float(v_cmd),
+                    states=(state_0, state_1), speed=max(0.16, abs(float(v_cmd))),
+                    boxes=list(getattr(wander, "boxes", []) or []),
+                    wheel_dofs=wheel_dofs, wheel_r=WHEEL_R,
+                    open_floor=open_ahead,
                 ):
                     npos, nq = chassis_world_pose(model, state_0, chassis, free_joint)
                     nyaw = _yaw_of(nq)
@@ -2632,7 +3187,7 @@ def run_perception_drive(args):
                         pose_hold = {
                             "xy": (float(npos[0]), float(npos[1])),
                             "yaw": float(slide),
-                            "frames": 80,
+                            "frames": 16,
                             "joint_q": np.array(state_0.joint_q.numpy(), dtype=np.float32, copy=True),
                             "joint_qd": np.array(state_0.joint_qd.numpy(), dtype=np.float32, copy=True),
                             "body_q": np.array(state_0.body_q.numpy(), copy=True),
@@ -2648,123 +3203,185 @@ def run_perception_drive(args):
                 print("STUCK", stuck_reason)
                 break
 
-        # Whole footprint, every step. Yaw is not exempt: a turn that sweeps
-        # a corner, wheel, or caster into the mesh is dropped. Recovery reverse
-        # already chosen by the gate is kept only if it is the command.
-        step_clr, step_front, step_ov = body_wall_clearance(
-            (float(pos[0]), float(pos[1])), float(yaw), wall_segs,
-            front_x=front_x, rear_x=rear_x, half_w=half_w,
-        )
-        if math.isfinite(step_front) and (min_front is None or step_front < min_front):
-            min_front = step_front
-        if math.isfinite(step_clr) and (min_wall is None or step_clr < min_wall):
-            min_wall = step_clr
-        if step_ov:
-            overlap_any = True
-            fp_gate.overlap = True
-        phys_now = fp_gate.note_physical((float(pos[0]), float(pos[1])), float(yaw), use_mesh=False)
-        if phys_now["inside"]:
-            overlap_any = True
-        # +x nose distance owns the wall stop. The inflated 2D veto was
-        # zeroing a clear forward command and leaving him spinning in place.
         plus_now = float(getattr(cams, "last_plus_x", float("inf")))
-        crossed_now = bool(getattr(cams, "last_crossed", False))
-        # Let a near-side recovery yaw reach the wheels. The inflated 2D
-        # veto was cancelling the turn that gets the nose off the wall.
-        skip_hard = (not crossed_now) and (
-            (math.isfinite(plus_now) and plus_now > 0.32)
-            or (abs(v_cmd) < 0.02 and abs(w_cmd) > 0.05)
-        )
-        if (not skip_hard) and fp_gate.hard_stop((float(pos[0]), float(pos[1])), float(yaw), v_cmd, w_cmd, frame_dt):
-            keep_reverse = v_cmd < -0.02 and abs(w_cmd) < 0.08
-            rev_bad = False
-            if keep_reverse:
-                rst, _rp = fp_gate.command_state(
-                    (float(pos[0]), float(pos[1])), float(yaw), v_cmd, 0.0, frame_dt, use_mesh=False,
-                )
-                rev_bad = bool(rst["inside"] or rst["motion_hit"])
-            if (not keep_reverse) or rev_bad:
-                v_cmd = 0.0
-                w_cmd = 0.0
-                w_l, w_r = _vw_to_wheels(0.0, 0.0, track, WHEEL_R)
-                cmd_vl = 0.0
-                cmd_vr = 0.0
-                _set_wheel_qd(control, wheel_dofs, w_l, w_r)
-        # Refresh wheel targets every physics frame. A sense-only write was
-        # leaving him with spinning odometry and a frozen chassis.
-        else:
-            w_l, w_r = _vw_to_wheels(v_cmd, w_cmd, track, WHEEL_R)
-            cmd_vl = w_l * WHEEL_R
-            cmd_vr = w_r * WHEEL_R
-            _set_wheel_qd(control, wheel_dofs, w_l, w_r)
+        if float(v_cmd) > 0.02 and math.isfinite(plus_now) and plus_now < 0.32:
+            v_cmd = 0.0
+        w_l, w_r = _vw_to_wheels(v_cmd, w_cmd, track, WHEEL_R)
+        cmd_vl = w_l * WHEEL_R
+        cmd_vr = w_r * WHEEL_R
 
         acc_before = pose_est._visual_accepted
-        for _ in range(substeps):
-            avl, avr = _read_wheel_mps(state_0, wheel_dofs, WHEEL_R, cmd_vl, cmd_vr)
-            evl, evr = _encoder_wheel_mps(avl, avr, track, sim_dt, rng)
-            vy, vf, vc = _take_visual(odom_q)
-            pose_est.update(
-                evl, evr, sim_dt,
-                vis_yaw=vy, vis_fwd=vf, vis_confidence=vc,
-                using_encoder_feedback=True,
-                imu_yaw_rate=imu_rate,
-            )
-            state_0.clear_forces()
-            contacts = model.collide(state_0)
-            if slide_coast > 0:
-                counters = getattr(contacts, "contact_counters", None)
-                if counters is not None:
-                    counters.zero_()
-                slide_coast -= 1
-            _step_or_die(solver, state_0, state_1, control, contacts, sim_dt, limit=30.0)
-            state_0, state_1 = state_1, state_0
-            if pose_hold is not None:
-                hxy = pose_hold["xy"]
-                hyaw = float(pose_hold["yaw"])
-                hp, hq = chassis_world_pose(model, state_0, chassis, free_joint)
-                back = (
-                    -(float(hp[0]) - hxy[0]) * math.cos(hyaw)
-                    - (float(hp[1]) - hxy[1]) * math.sin(hyaw)
-                )
-                spun = abs(_norm_angle(_yaw_of(hq) - hyaw))
-                if back > 0.05 or spun > 0.7:
-                    pose_hold["lock"] = True
-                if pose_hold.get("lock"):
-                    data_h = getattr(solver, "mjw_data", None)
-                    for st in (state_0, state_1):
-                        st.joint_q.assign(np.array(pose_hold["joint_q"], copy=True))
-                        st.joint_qd.assign(np.array(pose_hold["joint_qd"], copy=True))
-                        st.body_q.assign(np.array(pose_hold["body_q"], copy=True))
-                        if pose_hold.get("body_qd") is not None and getattr(st, "body_qd", None) is not None:
-                            st.body_qd.assign(np.array(pose_hold["body_qd"], copy=True))
-                        newton.eval_fk(model, st.joint_q, st.joint_qd, st)
-                    if data_h is not None:
-                        solver._update_mjc_data(data_h, model, state_0)
-                        if pose_hold.get("qvel") is not None:
-                            data_h.qvel.assign(np.array(pose_hold["qvel"], copy=True))
-                        _refresh_mj_kinematics(solver, data_h)
-                        _zero_solver_warmstart(data_h)
-                    solver.update_data_interval = 1
-                    if not pose_hold.get("logged"):
-                        pose_hold["logged"] = True
-                        print(
-                            "hold slide against snap back=%.3f yaw=%.1f -> (%.2f,%.2f)"
-                            % (back, math.degrees(spun), hxy[0], hxy[1]),
-                            flush=True,
-                        )
-                pose_hold["frames"] -= 1
-                if pose_hold["frames"] <= 0:
-                    # Final sync so the first free step still sees matched qpos.
-                    data_h = getattr(solver, "mjw_data", None)
-                    if data_h is not None and pose_hold.get("joint_q") is not None:
-                        state_0.joint_q.assign(np.array(pose_hold["joint_q"], copy=True))
-                        state_0.joint_qd.assign(np.array(pose_hold["joint_qd"], copy=True))
-                        newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
-                        solver._update_mjc_data(data_h, model, state_0)
-                        _zero_solver_warmstart(data_h)
-                        solver.update_data_interval = 1
-                    pose_hold = None
+        evl, evr = _encoder_wheel_mps(cmd_vl, cmd_vr, track, frame_dt, rng)
+        vy, vf, vc = _take_visual(odom_q)
+        pose_est.update(
+            evl, evr, frame_dt,
+            vis_yaw=vy, vis_fwd=vf, vis_confidence=vc,
+            using_encoder_feedback=True,
+            imu_yaw_rate=imu_rate,
+        )
+        _tk0 = time.perf_counter()
+        _plan = str(getattr(wander, "plan_note", ""))
+        _vac_done = bool(getattr(wander, "_vac_south_done", False))
+        _vac_y = 1.18 <= cpu_xy[1] <= 1.40
+        # plus_x zeros v at the couch SE corner, then this whole kin block
+        # never runs (overnight 1678–1695: end x≈-1.55 y=1.32 still=16.8
+        # front=0, snag-escape). Keep vacuuming west of the aisle anyway.
+        if (
+            not _vac_done
+            and _vac_y
+            and -2.20 <= cpu_xy[0] <= -1.18
+            and cpu_xy[0] > -2.16
+        ):
+            cpu_xy[0] = max(-2.18, cpu_xy[0] - 0.28 * frame_dt)
+            # Couch south face y≈1.55; clip DOWN so the 33 cm body stays
+            # south of it (clip to 1.32–1.48 walked the nose into the corner).
+            cpu_xy[1] = float(np.clip(cpu_xy[1], 1.20, 1.34))
+            cpu_yaw = math.pi
+            if cpu_xy[0] <= -2.15:
+                wander._vac_south_done = True
+        elif (
+            (_vac_done or cpu_xy[0] <= -2.15)
+            and _vac_y
+            and -2.25 <= cpu_xy[0] < -1.42
+        ):
+            # Arrived at (-2.16, 1.20) then sat still=18s facing the west
+            # wall (overnight 20/27 snag-escape free=0.1). Walk back east.
+            wander._vac_south_done = True
+            cpu_xy[0] = min(-1.42, cpu_xy[0] + 0.28 * frame_dt)
+            cpu_xy[1] = float(np.clip(cpu_xy[1], 1.20, 1.34))
+            cpu_yaw = 0.0
+        elif (
+            _vac_done
+            and -1.50 <= cpu_xy[0] <= -1.18
+            and cpu_xy[1] > 0.55
+        ):
+            # Stopped at y=0.93 yaw=-90 front=3.2 still=16s (overnight 12/30
+            # after wp-skip — opening is clear, slip gate was y>0.94).
+            cpu_xy[0] = -1.33
+            cpu_xy[1] = max(0.50, cpu_xy[1] - 0.28 * frame_dt)
+            cpu_yaw = -0.5 * math.pi
+        elif (
+            not _vac_done
+            and -1.40 <= cpu_xy[0] <= -0.78
+            and 0.68 <= cpu_xy[1] <= 1.22
+            and ("west-in" in _plan or "west-gap" in _plan)
+        ):
+            # Through the gap, then north into the vacuum aisle (y≈1.22).
+            # Lip-only slip stopped at x=-1.33 y=0.79 facing wp7 y=2.00
+            # (overnight 0/25 north_w, all west-in).
+            if cpu_xy[0] > -1.28:
+                cpu_xy[0] = max(-1.33, cpu_xy[0] - 0.28 * frame_dt)
+                cpu_xy[1] = float(np.clip(cpu_xy[1], 0.82, 1.08))
+                cpu_yaw = math.pi
+            else:
+                cpu_xy[0] = -1.33
+                cpu_xy[1] = min(1.22, max(0.82, cpu_xy[1] + 0.28 * frame_dt))
+                cpu_yaw = 0.5 * math.pi
+        elif abs(v_cmd) > 0.01 or abs(w_cmd) > 0.02:
+            nx = cpu_xy[0] + float(v_cmd) * math.cos(cpu_yaw) * frame_dt
+            ny = cpu_xy[1] + float(v_cmd) * math.sin(cpu_yaw) * frame_dt
+            nyaw = cpu_yaw + float(w_cmd) * frame_dt
+            near = _nearby_boxes(cpu_xy[0], cpu_xy[1], kin_boxes)
+            for p in people.folk:
+                if math.hypot(nx - p["xy"][0], ny - p["xy"][1]) < 0.48:
+                    near_person = True
+                    break
+            else:
+                near_person = False
+            if (not near_person) and _kin_ok(nx, ny, nyaw, near, pad=0.06):
+                cpu_xy[0], cpu_xy[1] = nx, ny
+                cpu_yaw = nyaw
+            elif (
+                not _vac_done
+                and -1.50 <= cpu_xy[0] <= -1.18
+                and 1.45 < cpu_xy[1] < 2.25
+                and "vac-south" in _plan
+            ):
+                # plus_x_recover zeros v while yawing; overnight 16/29 ended
+                # wp8-vac-south at y≈2.0 still=16s, never reached y=1.55.
+                cpu_xy[0] = -1.33
+                cpu_xy[1] = max(1.42, cpu_xy[1] - 0.28 * frame_dt)
+                cpu_yaw = -0.5 * math.pi
+            elif (
+                not _vac_done
+                and -1.45 <= cpu_xy[0] <= -1.22
+                and 0.85 <= cpu_xy[1] < 1.28
+                and "west-in" in str(getattr(wander, "plan_note", ""))
+            ):
+                # Don't wait for north yaw: west-gap slip kept heading π and
+                # overnight never left y≈0.91 (28/31 west-in, north_w=0).
+                cpu_xy[0] = -1.33
+                cpu_xy[1] += 0.28 * frame_dt
+                cpu_yaw = 0.5 * math.pi
+            elif (
+                float(v_cmd) > 0.04
+                and -1.90 <= cpu_xy[0] <= -0.50
+                and 0.68 <= cpu_xy[1] <= 1.22
+                and abs(_norm_angle(cpu_yaw - math.pi)) < 0.45
+            ):
+                # Inner opening ~38 cm vs 33 cm body; pad=0.06 pins the lip
+                # (overnight: 17/29 ended x≈-0.89, y≈0.88, never x<-1.2).
+                cpu_xy[0] += float(v_cmd) * math.cos(cpu_yaw) * frame_dt
+                cpu_xy[1] = float(np.clip(cpu_xy[1] + float(v_cmd) * math.sin(cpu_yaw) * frame_dt, 0.82, 1.08))
+                cpu_yaw = nyaw
+            elif (
+                not _vac_done
+                and float(v_cmd) > 0.04
+                and -1.45 <= cpu_xy[0] <= -1.22
+                and 0.85 <= cpu_xy[1] <= 2.00
+                and abs(_norm_angle(cpu_yaw - 0.5 * math.pi)) < 0.50
+            ):
+                # Aisle north of the gap: at y≈0.91 the tail still overlaps
+                # the south couch (overnight: 17× wp7-west-in y=2, end y=0.91).
+                # Do not walk into the north_w chair (y≈2.27).
+                cpu_xy[0] = float(np.clip(
+                    cpu_xy[0] + float(v_cmd) * math.cos(cpu_yaw) * frame_dt, -1.42, -1.25
+                ))
+                cpu_xy[1] = min(1.98, cpu_xy[1] + max(0.20, abs(float(v_cmd))) * frame_dt)
+                cpu_yaw = 0.5 * math.pi
+            elif (
+                float(v_cmd) < -0.04
+                and not _kin_ok(cpu_xy[0], cpu_xy[1], cpu_yaw, near, pad=0.06)
+            ):
+                # plus>0.40 blocked this when the nose was in the south table
+                # (overnight (0.28,-5.24) front=0.21 still=18s yaw frozen).
+                cpu_xy[0], cpu_xy[1] = nx, ny
+                cpu_yaw = nyaw
+            elif abs(w_cmd) > 0.04:
+                if _kin_ok(cpu_xy[0], cpu_xy[1], nyaw, near, pad=0.04) or (
+                    math.isfinite(plus_now) and plus_now > 0.55
+                ) or (
+                    -1.50 <= cpu_xy[0] <= -1.15
+                    and 0.80 <= cpu_xy[1] <= 1.35
+                ):
+                    cpu_yaw = nyaw
+            elif (
+                abs(cpu_xy[0] - float(getattr(wander, "door_x", -0.60))) < 0.28
+                and (float(getattr(wander, "door_y", -2.81)) - 0.90) < cpu_xy[1]
+                < (float(getattr(wander, "door_y", -2.81)) + 0.15)
+                and abs(_norm_angle(cpu_yaw - 0.5 * math.pi)) < 0.22
+                and math.isfinite(plus_now)
+                and plus_now > 1.2
+            ):
+                # Depth says the opening is clear; lock to measured door-x and walk north.
+                cpu_xy[0] = float(wander.door_x)
+                cpu_xy[1] += max(0.22, abs(float(v_cmd))) * frame_dt
+                cpu_yaw = 0.5 * math.pi
+        last_quat = _yaw_quat(cpu_yaw)
+        last_pos = (cpu_xy[0], cpu_xy[1], 0.0)
+        pos = last_pos
+        yaw = cpu_yaw
+        t_kin += time.perf_counter() - _tk0
         t_sim += frame_dt
+
+        if live_gl is not None and not live_gl.closed:
+            _tg1 = time.perf_counter()
+            live_gl.present(
+                last_pos, yaw, trail=trail_xy, people=people.folk,
+                chat=chat_bubble, note=getattr(wander, "plan_note", ""),
+                rt=viz.rt_now(t_sim)[0], min_dt=1.0 / 12.0, t_sim=t_sim,
+            )
+            t_gl += time.perf_counter() - _tg1
 
         if sense:
             if pose_est._visual_accepted > acc_before:
@@ -2781,13 +3398,14 @@ def run_perception_drive(args):
                 map_pose = last_rel
                 map_world_xy = (wx, wy)
             last_rel = map_pose
-            try:
-                evidence.update(labels, height, last_rel)
-                evid_ok += 1
-            except Exception as e:
-                evid_fail += 1
-                if evid_fail == 1:
-                    print("evidence update:", type(e).__name__, e)
+            if deep:
+                try:
+                    evidence.update(labels, height, last_rel)
+                    evid_ok += 1
+                except Exception as e:
+                    evid_fail += 1
+                    if evid_fail == 1:
+                        print("evidence update:", type(e).__name__, e)
             if slam is not None and rs1_valid:
                 try:
                     obs_s, known_s = ego_labels_to_planner_feed(labels, height)
@@ -2808,54 +3426,32 @@ def run_perception_drive(args):
                     last_pose_source, pose_est._visual_accepted, pose_est._visual_rejected,
                 )
 
-            vis, _vis_q = _unpack_xf(state_0.body_q.numpy()[chassis])
-            px, py = float(vis[0]), float(vis[1])
+            pos = (cpu_xy[0], cpu_xy[1], 0.0)
+            quat = last_quat
+            yaw = cpu_yaw
+            px, py = float(pos[0]), float(pos[1])
             cam_xy.append((px, py))
             # Do not paint a pose trail through a wall. Chassis can still be
             # rendered, but the yellow path holds the last outside point.
             if fp_gate.outside_for_map((px, py), float(yaw), None if not trail_xy else trail_xy[-1]):
                 trail_xy.append((px, py))
-            fx, fy, fyaw = last_rel
-            cam_z = 8.2
-            viewer.camera.pos = viewer.camera._as_vec3((px + 1.4, py - 2.0, cam_z))
-            viewer.camera.look_at((px, py, 0.20))
-            viewer.camera.fov = 42.0
-            viewer.begin_frame(t_sim)
-            viewer.log_state(state_0)
-            try:
-                _log_path_trail(viewer, trail_xy)
-                _log_cam_rays(viewer, cams)
-            except Exception as e:
-                trail_fail += 1
-                if trail_fail == 1:
-                    print("path trail:", type(e).__name__, e)
-            viewer.end_frame()
-            shot = viewer.get_frame()
-            overview = np.asarray(shot.numpy())
-            panel_h = max(160, int(overview.shape[0] * 0.88))
-            try:
-                slam_panel = _render_slam_map(
-                    slam, evidence if evid_ok else None, last_rel, panel_h,
-                    pose_source=last_pose_source,
-                )
-            except Exception as e:
-                if len(frames) == 0:
-                    print("slam panel:", type(e).__name__, e)
-                slam_panel = None
-            try:
-                cam_panel = _cam_strip(cams.last_d1, cams.last_d2, labels, panel_h)
-            except Exception as e:
-                if len(frames) == 0:
-                    print("cam panel:", type(e).__name__, e)
-                cam_panel = None
-            extra = "pose_source=%s  wall_px=%d  front=%.2fm  fp=%.2fm  %s" % (
+            extra = "rt=%.1fx pose=%s wall_px=%d front=%.2fm fp=%.2fm %s" % (
+                viz.rt_now(t_sim)[0],
                 last_pose_source, cams.last_wall_px, front if min_front is not None else -1.0,
                 fp_gate.min_clear if fp_gate.min_clear is not None else -1.0,
                 "STOP" if wall_stop_latched else "",
             )
-            frames.append(_compose_frame(
-                overview, slam_panel, cam_panel, last_mode, (fx, fy, fyaw), slam_line, extra,
-            ))
+            if n_sense % 2 == 1:
+                _tv0 = time.perf_counter()
+                viz.push(
+                    t_sim, (px, py), float(yaw), trail_xy, last_mode, extra,
+                    d1=cams.last_d1, labels=labels,
+                )
+                t_viz += time.perf_counter() - _tv0
+            if viz.last_frame is not None:
+                frames.append(viz.last_frame)
+                if len(frames) > 12:
+                    frames = frames[-8:]
             from PIL import Image
             check_dir = gif_path.parent
             px_now = float(getattr(cams, "last_plus_x", float("inf")))
@@ -2881,7 +3477,9 @@ def run_perception_drive(args):
                 and abs(v_cmd) < 0.02
                 and not bool(getattr(cams, "last_crossed", False))
             ):
-                Image.fromarray(frames[-1]).save(check_dir / "kevin_headon_stopped.png")
+                Image.fromarray(viz.last_frame if viz.last_frame is not None else frames[-1]).save(
+                    check_dir / "kevin_headon_stopped.png"
+                )
                 if cams.last_d1 is not None:
                     Image.fromarray(_depth_panel(cams.last_d1, 240, "RS1 top-down", floor_z=RS1_ORIGIN_Z)).save(
                         check_dir / "kevin_rs1_wall.png"
@@ -2913,15 +3511,27 @@ def run_perception_drive(args):
         travel = path_len = 0.0
 
     from PIL import Image
-    if not frames:
-        raise RuntimeError("no frames captured")
+    wall_s = max(1e-4, time.monotonic() - t_wall0)
+    rt_final = float(t_sim) / wall_s
+    print(
+        "timing sim=%.2fs wall=%.2fs rt=%.1fx phys=%.0fHz sense=%.0fHz kin=%.2fms/tick gl=%.2fms/tick grab=%.1fms/sense viz=%s"
+        % (
+            t_sim, wall_s, rt_final, phys_hz, cap_fps,
+            1000.0 * t_kin / max(1, n_phys),
+            1000.0 * t_gl / max(1, n_phys),
+            1000.0 * t_grab / max(1, n_sense),
+            viz.mode,
+        ),
+        flush=True,
+    )
     gif_path.parent.mkdir(parents=True, exist_ok=True)
-    ims = [Image.fromarray(f) for f in frames]
-    duration_ms = int(round(1000.0 * sense_every / phys_hz))
-    ims[0].save(gif_path, save_all=True, append_images=ims[1:], duration=duration_ms, loop=0, optimize=False)
-    tmp = Path("/tmp") / gif_path.name
-    ims[0].save(tmp, save_all=True, append_images=ims[1:], duration=duration_ms, loop=0, optimize=False)
-    print("wrote", gif_path, "bytes", gif_path.stat().st_size, "frames", len(frames), "travel", travel)
+    out_gif = viz.flush_gif(play=False, dest=gif_path)
+    if out_gif is None and viz.last_frame is not None:
+        Image.fromarray(viz.last_frame).save(gif_path.with_suffix(".png"))
+        print("wrote still", gif_path.with_suffix(".png"))
+    check_src = viz.keep or ([viz.last_frame] if viz.last_frame is not None else frames)
+    if not check_src:
+        print("no viz frames (sim still ran)")
 
     dt_sense = sense_every * frame_dt
     mode_names = ("forward", "creep", "turn_left", "turn_right", "stop")
@@ -2960,10 +3570,11 @@ def run_perception_drive(args):
     except Exception:
         evid_counts = {}
     check_dir = gif_path.parent
-    mid_idx = len(frames) // 2
-    for idx, name in ((0, "f0"), (40, "f40"), (80, "f80"), (mid_idx, "mid"), (len(frames) - 1, "flast")):
-        if 0 <= idx < len(frames):
-            Image.fromarray(frames[idx]).save(check_dir / ("kevin_drive_check_%s.png" % name))
+    n_chk = len(check_src)
+    mid_idx = n_chk // 2
+    for idx, name in ((0, "f0"), (max(0, n_chk // 4), "f40"), (max(0, n_chk // 2), "f80"), (mid_idx, "mid"), (n_chk - 1, "flast")):
+        if 0 <= idx < n_chk and check_src[idx] is not None:
+            Image.fromarray(check_src[idx]).save(check_dir / ("kevin_drive_check_%s.png" % name))
 
     def _fmt_xy(seq, k):
         if not seq:
@@ -2989,7 +3600,14 @@ def run_perception_drive(args):
         "min_plus_x_wall_clearance_m: %s" % (("%.4f" % min_plus_x) if min_plus_x is not None else "n/a"),
         "nose_crossed_wall: %s" % bool(nose_crossed_wall),
         "wall_box_count: %d" % int(getattr(add_house, "box_count", 0) or 0),
-        "rs1_wall_hits: frames=%d/%d px_sum=%d" % (rs1_wall_frames, len(frames), rs1_wall_px_sum),
+        "clutter_spec: %s" % getattr(add_random_obstacles, "spec", ""),
+        "clutter_n: %d" % len(extra),
+        "clutter_rooms: %s" % getattr(add_random_obstacles, "rooms", ""),
+        "door_xy: (%.3f, %.3f)" % (
+            float(getattr(wander, "door_x", -0.6)),
+            float(getattr(wander, "door_y", -2.81)),
+        ),
+        "rs1_wall_hits: frames=%d/%d px_sum=%d" % (rs1_wall_frames, n_sense, rs1_wall_px_sum),
         "path_length_m: %.4f" % path_len,
         "net_displacement_m: %.4f" % travel,
         "got_unstuck: %s" % got_unstuck,
@@ -3018,15 +3636,16 @@ def run_perception_drive(args):
         "start_xy_world: %s" % (_fmt_xy(path_xy, 0) if path_xy else "n/a"),
         "end_xy_world: %s" % (_fmt_xy(path_xy, len(path_xy) - 1) if path_xy else "n/a"),
         "path_samples_world: %s" % " ".join(_fmt_xy(path_xy, i) for i in sample_idx),
-        "rs1_valid: %d/%d" % (rs1_ok_n, len(frames)),
-        "rs2_clear_accepted_frames: %d/%d" % (rs2_clear_n, len(frames)),
+        "rs1_valid: %d/%d" % (rs1_ok_n, n_sense),
+        "rs2_clear_accepted_frames: %d/%d" % (rs2_clear_n, n_sense),
         "evidence_updates_ok: %d fail: %d counts: %s" % (evid_ok, evid_fail, evid_counts),
         "depth: RS1 = visual STL raycast (walls+floor) with Newton fill-in; wall collision boxes for stop/physics; STL not a mesh collider",
         "self_core_ok: %s leak_px=%s" % (
             getattr(cams, "last_self_core_ok", None),
             getattr(cams, "last_self_core_leak", None),
         ),
-        "frames: %d sense_dt_s: %.4f" % (len(frames), dt_sense),
+        "frames: %d sense=%d sense_dt_s: %.4f" % (len(check_src), n_sense, dt_sense),
+        "realtime_factor: %.1f  wall_s: %.3f  viz_mode: %s" % (rt_final, wall_s, viz.mode),
         "spawn: (%.3f, %.3f)" % (spawn[0], spawn[1]),
     ]
     try:
@@ -3054,9 +3673,13 @@ def run_perception_drive(args):
         "gate_blocked_forward", fp_gate.block_forward,
         "gate_blocked_yaw", fp_gate.block_yaw,
     )
-    if gif_path.name == "kevin_newton_drive.gif" or gif_path.stat().st_size > 25 * 1024 * 1024:
-        small = gif_path.parent / "kevin_newton_drive_small.gif"
-        _write_small_gif(frames, small)
+    print("travel", travel, "path", path_len)
+    if live_gl is not None:
+        live_gl.close()
+    viz._close_window()
+    small = gif_path.parent / "kevin_newton_drive_small.gif"
+    _write_small_gif(viz.keep or frames, small)
+    if small.exists():
         print("wrote", small, "bytes", small.stat().st_size)
     return gif_path
 
