@@ -103,10 +103,16 @@ class ODriveAxisCAN:
             data=struct.pack('<BHB', 0x00, ep_id, 0),
             is_extended_id=False
         ))
-        for msg in self.bus:
-            if msg.is_rx and msg.arbitration_id == (self.node_id << 5 | self.CMD_TX_SDO):
+        deadline = time.time() + 0.25
+        msg = None
+        while time.time() < deadline:
+            cand = self.bus.recv(timeout=0.05)
+            if cand is None:
+                continue
+            if cand.is_rx and cand.arbitration_id == (self.node_id << 5 | self.CMD_TX_SDO):
+                msg = cand
                 break
-        else:
+        if msg is None:
             return None
         _, _, _, val = struct.unpack_from('<BHB' + fmt, msg.data)
         return val
@@ -171,55 +177,77 @@ class ODriveAxisCAN:
     def get_encoder_vel_fast(self):
         """Read vel_estimate via native CAN Get_Encoder_Estimates (0x09).
 
-        ~3 ms per call (vs ~10 ms for SDO).  Caller must hold bus_lock.
-        Returns vel in turns/s, or None on failure.
+        S1 broadcasts this cyclically. Do not flush those frames, and do not
+        depend on a 4 ms RTR reply (that is what made 'enc=fail' with good
+        harnesses). Returns vel in turns/s, or None on failure.
         """
         target_id = self.node_id << 5 | self.CMD_GET_ENCODER_ESTIMATES
         try:
-            while self.bus.recv(timeout=0) is not None:
-                pass
-            self.bus.send(can.Message(
-                arbitration_id=target_id,
-                is_remote_frame=True,
-                is_extended_id=False,
-                dlc=8))
-            deadline = time.time() + 0.004
+            deadline = time.time() + 0.025
+            last = None
             while time.time() < deadline:
-                msg = self.bus.recv(timeout=0.003)
+                msg = self.bus.recv(timeout=0.020)
                 if (msg and msg.arbitration_id == target_id
                         and not msg.is_remote_frame
                         and len(msg.data) >= 8):
-                    _, vel = struct.unpack_from('<ff', msg.data)
-                    return vel
+                    last = msg
+                    break
+            if last is None:
+                return None
+            _, vel = struct.unpack_from('<ff', last.data)
+            return vel
+        except can.CanOperationError:
+            return None
+
+    @staticmethod
+    def poll_encoder_vels(bus, node_ids=(0, 1), timeout=0.04):
+        """One recv window for cyclic Get_Encoder_Estimates on several nodes.
+
+        Sequential per-axis waits drop the other wheel's 100 Hz frames and
+        look like encoder failure. Returns dict node_id -> vel (missing=None).
+        """
+        want = {int(n): None for n in node_ids}
+        ids = {(int(n) << 5 | ODriveAxisCAN.CMD_GET_ENCODER_ESTIMATES): int(n)
+               for n in node_ids}
+        deadline = time.time() + float(timeout)
+        try:
+            while time.time() < deadline and any(v is None for v in want.values()):
+                msg = bus.recv(timeout=0.015)
+                if (not msg or msg.is_remote_frame or len(msg.data) < 8
+                        or msg.arbitration_id not in ids):
+                    continue
+                _pos, vel = struct.unpack_from('<ff', msg.data)
+                want[ids[msg.arbitration_id]] = vel
         except can.CanOperationError:
             pass
-        return None
+        return want
+        """(pos_turns, vel_turns_s) from cyclic 0x09, or (None, None)."""
+        target_id = self.node_id << 5 | self.CMD_GET_ENCODER_ESTIMATES
+        try:
+            deadline = time.time() + 0.025
+            while time.time() < deadline:
+                msg = self.bus.recv(timeout=0.020)
+                if (msg and msg.arbitration_id == target_id
+                        and not msg.is_remote_frame
+                        and len(msg.data) >= 8):
+                    pos, vel = struct.unpack_from('<ff', msg.data)
+                    return pos, vel
+        except can.CanOperationError:
+            pass
+        return None, None
 
     def get_encoder_vel_sdo(self):
-        """Read vel_estimate via SDO (slower fallback, ~8 ms).
+        """Read vel_estimate via SDO (slower fallback).
 
-        Caller must hold bus_lock.
-        Returns vel in turns/s, or None on failure.
+        Caller must hold bus_lock. Returns vel in turns/s, or None on failure.
         """
-        ep_name = 'axis0.encoder_estimator.vel_estimate'
-        if ep_name not in self.endpoints:
-            return None
-        ep_id = self.endpoints[ep_name]['id']
-        try:
-            self.flush_bus()
-            self.bus.send(can.Message(
-                arbitration_id=(self.node_id << 5 | self.CMD_RX_SDO),
-                data=struct.pack('<BHB', 0x00, ep_id, 0),
-                is_extended_id=False))
-            target_id = self.node_id << 5 | self.CMD_TX_SDO
-            deadline = time.time() + 0.015
-            while time.time() < deadline:
-                msg = self.bus.recv(timeout=0.012)
-                if msg and msg.arbitration_id == target_id and len(msg.data) >= 8:
-                    _, _, _, val = struct.unpack_from('<BHBf', msg.data)
-                    return val
-        except can.CanOperationError:
-            pass
+        for ep_name in (
+            "axis0.vel_estimate",
+            "encoder_estimator0.vel_estimate",
+            "axis0.encoder_estimator.vel_estimate",
+        ):
+            if ep_name in self.endpoints:
+                return self.read_property(ep_name)
         return None
 
 

@@ -1,0 +1,11 @@
+{
+  "n_frames": 408,
+  "thresh": 0.22,
+  "known_frac": 0.6727083333333334,
+  "mean_p_known": 0.5710176674836601,
+  "p_known_inside": 0.8460626430813886,
+  "bags": [
+    "/home/james/gits/awokeknowing/anglerdroid/sim/rl_nav/bags/wander_5min_pilot",
+    "/home/james/gits/awokeknowing/anglerdroid/sim/rl_nav/bags/wander_pilot_d"
+  ]
+}

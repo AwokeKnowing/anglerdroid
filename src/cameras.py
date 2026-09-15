@@ -2,6 +2,7 @@
 Pre-allocated numpy buffers. Blocking grab(). No processing.
 """
 
+import os
 import numpy as np
 import cv2
 
@@ -12,7 +13,9 @@ except ImportError:
     HAS_RS = False
 
 from robot_config import FRAME_W, FRAME_H
-RS_DEPTH_W, RS_DEPTH_H = 848, 480
+RS_DEPTH_W = int(os.environ.get("RS_DEPTH_W", "848"))
+RS_DEPTH_H = int(os.environ.get("RS_DEPTH_H", "480"))
+RS_FPS = int(os.environ.get("RS_FPS", "30"))
 RGB_CAP_W, RGB_CAP_H = 640, 480
 RS_DECIMATE_MAG = 3  # detail-first default (~45k verts on JP6). Do NOT drop mag for speed alone — see AGENTS.md Depth detail metric. Env override OK for bake-offs.
 
@@ -102,23 +105,23 @@ class RSCamera:
     With decimate_mag=8 the pointcloud has ~106x60 = 6360 vertices;
     making downstream numpy processing trivial (<1 ms).
     Set compute_pointcloud=False for cameras that only provide color.
-    Set capture_ir=True to also capture stereo IR frames (for cuVSLAM).
+    Set capture_ir=True to also capture stereo IR frames (cuVSLAM / i777 ORB-SLAM3).
     """
 
     def __init__(self, serial, decimate_mag=RS_DECIMATE_MAG,
-                 compute_pointcloud=True, capture_ir=False):
+                 compute_pointcloud=True, capture_ir=False, emitter=True):
         if not HAS_RS:
             raise ImportError("pyrealsense2 not available")
 
         cfg = rs.config()
         cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.depth, RS_DEPTH_W, RS_DEPTH_H, rs.format.z16, 30)
-        cfg.enable_stream(rs.stream.color, FRAME_W, FRAME_H, rs.format.rgb8, 30)
+        cfg.enable_stream(rs.stream.depth, RS_DEPTH_W, RS_DEPTH_H, rs.format.z16, RS_FPS)
+        cfg.enable_stream(rs.stream.color, RGB_CAP_W, RGB_CAP_H, rs.format.rgb8, RS_FPS)
 
         self._capture_ir = capture_ir
         if capture_ir:
-            cfg.enable_stream(rs.stream.infrared, 1, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
-            cfg.enable_stream(rs.stream.infrared, 2, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
+            cfg.enable_stream(rs.stream.infrared, 1, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, RS_FPS)
+            cfg.enable_stream(rs.stream.infrared, 2, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, RS_FPS)
 
         self._pipe = rs.pipeline()
         self.profile = self._pipe.start(cfg)
@@ -144,10 +147,12 @@ class RSCamera:
 
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
-        _set_sensor_opt(sensor, rs.option.laser_power, 360)
-        _set_sensor_opt(sensor, rs.option.emitter_enabled, 1)
+        _set_sensor_opt(sensor, rs.option.laser_power, 360 if emitter else 0)
+        _set_sensor_opt(sensor, rs.option.emitter_enabled, 1 if emitter else 0)
         _set_sensor_opt(sensor, rs.option.depth_units, 0.001)
         _set_sensor_opt(sensor, rs.option.receiver_gain, 16)
+        if not emitter:
+            print("cameras: %s IR emitter OFF (visual SLAM, not speckle)" % serial)
         # Cap exposure so low-light AE cannot stretch past ~30Hz budget.
         # Depth exposure is microseconds; 15000us = 15ms leaves headroom under 33ms.
         try:
@@ -199,10 +204,25 @@ class RSCamera:
             self.verts = None
 
         self.color = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self.depth = np.zeros((RS_DEPTH_H, RS_DEPTH_W), dtype=np.uint16)
+        self.depth_stamp = 0.0
         # Pre-allocate IR buffers (if capturing IR, allocate on first grab)
         self.ir_left = None
         self.ir_right = None
         self.ok = False
+
+    def depth_intrinsics(self):
+        """fx, fy, ppx, ppy, width, height of the raw (undecimated) depth stream."""
+        try:
+            vs = self.profile.get_stream(rs.stream.depth).as_video_stream_profile()
+            i = vs.get_intrinsics()
+            return {
+                "fx": float(i.fx), "fy": float(i.fy),
+                "ppx": float(i.ppx), "ppy": float(i.ppy),
+                "width": int(i.width), "height": int(i.height),
+            }
+        except Exception:
+            return {}
 
     def grab(self):
         """Take the newest frameset without multi-second stalls.
@@ -227,11 +247,25 @@ class RSCamera:
         _t1 = _time.monotonic() if _prof else 0.0
         d = frames.get_depth_frame()
         c = frames.get_color_frame()
-        if not d or not c:
+        if not d:
             self.ok = False
             return False
 
-        self.color[:] = np.asarray(c.get_data())
+        raw_z = np.asarray(d.get_data())
+        if raw_z.shape == self.depth.shape:
+            np.copyto(self.depth, raw_z)
+        else:
+            self.depth = np.array(raw_z, dtype=np.uint16, copy=True)
+        try:
+            self.depth_stamp = float(d.get_timestamp()) * 1e-3
+        except Exception:
+            self.depth_stamp = _time.monotonic()
+
+        if c:
+            raw_c = np.asarray(c.get_data())
+            if raw_c.shape[0] != FRAME_H or raw_c.shape[1] != FRAME_W:
+                raw_c = cv2.resize(raw_c, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
+            self.color[:] = raw_c
         _t2 = _time.monotonic() if _prof else 0.0
 
         if self._compute_pc:

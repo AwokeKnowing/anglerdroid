@@ -1,0 +1,8 @@
+out/
+bags/
+__pycache__/
+*.pt
+*.onnx
+*.npy
+!fov80_rs1.npy
+

@@ -8,7 +8,8 @@ Async goal mailbox for high-level agents (Kevins Doctor / tools):
 Each main-loop tick (~30 Hz): drive via planner backend:
   - 'vfh'  (default): rolling subgoal → VFH on atlas quadrant
   - 'mppi': MppiCostmapPlanner on ego-space vis._persistent_obs
-  - 'insect': 5 Hz reachable (v,w) scored 5 s on ego heightmap + visit doughnut
+  - 'insect': 5 Hz (v,w) wander + visit doughnut; plus-x stop still zeros v;
+              unstuck net is off (`hp unstuck=0`); set_goal_xy still wanders
   - 'neural_rl': learned policy with mppi/vfh fallback
 
 Never blocks. Capture/map thread stays untouched.
@@ -58,7 +59,7 @@ def _ensure_neural_rl():
         fallback_planner = os.environ.get('KEVIN_NEURAL_FALLBACK', 'mppi')
         _neural_rl = NeuralRLPolicy(
             model_path=model_path,
-            inference_budget_ms=5.0,
+            inference_budget_ms=20.0,
             fallback_planner=fallback_planner
         )
     return _neural_rl
@@ -272,11 +273,13 @@ def _tick_insect(obs_map, pose_x, pose_y, pose_theta):
 
     policy_obs = None
     slam_locked = False
+    safety_fwd = 1.0
     try:
         vis = tools.get_vision()
         if vis:
             policy_obs = vis.get_policy_observation()
             slam_locked = vis.slam_locked
+            safety_fwd = float(getattr(vis, "safety_fwd_scale", 1.0) or 1.0)
     except Exception as e:
         print("local_executive: get_policy_observation failed: %s" % e)
 
@@ -302,7 +305,34 @@ def _tick_insect(obs_map, pose_x, pose_y, pose_theta):
     except Exception as e:
         print("keepouts: paint skip %s" % e)
 
-    cmd = insect.tick(insect_input, pose, 0.033)
+    cmd = insect.tick(insect_input, pose, 0.033,
+                      safety_fwd=safety_fwd, pose_ok=slam_locked)
+    n = getattr(_tick_insect, "_log_n", 0) + 1
+    _tick_insect._log_n = n
+    if n <= 2 or n % 30 == 0:
+        enc = "?"
+        try:
+            wb = tools.get_wheelbase()
+            if wb is not None:
+                h = wb.get_encoder_health()
+                enc = "ok" if h.get("encoder_ok") else "fail"
+                enc += "/%.2fs" % float(h.get("age_s", -1))
+        except Exception:
+            pass
+        st = insect.get_debug_state()
+        print(
+            "wander: v=%.3f w=%.3f plus_x=%.2f L=%.2f R=%.2f "
+            "safety_fwd=%.2f mode=%s pose=(%.2f,%.2f,%.1f°) enc=%s recover=%s%s%s"
+            % (float(st.get("cmd_fwd", 0.0)), float(st.get("cmd_ang", 0.0)),
+               float(st.get("plus_x", -1.0)),
+               float((st.get("open") or (-1, -1, -1))[1]),
+               float((st.get("open") or (-1, -1, -1))[2]),
+               float(safety_fwd), st.get("mode") or "-",
+               pose[0], pose[1], pose[2] * 57.3, enc,
+               st.get("recover") or "-",
+               ("/%s" % st["reverse_src"]) if st.get("reverse_src") else "",
+               " seek" if st.get("seeking") else ""),
+            flush=True)
     with _lock:
         if not insect.is_active():
             _active = False
@@ -317,6 +347,9 @@ def _tick_insect(obs_map, pose_x, pose_y, pose_theta):
                 "prim_ms": st.get("prim_ms"),
                 "hot": st.get("hot"),
                 "throt": st.get("throt"),
+                "unstuck": st.get("unstuck"),
+                "plus_x": st.get("plus_x"),
+                "goal": st.get("goal"),
             }
     if cmd is None:
         return None
@@ -336,11 +369,16 @@ def _tick_neural_rl(obs_map, pose_x, pose_y, pose_theta):
     
     # Try to get policy feed (labeled heightmap) from Vision
     policy_feed = None
+    ego80 = None
+    v_scale = w_scale = 1.0
     slam_locked = False
     try:
         vis = tools.get_vision()
         if vis:
             policy_feed = vis.get_policy_feed()
+            ego80 = vis.get_policy_ego80()
+            v_scale = float(getattr(vis, "safety_fwd_scale", 1.0) or 1.0)
+            w_scale = float(getattr(vis, "safety_ang_scale", 1.0) or 1.0)
             slam_locked = vis.slam_locked
     except Exception as e:
         print("local_executive: get_policy_feed failed: %s" % e)
@@ -359,10 +397,22 @@ def _tick_neural_rl(obs_map, pose_x, pose_y, pose_theta):
         print("keepouts: paint skip %s" % e)
     
     # Tick neural policy
-    cmd = neural.tick(obs_map, pose, 0.033, policy_feed=policy_feed)
+    cmd = neural.tick(
+        obs_map, pose, 0.033,
+        policy_feed=policy_feed, ego80=ego80,
+        v_scale=v_scale, w_scale=w_scale,
+    )
     
     if cmd is not None and cmd.get('source') == 'neural':
-        # Neural inference succeeded
+        fwd = float(cmd["fwd_mps"])
+        ang = float(cmd["ang_rads"])
+        # Safety already wants an escape spin when the nose is pinned; the
+        # PPO has never trained at fwd_scale≈0 and will crawl then idle.
+        if v_scale < 0.20 and abs(ang) < 0.25:
+            ang = 0.45 if ang >= 0.0 else -0.45
+            if fwd > 0.0:
+                fwd = 0.0
+            cmd = dict(cmd, fwd_mps=fwd, ang_rads=ang, escape_spin=True)
         with _lock:
             if not neural.is_active():
                 _active = False
@@ -375,8 +425,9 @@ def _tick_neural_rl(obs_map, pose_x, pose_y, pose_theta):
                     "cmd": cmd,
                     "inference_ms": cmd.get("inference_ms"),
                     "using_policy_feed": policy_feed is not None and policy_feed.get('valid', False),
+                    "escape_spin": bool(cmd.get("escape_spin")),
                 }
-        return (float(cmd["fwd_mps"]), float(cmd["ang_rads"]))
+        return (fwd, ang)
     
     # Neural failed or returned None → fallback to configured planner
     fallback = neural._fallback_planner
