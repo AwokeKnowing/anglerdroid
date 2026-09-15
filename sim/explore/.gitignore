@@ -1,0 +1,15 @@
+*.pt
+*.pid
+*.log
+*.jsonl
+heartbeat.txt
+watchdog_heartbeat.txt
+STATUS.txt
+metrics.json
+snapshot.json
+deadline.txt
+last_eval.txt
+RESTART
+ckpt*
+*.png
+*.gif

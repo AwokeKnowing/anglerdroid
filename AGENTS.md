@@ -101,6 +101,7 @@ on device whenever changing it. Goal is **60 fps** when physics allows —
 - `JAMES_ARCHITECTURE.md` — 30 Hz vs ~3 Hz extras split
 - `LOOP_HARDENING_SUMMARY.md` / `CAPTURE_FPS.md` — budget shedding notes
 - `skills/checkered_mat_keepout.md` — brown border @ 3 Hz + named keepout
+- `sim/rl_nav/PLAN.md` — bag-matched 80×60 PPO; 848 is ego blit (`TD_X_OFFSET=-75`), not a center crop
 
 ---
 

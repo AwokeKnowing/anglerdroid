@@ -22,18 +22,21 @@ WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
 # Axle origin in ego pixels: (RCX, RCY).
 # ---------------------------------------------------------------------------
 
-# Body: 30 cm front-back × 33 cm left-right, centered on axle
-BODY_LEN_CM = 30.0            # along +X (forward)
+# Body: 34 cm front-back × 33 cm left-right. Extra length is forward of
+# axle so the leading-edge self-return stays inside the box.
+BODY_LEN_CM = 34.0            # along +X (forward)
 BODY_WID_CM = 33.0            # along +Y (left)
-BODY_CX_CM = 0.0              # body center vs axle
+BODY_CX_CM = 2.0              # +X = 4 cm extra forward vs centered 30 cm
 BODY_CY_CM = 0.0
 
-# Wheels: one box each, 18×6 cm (diameter × tire width), centers on axle line
-WHEEL_LEN_CM = 18.0           # along +X
-WHEEL_WID_CM = 6.0            # along +Y
-WHEEL_L_CX_CM = 0.0
+# Wheels: 18 cm physical diameter; extra length is FORWARD only (CX > 0)
+# so outboard tire returns past the axle box are covered without growing aft.
+# Wider than the 6 cm tire so left/right self-returns do not leak as obs.
+WHEEL_LEN_CM = 24.0           # along +X
+WHEEL_WID_CM = 10.0           # along +Y (was 6; +2 cm each side)
+WHEEL_L_CX_CM = 3.0           # +3 cm → +6 cm front, back edge stays on axle box
 WHEEL_L_CY_CM = WHEELBASE_CM / 2.0    # left (+Y)
-WHEEL_R_CX_CM = 0.0
+WHEEL_R_CX_CM = 3.0
 WHEEL_R_CY_CM = -WHEELBASE_CM / 2.0   # right (−Y)
 
 # Mast column (self-hits, not floor-clear). Size/offset from URDF (~3 cm post

@@ -1,0 +1,54 @@
+# Insect explore 20h plan (living — evaluator may edit)
+
+Started: 2026-09-11 23:17 PT. Deadline = unix in sim/explore/deadline.txt (20h). Do not reset.
+
+## Status (eval 3, 30 min)
+Healthy. 18.45 h left. GPU 92 MiB. LIVE+HUD. Visit doughnut is in the 5 s score.
+Roll25: win=0.83, chord=1.10 m, path=5.1 m, cells=15.3, rooms=1.7, crash=0.28,
+prim_hot=0.11, prim_ms≈20. Path dropped vs pre-doughnut 7.3 m (less looping);
+rooms not stuck at 1 (mix of 1–2, some 30-cell one-room paces). **Hold.**
+Do not raise visit_coef yet. Do not cut max_v. crash<0.4. plant=0.
+
+## Goal
+Pick a short-horizon command that is physically reachable now, but score the
+story 5 s out so paths that pin / hug walls lose. Smoothness comes from the
+same path winning again, not from gluing the robot to a curve.
+No room-id / map waypoints in the actor. Plus-x / box stop stays as physics.
+
+## Quant metrics
+WIDE: mean_cov_cells, mean_n_rooms, mean_path_m
+SLICE: mean_chord (imagined 5 s path m), win_frac (path≥0.5 m and throt<0.30)
+CUT: time_frac, crash_frac
+THROT: mean curve_cont (HUD throttle of winner)
+SPEED: prim_ms (64×50 score wall time; want << 10 ms)
+
+## Adjustment table (ONE change per 30 min)
+| Observation | Change |
+|---|---|
+| win_frac < 0.10 after 20+ eps, high throt | raise `prim_stuck` +0.2 (cap 3.4) |
+| win_frac > 0.45 and mean_path_m still tiny | raise `prim_progress` +0.05 (cap 0.80) |
+| crash_frac > 0.4 and prim_ms healthy | raise `curve_wall_coef` +0.1 (cap 1.4) — do **not** cut max_v first |
+| circling / hot doughnut, rooms stay ~1 | raise `visit_coef` +0.2 (cap 2.4) |
+| mean imagined path high but rooms=1 | raise `visit_coef` first, not cover_coef |
+| prim_ms > 15 | leave mechanism; do not add Python loops |
+| GPU ~0 or dash dead | restart watchdog DISPLAY=:1 |
+
+Retired knobs (do not tune): curve_r_max, curve_r_min, curve_bead, curve_pin_lose,
+curve_spawn_open, curve_s. Bézier commit is gone.
+
+Never: plant=1, room waypoints, textures, Jetson arm, commit, reset deadline,
+spawn yaw cheat, sticky 10 s follow.
+
+## Hardware
+RTX 3090 Warp raycast + PPO/RND. LIVE+HUD DISPLAY=:1. Last run used ~92 MiB — lots of GPU headroom.
+
+## Parallel sims / longer train (research, do not block this run)
+- One Newton env + net was ~92 MiB. 3090 (24 GB) can hold many Warp raycast meshes.
+- **Alternate GPU vec-env (from scratch, not this 20h process):** `sim/gpu_insect/`.
+  Own ckpt in `sim/gpu_insect/out/`. Do not load Newton ckpt into it.
+  Port 5 Hz reachable (v,w) there later; do not block this run.
+- Option-level PPO still 4D; a[0],a[1] = actor (v,w) clipped into the 0.2 s box.
+
+## Why scoring must include plus-x
+Physics zeros v when plus-x < plus_x_stop. A 5 s imagined path that spends most
+ticks throttled is stuck even if w is free (in-place yaw). Those samples must lose.

@@ -51,8 +51,9 @@ def main():
                         help="EXPERIMENT: Use wheel+IMU prediction prior (for self-slam-wheel-imu-prior-v0)")
     parser.add_argument("--auto-local", action="store_true",
                         help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI/NeuralRL)")
-    parser.add_argument("--local-planner", default="vfh", choices=["vfh", "mppi", "neural_rl"],
-                        help="LocalExecutive backend: vfh (default), mppi (NumPy MPPI on ego costmap), or neural_rl (learned policy)")
+    parser.add_argument("--local-planner", default="vfh",
+                        choices=["vfh", "mppi", "neural_rl", "insect"],
+                        help="LocalExecutive backend: vfh, mppi, neural_rl, or insect (5 Hz v,w + visit doughnut)")
     parser.add_argument("--wander", action="store_true",
                         help="With --auto-local, start continuous ~1m wander immediately")
     parser.add_argument("--house-bot", action="store_true",
@@ -153,12 +154,12 @@ def main():
         print("main: local planner armed: %s" % args.local_planner)
         if args.wander:
             local_executive.set_wander()
-            print("main: wander started (~1m rolling goals)")
+            print("main: wander started (%s)" % args.local_planner)
     hb = None
     if args.house_bot:
         hb = house_bot_mod.HouseBot(vis, enabled=True)
         hb.start()
-    else:
+    elif not args.auto_local:
         local_executive.clear()
     people = None
     if args.people or args.house_bot:

@@ -88,14 +88,35 @@ class NeuralRLPolicy:
         
         self._active = False
         self._goal_xy = None  # type: Optional[Tuple[float, float]]
+        self._rl_nav = None
+
+        candidates = []
+        env_ckpt = os.environ.get("KEVIN_RL_NAV_CKPT", "").strip()
+        if env_ckpt:
+            candidates.append(env_ckpt)
+        candidates.append(os.path.expanduser("~/.kevin/rl_nav.onnx"))
+        candidates.append(os.path.expanduser("~/.kevin/rl_nav_ckpt.pt"))
+        seen = set()
+        for ckpt in candidates:
+            if not ckpt or ckpt in seen or not Path(ckpt).is_file():
+                continue
+            seen.add(ckpt)
+            try:
+                from rl_nav_live import RlNavLive
+                self._rl_nav = RlNavLive(ckpt)
+                print("neural_rl: using sim/rl_nav PPO from %s" % ckpt, flush=True)
+                break
+            except Exception as e:
+                print("neural_rl: rl_nav load failed %s (%s)" % (ckpt, e), flush=True)
+                self._rl_nav = None
         
         # Try to load ONNX model
-        if model_path and ONNX_AVAILABLE:
+        if self._rl_nav is None and model_path and ONNX_AVAILABLE:
             self._load_model(model_path)
-        else:
+        elif self._rl_nav is None:
             if model_path and not ONNX_AVAILABLE:
                 print(f"neural_rl: ONNX runtime not available, using {fallback_planner} fallback")
-            else:
+            elif not model_path:
                 print(f"neural_rl: no model path provided, using {fallback_planner} fallback")
     
     def _load_model(self, model_path: str) -> bool:
@@ -286,7 +307,10 @@ class NeuralRLPolicy:
         obs_map: np.ndarray,
         pose: Tuple[float, float, float],
         dt: float,
-        policy_feed: Optional[Dict[str, Any]] = None
+        policy_feed: Optional[Dict[str, Any]] = None,
+        ego80: Optional[np.ndarray] = None,
+        v_scale: float = 1.0,
+        w_scale: float = 1.0,
     ) -> Optional[dict]:
         """Compute control command from observation.
         
@@ -307,6 +331,29 @@ class NeuralRLPolicy:
             
             goal_xy = self._goal_xy
             fallback = self._fallback_planner
+
+        if self._rl_nav is not None:
+            if ego80 is None:
+                return {
+                    "fwd_mps": 0.0,
+                    "ang_rads": 0.0,
+                    "source": "neural",
+                    "inference_ms": 0.0,
+                }
+            try:
+                t0 = time.perf_counter()
+                fwd, ang = self._rl_nav.act(
+                    ego80, v_scale=v_scale, w_scale=w_scale)
+                self._inference_time_ms = (time.perf_counter() - t0) * 1000.0
+                self._inference_count += 1
+                return {
+                    "fwd_mps": float(fwd),
+                    "ang_rads": float(ang),
+                    "source": "neural",
+                    "inference_ms": self._inference_time_ms,
+                }
+            except Exception as e:
+                print("neural_rl: rl_nav act failed: %s" % e, flush=True)
         
         # Try neural inference
         if self._session is not None:
@@ -343,7 +390,8 @@ class NeuralRLPolicy:
             return {
                 "active": self._active,
                 "goal_xy": self._goal_xy,
-                "model_loaded": self._session is not None,
+                "model_loaded": self._session is not None or self._rl_nav is not None,
+                "rl_nav": self._rl_nav is not None,
                 "inference_count": self._inference_count,
                 "fallback_count": self._fallback_count,
                 "inference_ms": round(self._inference_time_ms, 2),
