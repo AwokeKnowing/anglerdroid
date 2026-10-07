@@ -859,9 +859,11 @@ void main() {
     }
     
     // Project to ego frame (camera-centered, will rotate 180° later)
-    vec2 proj = (p.xy * u_scale) + u_offset;
+    // CRITICAL: floor() to match CPU astype(np.uint32) truncation semantics
+    vec2 proj_float = (p.xy * u_scale) + u_offset;
+    vec2 proj = floor(proj_float);
     
-    // Bounds check
+    // Bounds check (after floor, matching CPU)
     if (proj.x < 0.0 || proj.x >= u_fbo_sz.x || proj.y < 0.0 || proj.y >= u_fbo_sz.y) {
         gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
     }
@@ -876,14 +878,18 @@ void main() {
     } else {
         v_label = 3.0;  // OBSTACLE
         // Height in cm above floor (clamped 1-100)
-        float h_cm = clamp((u_floor_clip - p.z) * 100.0, 1.0, 100.0);
+        // Use floor() to match CPU's .astype(np.int32) truncation, then clamp
+        float h_raw = (u_floor_clip - p.z) * 100.0;
+        float h_cm = clamp(floor(h_raw), 1.0, 100.0);
         v_height = h_cm;
-        // Map height to depth range [0.01, 1.0] so taller obstacles win
-        depth_val = h_cm / 100.0;
+        // Map height to depth: use 0.1 + (height/100)*0.9 so obstacles are in [0.109, 1.0]
+        // This ensures obstacles always beat CLEAR (0.001) and taller obstacles win
+        depth_val = 0.1 + (h_cm / 100.0) * 0.9;
     }
     
     // NDC coordinates for scatter
-    vec2 ndc = (proj / u_fbo_sz) * 2.0 - 1.0;
+    // Add 0.5 to target pixel center (OpenGL pixels centered at integer+0.5)
+    vec2 ndc = ((proj + 0.5) / u_fbo_sz) * 2.0 - 1.0;
     // Use depth for priority: OBSTACLE > CLEAR > UNKNOWN (taller obstacle wins)
     gl_Position = vec4(ndc, depth_val, 1.0);
 }
