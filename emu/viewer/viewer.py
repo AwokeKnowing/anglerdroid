@@ -148,13 +148,15 @@ PAGE = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport co
 #f{display:flex;padding:6px;gap:6px}#q{flex:1;font:15px system-ui;padding:6px;background:#222;color:#fff;border:1px solid #555}
 #hint{position:absolute;left:8px;top:6px;font:12px system-ui;color:#ccc;background:#0008;padding:3px 6px;border-radius:4px}
 @media(max-width:900px){body{flex-direction:column;height:auto}#v{height:56vw}#r,#m{width:100%;height:auto}}</style></head><body>
-<div id=v><img id=img alt="3-D view"><div id=hint>3-D: drag to orbit, wheel to zoom. Cyan frustum = depth FOV (colorized depth), yellow = RGB FOV (live RGB)</div></div>
+<div id=v><img id=img alt="3-D view"><div id=hint>3-D: drag to orbit, wheel to zoom. Cyan frustum = depth FOV (colorized depth), yellow = RGB FOV (live RGB) <label style="margin-left:12px"><input type=checkbox id=camvis checked> Camera vis</label></div></div>
 <div id=r><img id=m alt=map><div id=log></div><form id=f><input id=q placeholder="go to the kitchen | go to the couch | follow the dog | stop | come back | forward 1 | turn left" autocomplete=off><button>send</button></form></div>
 <script>
 const img=document.getElementById('img'),m=document.getElementById('m'),lg=document.getElementById('log'),q=document.getElementById('q');
 function loop(el,url,ms){let busy=false;setInterval(()=>{if(busy)return;busy=true;const n=new Image();n.onload=()=>{el.src=n.src;busy=false};n.onerror=()=>{busy=false};n.src=url+'?t='+Date.now()},ms)}
-loop(img,'/view.jpg',120);loop(m,'/map.jpg',250);
-let cam={az:0,elev:-62,dist:3.2},drag=null;
+loop(img,'/view.jpg?v=2',120);loop(m,'/map.jpg',250);
+let cam={az:0,elev:-62,dist:3.2,camvis:true},drag=null;
+const camvisEl=document.getElementById('camvis');
+camvisEl.onchange=()=>{cam.camvis=camvisEl.checked;sendCam()};
 function sendCam(){fetch('/cam',{method:'POST',body:JSON.stringify(cam)})}
 img.onmousedown=e=>{drag=[e.clientX,e.clientY];e.preventDefault()};
 window.onmouseup=()=>{drag=null};
@@ -186,6 +188,7 @@ class H(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
         if self.path == "/cam":
             c = {k: float(d[k]) for k in ("az", "elev", "dist") if k in d}
+            c["camvis"] = bool(d.get("camvis", True))
             open("/dev/shm/kevin_view_cam.tmp", "w").write(json.dumps(c)); os.replace("/dev/shm/kevin_view_cam.tmp", "/dev/shm/kevin_view_cam.json")
             return self._send(b"{}")
         if self.path == "/chat":

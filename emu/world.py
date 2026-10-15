@@ -613,6 +613,7 @@ class World:
             R._gl_context.make_current(); mj.mjr_uploadTexture(vm, R._mjr_context, tid)
         try: vc = json.load(open("/dev/shm/kevin_view_cam.json"))
         except Exception: vc = {}
+        camvis = bool(vc.get("camvis", True))  # default ON
         bx, by = float(dr.qpos[0]), float(dr.qpos[1]); q = dr.qpos[3:7]; yaw = math.atan2(2 * (q[0] * q[3] + q[1] * q[2]), 1 - 2 * (q[2] ** 2 + q[3] ** 2))
         az = math.degrees(yaw) + 200.0                                      # behind-left of Kevin, smoothed
         self._vaz = az if self._vaz is None else self._vaz + 0.08 * (((az - self._vaz) + 180) % 360 - 180)
@@ -626,19 +627,21 @@ class World:
         hit = mj.mj_ray(vm, dr, np.array(cam.lookat, float), back, self._rgrp, 1, -1, self._rid)
         if 0 <= hit < cam.distance + 0.15:
             cam.distance = max(0.5, hit - 0.15); cam.elevation = min(cam.elevation, -70.0) if hit < 1.2 else cam.elevation
-        if not hasattr(self, "_vopt"): self._vopt = mj.MjvOption(); self._vopt.geomgroup[4] = 1; self._vopt.geomgroup[5] = 1
+        if not hasattr(self, "_vopt"): self._vopt = mj.MjvOption(); self._vopt.geomgroup[5] = 1
+        self._vopt.geomgroup[4] = 1 if camvis else 0  # group 4 = image-slice geometry
         R.update_scene(dr, cam, self._vopt); sc = R.scene
         near, far = VIEW_CLIP
-        for nm, (_d, _tw, _th, _fov, _asp, col) in VIEW_CAMS.items():   # FOV: thin translucent lines, no filled planes
-            cid = self.m.camera(nm).id; P = dr.cam_xpos[cid].copy(); Rm = dr.cam_xmat[cid].reshape(3, 3)
-            ty = math.tan(math.radians(self.m.cam_fovy[cid]) / 2); tx = ty * _asp
-            K = [Rm @ np.array([sx * tx, sy * ty, -1.0]) for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
-            N = [P + near * k for k in K]; F = [P + far * k for k in K]
-            segs = [(P, f, 0.30) for f in F] + [(N[i], N[(i + 1) % 4], 0.22) for i in range(4)] + [(F[i], F[(i + 1) % 4], 0.22) for i in range(4)]
-            for a_, b_, al in segs:
-                if sc.ngeom >= sc.maxgeom: break
-                g = sc.geoms[sc.ngeom]; mj.mjv_initGeom(g, mj.mjtGeom.mjGEOM_LINE, np.zeros(3), np.zeros(3), np.zeros(9), np.array((*col, al), np.float32))
-                mj.mjv_connector(g, mj.mjtGeom.mjGEOM_LINE, 1.0, np.asarray(a_, float), np.asarray(b_, float)); sc.ngeom += 1
+        if camvis:  # skip frustum lines when camera vis off
+            for nm, (_d, _tw, _th, _fov, _asp, col) in VIEW_CAMS.items():   # FOV: thin translucent lines, no filled planes
+                cid = self.m.camera(nm).id; P = dr.cam_xpos[cid].copy(); Rm = dr.cam_xmat[cid].reshape(3, 3)
+                ty = math.tan(math.radians(self.m.cam_fovy[cid]) / 2); tx = ty * _asp
+                K = [Rm @ np.array([sx * tx, sy * ty, -1.0]) for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                N = [P + near * k for k in K]; F = [P + far * k for k in K]
+                segs = [(P, f, 0.30) for f in F] + [(N[i], N[(i + 1) % 4], 0.22) for i in range(4)] + [(F[i], F[(i + 1) % 4], 0.22) for i in range(4)]
+                for a_, b_, al in segs:
+                    if sc.ngeom >= sc.maxgeom: break
+                    g = sc.geoms[sc.ngeom]; mj.mjv_initGeom(g, mj.mjtGeom.mjGEOM_LINE, np.zeros(3), np.zeros(3), np.zeros(9), np.array((*col, al), np.float32))
+                    mj.mjv_connector(g, mj.mjtGeom.mjGEOM_LINE, 1.0, np.asarray(a_, float), np.asarray(b_, float)); sc.ngeom += 1
         img = R.render()
         import cv2
         ok, jp = cv2.imencode(".jpg", cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
