@@ -193,6 +193,9 @@ class H(BaseHTTPRequestHandler):
                     env = ENVS.get(S["env"], lambda _: None)(0)
                     if env:
                         geoms = []
+                        extent = env.extent if hasattr(env, 'extent') else (-5, -5, 5, 5)
+                        print(f"[viewer] exporting scene: env={S['env']}, extent={extent}, geoms={len(env.geoms)}", flush=True)
+                        
                         for g in env.geoms:
                             color = {"plaster": 0xdcd8cc, "plaster2": 0xc8d0d8, "wood": 0x8c6138, "fabric": 0x4c5c78,
                                    "metal": 0x9ea2a8, "white": 0xededed, "dark": 0x262629}.get(g.mat, 0x888888)
@@ -201,20 +204,30 @@ class H(BaseHTTPRequestHandler):
                                 # Export mesh vertices/faces for walls (trimesh)
                                 try:
                                     import trimesh
+                                    print(f"[viewer] loading mesh: {g.mesh}", flush=True)
                                     m = trimesh.load(g.mesh)
                                     scale = g.size[0] if isinstance(g.size, (list, tuple)) else 1.0
+                                    print(f"[viewer] mesh loaded: {len(m.vertices)} verts, {len(m.faces)} faces, scale={scale}", flush=True)
                                     # Transform vertices: scale + translate by pos (pos is offset from origin)
                                     verts = (m.vertices * scale + np.array(g.pos)).tolist()
                                     faces = m.faces.tolist()
                                     gd["vertices"] = verts
                                     gd["faces"] = faces
+                                    print(f"[viewer] mesh exported: {len(verts)} verts, {len(faces)} faces", flush=True)
                                 except Exception as e:
                                     print(f"[viewer] mesh export failed for {g.mesh}: {e}", flush=True)
+                                    import traceback
+                                    traceback.print_exc()
                             geoms.append(gd)
-                        return self._send(json.dumps({"geoms": geoms}).encode())
+                        
+                        result = {"geoms": geoms, "extent": list(extent)}
+                        print(f"[viewer] scene.json ready: {len(geoms)} geoms", flush=True)
+                        return self._send(json.dumps(result).encode())
                 except Exception as e:
                     print(f"[viewer] scene.json export failed: {e}", flush=True)
-            return self._send(json.dumps({"geoms": []}).encode())
+                    import traceback
+                    traceback.print_exc()
+            return self._send(json.dumps({"geoms": [], "extent": [-5, -5, 5, 5]}).encode())
         if p == "/state.json":
             # Polled state (tunnel-friendly, prefer this over SSE)
             S = sim()

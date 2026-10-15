@@ -59,41 +59,48 @@ controls.enableDamping=true;
 controls.dampingFactor=0.05;
 controls.update();
 
-// Lights
-const ambient=new THREE.AmbientLight(0xffffff,0.4);
+// Lights - brighter for better visibility
+const hemi=new THREE.HemisphereLight(0xffffff,0x444444,0.6);
+scene.add(hemi);
+const ambient=new THREE.AmbientLight(0xffffff,0.5);
 scene.add(ambient);
-const dir=new THREE.DirectionalLight(0xffffff,0.6);
+const dir=new THREE.DirectionalLight(0xffffff,0.8);
 dir.position.set(5,10,7);
 dir.castShadow=true;
-dir.shadow.camera.left=-6;dir.shadow.camera.right=6;
-dir.shadow.camera.top=6;dir.shadow.camera.bottom=-6;
+dir.shadow.camera.left=-15;dir.shadow.camera.right=15;
+dir.shadow.camera.top=15;dir.shadow.camera.bottom=-15;
 dir.shadow.mapSize.width=2048;dir.shadow.mapSize.height=2048;
 scene.add(dir);
 
-// Ground
-const ground=new THREE.Mesh(
+// Ground - will be resized based on scene extent
+let ground=new THREE.Mesh(
   new THREE.PlaneGeometry(20,20),
-  new THREE.MeshStandardMaterial({color:0x2a2a2a,roughness:0.8})
+  new THREE.MeshStandardMaterial({color:0x3a3a3a,roughness:0.8})
 );
 ground.rotation.x=-Math.PI/2;
 ground.receiveShadow=true;
 scene.add(ground);
+
+// Grid helper for reference
+let grid=new THREE.GridHelper(20,20,0x555555,0x333333);
+grid.position.y=0.01;
+scene.add(grid);
 
 // State
 let sceneLoaded=false;
 let robot=null,dog=null,goal=null,path=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
 
-// Robot (simple box for now)
-const robotGeom=new THREE.BoxGeometry(0.4,0.18,0.3);
-const robotMat=new THREE.MeshStandardMaterial({color:0x0a8});
+// Robot - bigger and more visible
+const robotGeom=new THREE.BoxGeometry(0.5,0.25,0.4);
+const robotMat=new THREE.MeshStandardMaterial({color:0x00cc88,emissive:0x003322,roughness:0.6});
 robot=new THREE.Mesh(robotGeom,robotMat);
-robot.position.y=0.09;
+robot.position.y=0.125;
 robot.castShadow=true;
 scene.add(robot);
 
-// Arrow for robot heading
-const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),0.4,0x0f0,0.1,0.08);
+// Arrow for robot heading - bigger
+const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),0.5,0x00ff44,0.15,0.1);
 robot.add(arrowHelper);
 
 // Dog (small sphere)
@@ -147,10 +154,45 @@ async function loadScene(){
   try{
     const res=await fetch('/scene.json');
     const data=await res.json();
+    console.log('Scene data:',data);
+    
+    // Update floor and grid based on extent
+    if(data.extent){
+      const[xmin,ymin,xmax,ymax]=data.extent;
+      const w=xmax-xmin,h=ymax-ymin;
+      const cx=(xmin+xmax)/2,cy=(ymin+ymax)/2;
+      console.log(`Scene extent: ${w.toFixed(1)}m x ${h.toFixed(1)}m @ (${cx.toFixed(1)}, ${cy.toFixed(1)})`);
+      
+      // Resize ground
+      scene.remove(ground);
+      ground=new THREE.Mesh(
+        new THREE.PlaneGeometry(w+2,h+2),
+        new THREE.MeshStandardMaterial({color:0x3a3a3a,roughness:0.8})
+      );
+      ground.rotation.x=-Math.PI/2;
+      ground.position.set(cx,0,cy);
+      ground.receiveShadow=true;
+      scene.add(ground);
+      
+      // Resize grid
+      scene.remove(grid);
+      const gridSize=Math.max(w,h)+2;
+      grid=new THREE.GridHelper(gridSize,Math.ceil(gridSize),0x555555,0x333333);
+      grid.position.set(cx,0.01,cy);
+      scene.add(grid);
+      
+      // Position camera to view the whole scene
+      const dist=Math.max(w,h)*0.8;
+      camera.position.set(cx-dist*0.6,dist*0.5,cy+dist*0.6);
+      controls.target.set(cx,0,cy);
+      controls.update();
+    }
     
     // Add geometry from scene
+    let meshCount=0,boxCount=0,cylCount=0;
     data.geoms.forEach(g=>{
       if(g.kind==='box'){
+        boxCount++;
         const geom=new THREE.BoxGeometry(g.size[0]*2,g.size[2]*2,g.size[1]*2);
         const color=g.color||0x888888;
         const mat=new THREE.MeshStandardMaterial({color,roughness:0.7});
@@ -161,6 +203,7 @@ async function loadScene(){
         mesh.receiveShadow=true;
         scene.add(mesh);
       }else if(g.kind==='cyl'){
+        cylCount++;
         const geom=new THREE.CylinderGeometry(g.size[0],g.size[0],g.size[1]*2,16);
         const color=g.color||0x888888;
         const mat=new THREE.MeshStandardMaterial({color,roughness:0.6});
@@ -171,6 +214,8 @@ async function loadScene(){
         scene.add(mesh);
       }else if(g.kind==='mesh'&&g.vertices&&g.faces){
         // Mesh (e.g. walls from trimesh)
+        meshCount++;
+        console.log(`Loading mesh: ${g.vertices.length} verts, ${g.faces.length} faces`);
         const geom=new THREE.BufferGeometry();
         const verts=[];const norms=[];
         g.faces.forEach(f=>{
@@ -192,6 +237,7 @@ async function loadScene(){
         scene.add(mesh);
       }
     });
+    console.log(`Scene loaded: ${meshCount} meshes, ${boxCount} boxes, ${cylCount} cylinders`);
     
     sceneLoaded=true;
   }catch(e){
