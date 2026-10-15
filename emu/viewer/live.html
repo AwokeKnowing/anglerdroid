@@ -40,6 +40,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <script type="module">
 import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 
 const canvas=document.getElementById('c');
 const scene=new THREE.Scene();
@@ -97,27 +98,64 @@ const showdogEl=document.getElementById('showdog');
 // MuJoCo Z-up to Three.js Y-up coordinate transform
 function mjToThree(x,y,z){return[x,z,-y]}
 
-// Robot - dark chassis + mast stub + yellow arrow
+// Robot - load GLB mesh, fallback to box placeholder
 const robotGroup=new THREE.Group();
-// Chassis (dark box)
+let robotMesh=null;
+let placeholder=null;
+
+// Placeholder (dark box + mast) - shown until GLB loads
+const placeholderGroup=new THREE.Group();
 const chassisGeom=new THREE.BoxGeometry(0.5,0.15,0.4);
 const chassisMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
 const chassis=new THREE.Mesh(chassisGeom,chassisMat);
 chassis.position.y=0.075;
 chassis.castShadow=true;
-robotGroup.add(chassis);
-// Mast stub (small vertical cylinder)
+placeholderGroup.add(chassis);
 const mastGeom=new THREE.CylinderGeometry(0.03,0.03,0.15,8);
 const mastMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
 const mast=new THREE.Mesh(mastGeom,mastMat);
 mast.position.set(0,0.15+0.075,0);
 mast.castShadow=true;
-robotGroup.add(mast);
-// Yellow heading arrow
+placeholderGroup.add(mast);
+placeholder=placeholderGroup;
+robotGroup.add(placeholder);
+
+// Yellow heading arrow (always visible)
 const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.1,0),0.5,0xffff00,0.15,0.1);
 robotGroup.add(arrowHelper);
+
 robot=robotGroup;
 scene.add(robot);
+
+// Load GLB mesh
+const loader=new GLTFLoader();
+loader.load('/assets/kevin_lite.glb',
+  (gltf)=>{
+    console.log('GLB loaded successfully');
+    robotMesh=gltf.scene;
+    // GLB is Y-up, MuJoCo is Z-up: rotate -90° around X to lay flat
+    robotMesh.rotation.x=-Math.PI/2;
+    robotMesh.traverse((child)=>{
+      if(child.isMesh){
+        child.castShadow=true;
+        child.receiveShadow=true;
+      }
+    });
+    robotGroup.add(robotMesh);
+    // Hide placeholder
+    if(placeholder){
+      robotGroup.remove(placeholder);
+      placeholder=null;
+    }
+  },
+  (progress)=>{
+    console.log('Loading GLB:',Math.round(progress.loaded/progress.total*100)+'%');
+  },
+  (error)=>{
+    console.error('Failed to load GLB:',error);
+    // Keep placeholder visible on error
+  }
+);
 
 // Dog marker (small sphere) - OFF by default
 const dogGeom=new THREE.SphereGeometry(0.15,16,16);

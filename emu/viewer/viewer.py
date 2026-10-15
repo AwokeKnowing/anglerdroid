@@ -176,6 +176,9 @@ class H(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/": return self._send(open(os.path.join(os.path.dirname(__file__), "live.html")).read().encode(), "text/html; charset=utf-8")
         if p == "/jpeg": return self._send(PAGE.encode(), "text/html; charset=utf-8")
+        if p == "/assets/kevin_lite.glb":
+            try: return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
+            except Exception: return self._send(b"", code=404)
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)

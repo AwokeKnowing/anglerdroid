@@ -30,7 +30,10 @@ Open browser: http://localhost:8095
 **Live WebGL viewer:**
 - Three.js scene with orbit controls (drag to orbit, scroll to zoom)
 - Real-time state updates via polling `/state.json` (~20 Hz, tunnel-friendly)
-- Robot (bright cyan emissive box 0.5×0.25×0.4m with yellow heading arrow)
+- Robot: Kevin GLB mesh (`assets/kevin_lite.glb`) loaded via GLTFLoader
+  - Chassis + mast + wheels geometry from URDF dimensions
+  - Fallback to box placeholder on load failure
+  - Yellow heading arrow for direction indication
 - Dog (brown sphere, when present)
 - Goal marker (red cone, when set)
 - Path visualization (orange line, when planned)
