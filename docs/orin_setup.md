@@ -192,13 +192,41 @@ Repo includes USB recovery scripts (currently manual cron, not auto-enabled):
 
 See `docs/bringup.md` step 7 (ruler tests) for calibration procedure.
 
+## Bootstrap Script
+
+**Fresh Orin setup:** `scripts/bootstrap_orin.sh [--install-system]`
+
+Automated bootstrap script to set up a fresh Orin matching this document:
+- Detects Jetson/aarch64, checks JetPack/L4T/CUDA
+- Creates `~/.venv-kplan` (torch 2.14.1+cu132, torchvision, triton, ninja)
+- Creates `~/.venv-kevinnav` (borrows torch from kplan via symlinks)
+- Optionally installs system files with `--install-system` (udev rules, systemd unit; needs sudo)
+- Builds/verifies MPPI CUDA kernel
+- Prints next steps (RealSense RSUSB build, CAN setup, pre-flight)
+
+**Idempotent** (safe to re-run). Does NOT auto-build librealsense or flash ODrive (too heavy/tribal).
+
+### Usage
+
+```bash
+cd ~/anglerdroid
+scripts/bootstrap_orin.sh              # Setup venvs + CUDA check
+scripts/bootstrap_orin.sh --install-system  # Also install udev/systemd (needs sudo)
+```
+
+After bootstrap, follow manual steps:
+1. **RealSense RSUSB build** (see below) — required for D435i IMU
+2. **Plug cameras into USB 3** (Bus 002, 10 Gb/s port)
+3. **CAN setup** — manual or enable systemd unit
+4. **Pre-flight check** — `KEVIN_ROBOT=kevin001 scripts/bringup_check.py`
+
 ## Pre-flight / Bring-up
 
 Before running Kevin on the Orin:
 
-1. **Verify CUDA:** `scripts/build_orin_cuda.sh` (exits if GPU unusable)
-2. **Pre-flight checks:** `scripts/bringup_check.py` (USB 3, RealSense 30 Hz, IMU, CAN, safety, calibration)
-3. **Bring-up:** `scripts/bringup_run.sh 0.3` (enforces CUDA, starts nav at port 8080)
+1. **Bootstrap (if fresh machine):** `scripts/bootstrap_orin.sh [--install-system]` (see above)
+2. **Pre-flight checks:** `KEVIN_ROBOT=kevin001 scripts/bringup_check.py` (USB 3, RealSense 30 Hz, IMU, CAN, safety, calibration)
+3. **Bring-up:** `KEVIN_ROBOT=kevin001 scripts/bringup_run.sh 0.3` (enforces CUDA, starts nav at port 8080)
 
 See `docs/bringup.md` for full checklist (wheels-up, e-stop, hand-over-lens, floor tests).
 
