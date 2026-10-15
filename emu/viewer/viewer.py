@@ -5,6 +5,8 @@ Map: nav SLAM map + Kevin footprint (safety-state color) + trajectory + goal + p
 Chat: text -> small parser -> nav POST /api/command (same interface as the nav page)."""
 import sys, os, json, math, re, time, threading, urllib.request, struct, hashlib, numpy as np, cv2
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from emu import shm
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8095; NAV = "http://localhost:%d" % (int(sys.argv[2]) if len(sys.argv) > 2 else 8090)
 FP = [(0.33, 0.27), (0.33, -0.27), (-0.33, -0.27), (-0.33, 0.27)]    # display footprint only
 COL = {"ok": (80, 200, 80), "limited": (0, 200, 255), "blocked": (40, 40, 255), "no_depth": (200, 0, 200)}
@@ -141,6 +143,73 @@ def mapper():
             pass
         time.sleep(max(0.05, 0.25 - (time.time() - t0)))
 
+class CameraShm:
+    """Read camera frames from sim shared memory (kevin_rs1, kevin_rs2) and serve as JPEGs."""
+    def __init__(self):
+        self.info = None
+        self.rs1 = None
+        self.rs2 = None
+        self.last_info_check = 0
+        self.lock = threading.Lock()
+    
+    def _refresh(self):
+        """Reconnect to shm blocks if world restarted."""
+        try:
+            info = shm.read_info(wait_s=0.1)
+            if info != self.info:
+                self.info = info
+                try:
+                    if self.rs1: self.rs1.close()
+                    if self.rs2: self.rs2.close()
+                except: pass
+                # Find rs1 and rs2 from camera dict - order may vary
+                cams = info["cameras"]
+                self.rs1 = shm.Block(cams[list(cams.keys())[0]]["shm"], cams[list(cams.keys())[0]]["layout"])
+                self.rs2 = shm.Block(cams[list(cams.keys())[1]]["shm"], cams[list(cams.keys())[1]]["layout"])
+                print(f"[viewer] camera shm connected: {list(cams.keys())}", flush=True)
+        except Exception as e:
+            print(f"[viewer] camera shm refresh failed: {e}", flush=True)
+            self.rs1 = None
+            self.rs2 = None
+    
+    def get_jpeg(self, name):
+        """Return (JPEG bytes, None) or (None, error_reason)."""
+        now = time.time()
+        with self.lock:
+            if now - self.last_info_check > 2.0:
+                self._refresh()
+                self.last_info_check = now
+            
+            if name not in ("rs1_depth", "rs1_color", "rs2_depth", "rs2_color"):
+                return None, f"unknown camera: {name}"
+            
+            block = self.rs1 if name.startswith("rs1") else self.rs2
+            if block is None:
+                return None, "emulator not running"
+            
+            try:
+                _, _, arrays = block.read()
+                if "depth" in name:
+                    z = arrays["depth"]  # uint16 mm
+                    z_m = z.astype(np.float32) * 0.001
+                    # Colormap 0.2-4.0m
+                    z_norm = np.clip((z_m - 0.2) / (4.0 - 0.2), 0, 1)
+                    z_col = cv2.applyColorMap((z_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
+                    ok, jp = cv2.imencode(".jpg", z_col, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                else:  # color
+                    rgb = arrays["color"]  # uint8 HxWx3
+                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    ok, jp = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                
+                if ok:
+                    return jp.tobytes(), None
+                else:
+                    return None, "encode failed"
+            except Exception as e:
+                return None, str(e)
+
+CAMSHM = CameraShm()
+
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Kevin sim</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px system-ui;display:flex;height:100vh}#v{flex:1;position:relative;overflow:hidden}
 #v img{width:100%;height:100%;object-fit:contain;cursor:grab;user-select:none}#r{width:560px;display:flex;flex-direction:column;border-left:1px solid #333}
@@ -183,15 +252,14 @@ class H(BaseHTTPRequestHandler):
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)
         if p.startswith("/cam/"):
-            # Camera panel endpoints: serve sim camera frames from shm if available
-            # TODO: wire lightweight JPEG thumbs from sim shm (rs1_depth.jpg, rs1_color.jpg, rs2_depth.jpg, rs2_color.jpg)
             cam_name = p[5:-4] if p.endswith(".jpg") else None
-            if cam_name in ("rs1_depth", "rs1_color", "rs2_depth", "rs2_color"):
-                try:
-                    return self._send(open(f"/dev/shm/kevin_{cam_name}.jpg", "rb").read(), "image/jpeg")
-                except Exception:
-                    return self._send(b"", code=404)
-            return self._send(b"", code=404)
+            if cam_name:
+                jpg, err = CAMSHM.get_jpeg(cam_name)
+                if jpg:
+                    return self._send(jpg, "image/jpeg")
+                else:
+                    return self._send(json.dumps({"error": err}).encode(), "application/json", 503)
+            return self._send(json.dumps({"error": "bad request"}).encode(), "application/json", 400)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
             with lock: return self._send(json.dumps(LOG).encode())
