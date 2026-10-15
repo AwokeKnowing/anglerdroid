@@ -133,8 +133,8 @@ loader.load('/assets/kevin_lite.glb',
   (gltf)=>{
     console.log('GLB loaded successfully');
     robotMesh=gltf.scene;
-    // GLB is Y-up, MuJoCo is Z-up: rotate -90° around X to lay flat
-    robotMesh.rotation.x=-Math.PI/2;
+    // Real mesh is Y-up in metres; lift so wheels sit on floor (wheels at Y ≈ -0.086)
+    robotMesh.position.y=0.086;
     robotMesh.traverse((child)=>{
       if(child.isMesh){
         child.castShadow=true;
@@ -324,7 +324,7 @@ function updateState(st){
     if(st.kevin){
       const[x,y,z]=mjToThree(st.kevin[0],st.kevin[1],0);
       robot.position.set(x,y,z);
-      robot.rotation.y=-st.kevin[2];
+      robot.rotation.y=st.kevin[2];
     }
     
     // Update dog
