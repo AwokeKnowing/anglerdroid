@@ -75,7 +75,7 @@ except Exception:  # pragma: no cover
 D435_VFOV_DEG = 58.0
 RS2_MIN_Z = 0.28
 RS_MAX_Z = 10.0
-RS1_ORIGIN_Z = 0.86
+RS1_ORIGIN_Z = 0.865  # twin mast-tip D435 optical z in base_link (axle frame); was 0.86
 # Floor optical depth is about RS1_ORIGIN_Z. A wall hit is closer than this.
 WALL_Z_MARGIN = 0.08
 WALL_H_CM = 8
@@ -1820,6 +1820,33 @@ class SimRsCameras:
             )
             print("newton tiled camera fallback (no visual caster)")
 
+
+    def apply_urdf_poses(self, cam_poses: dict):
+        """Override RS1/RS2 extrinsics from URDF FK (body frame, look=-Z)."""
+        rs1 = cam_poses.get("rs1") or {}
+        rs2 = cam_poses.get("rs2") or {}
+        if "p" in rs1:
+            self.p_rs1 = np.asarray(rs1["p"], dtype=np.float64).reshape(3).copy()
+        if "q" in rs1:
+            self.q_rs1 = np.asarray(rs1["q"], dtype=np.float64).reshape(4).copy()
+        if "p" in rs2:
+            self.p_rs2 = np.asarray(rs2["p"], dtype=np.float64).reshape(3).copy()
+        if "q" in rs2:
+            self.q_rs2 = np.asarray(rs2["q"], dtype=np.float64).reshape(4).copy()
+        global RS1_ORIGIN_Z
+        RS1_ORIGIN_Z = float(self.p_rs1[2])
+        self.z_bias = float(TD_FLOOR_CLIP) - float(RS1_ORIGIN_Z)
+        print(
+            "URDF cam RS1 p=%s z=%.3f  RS2 p=%s pitch_down=%.1f"
+            % (
+                self.p_rs1.round(4).tolist(),
+                float(self.p_rs1[2]),
+                self.p_rs2.round(4).tolist(),
+                float((rs2 or {}).get("pitch_down_deg", float("nan"))),
+            ),
+            flush=True,
+        )
+
     def _xform(self, pos, quat, local_p, local_q):
         wp_pos = np.asarray(pos, dtype=np.float64) + _quat_rot(quat, local_p)
         wq = _quat_mul(quat, local_q)
@@ -2251,6 +2278,140 @@ def _play_gif_file(path):
     print("gif play skipped (no vlc/xdg-open):", path, flush=True)
 
 
+
+def _sync_free_xy_yaw(model, state, free_joint, x, y, yaw):
+    """Quiet absolute free-joint write for ViewerGL (kinematic cpu_xy path)."""
+    jq = int(np.asarray(model.joint_q_start.numpy()).reshape(-1)[int(free_joint)])
+    Xp = _unpack_xf(model.joint_X_p.numpy()[int(free_joint)])
+    Xc = _unpack_xf(model.joint_X_c.numpy()[int(free_joint)])
+    jq_arr = np.array(state.joint_q.numpy(), dtype=np.float32, copy=True)
+    flat = jq_arr.reshape(-1)
+    cur_joint = (flat[jq:jq + 3].astype(np.float64), flat[jq + 3:jq + 7].astype(np.float64))
+    cur_world = _world_from_joint_xf(Xp, Xc, cur_joint)
+    z = float(cur_world[0][2])
+    yaw_q = np.asarray(_yaw_quat(yaw), dtype=np.float64)
+    target_house = (np.array([float(x), float(y), z], dtype=np.float64), yaw_q)
+    jpos, jquat = _joint_from_world_xf(Xp, Xc, target_house)
+    flat[jq + 0] = np.float32(jpos[0])
+    flat[jq + 1] = np.float32(jpos[1])
+    flat[jq + 2] = np.float32(jpos[2])
+    flat[jq + 3] = np.float32(jquat[0])
+    flat[jq + 4] = np.float32(jquat[1])
+    flat[jq + 5] = np.float32(jquat[2])
+    flat[jq + 6] = np.float32(jquat[3])
+    state.joint_q.assign(jq_arr)
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+
+class _NewtonChaseGL:
+    """Newton ViewerGL chase/follow cam; primary 3D deliverable (not birdseye)."""
+
+    def __init__(self, model, state, free_joint, chassis, record_path=None, width=1280, height=720, fps=12.0):
+        from newton.viewer import ViewerGL
+        self.model = model
+        self.state = state
+        self.free_joint = int(free_joint)
+        self.chassis = int(chassis)
+        self.width = int(width)
+        self.height = int(height)
+        self.fps = float(fps)
+        self.closed = False
+        self._last_t = -1e9
+        self._n = 0
+        self._orbit = 0.0
+        self.viewer = ViewerGL(width=self.width, height=self.height, vsync=False)
+        self.viewer.set_model(model)
+        self._ff = None
+        self.record_path = Path(record_path) if record_path else None
+        if self.record_path:
+            self.record_path.parent.mkdir(parents=True, exist_ok=True)
+            ff = os.environ.get("FFMPEG", "/tmp/ffmpeg-7.0.2-amd64-static/ffmpeg")
+            if not Path(ff).is_file():
+                ff = "ffmpeg"
+            cmd = [
+                ff, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", "%dx%d" % (self.width, self.height),
+                "-r", str(self.fps), "-i", "-",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20",
+                str(self.record_path),
+            ]
+            self._ff = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print("newton chase GL recording ->", self.record_path, "ffmpeg_pid", self._ff.pid, flush=True)
+        else:
+            print("newton chase GL live %dx%d" % (self.width, self.height), flush=True)
+
+    def _chase(self, x, y, yaw, t_sim):
+        # Slow orbit so the mesh reads as 3D (not locked orthographic).
+        self._orbit = 12.0 * math.sin(0.12 * float(t_sim))
+        back = 2.15
+        height = 1.35
+        look_z = 0.28
+        yaw_cam = float(yaw) + math.radians(self._orbit)
+        cx = float(x) - back * math.cos(yaw_cam)
+        cy = float(y) - back * math.sin(yaw_cam)
+        cz = height
+        dx = float(x) - cx
+        dy = float(y) - cy
+        dz = look_z - cz
+        dist = math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-9
+        pitch = math.degrees(math.asin(max(-0.99, min(0.99, dz / dist))))
+        yaw_deg = math.degrees(math.atan2(dy, dx))
+        self.viewer.set_camera(wp.vec3(cx, cy, cz), float(pitch), float(yaw_deg))
+
+    def present(self, pos, yaw, trail=None, people=None, chat="", note="", rt=0.0, min_dt=1.0 / 12.0, t_sim=0.0):
+        if self.closed:
+            return
+        if (float(t_sim) - self._last_t) < float(min_dt) and self._n > 0:
+            return
+        self._last_t = float(t_sim)
+        try:
+            if not self.viewer.is_running():
+                self.close()
+                return
+            x = float(pos[0]); y = float(pos[1])
+            _sync_free_xy_yaw(self.model, self.state, self.free_joint, x, y, float(yaw))
+            self._chase(x, y, float(yaw), t_sim)
+            self.viewer.begin_frame(float(t_sim))
+            self.viewer.log_state(self.state)
+            # Small text HUD via scalar plots is heavy; skip — path trail is enough.
+            if trail and len(trail) >= 2:
+                try:
+                    _log_path_trail(self.viewer, trail[-80:])
+                except Exception:
+                    pass
+            self.viewer.end_frame()
+            if self._ff is not None and self._ff.stdin is not None:
+                frame = self.viewer.get_frame(render_ui=False)
+                self._ff.stdin.write(frame.numpy().tobytes())
+            self._n += 1
+        except Exception as e:
+            print("newton chase present skip:", type(e).__name__, e, flush=True)
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self._ff is not None:
+            try:
+                if self._ff.stdin:
+                    self._ff.stdin.close()
+                self._ff.wait(timeout=30)
+            except Exception as e:
+                print("ffmpeg close:", type(e).__name__, e, flush=True)
+                try:
+                    self._ff.kill()
+                except Exception:
+                    pass
+            self._ff = None
+            if self.record_path and self.record_path.is_file():
+                print("wrote", self.record_path, "bytes", self.record_path.stat().st_size, "frames", self._n, flush=True)
+        try:
+            self.viewer.close()
+        except Exception:
+            pass
+
+
 class _CheapViz:
     """Still/gif recorder. Live view is always the small ViewerGL window."""
 
@@ -2457,8 +2618,12 @@ def run_perception_drive(args):
     os.environ.setdefault("DISPLAY", ":1")
     from newton_kevin import (
         WHEEL_R, BODY_W, WHEEL_GAP, WHEEL_W, BODY_L, AXLE_FROM_REAR,
-        add_house, add_random_obstacles, build_kevin, DEFAULT_STL,
+        add_house, add_random_obstacles, build_kevin, build_kevin_urdf, DEFAULT_STL,
     )
+
+    use_urdf = bool(getattr(args, "urdf", False))
+    urdf_path = getattr(args, "urdf_path", "") or None
+    freeze_casters = not bool(getattr(args, "urdf_free_casters", False))
 
     wp.init()
     builder = newton.ModelBuilder()
@@ -2490,8 +2655,35 @@ def run_perception_drive(args):
         delta = closest[j] - sp
         yaw0 = math.atan2(float(delta[1]), float(delta[0]))
         print("spawn yaw toward nearest wall %.1fdeg dist=%.3f" % (math.degrees(yaw0), float(d[j])))
-    wheel_joints = build_kevin(builder, start_xy=spawn, yaw=yaw0)
-    chassis = int(build_kevin.chassis)
+    urdf_cams = None
+    wheel_r = float(WHEEL_R)
+    if use_urdf:
+        wheel_joints = build_kevin_urdf(
+            builder,
+            start_xy=spawn,
+            yaw=yaw0,
+            urdf_path=Path(urdf_path) if urdf_path else None,
+            freeze_casters=freeze_casters,
+        )
+        chassis = int(build_kevin_urdf.chassis)
+        track = float(build_kevin_urdf.track)
+        wheel_r = float(build_kevin_urdf.wheel_r)
+        front_x = float(build_kevin_urdf.front_x)
+        rear_x = float(build_kevin_urdf.rear_x)
+        half_w = float(build_kevin_urdf.half_w)
+        urdf_cams = build_kevin_urdf.camera_poses
+        free_joint_name = str(build_kevin_urdf.free_joint_label)
+        print(
+            "drive mode=URDF twin track=%.3f wheel_r=%.4f front=%.3f rear=%.3f half_w=%.3f free=%s"
+            % (track, wheel_r, front_x, rear_x, half_w, free_joint_name),
+            flush=True,
+        )
+    else:
+        wheel_joints = build_kevin(builder, start_xy=spawn, yaw=yaw0)
+        chassis = int(build_kevin.chassis)
+        track = None  # filled below from box geometry
+        front_x = rear_x = half_w = None
+        free_joint_name = "kevin_free"
     builder.add_ground_plane()
     model = builder.finalize(device=getattr(args, "device", "cuda:0"))
     # MuJoCo Warp owns qpos. Re-pushing Newton state every substep was a
@@ -2518,20 +2710,33 @@ def run_perception_drive(args):
     state_1 = model.state()
     control = model.control()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
-    y_wheel = BODY_W * 0.5 + WHEEL_GAP + WHEEL_W * 0.5
-    track = 2.0 * y_wheel
-    free_joint = list(model.joint_label).index("kevin_free")
+    if track is None:
+        y_wheel = BODY_W * 0.5 + WHEEL_GAP + WHEEL_W * 0.5
+        track = 2.0 * y_wheel
+    labels = [str(x) for x in model.joint_label]
+    if free_joint_name in labels:
+        free_joint = labels.index(free_joint_name)
+    else:
+        # URDF floating base may be kevin/floating_base
+        free_joint = next(
+            (i for i, lab in enumerate(labels) if "floating" in lab or lab.endswith("kevin_free") or "free" in lab),
+            labels.index("kevin_free") if "kevin_free" in labels else 0,
+        )
     qd_start = model.joint_qd_start.numpy()
     wheel_dofs = [int(qd_start[j]) for j in wheel_joints]
-    print("kevin_free", free_joint, "wheel_dofs", wheel_dofs, "spawn", spawn)
+    print("free_joint", free_joint, labels[free_joint], "wheel_dofs", wheel_dofs, "spawn", spawn)
+    WHEEL_R = float(wheel_r)  # box or URDF radius for commander/odom
     _print_free_sync_map(model, solver, free_joint)
     print("house repair", getattr(add_house, "report", {}))
 
     cams = SimRsCameras(model, getattr(add_house, "verts", None), getattr(add_house, "faces", None))
+    if urdf_cams is not None:
+        cams.apply_urdf_poses(urdf_cams)
     wall_segs = getattr(add_house, "wall_segments", np.zeros((0, 2, 2)))
-    front_x = -AXLE_FROM_REAR + BODY_L
-    rear_x = -AXLE_FROM_REAR
-    half_w = BODY_W * 0.5
+    if front_x is None:
+        front_x = -AXLE_FROM_REAR + BODY_L
+        rear_x = -AXLE_FROM_REAR
+        half_w = BODY_W * 0.5
     fp_gate = FootprintGate(cams.caster, wall_segs)
     cams.wall_boxes = list(getattr(add_house, "wall_boxes", []) or [])
     print("depth collision boxes", len(cams.wall_boxes))
@@ -2579,10 +2784,25 @@ def run_perception_drive(args):
     gif_path = Path(getattr(args, "gif", "") or (_REPO / "sim" / "kevin_newton_drive.gif"))
     viz = _CheapViz(gif_path, wall_segs)
     live_gl = None
+    record_3d = str(getattr(args, "record_3d", "") or "").strip()
+    no_2d = bool(getattr(args, "no_2d_view", False)) or bool(record_3d)
     try:
-        live_gl = _LiveGL(list(getattr(add_house, "wall_boxes", []) or []), people=people.folk, clutter=extra)
+        if record_3d:
+            live_gl = _NewtonChaseGL(
+                model, state_0, free_joint, chassis,
+                record_path=record_3d,
+                width=1280, height=720,
+                fps=max(6.0, float(getattr(args, "capture_fps", 12.0))),
+            )
+            viz.mode = "gl"
+            print("viz: Newton ViewerGL chase is primary (2D HouseView off)", flush=True)
+        elif no_2d:
+            print("viz: 2D HouseView skipped (--no-2d-view)", flush=True)
+            viz.mode = "gif"
+        else:
+            live_gl = _LiveGL(list(getattr(add_house, "wall_boxes", []) or []), people=people.folk, clutter=extra)
     except Exception as e:
-        print("house view skip:", type(e).__name__, e, flush=True)
+        print("house/3d view skip:", type(e).__name__, e, flush=True)
         viz.mode = "gif"
     contacts = None
     phys_graph = None

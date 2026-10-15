@@ -390,6 +390,7 @@ class InsectEnv:
         )
         self.chat = ""
         self.build_t = time.time()
+        self.click_goal = None
 
     def _build(self, seed: int):
         import warp as wp
@@ -635,6 +636,16 @@ class InsectEnv:
         self.prim_hot = 0.0
         self.prim_hot_hit = 0.0
 
+    def set_goal(self, x, y=None):
+        """Wander toward a world (x, y). None, None clears. Visit doughnut stays on."""
+        if x is None:
+            if self.click_goal is not None:
+                print("click goal cleared", flush=True)
+            self.click_goal = None
+            return
+        self.click_goal = (float(x), float(y))
+        print("click goal (%.2f, %.2f)" % self.click_goal, flush=True)
+
     def _actor_vw(self, action):
         a = np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[:2], -1.0, 1.0)
         max_v = float(self.hp.get("max_v", 0.28))
@@ -662,9 +673,16 @@ class InsectEnv:
         box = prim.pack_boxes(self._score_boxes(), self.x, self.y)
         actor_vw = self._actor_vw(action)
         cmd = prim.sample_vw(self.exe_v, self.exe_w, actor_vw, self._prim_vw, hp)
+        g = getattr(self, "click_goal", None)
+        if g is not None:
+            reach = float(hp.get("goal_reach_m", 0.45))
+            if math.hypot(g[0] - self.x, g[1] - self.y) <= reach:
+                print("click goal reached (%.2f, %.2f)" % g, flush=True)
+                self.click_goal = None
+                g = None
         score, path, throt, trail, hot, hot_hit = prim.score_vw(
             cmd[:, 0], cmd[:, 1], self.x, self.y, self.yaw, box, hp,
-            visit=self.visit,
+            visit=self.visit, goal_xy=g,
         )
         score = score.copy()
         if self._prim_vw is not None:
@@ -852,6 +870,42 @@ class InsectEnv:
             return 0.0, sgn * turn_w
         return v, 0.0
 
+    def _pick_pin_spawn(self):
+        """Pose already in plus-x throttle: close wall ahead, footprint still free."""
+        boxes = self.kin_boxes()
+        opts = list(getattr(self, "spawn_xy", None) or SPAWN_XY)
+        self.rng.shuffle(opts)
+        stop = float(self.hp.get("plus_x_stop", 0.28))
+        lo = float(self.hp.get("unstuck_px_lo", 0.10))
+        hi = min(float(self.hp.get("unstuck_px_hi", 0.24)), stop - 0.02)
+        fallback = None
+        for _ in range(160):
+            if opts:
+                bx, by = opts.pop()
+            else:
+                bx = self.rng.uniform(FLOOR_X0 + 1.0, FLOOR_X1 - 1.0)
+                by = self.rng.uniform(FLOOR_Y0 + 1.0, FLOOR_Y1 - 1.0)
+            x = bx + self.rng.uniform(-0.40, 0.40)
+            y = by + self.rng.uniform(-0.40, 0.40)
+            if not self._kin_ok(x, y, 0.0, boxes, pad=0.34):
+                continue
+            headings = [self.rng.uniform(-math.pi, math.pi)]
+            headings.extend(-math.pi + (2.0 * math.pi * i) / 16.0 for i in range(16))
+            for yaw in headings:
+                if not self._kin_ok(x, y, yaw, boxes, pad=0.30):
+                    continue
+                px, crossed, _ = plus_x_against_boxes((x, y), yaw, boxes, nose_x=0.15)
+                px = float(px) if math.isfinite(float(px)) else 0.0
+                if crossed:
+                    continue
+                if lo <= px <= hi:
+                    return x, y, yaw
+                if fallback is None and 0.06 <= px <= stop:
+                    fallback = (x, y, yaw)
+        if fallback is not None:
+            return fallback
+        return self._pick_spawn()
+
     def _pick_spawn(self):
         boxes = self.kin_boxes()
         opts = list(getattr(self, "spawn_xy", None) or SPAWN_XY)
@@ -1000,11 +1054,20 @@ class InsectEnv:
         self.door_open = self.rng.random() < float(self.hp.get("door_open_p", 0.55))
         self._reset_visit()
         self._reset_curve()
+        self.clear_s = 0.0
+        self.prev_plus_x = 9.0
         obs = None
+        pin = float(self.hp.get("unstuck_mode", 0.0)) >= 0.5
         for _ in range(24):
-            self.x, self.y, self.yaw = self._pick_spawn()
+            if pin:
+                self.x, self.y, self.yaw = self._pick_pin_spawn()
+            else:
+                self.x, self.y, self.yaw = self._pick_spawn()
             obs, _, _ = self._observe()
-            if float(self.plus_x) >= 0.55:
+            if pin:
+                if 0.08 <= float(self.plus_x) <= 0.30:
+                    break
+            elif float(self.plus_x) >= 0.55:
                 break
         self.steps = 0
         self.t_sim = 0.0
@@ -1036,6 +1099,8 @@ class InsectEnv:
         self._stamp_cov(self.x, self.y)
         self.rooms_seen.add(self._room_name(self.x, self.y))
         obs, _, _ = self._observe()
+        self.prev_plus_x = float(self.plus_x)
+        self.clear_s = 0.0
         self.last_obs = obs
         info = self._info(0.0, False)
         self.last_info = info
@@ -1098,6 +1163,8 @@ class InsectEnv:
             "prim_hot_hit": float(getattr(self, "prim_hot_hit", 0.0)),
             "exe_v": float(getattr(self, "exe_v", 0.0)),
             "exe_w": float(getattr(self, "exe_w", 0.0)),
+            "goal_x": None if getattr(self, "click_goal", None) is None else float(self.click_goal[0]),
+            "goal_y": None if getattr(self, "click_goal", None) is None else float(self.click_goal[1]),
         }
         if extra:
             info.update(extra)
@@ -1105,9 +1172,94 @@ class InsectEnv:
 
     def step(self, action):
         hp = self.hp
+        if float(hp.get("unstuck_mode", 0.0)) >= 0.5:
+            return self._step_unstuck(action)
         if float(hp.get("curve_mode", 1.0)) >= 0.5:
             return self._step_curve(action)
         return self._step_vw(action)
+
+    def _step_unstuck(self, action):
+        """Pinned start: learn (v,w) until plus-x throttle is gone."""
+        hp = self.hp
+        dt = float(hp.get("dt", 0.10))
+        max_v = float(hp.get("max_v", 0.28))
+        max_w = float(hp.get("max_w", 0.80))
+        stop = float(hp.get("plus_x_stop", 0.28))
+        clear_px = float(hp.get("unstuck_clear_px", 0.50))
+        a = np.clip(np.asarray(action, dtype=np.float32).reshape(-1)[:2], -1.0, 1.0)
+        v_rev = float(hp.get("v_rev", -0.10))
+        v = float(np.clip(a[0] * max_v, v_rev, max_v))
+        w = float(np.clip(a[1] * max_w, -max_w, max_w))
+        # Reachable in 0.2 s from current executed speed.
+        v_lo, v_hi, w_lo, w_hi = prim.reachable_vw(
+            float(getattr(self, "exe_v", 0.0)),
+            float(getattr(self, "exe_w", 0.0)), hp)
+        v = float(np.clip(v, v_lo, v_hi))
+        w = float(np.clip(w, w_lo, w_hi))
+        prev_px = float(getattr(self, "prev_plus_x", self.plus_x))
+        if float(self.plus_x) < stop:
+            v = 0.0
+        path0 = float(self.path_m)
+        v, w, collided, moved, yaw_only = self._try_move(v, w, dt, max_v, max_w)
+        self.exe_v, self.exe_w = float(v), float(w)
+        self.last_act[0] = np.float32(np.clip(v / max(max_v, 1e-6), -1.0, 1.0))
+        self.last_act[1] = np.float32(np.clip(w / max(max_w, 1e-6), -1.0, 1.0))
+        self.t_sim += dt
+        self.steps += 1
+        self._pi_step(v, w, dt)
+        self._visit_step()
+        obs, _, _ = self._observe()
+        self.last_obs = obs
+        px = float(self.plus_x)
+        throttled = px < stop
+        if throttled:
+            self.clear_s = 0.0
+        else:
+            self.clear_s = float(getattr(self, "clear_s", 0.0)) + dt
+        dpx = px - prev_px
+        rew = 0.90 * float(np.clip(dpx / 0.35, -1.0, 1.0))
+        if throttled:
+            rew += 0.18 * abs(w) / max(max_w, 1e-6)
+            if abs(v) < 0.03 and abs(w) < 0.08:
+                rew -= 0.20
+        else:
+            rew += 0.35
+        if collided:
+            rew -= 0.35
+        done = False
+        self.cut_reason = ""
+        win = False
+        if self.clear_s >= float(hp.get("unstuck_hold_s", 0.40)) and px >= clear_px:
+            done = True
+            win = True
+            rew += 1.60
+            self.cut_reason = "clear"
+        elif self.coll_streak >= int(hp.get("coll_done", 40)):
+            done = True
+            rew -= 0.50
+            self.cut_reason = "crash"
+        elif self.steps >= int(hp.get("ep_steps", 80)):
+            done = True
+            self.cut_reason = "time"
+        self.prev_plus_x = px
+        self.need_curve = True
+        self.seg_done = bool(done)
+        if win:
+            self.curve_wins += 1
+            self.last_seg = "clear"
+        elif done:
+            self.curve_losses += 1
+            self.last_seg = self.cut_reason
+        self.curve_n += 1 if done else 0
+        info = self._info(rew, done, {
+            "v": v, "w": w, "collided": collided,
+            "throttled": 1.0 if throttled else 0.0,
+            "clear_s": float(self.clear_s),
+            "unstuck": 1.0 if win else 0.0,
+            "plant": "off",
+        })
+        self.last_info = info
+        return obs, float(rew), bool(done), info
 
     def _step_curve(self, action):
         hp = self.hp

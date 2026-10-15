@@ -156,6 +156,146 @@ def build_kevin(builder: newton.ModelBuilder, start_xy=(1.0, 1.0), yaw=0.0):
     return wheel_joints
 
 
+def build_kevin_urdf(
+    builder: newton.ModelBuilder,
+    start_xy=(1.0, 1.0),
+    yaw=0.0,
+    urdf_path: Path | None = None,
+    freeze_casters: bool = True,
+):
+    """Load MakerBeam XL twin via ModelBuilder.add_urdf (floating + collapse fixed).
+
+    Spawns with axle at z=wheel_r so tires kiss the ground plane. Continuous
+    caster joints default to stiff position holds for first bring-up (set
+    freeze_casters=False to leave them free). Drive wheels get VELOCITY
+    actuators. Mesh paths resolve via sim/kevin-urdf-twin/urdf/meshes -> ../meshes.
+    """
+    from urdf_twin_fk import (
+        DEFAULT_URDF,
+        camera_poses,
+        wheel_geometry,
+        body_extents,
+        audit_collisions_inertials,
+    )
+
+    urdf = Path(urdf_path or DEFAULT_URDF).resolve()
+    if not urdf.exists():
+        raise FileNotFoundError("URDF twin missing: %s" % urdf)
+    mesh_link = urdf.parent / "meshes"
+    if not mesh_link.exists():
+        target = urdf.parent.parent / "meshes"
+        if target.exists():
+            mesh_link.symlink_to(target, target_is_directory=True)
+            print("urdf mesh symlink", mesh_link, "->", target, flush=True)
+        else:
+            raise FileNotFoundError("URDF meshes missing at %s" % target)
+
+    wheels = wheel_geometry(urdf)
+    body = body_extents(urdf)
+    cams = camera_poses(urdf)
+    audit = audit_collisions_inertials(urdf)
+    wheel_r = float(wheels["wheel_r"])
+
+    q_yaw = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), float(yaw))
+    xf = wp.transform(
+        p=wp.vec3(float(start_xy[0]), float(start_xy[1]), wheel_r),
+        q=q_yaw,
+    )
+    builder.add_urdf(
+        str(urdf),
+        xform=xf,
+        floating=True,
+        collapse_fixed_joints=True,
+        enable_self_collisions=False,
+        ignore_inertial_definitions=False,
+        parse_visuals_as_colliders=False,
+    )
+
+    labels = list(builder.joint_label)
+
+    def _find(substr: str) -> int:
+        for i, lab in enumerate(labels):
+            if substr in str(lab):
+                return i
+        raise KeyError("joint containing %r not in %s" % (substr, labels))
+
+    j_free = 0
+    j_left = _find("wheel_left_joint")
+    j_right = _find("wheel_right_joint")
+    caster_js = []
+    for s in (
+        "front_caster_yaw_joint",
+        "front_caster_wheel_joint",
+        "gate_caster_yaw_joint",
+        "gate_caster_wheel_joint",
+    ):
+        try:
+            caster_js.append(_find(s))
+        except KeyError:
+            pass
+
+    qd_starts = list(builder.joint_qd_start)
+    VEL = newton.JointTargetMode.VELOCITY
+    POS = newton.JointTargetMode.POSITION
+
+    def _dof(j: int) -> int:
+        return int(qd_starts[j])
+
+    for j in (j_left, j_right):
+        d = _dof(j)
+        builder.joint_target_mode[d] = VEL
+        builder.joint_target_kd[d] = 8.0
+        builder.joint_target_ke[d] = 0.0
+        builder.joint_armature[d] = 0.01
+        builder.joint_effort_limit[d] = 12.0
+
+    if freeze_casters:
+        for j in caster_js:
+            d = _dof(j)
+            builder.joint_target_mode[d] = POS
+            builder.joint_target_ke[d] = 400.0
+            builder.joint_target_kd[d] = 20.0
+            q0 = int(builder.joint_q_start[j])
+            if q0 < len(builder.joint_target_q):
+                builder.joint_target_q[q0] = 0.0
+
+    body_labels = list(builder.body_label)
+    chassis = next(i for i, lab in enumerate(body_labels) if "base_link" in str(lab))
+
+    build_kevin_urdf.chassis = chassis
+    build_kevin_urdf.free_joint_label = str(labels[j_free])
+    build_kevin_urdf.wheel_joints = [j_left, j_right]
+    build_kevin_urdf.caster_joints = caster_js
+    build_kevin_urdf.wheel_r = wheel_r
+    build_kevin_urdf.track = float(wheels["track"])
+    build_kevin_urdf.front_x = float(body["front_x"])
+    build_kevin_urdf.rear_x = float(body["rear_x"])
+    build_kevin_urdf.half_w = float(body["half_w"])
+    build_kevin_urdf.camera_poses = cams
+    build_kevin_urdf.audit = audit
+    build_kevin_urdf.urdf = urdf
+    n_col = int(audit.get("n_collision_geoms", 0))
+    missing = audit.get("missing_inertial", [])
+    print(
+        "URDF twin %s freeze_casters=%s wheel_r=%.4f track=%.3f "
+        "RS1_z=%.3f RS2_z=%.3f RS2_pitch=%.1f collisions=%d missing_inertial=%d"
+        % (
+            urdf.name,
+            freeze_casters,
+            wheel_r,
+            float(wheels["track"]),
+            float(cams["rs1"]["z"]),
+            float(cams["rs2"]["z"]),
+            float(cams["rs2"]["pitch_down_deg"]),
+            n_col,
+            len(missing),
+        ),
+        flush=True,
+    )
+    return [j_left, j_right]
+
+
+
 def add_house(builder: newton.ModelBuilder, stl_path: Path):
     """Visual-only house. Repaired STL, site (no collider). Sensors raycast the mesh."""
     from house_mesh import FIXED_STL, REPORT, load_indexed, repair_house_stl, wall_segments_xy, wall_collision_boxes
@@ -251,9 +391,19 @@ def main():
     ap.add_argument("--fwd", type=float, default=0.25)
     ap.add_argument("--seed", type=int, default=3)
     ap.add_argument("--drive", action="store_true")
+    ap.add_argument("--urdf", action="store_true",
+                    help="Build Kevin from MakerBeam XL URDF twin instead of box chassis")
+    ap.add_argument("--urdf-path", default="",
+                    help="Optional override path to kevin.urdf")
+    ap.add_argument("--urdf-free-casters", action="store_true",
+                    help="Do not freeze caster continuous joints (default: freeze)")
     ap.add_argument("--seconds", type=float, default=40.0)
     ap.add_argument("--capture-fps", type=float, default=6.0)
     ap.add_argument("--gif", default="")
+    ap.add_argument("--record-3d", default="",
+                    help="Newton ViewerGL chase-cam MP4 path (3D primary; skips 2D HouseView)")
+    ap.add_argument("--no-2d-view", action="store_true",
+                    help="Skip Kevin LIVE birdseye windows")
     ap.add_argument("--head-on", action="store_true")
     ap.add_argument(
         "--clutter",

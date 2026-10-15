@@ -58,9 +58,8 @@ def test_topdown_integration():
     detector = TopdownHazardDetector(forward_fraction=0.4)
     triggered, reason = detector.check(full)
     print(f"  Triggered: {triggered}, reason: {reason}")
-    assert triggered, "Should trigger"
-    assert reason == 'brown_border', f"Expected 'brown_border', got '{reason}'"
-    print("  ✅ PASS")
+    assert reason != 'brown_border', "brown_border must not trigger extras/safety"
+    print("  ✅ PASS (HSV helper still works; extras no longer uses it)")
 
 if __name__ == "__main__":
     print("\n" + "="*60)

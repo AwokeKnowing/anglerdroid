@@ -137,7 +137,7 @@ def _improve_chart(rows, w, h, mark_t=None):
 
 
 def _cov_img(cov, robot, people, trail, door_open, w=420, h=520, curve=None,
-             beads=None, got=None, cont_ray=None, alts=None):
+             beads=None, got=None, cont_ray=None, alts=None, goal=None):
     ch, cw = cov.shape
     vis = np.zeros((h, w, 3), dtype=np.uint8)
     vis[:] = (22, 24, 28)
@@ -177,6 +177,10 @@ def _cov_img(cov, robot, people, trail, door_open, w=420, h=520, curve=None,
         cv2.circle(vis, (px, py), 6, (60, 140, 255), -1)
         c, s = float(np.cos(robot[2])), float(np.sin(robot[2]))
         cv2.line(vis, (px, py), (int(px + 14 * c), int(py - 14 * s)), (255, 230, 80), 2)
+    if goal is not None:
+        gx, gy = xy_to_px(float(goal[0]), float(goal[1]))
+        cv2.drawMarker(vis, (gx, gy), (40, 70, 255), cv2.MARKER_STAR, 16, 2)
+        cv2.circle(vis, (gx, gy), 10, (40, 70, 255), 1)
     for p in people or []:
         px, py = xy_to_px(p["xy"][0], p["xy"][1])
         talking = bool(p.get("talking") or p.get("chat_left", 0) > 0)
@@ -214,7 +218,55 @@ class ExploreDash:
         self._ledger_mtime = 0.0
         self._ledger_check = 0.0
         self._run_mark = "2026-09-11T23:17"
+        self._goal_env = None
+        self.live.on_click = self._on_live_click
+        self.hud.push_handlers(on_mouse_press=self._on_hud_mouse)
         print("explore dash LIVE+HUD DISPLAY=%s" % os.environ.get("DISPLAY", ""), flush=True)
+
+    def _on_live_click(self, x, y=None):
+        env = self._goal_env
+        if env is None:
+            return
+        env.set_goal(x, y)
+
+    def _on_hud_mouse(self, mx, my, button, modifiers):
+        from pyglet.window import mouse
+        env = self._goal_env
+        if env is None:
+            return
+        if button in (mouse.RIGHT, mouse.MIDDLE):
+            env.set_goal(None, None)
+            return
+        if button != mouse.LEFT:
+            return
+        cv_x = int(mx)
+        cv_y = int(self.h - 1 - my)
+        x0, y0, cw, ch = 770, 50, 420, 400
+        if not (x0 <= cv_x < x0 + cw and y0 <= cv_y < y0 + ch):
+            return
+        lx, ly = cv_x - x0, cv_y - y0
+        if ly < 50:
+            return
+        wx = FLOOR_X0 + (lx - 8) / max(1.0, cw - 16) * (FLOOR_X1 - FLOOR_X0)
+        wy = FLOOR_Y1 - (ly - 50) / max(1.0, ch - 70) * (FLOOR_Y1 - FLOOR_Y0)
+        env.set_goal(wx, wy)
+
+    def _poll(self, env):
+        self._goal_env = env
+        try:
+            self.live.poll_events()
+        except Exception:
+            pass
+        try:
+            self.hud.dispatch_events()
+        except Exception as e:
+            print("hud skip:", type(e).__name__, e, flush=True)
+            self.closed = True
+            return
+        g = getattr(env, "click_goal", None)
+        self.live.goal_xy = g
+        if g is None:
+            self.live.last_click = None
 
     def close(self):
         self.closed = True
@@ -230,6 +282,7 @@ class ExploreDash:
     def present(self, env, note="", rt=0.0, extras=None, min_dt=1.0 / 12.0):
         if self.closed:
             return
+        self._poll(env)
         now = time.monotonic()
         if now - self.last < min_dt:
             return
@@ -277,6 +330,7 @@ class ExploreDash:
             got=getattr(env, "curve_got", None),
             cont_ray=getattr(env, "curve_cont_ray", None),
             alts=getattr(env, "prim_alts", None),
+            goal=getattr(env, "click_goal", None),
             w=420, h=400,
         )
         _paste(canvas, cov, 770, 50)
@@ -334,6 +388,7 @@ class ExploreDash:
                int(info.get("curve_wins", 0)) + int(info.get("curve_losses", 0))),
             extras.get("status", ""),
             extras.get("eval", ""),
+            ("goal=(%.2f, %.2f)" % env.click_goal) if getattr(env, "click_goal", None) else "goal=off  (L-click LIVE or coverage)",
         ]
         y = 16
         for i, line in enumerate(lines):

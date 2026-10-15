@@ -6,38 +6,31 @@ reverse only when bwd_scale>0.
 """
 
 import math
+import sys
+from pathlib import Path
+
 import numpy as np
 from sim.dynamics import DiffDriveDynamics
 
-
-FRAME_W = 320
-FRAME_H = 240
-RCX = 81
-RCY = 119
-EGO_PX_SIZE = 0.01
-
-ROBOT_W = 30
-ROBOT_H = 42
-ROBOT_CX_OFF = -78
-
-FOOT_X0 = 56
-FOOT_Y0 = 97
-FOOT_X1 = 101
-FOOT_Y1 = 142
-FOOT_PAD_FWD = 5
-FOOT_PAD_BWD = 10
-FOOT_PAD_LAT = 2
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from robot_config import (  # noqa: E402
+    FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE,
+    FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
+    WANDER_CLEAR_CM,
+)
 
 MIN_CLEARANCE_PX = 1
 BRAKE_START_PX = 30
 OBS_THRESH = 100
 # Planner soft buffer (prefer). Hard SafetyGuard still uses bare FOOT scans.
-SOFT_INFLATE_PX = 10          # ~10 cm prefer-clear around obstacles
+SOFT_INFLATE_PX = int(round(WANDER_CLEAR_CM))  # wander keep-clear disk
 HARD_PAD_PX = 2              # tiny pad for hard contact scan only
 SQUEEZE_FWD_SOFT_MAX = 0.55  # below this soft clearance → squeeze mode
 
-# Cul-de-sac tip disk offsets (px), radius ~0.26 m
-_CUL_RAD = max(3, int(0.26 / EGO_PX_SIZE))
+# Cul-de-sac tip disk = wander keep-clear (250 mm).
+_CUL_RAD = max(3, int(round(WANDER_CLEAR_CM)))
 _CUL_DISK = [
     (dx, dy)
     for dy in range(-_CUL_RAD, _CUL_RAD + 1)
@@ -45,7 +38,10 @@ _CUL_DISK = [
     if dx * dx + dy * dy <= _CUL_RAD * _CUL_RAD
 ]
 
-_HALF_DIAG = 26
+_HALF_DIAG = int(round(math.hypot(
+    max(FOOT_X1 - RCX, RCX - FOOT_X0),
+    max(FOOT_Y1 - RCY, RCY - FOOT_Y0),
+)))
 LAT_X0 = max(0, RCX - _HALF_DIAG)
 LAT_X1 = min(FRAME_W, RCX + _HALF_DIAG)
 LAT_HARD_PX = 2
@@ -75,19 +71,19 @@ def _clearance_scale(clear_px):
 
 
 def soft_inflate(obs, rad=SOFT_INFLATE_PX):
-    """Binary dilation for planner soft-buffer cost (not used by hard SafetyGuard)."""
+    """Binary dilation for planner keep-clear (not used by hard SafetyGuard)."""
     if rad <= 0:
         return (obs >= OBS_THRESH)
+    r = int(rad)
     try:
         import cv2
-        k = 2 * int(rad) + 1
-        kernel = np.ones((k, k), np.uint8)
+        yy, xx = np.ogrid[-r:r + 1, -r:r + 1]
+        kernel = ((xx * xx + yy * yy) <= r * r).astype(np.uint8)
         return cv2.dilate((obs >= OBS_THRESH).astype(np.uint8), kernel, iterations=1).astype(bool)
     except Exception:
-        # Cheap square max-pool fallback
         from numpy.lib.stride_tricks import sliding_window_view
         m = (obs >= OBS_THRESH).astype(np.uint8)
-        pad = int(rad)
+        pad = r
         mp = np.pad(m, pad, mode='constant')
         win = sliding_window_view(mp, (2 * pad + 1, 2 * pad + 1))
         return win.max(axis=(-1, -2)).astype(bool)
