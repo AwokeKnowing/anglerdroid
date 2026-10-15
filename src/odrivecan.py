@@ -211,6 +211,15 @@ class ODriveAxisCAN:
                for n in node_ids}
         deadline = time.time() + float(timeout)
         try:
+            # Drain what is already queued and keep the NEWEST value per node. The S1 streams ~600 frames/s/node
+            # (s1-odrive-config: encoder/iq/torque/error/temp/vbus @10 ms); reading 2 frames per 70 ms cycle from the
+            # head of the socket queue returned values 1-5 s stale (found in the Jetson emulator, docs/fullstack.md).
+            while True:
+                msg = bus.recv(timeout=0)
+                if msg is None:
+                    break
+                if (not msg.is_remote_frame and len(msg.data) >= 8 and msg.arbitration_id in ids):
+                    want[ids[msg.arbitration_id]] = struct.unpack_from('<ff', msg.data)[1]
             while time.time() < deadline and any(v is None for v in want.values()):
                 msg = bus.recv(timeout=0.015)
                 if (not msg or msg.is_remote_frame or len(msg.data) < 8

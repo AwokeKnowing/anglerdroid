@@ -33,9 +33,12 @@ MASK_X1 = FOOT_X1
 MASK_Y1 = FOOT_Y1
 BWD_SCAN_X0 = FOOT_X0
 
-# Lateral scan covers the robot's full diagonal extent so spin-corner
-# collisions are caught.  half-diagonal ≈ sqrt(15²+21²) ≈ 26 px.
-_HALF_DIAG = 26
+# Lateral scan covers the FOOT AABB diagonal so spin-corner collisions
+# are caught. Tape hull ~20×22.7 cm plus lat pad → ~32 px.
+_HALF_DIAG = int(round(math.hypot(
+    max(FOOT_X1 - RCX, RCX - FOOT_X0),
+    max(FOOT_Y1 - RCY, RCY - FOOT_Y0),
+)))
 LAT_X0 = max(0, RCX - _HALF_DIAG)
 LAT_X1 = min(FRAME_W, RCX + _HALF_DIAG)
 LAT_HARD_PX = 2    # within this → angular = 0

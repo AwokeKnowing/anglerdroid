@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run any robot command against the selected hardware: KEVIN_HAL=real (default) | sim (Jetson emulator).
+#   KEVIN_HAL=sim scripts/kevin-hal python src/main.py --no-rerun
+set -e
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+case "${KEVIN_HAL:-real}" in
+  real) ;;
+  sim)  export PYTHONPATH="$REPO/hal/sim${PYTHONPATH:+:$PYTHONPATH}"; export PATH="$REPO/hal/sim/bin:$PATH"
+        export CAN_IFACE="${CAN_IFACE:-can0}"; export KEVIN_RGB_DEV="${KEVIN_RGB_DEV:-none}" ;;
+  *) echo "KEVIN_HAL must be real|sim" >&2; exit 2;;
+esac
+exec "$@"

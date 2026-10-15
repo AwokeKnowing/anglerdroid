@@ -100,7 +100,7 @@ class OdomThread:
                         # Transform to body frame (assuming FW_PITCH_DEG from vision)
                         # For now, just take raw Z-axis gyro (this will be refined)
                         _, _, imu_yaw_rate = self._imu.get_angular_velocity_body(
-                            camera_pitch_deg=-64.4)  # FW_PITCH_DEG + 90
+                            camera_pitch_deg=-(90.0 - __import__("twin_geometry").RS2_PITCH_DOWN_DEG))  # twin RS2: -63.0 (was -64.4 bag fit)
                 except Exception:
                     pass
             

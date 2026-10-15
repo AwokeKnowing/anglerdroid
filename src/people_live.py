@@ -28,7 +28,7 @@ import speech_io
 from social_fsm import SocialFSM
 
 GREET_PERIOD_S = 0.6
-LISTEN_PERIOD_S = 12.0
+LISTEN_GAP_S = 0.35
 LISTEN_SECS = 2.5
 HEARTBEAT_S = 30.0
 MAX_PENDING = 4
@@ -43,6 +43,19 @@ def _drive_armed() -> bool:
         return False
 
 
+
+
+def _encoder_ok() -> bool:
+    """False when wheel ticks are dead — world xy goals never arrive."""
+    try:
+        import tools
+        wb = tools.get_wheelbase()
+        if wb is None:
+            return True
+        h = wb.get_encoder_health()
+        return bool(h.get("encoder_ok"))
+    except Exception:
+        return True
 
 
 def _robot_is_moving(speed_eps: float = 0.04) -> bool:
@@ -82,13 +95,18 @@ class PeopleLive:
         self._pending = []
         self._lock = threading.Lock()
         self._last_goal_apply = 0.0
+        self._listen_thread = None
 
     def start(self):
         if not self.enabled:
             return
+        speech_io.set_nav_callback(lambda h: self._apply_goal_hint(h))
         self._thread = threading.Thread(target=self._loop, daemon=True, name="people_live")
         self._thread.start()
-        print("people_live: started (RGB face greet + name-call; speech only)")
+        self._listen_thread = threading.Thread(
+            target=self._listen_loop, daemon=True, name="people_listen")
+        self._listen_thread.start()
+        print("people_live: started (RGB face greet + always-on listen)")
 
     def stop(self):
         self._stop = True
@@ -113,7 +131,7 @@ class PeopleLive:
             self._cm = ConversationManager(
                 recognizer=rec,
                 speak_fn=_speak,
-                volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.30")),
+                volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.70")),
                 greet_hours=GreetHours(start_hour=8, end_hour=22),
             )
             # Shorter cooldown so walking past again gets a hello sooner.
@@ -126,7 +144,7 @@ class PeopleLive:
                 greet_start=8,
                 greet_end=22,
                 cooldown_seconds=90.0,
-                volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.30")),
+                volume=float(os.environ.get("KEVIN_SPEAK_VOL", "0.70")),
                 enable_live_enrollment=True,
             )
             self._pb.enabled_on_hardware = True
@@ -140,6 +158,15 @@ class PeopleLive:
                 print("people_live: kokoro prewarmed")
             except Exception as e:
                 print("people_live: kokoro prewarm skip: %s" % e)
+            try:
+                speech_io.apply_speak_sink(persist=False)
+                speech_io.apply_listen_source(quiet=False)
+                print("people_live: speak vol=%.0f%%" % (
+                    float(os.environ.get("KEVIN_SPEAK_VOL", "0.70")) * 100))
+            except Exception as e:
+                print("people_live: sink setup skip: %s" % e)
+            self._enqueue(
+                "Hi. I'm Kevin. I'm listening. Tell me to turn, come here, stop, or wander.")
             return True
         except Exception as e:
             print("people_live: init failed: %s" % e)
@@ -206,6 +233,37 @@ class PeopleLive:
             print("people_live: rgb err %s" % e)
             return None
 
+    def _twist_body(self, bearing_deg: float, distance_m: float, label: str,
+                    reverse: bool = False) -> None:
+        """Timed body command when encoders are dead (world xy never arrives)."""
+        import tools
+        local_executive.clear()
+        ang = math.radians(float(bearing_deg or 0.0))
+        dist = abs(float(distance_m or 0.0))
+        if reverse:
+            dur = min(4.0, max(0.4, dist / 0.10))
+            tools.twist_for(-0.10, 0.0, duration_secs=dur,
+                            ramp_in_secs=0.15, ramp_out_secs=0.15)
+            print("people_live: encoder-fail reverse %.1fs (%s)" % (dur, label))
+            return
+        if abs(ang) >= 0.35 and dist <= 0.65:
+            w = 0.45 if ang >= 0 else -0.45
+            dur = min(5.0, abs(ang) / 0.45)
+            tools.twist_for(0.0, w, duration_secs=dur,
+                            ramp_in_secs=0.08, ramp_out_secs=0.12)
+            print("people_live: encoder-fail turn %.0fdeg %.1fs (%s)"
+                  % (math.degrees(ang), dur, label))
+            return
+        w = 0.0
+        if abs(ang) > 0.15:
+            w = max(-0.40, min(0.40, ang))
+        v = 0.12
+        dur = min(4.0, max(0.5, dist / v))
+        tools.twist_for(v, w, duration_secs=dur,
+                        ramp_in_secs=0.20, ramp_out_secs=0.20)
+        print("people_live: encoder-fail crawl v=%.2f w=%.2f %.1fs (%s)"
+              % (v, w, dur, label))
+
     def _apply_goal_hint(self, hint: dict, person: str = None):
         """Apply goal hint to LocalExecutive when drive is armed."""
         if hint is None:
@@ -248,58 +306,69 @@ class PeopleLive:
                     return
                 bearing_deg = hint.get("bearing_deg", 0.0)
                 target_dist = hint.get("target_distance_m", 1.35)
-                
-                # Bearing is relative to current heading
+                if not _encoder_ok():
+                    self._twist_body(bearing_deg, target_dist, "approach " + (person or ""))
+                    return
                 target_theta = pose.theta + math.radians(bearing_deg)
                 gx = pose.x + target_dist * math.cos(target_theta)
                 gy = pose.y + target_dist * math.sin(target_theta)
-                
                 local_executive.set_goal_xy(gx, gy)
                 print("people_live: approach %s at bearing %.0f° dist %.1fm" % (
                     person or "person", bearing_deg, target_dist))
             
             elif hint_type == "relative_bearing":
-                # Directional help (kitchen, left, etc.)
                 pose = getattr(self.vision, "_pose", None)
                 if pose is None:
                     return
                 bearing_deg = hint.get("bearing_deg", 0.0)
                 distance_m = hint.get("distance_m", 1.0)
-                
+                label = hint.get("label", "target")
+                if not _encoder_ok():
+                    self._twist_body(bearing_deg, distance_m, label)
+                    return
                 target_theta = pose.theta + math.radians(bearing_deg)
                 gx = pose.x + distance_m * math.cos(target_theta)
                 gy = pose.y + distance_m * math.sin(target_theta)
-                
                 local_executive.set_goal_xy(gx, gy)
-                label = hint.get("label", "target")
                 print("people_live: relative_bearing %s %.0f° %.1fm" % (
                     label, bearing_deg, distance_m))
             
             elif hint_type in ("approach_speaker", "turn_to_speaker"):
-                # Come-here / look-at: small step toward current heading (speaker assumed ahead).
                 pose = getattr(self.vision, "_pose", None)
                 if pose is None:
                     print("people_live: no pose for %s" % hint_type)
                     return
                 distance_m = 0.6 if hint_type == "turn_to_speaker" else float(
                     hint.get("target_distance_m", 1.35))
+                if not _encoder_ok():
+                    self._twist_body(0.0, distance_m, hint_type)
+                    return
                 gx = pose.x + distance_m * math.cos(pose.theta)
                 gy = pose.y + distance_m * math.sin(pose.theta)
                 local_executive.set_goal_xy(gx, gy)
                 print("people_live: %s dist %.1fm" % (hint_type, distance_m))
 
             elif hint_type == "retreat":
-                # Back away
                 pose = getattr(self.vision, "_pose", None)
                 if pose is None:
                     return
                 distance_m = hint.get("distance_m", 2.0)
-                # Move backwards
+                if not _encoder_ok():
+                    self._twist_body(0.0, distance_m, "retreat", reverse=True)
+                    return
                 gx = pose.x - distance_m * math.cos(pose.theta)
                 gy = pose.y - distance_m * math.sin(pose.theta)
-                
                 local_executive.set_goal_xy(gx, gy)
                 print("people_live: retreat %.1fm" % distance_m)
+
+            elif hint_type == "xy":
+                gx = float(hint.get("x"))
+                gy = float(hint.get("y"))
+                if not _encoder_ok():
+                    print("people_live: xy goal skipped (encoders down)")
+                    return
+                local_executive.set_goal_xy(gx, gy)
+                print("people_live: xy goal (%.2f, %.2f)" % (gx, gy))
             
         except Exception as e:
             print("people_live: goal apply err %s" % e)
@@ -332,13 +401,22 @@ class PeopleLive:
             
             now = time.monotonic()
             
-            # Handle known faces via FSM (approach/greet/leave)
+            # Handle known faces via FSM (approach/greet/2-min chat)
             fsm_actions = []
+            seen_known = set()
             for name, confidence, box in faces:
                 if name != "unknown" and self._fsm is not None:
+                    seen_known.add(name)
                     action = self._fsm.on_face_seen(name, confidence, box, now, depth_map)
                     if action:
                         fsm_actions.append(action)
+            if self._fsm is not None:
+                current = self._fsm.current_person
+                if current and current not in seen_known:
+                    timed = self._fsm.on_timer(now)
+                    if timed:
+                        fsm_actions.append(timed)
+
             
             # Apply FSM actions (known people)
             for action in fsm_actions:
@@ -353,10 +431,31 @@ class PeopleLive:
                 if goal_hint:
                     self._apply_goal_hint(goal_hint, person)
                 
-                if action_type in ("greet", "approach"):
+                if action_type in ("greet", "approach", "prompt", "empathy", "leave"):
+                    print("people_live: %s %s %r"
+                          % (action_type, person or "", (utterance or "")[:80]),
+                          flush=True)
+                if action_type in ("greet", "approach", "prompt", "empathy"):
                     self._n_greet += 1
                     PeopleLive.social_priority = True
-                    PeopleLive.social_hold_until = now + 2.5
+                    remain = 120.0
+                    try:
+                        from social_fsm import CONVERSE_BUDGET_S
+                        enc = None
+                        if person and self._fsm:
+                            enc = self._fsm.encounters.get(person)
+                        if enc is not None and enc.converse_t0 > 0:
+                            remain = max(8.0, CONVERSE_BUDGET_S - (now - enc.converse_t0))
+                        else:
+                            remain = CONVERSE_BUDGET_S
+                    except Exception:
+                        remain = 120.0
+                    PeopleLive.social_hold_until = now + remain
+                    if action_type == "greet":
+                        self._apply_goal_hint({"type": "stop"}, person)
+                elif action_type == "leave":
+                    PeopleLive.social_hold_until = now + 2.0
+
             
             # Handle unknown faces with live enrollment (PeopleBehaviorStub)
             # Never start/ask while driving or turning — face the person first, hold still.
@@ -371,6 +470,8 @@ class PeopleLive:
                 
                 # Match faces to detections by box similarity
                 for name, confidence, box in faces:
+                    if name != "unknown":
+                        continue  # FSM owns known people (avoid a second greeting)
                     # Find matching detection with landmarks
                     landmarks = None
                     for det_box, det_lm in detections:
@@ -427,7 +528,7 @@ class PeopleLive:
             traceback.print_exc()
 
     def _tick_listen(self):
-        if speech_io.is_speaking() or PeopleLive.social_priority:
+        if speech_io.is_speaking():
             return
         try:
             text = speech_io.listen_seconds(LISTEN_SECS)
@@ -487,12 +588,26 @@ class PeopleLive:
             import traceback
             traceback.print_exc()
 
+    def _listen_loop(self):
+        """Always-on ASR when not speaking — do not gate to 12 s."""
+        while not self._stop and self._cm is None:
+            time.sleep(0.2)
+        print("people_live: listen loop on (%.1fs clips)" % LISTEN_SECS)
+        while not self._stop:
+            if speech_io.is_speaking():
+                time.sleep(0.15)
+                continue
+            try:
+                self._tick_listen()
+            except Exception as e:
+                print("people_live: listen loop err %s" % e)
+            time.sleep(LISTEN_GAP_S)
+
     def _loop(self):
         time.sleep(0.8)  # cameras settle (was 4s — greets came too late)
         if not self._ensure():
             return
         last_face = 0.0
-        last_listen = time.monotonic()
         last_hb = 0.0
         while not self._stop:
             now = time.monotonic()
@@ -501,14 +616,12 @@ class PeopleLive:
                 if now - last_face >= GREET_PERIOD_S:
                     last_face = now
                     self._tick_faces()
-                if now - last_listen >= LISTEN_PERIOD_S:
-                    last_listen = now
-                    self._tick_listen()
                 if now - last_hb >= HEARTBEAT_S:
                     last_hb = now
                     print(
-                        "people_live: heartbeat ticks=%d greets=%d rgb_miss=%d pending=%d"
-                        % (self._n_tick, self._n_greet, self._n_rgb_miss, len(self._pending))
+                        "people_live: heartbeat ticks=%d greets=%d heard=%d rgb_miss=%d pending=%d"
+                        % (self._n_tick, self._n_greet, self._n_hear,
+                           self._n_rgb_miss, len(self._pending))
                     )
             except Exception as e:
                 print("people_live: loop err %s" % e)

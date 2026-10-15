@@ -15,7 +15,15 @@ from robot_config import (
 from .labels import UNKNOWN, SELF, CLEAR, OBSTACLE
 
 # Keep in sync with vision.TD_FLOOR_CLIP until shared config exists.
-TD_FLOOR_CLIP = np.float32(0.91)
+from pathlib import Path
+try:  # v310 tire profile switch (src/tire_profile.py, env KEVIN_TIRE, default stock)
+    from tire_profile import RIDE_DZ_M as _TIRE_DZ
+except ImportError:
+    import importlib.util as _ilu, sys as _sys
+    _sp = _ilu.spec_from_file_location('tire_profile', str(Path(__file__).resolve().parents[2] / 'src' / 'tire_profile.py'))
+    _tp = _ilu.module_from_spec(_sp); _sys.modules.setdefault('tire_profile', _tp); _sp.loader.exec_module(_tp)
+    _TIRE_DZ = _tp.RIDE_DZ_M
+TD_FLOOR_CLIP = np.float32(0.91 + _TIRE_DZ)  # SAFETY-CRITICAL v310: follows tire ride height (stock 0.91)
 
 
 def _blit_x(dst: np.ndarray, src: np.ndarray, dx: int) -> None:
