@@ -89,7 +89,7 @@ scene.add(grid);
 // State
 let sceneLoaded=false;
 let sceneExtent=null;
-let robot=null,dog=null,goal=null,path=null,frustums=[];
+let robot=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
 
 // Robot - bright cyan emissive
@@ -107,7 +107,7 @@ robot.add(arrowHelper);
 // Dog (small sphere)
 const dogGeom=new THREE.SphereGeometry(0.15,16,16);
 const dogMat=new THREE.MeshStandardMaterial({color:0x8a5});
-dog=new THREE.Mesh(dogGeom,dogMat);
+const dog=new THREE.Mesh(dogGeom,dogMat);
 dog.position.y=0.15;
 dog.visible=false;
 scene.add(dog);
@@ -115,14 +115,14 @@ scene.add(dog);
 // Goal marker
 const goalGeom=new THREE.ConeGeometry(0.08,0.25,8);
 const goalMat=new THREE.MeshStandardMaterial({color:0xf00,emissive:0x800});
-goal=new THREE.Mesh(goalGeom,goalMat);
+const goal=new THREE.Mesh(goalGeom,goalMat);
 goal.position.y=0.125;
 goal.visible=false;
 scene.add(goal);
 
 // Path line
 const pathMat=new THREE.LineBasicMaterial({color:0xfa0,linewidth:2});
-path=new THREE.Line(new THREE.BufferGeometry(),pathMat);
+const path=new THREE.Line(new THREE.BufferGeometry(),pathMat);
 scene.add(path);
 
 // Camera frustums (optional)
