@@ -1,5 +1,7 @@
 # Kevin real-robot bring-up (Orin "jetbot", code in ~/anglerdroid on branch fullstack-sim-slam-2026-10-14, venv ~/.venv-kevinnav)
 
+**Host setup:** See `docs/orin_setup.md` for JetPack 7.2, PyTorch/CUDA 13.2, RealSense, and CAN configuration.
+
 Emulator rehearsal of this whole flow (i777): `~/.venv-kevinsim/bin/python emu/tools/rehearse_bringup.py <tag> <pitch_deg>`.
 
 Order matters; stop at the first FAIL. Physical e-stop (mast) within reach the whole time.

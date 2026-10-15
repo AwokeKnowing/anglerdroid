@@ -2,6 +2,8 @@
 
 Status: **work in progress**, committed on branch `fullstack-sim-slam-2026-10-14` (2026-10-14). Timings are measured on i777 (RTX 3090) against the emulator, not on the Orin.
 
+**Orin setup:** See `docs/orin_setup.md` for host configuration (JetPack 7.2, PyTorch/CUDA 13.2, RealSense, CAN).
+
 ## Layout
 - `hardware/tires/v3_4/`: tire v3.4 (STL, generators, renders, README, deps/).
 - `emu/`: Jetson emulator.

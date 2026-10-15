@@ -2,6 +2,8 @@
 
 Minimal robot stack: 30 fps loop, tools (wheelbase + vision + ui), dual RealSense obstacle mapping, Gemini AI with voice.
 
+**NOTE:** This README describes the original v2 stack. For current Kevin full-stack setup (JetPack 7.2, PyTorch/CUDA 13.2, SLAM, planner), see `docs/orin_setup.md` and `docs/fullstack.md`.
+
 ## Project structure
 
 All source lives in `src/`:

@@ -1,5 +1,8 @@
 # AnglerDroid – Jetson Orin NX (aarch64)
 #
+# ⚠️  STALE: This Dockerfile references JetPack 6.x / CUDA 12.
+# ⚠️  Real Kevin runs JetPack 7.2 / CUDA 13.2 — see docs/orin_setup.md for current config.
+#
 # Requires JetPack 6.x on the host for GPU/CUDA 12 support.
 # Adjust BASE_IMAGE arg to match your installed JetPack:
 #   JP 6.0 GA  →  nvcr.io/nvidia/l4t-jetpack:r36.3.0
