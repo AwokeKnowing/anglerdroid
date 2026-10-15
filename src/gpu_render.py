@@ -844,8 +844,6 @@ uniform float u_scale;
 uniform vec2  u_offset;
 uniform float u_floor_clip;
 uniform vec2  u_fbo_sz;
-uniform int   u_border;
-uniform ivec2 u_grid_size;
 in vec3 in_v;
 flat out float v_label;
 flat out float v_height;
@@ -860,13 +858,6 @@ void main() {
         gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
     }
     
-    // Early discard: border clipping (same as topdown)
-    vec2 uv_grid = vec2(gl_VertexID % u_grid_size.x, gl_VertexID / u_grid_size.x);
-    if (uv_grid.x < float(u_border) || uv_grid.x >= float(u_grid_size.x - u_border) ||
-        uv_grid.y < float(u_border) || uv_grid.y >= float(u_grid_size.y - u_border)) {
-        gl_Position = vec4(2.0, 2.0, 0.0, 1.0); return;
-    }
-    
     // Project to ego frame (camera-centered, will rotate 180° later)
     vec2 proj = (p.xy * u_scale) + u_offset;
     
@@ -876,20 +867,25 @@ void main() {
     }
     
     // Classify: CLEAR (2) if floor, OBSTACLE (3) if below floor
+    float depth_val;
     if (p.z >= u_floor_clip) {
         v_label = 2.0;  // CLEAR
         v_height = 0.0;
+        // Small positive depth so CLEAR beats UNKNOWN but loses to OBSTACLE
+        depth_val = 0.001;
     } else {
         v_label = 3.0;  // OBSTACLE
         // Height in cm above floor (clamped 1-100)
         float h_cm = clamp((u_floor_clip - p.z) * 100.0, 1.0, 100.0);
         v_height = h_cm;
+        // Map height to depth range [0.01, 1.0] so taller obstacles win
+        depth_val = h_cm / 100.0;
     }
     
     // NDC coordinates for scatter
     vec2 ndc = (proj / u_fbo_sz) * 2.0 - 1.0;
-    // Use height as depth for max-blending (taller wins)
-    gl_Position = vec4(ndc, v_height / 100.0, 1.0);
+    // Use depth for priority: OBSTACLE > CLEAR > UNKNOWN (taller obstacle wins)
+    gl_Position = vec4(ndc, depth_val, 1.0);
 }
 """
 
@@ -1878,8 +1874,6 @@ class GPURenderer:
         p['u_offset'].value = tuple(self._el_offset.tolist())
         p['u_floor_clip'].value = self._el_floor
         p['u_fbo_sz'].value = (float(ow), float(oh))
-        p['u_border'].value = 4
-        p['u_grid_size'].value = (283, 160)  # typical D435 decimated mag=3
 
         try:
             ctx.enable(moderngl.PROGRAM_POINT_SIZE)
@@ -1925,7 +1919,7 @@ class GPURenderer:
         """
         # CPU fallback if GPU unavailable
         if not self.available or not getattr(self, '_el_configured', False):
-            from src.perception.ego_rs1 import label_rs1_ego
+            from perception.ego_rs1 import label_rs1_ego
             return label_rs1_ego(
                 verts,
                 out_h=out_h,
@@ -1947,7 +1941,7 @@ class GPURenderer:
                 print("gpu_render: init failed: %s" % e)
                 self.available = False
                 # Fall back to CPU
-                from src.perception.ego_rs1 import label_rs1_ego
+                from perception.ego_rs1 import label_rs1_ego
                 return label_rs1_ego(
                     verts,
                     out_h=out_h,
@@ -1968,7 +1962,7 @@ class GPURenderer:
                 import traceback
                 traceback.print_exc()
                 # Fall back to CPU
-                from src.perception.ego_rs1 import label_rs1_ego
+                from perception.ego_rs1 import label_rs1_ego
                 return label_rs1_ego(
                     verts,
                     out_h=out_h,
@@ -2015,13 +2009,13 @@ class GPURenderer:
                 np.copyto(labels_out, cam_l_f)
                 np.copyto(height_out, cam_h_f)
             else:
-                from src.perception.ego_rs1 import _blit_x
+                from perception.ego_rs1 import _blit_x
                 _blit_x(labels_out, cam_l_f, int(x_offset))
                 _blit_x(height_out, cam_h_f, int(x_offset))
 
         # Paint SELF on CPU (box ops trivial, avoid GPU complexity)
         if self_boxes is not None:
-            from src.perception.labels import SELF
+            from perception.labels import SELF
             for x0, y0, x1, y1 in self_boxes:
                 labels_out[y0:y1, x0:x1] = SELF
 
