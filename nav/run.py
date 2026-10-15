@@ -371,6 +371,29 @@ def main():
     a = ap.parse_args()
     import signal, sys
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))      # clean stop: wheels zeroed in Brain.run's finally
+    
+    # CUDA enforcement: planner MUST run on GPU (Jetson Orin; CPU fallback forbidden)
+    # Sim (KEVIN_HAL=sim) may run on CPU for dev convenience
+    if os.environ.get("KEVIN_HAL", "real") == "real" and not a.no_plan:
+        import torch
+        if not torch.cuda.is_available():
+            print("\n=== FATAL: torch.cuda.is_available() == False ===", file=sys.stderr)
+            print("Kevin planner REQUIRES GPU on Orin. CPU fallback is FORBIDDEN.", file=sys.stderr)
+            print("Fix: Install PyTorch built for Jetson/JetPack 7.2 with CUDA 13.x support", file=sys.stderr)
+            print("See docs/bringup.md for setup instructions.", file=sys.stderr)
+            print("Run scripts/build_orin_cuda.sh to verify CUDA.", file=sys.stderr)
+            sys.exit(1)
+        # Verify GPU is actually usable (not just "available")
+        try:
+            x = torch.zeros(10, device="cuda")
+            _ = x + 1.0
+        except Exception as e:
+            print(f"\n=== FATAL: GPU device unusable: {e} ===", file=sys.stderr)
+            print("torch.cuda.is_available() was True but device allocation failed.", file=sys.stderr)
+            print("Check dmesg for CUDA driver errors, verify nvidia-smi works.", file=sys.stderr)
+            sys.exit(1)
+        print("[nav] CUDA verified: %s" % torch.cuda.get_device_name(0), flush=True)
+    
     hw = Hardware()
     b = Brain(hw, match=not a.no_match, plan=not a.no_plan)
     if a.map: b.command("load " + a.map)
