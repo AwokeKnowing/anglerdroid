@@ -26,6 +26,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <div id="controls">
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
+<button id="framehouse" style="background:#0008;border:1px solid #666;color:#ddd;padding:4px 8px;cursor:pointer;font-size:11px;margin-top:4px">Frame house</button>
 </div>
 <div id="log"></div>
 <div id="chat">
@@ -41,10 +42,9 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 
 const canvas=document.getElementById('c');
 const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x1a1d24);
-scene.fog=new THREE.Fog(0x1a1d24,8,15);
+scene.background=new THREE.Color(0x87ceeb);  // sky blue
 
-const camera=new THREE.PerspectiveCamera(50,window.innerWidth/window.innerHeight,0.1,100);
+const camera=new THREE.PerspectiveCamera(50,window.innerWidth/window.innerHeight,0.1,200);
 camera.position.set(-3,2.5,4);
 
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
@@ -59,48 +59,49 @@ controls.enableDamping=true;
 controls.dampingFactor=0.05;
 controls.update();
 
-// Lights - brighter for better visibility
-const hemi=new THREE.HemisphereLight(0xffffff,0x444444,0.6);
+// Lights - bright outdoor lighting
+const hemi=new THREE.HemisphereLight(0xffffff,0x666666,0.8);
 scene.add(hemi);
-const ambient=new THREE.AmbientLight(0xffffff,0.5);
+const ambient=new THREE.AmbientLight(0xffffff,0.6);
 scene.add(ambient);
-const dir=new THREE.DirectionalLight(0xffffff,0.8);
+const dir=new THREE.DirectionalLight(0xffffff,1.0);
 dir.position.set(5,10,7);
 dir.castShadow=true;
-dir.shadow.camera.left=-15;dir.shadow.camera.right=15;
-dir.shadow.camera.top=15;dir.shadow.camera.bottom=-15;
+dir.shadow.camera.left=-20;dir.shadow.camera.right=20;
+dir.shadow.camera.top=20;dir.shadow.camera.bottom=-20;
 dir.shadow.mapSize.width=2048;dir.shadow.mapSize.height=2048;
 scene.add(dir);
 
 // Ground - will be resized based on scene extent
 let ground=new THREE.Mesh(
-  new THREE.PlaneGeometry(20,20),
-  new THREE.MeshStandardMaterial({color:0x3a3a3a,roughness:0.8})
+  new THREE.PlaneGeometry(30,30),
+  new THREE.MeshStandardMaterial({color:0x4a4a4a,roughness:0.8})
 );
 ground.rotation.x=-Math.PI/2;
 ground.receiveShadow=true;
 scene.add(ground);
 
 // Grid helper for reference
-let grid=new THREE.GridHelper(20,20,0x555555,0x333333);
+let grid=new THREE.GridHelper(30,30,0x666666,0x444444);
 grid.position.y=0.01;
 scene.add(grid);
 
 // State
 let sceneLoaded=false;
+let sceneExtent=null;
 let robot=null,dog=null,goal=null,path=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
 
-// Robot - bigger and more visible
+// Robot - bright cyan emissive
 const robotGeom=new THREE.BoxGeometry(0.5,0.25,0.4);
-const robotMat=new THREE.MeshStandardMaterial({color:0x00cc88,emissive:0x003322,roughness:0.6});
+const robotMat=new THREE.MeshStandardMaterial({color:0x00ffff,emissive:0x00cccc,roughness:0.5});
 robot=new THREE.Mesh(robotGeom,robotMat);
 robot.position.y=0.125;
 robot.castShadow=true;
 scene.add(robot);
 
-// Arrow for robot heading - bigger
-const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),0.5,0x00ff44,0.15,0.1);
+// Arrow for robot heading - yellow
+const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),0.5,0xffff00,0.15,0.1);
 robot.add(arrowHelper);
 
 // Dog (small sphere)
@@ -149,6 +150,19 @@ function makeFrustum(color){
 
 camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked&&sceneLoaded)};
 
+// Frame house button
+function frameHouse(){
+  if(!sceneExtent)return;
+  const[xmin,ymin,xmax,ymax]=sceneExtent;
+  const w=xmax-xmin,h=ymax-ymin;
+  const cx=(xmin+xmax)/2,cy=(ymin+ymax)/2;
+  const dist=Math.max(w,h)*0.8;
+  camera.position.set(cx-dist*0.6,dist*0.5,cy+dist*0.6);
+  controls.target.set(cx,0,cy);
+  controls.update();
+}
+document.getElementById('framehouse').onclick=frameHouse;
+
 // Load scene geometry
 async function loadScene(){
   try{
@@ -158,16 +172,18 @@ async function loadScene(){
     
     // Update floor and grid based on extent
     if(data.extent){
+      sceneExtent=data.extent;
       const[xmin,ymin,xmax,ymax]=data.extent;
       const w=xmax-xmin,h=ymax-ymin;
       const cx=(xmin+xmax)/2,cy=(ymin+ymax)/2;
       console.log(`Scene extent: ${w.toFixed(1)}m x ${h.toFixed(1)}m @ (${cx.toFixed(1)}, ${cy.toFixed(1)})`);
       
-      // Resize ground
+      // Resize ground - larger than scene
       scene.remove(ground);
+      const groundSize=Math.max(w,h)+8;
       ground=new THREE.Mesh(
-        new THREE.PlaneGeometry(w+2,h+2),
-        new THREE.MeshStandardMaterial({color:0x3a3a3a,roughness:0.8})
+        new THREE.PlaneGeometry(groundSize,groundSize),
+        new THREE.MeshStandardMaterial({color:0x4a4a4a,roughness:0.8})
       );
       ground.rotation.x=-Math.PI/2;
       ground.position.set(cx,0,cy);
@@ -176,16 +192,12 @@ async function loadScene(){
       
       // Resize grid
       scene.remove(grid);
-      const gridSize=Math.max(w,h)+2;
-      grid=new THREE.GridHelper(gridSize,Math.ceil(gridSize),0x555555,0x333333);
+      grid=new THREE.GridHelper(groundSize,Math.ceil(groundSize),0x666666,0x444444);
       grid.position.set(cx,0.01,cy);
       scene.add(grid);
       
-      // Position camera to view the whole scene
-      const dist=Math.max(w,h)*0.8;
-      camera.position.set(cx-dist*0.6,dist*0.5,cy+dist*0.6);
-      controls.target.set(cx,0,cy);
-      controls.update();
+      // Auto-frame on load
+      frameHouse();
     }
     
     // Add geometry from scene
@@ -230,7 +242,7 @@ async function loadScene(){
         geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
         geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
         const color=g.color||0xdcd8cc;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide});
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide,transparent:true,opacity:0.6});
         const mesh=new THREE.Mesh(geom,mat);
         mesh.castShadow=true;
         mesh.receiveShadow=true;
