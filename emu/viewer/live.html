@@ -25,6 +25,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <div id="hud">Kevin Live Sim · Drag to orbit · Scroll to zoom</div>
 <div id="controls">
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
+<label><input type="checkbox" id="showdog"> Show dog marker</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
 <button id="framehouse" style="background:#0008;border:1px solid #666;color:#ddd;padding:4px 8px;cursor:pointer;font-size:11px;margin-top:4px">Frame house</button>
 </div>
@@ -91,26 +92,41 @@ let sceneLoaded=false;
 let sceneExtent=null;
 let robot=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
+const showdogEl=document.getElementById('showdog');
 
-// Robot - bright cyan emissive
-const robotGeom=new THREE.BoxGeometry(0.5,0.25,0.4);
-const robotMat=new THREE.MeshStandardMaterial({color:0x00ffff,emissive:0x00cccc,roughness:0.5});
-robot=new THREE.Mesh(robotGeom,robotMat);
-robot.position.y=0.125;
-robot.castShadow=true;
+// MuJoCo Z-up to Three.js Y-up coordinate transform
+function mjToThree(x,y,z){return[x,z,-y]}
+
+// Robot - dark chassis + mast stub + yellow arrow
+const robotGroup=new THREE.Group();
+// Chassis (dark box)
+const chassisGeom=new THREE.BoxGeometry(0.5,0.15,0.4);
+const chassisMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
+const chassis=new THREE.Mesh(chassisGeom,chassisMat);
+chassis.position.y=0.075;
+chassis.castShadow=true;
+robotGroup.add(chassis);
+// Mast stub (small vertical cylinder)
+const mastGeom=new THREE.CylinderGeometry(0.03,0.03,0.15,8);
+const mastMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
+const mast=new THREE.Mesh(mastGeom,mastMat);
+mast.position.set(0,0.15+0.075,0);
+mast.castShadow=true;
+robotGroup.add(mast);
+// Yellow heading arrow
+const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.1,0),0.5,0xffff00,0.15,0.1);
+robotGroup.add(arrowHelper);
+robot=robotGroup;
 scene.add(robot);
 
-// Arrow for robot heading - yellow
-const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0,0),0.5,0xffff00,0.15,0.1);
-robot.add(arrowHelper);
-
-// Dog (small sphere)
+// Dog marker (small sphere) - OFF by default
 const dogGeom=new THREE.SphereGeometry(0.15,16,16);
 const dogMat=new THREE.MeshStandardMaterial({color:0x8a5});
 const dog=new THREE.Mesh(dogGeom,dogMat);
 dog.position.y=0.15;
 dog.visible=false;
 scene.add(dog);
+showdogEl.onchange=()=>{if(!dog.userData.present)dog.visible=false;else dog.visible=showdogEl.checked};
 
 // Goal marker
 const goalGeom=new THREE.ConeGeometry(0.08,0.25,8);
@@ -149,6 +165,7 @@ function makeFrustum(color){
 }
 
 camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked&&sceneLoaded)};
+showdogEl.onchange();
 
 // Frame house button
 function frameHouse(){
@@ -209,7 +226,8 @@ async function loadScene(){
         const color=g.color||0x888888;
         const mat=new THREE.MeshStandardMaterial({color,roughness:0.7});
         const mesh=new THREE.Mesh(geom,mat);
-        mesh.position.set(g.pos[0],g.pos[2],g.pos[1]);
+        const[x,y,z]=mjToThree(g.pos[0],g.pos[1],g.pos[2]);
+        mesh.position.set(x,y,z);
         mesh.rotation.y=-g.yaw;
         mesh.castShadow=true;
         mesh.receiveShadow=true;
@@ -220,7 +238,8 @@ async function loadScene(){
         const color=g.color||0x888888;
         const mat=new THREE.MeshStandardMaterial({color,roughness:0.6});
         const mesh=new THREE.Mesh(geom,mat);
-        mesh.position.set(g.pos[0],g.pos[2],g.pos[1]);
+        const[x,y,z]=mjToThree(g.pos[0],g.pos[1],g.pos[2]);
+        mesh.position.set(x,y,z);
         mesh.castShadow=true;
         mesh.receiveShadow=true;
         scene.add(mesh);
@@ -232,17 +251,20 @@ async function loadScene(){
         const verts=[];const norms=[];
         g.faces.forEach(f=>{
           const v0=g.vertices[f[0]],v1=g.vertices[f[1]],v2=g.vertices[f[2]];
-          verts.push(v0[0],v0[2],v0[1],v1[0],v1[2],v1[1],v2[0],v2[2],v2[1]);
+          const[x0,y0,z0]=mjToThree(v0[0],v0[1],v0[2]);
+          const[x1,y1,z1]=mjToThree(v1[0],v1[1],v1[2]);
+          const[x2,y2,z2]=mjToThree(v2[0],v2[1],v2[2]);
+          verts.push(x0,y0,z0,x1,y1,z1,x2,y2,z2);
           // Compute normal
-          const a=new THREE.Vector3(v1[0]-v0[0],v1[2]-v0[2],v1[1]-v0[1]);
-          const b=new THREE.Vector3(v2[0]-v0[0],v2[2]-v0[2],v2[1]-v0[1]);
+          const a=new THREE.Vector3(x1-x0,y1-y0,z1-z0);
+          const b=new THREE.Vector3(x2-x0,y2-y0,z2-z0);
           const n=new THREE.Vector3().crossVectors(a,b).normalize();
           norms.push(n.x,n.y,n.z,n.x,n.y,n.z,n.x,n.y,n.z);
         });
         geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
         geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
         const color=g.color||0xdcd8cc;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide,transparent:true,opacity:0.6});
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide,transparent:true,opacity:0.88});
         const mesh=new THREE.Mesh(geom,mat);
         mesh.castShadow=true;
         mesh.receiveShadow=true;
@@ -262,24 +284,26 @@ function updateState(st){
   try{
     // Update robot
     if(st.kevin){
-      robot.position.x=st.kevin[0];
-      robot.position.z=st.kevin[1];
+      const[x,y,z]=mjToThree(st.kevin[0],st.kevin[1],0);
+      robot.position.set(x,y,z);
       robot.rotation.y=-st.kevin[2];
     }
     
     // Update dog
     if(st.dog){
-      dog.position.x=st.dog[0];
-      dog.position.z=st.dog[1];
-      dog.visible=true;
+      const[x,y,z]=mjToThree(st.dog[0],st.dog[1],0);
+      dog.position.set(x,0.15,z);
+      dog.userData.present=true;
+      dog.visible=showdogEl.checked;
     }else{
+      dog.userData.present=false;
       dog.visible=false;
     }
     
     // Update goal
     if(st.goal){
-      goal.position.x=st.goal[0];
-      goal.position.z=st.goal[1];
+      const[x,y,z]=mjToThree(st.goal[0],st.goal[1],0);
+      goal.position.set(x,0.125,z);
       goal.visible=true;
     }else{
       goal.visible=false;
@@ -287,7 +311,10 @@ function updateState(st){
     
     // Update path
     if(st.path&&st.path.length>0){
-      const points=st.path.map(p=>new THREE.Vector3(p[0],0.02,p[1]));
+      const points=st.path.map(p=>{
+        const[x,y,z]=mjToThree(p[0],p[1],0);
+        return new THREE.Vector3(x,0.02,z);
+      });
       path.geometry.dispose();
       path.geometry=new THREE.BufferGeometry().setFromPoints(points);
       path.visible=true;
