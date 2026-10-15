@@ -182,6 +182,16 @@ class H(BaseHTTPRequestHandler):
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)
+        if p.startswith("/cam/"):
+            # Camera panel endpoints: serve sim camera frames from shm if available
+            # TODO: wire lightweight JPEG thumbs from sim shm (rs1_depth.jpg, rs1_color.jpg, rs2_depth.jpg, rs2_color.jpg)
+            cam_name = p[5:-4] if p.endswith(".jpg") else None
+            if cam_name in ("rs1_depth", "rs1_color", "rs2_depth", "rs2_color"):
+                try:
+                    return self._send(open(f"/dev/shm/kevin_{cam_name}.jpg", "rb").read(), "image/jpeg")
+                except Exception:
+                    return self._send(b"", code=404)
+            return self._send(b"", code=404)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
             with lock: return self._send(json.dumps(LOG).encode())

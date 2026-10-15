@@ -18,6 +18,13 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 #controls{position:fixed;top:8px;right:8px;background:#0008;padding:6px;border-radius:4px;display:flex;flex-direction:column;gap:4px}
 #controls label{font-size:11px;display:flex;align-items:center;cursor:pointer}
 #controls input[type=checkbox]{margin-right:6px}
+.cam-panel{position:fixed;background:#000;border:1px solid #666;display:none;pointer-events:none}
+.cam-panel.show{display:block}
+.cam-panel img{display:block;width:100%;height:100%}
+#rs1d-panel{top:60px;left:8px;width:320px;height:240px}
+#rs1c-panel{top:310px;left:8px;width:320px;height:240px}
+#rs2d-panel{top:60px;right:348px;width:320px;height:240px}
+#rs2c-panel{top:310px;right:348px;width:320px;height:240px}
 </style>
 </head>
 <body>
@@ -25,10 +32,18 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <div id="hud">Kevin Live Sim · Drag to orbit · Scroll to zoom</div>
 <div id="controls">
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
-<label><input type="checkbox" id="showdog"> Show dog marker</label>
+<label><input type="checkbox" id="showdog" checked> Show dog</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
+<label><input type="checkbox" id="rs1d"> RS1 depth</label>
+<label><input type="checkbox" id="rs1c"> RS1 color</label>
+<label><input type="checkbox" id="rs2d"> RS2 depth</label>
+<label><input type="checkbox" id="rs2c"> RS2 color</label>
 <button id="framehouse" style="background:#0008;border:1px solid #666;color:#ddd;padding:4px 8px;cursor:pointer;font-size:11px;margin-top:4px">Frame house</button>
 </div>
+<div id="rs1d-panel" class="cam-panel"><img id="rs1d-img" src="" alt="RS1 depth"></div>
+<div id="rs1c-panel" class="cam-panel"><img id="rs1c-img" src="" alt="RS1 color"></div>
+<div id="rs2d-panel" class="cam-panel"><img id="rs2d-img" src="" alt="RS2 depth"></div>
+<div id="rs2c-panel" class="cam-panel"><img id="rs2c-img" src="" alt="RS2 color"></div>
 <div id="log"></div>
 <div id="chat">
 <input id="q" placeholder="go to couch | forward 2 | turn left | stop" autocomplete="off">
@@ -95,6 +110,17 @@ let robot=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
 const showdogEl=document.getElementById('showdog');
 
+// Camera panel controls
+const rs1dEl=document.getElementById('rs1d');
+const rs1cEl=document.getElementById('rs1c');
+const rs2dEl=document.getElementById('rs2d');
+const rs2cEl=document.getElementById('rs2c');
+
+rs1dEl.onchange=()=>{document.getElementById('rs1d-panel').classList.toggle('show',rs1dEl.checked)};
+rs1cEl.onchange=()=>{document.getElementById('rs1c-panel').classList.toggle('show',rs1cEl.checked)};
+rs2dEl.onchange=()=>{document.getElementById('rs2d-panel').classList.toggle('show',rs2dEl.checked)};
+rs2cEl.onchange=()=>{document.getElementById('rs2c-panel').classList.toggle('show',rs2cEl.checked)};
+
 // MuJoCo Z-up to Three.js Y-up coordinate transform
 function mjToThree(x,y,z){return[x,z,-y]}
 
@@ -157,14 +183,67 @@ loader.load('/assets/kevin_lite.glb',
   }
 );
 
-// Dog marker (small sphere) - OFF by default
-const dogGeom=new THREE.SphereGeometry(0.15,16,16);
-const dogMat=new THREE.MeshStandardMaterial({color:0x8a5});
-const dog=new THREE.Mesh(dogGeom,dogMat);
-dog.position.y=0.15;
-dog.visible=false;
-scene.add(dog);
-showdogEl.onchange=()=>{if(!dog.userData.present)dog.visible=false;else dog.visible=showdogEl.checked};
+// Dog (yorkie) - matching MuJoCo sim geometry from world.py lines 197-206
+// Materials: fur-like brown colors
+const furMat=new THREE.MeshStandardMaterial({color:0x8c6540,roughness:0.9});
+const fur2Mat=new THREE.MeshStandardMaterial({color:0x7a5530,roughness:0.9});
+
+const dogGroup=new THREE.Group();
+dogGroup.visible=false;
+
+// Body: capsule from (-0.07,0,0.13) to (0.06,0,0.135), radius 0.055
+const bodyGeom=new THREE.CapsuleGeometry(0.055,0.13,8,16);
+const bodyMesh=new THREE.Mesh(bodyGeom,fur2Mat);
+bodyMesh.position.set(-0.005,0.1325,0);
+bodyMesh.rotation.z=Math.PI/2;
+bodyMesh.castShadow=true;
+dogGroup.add(bodyMesh);
+
+// Head: sphere at (0.11,0,0.175), radius 0.048
+const headGeom=new THREE.SphereGeometry(0.048,16,16);
+const headMesh=new THREE.Mesh(headGeom,furMat);
+headMesh.position.set(0.11,0.175,0);
+headMesh.castShadow=true;
+dogGroup.add(headMesh);
+
+// Snout: capsule from (0.14,0,0.165) to (0.17,0,0.16), radius 0.018
+const snoutGeom=new THREE.CapsuleGeometry(0.018,0.03,6,8);
+const snoutMesh=new THREE.Mesh(snoutGeom,furMat);
+snoutMesh.position.set(0.155,0.1625,0);
+snoutMesh.rotation.z=Math.PI/2;
+snoutMesh.castShadow=true;
+dogGroup.add(snoutMesh);
+
+// Ears: boxes at (0.105,±0.028,0.225), size (0.012,0.008,0.022)
+for(let ex of[-1,1]){
+  const earGeom=new THREE.BoxGeometry(0.024,0.044,0.016);
+  const earMesh=new THREE.Mesh(earGeom,fur2Mat);
+  earMesh.position.set(0.105,0.225,0.028*ex);
+  earMesh.castShadow=true;
+  dogGroup.add(earMesh);
+}
+
+// Legs: 4 capsules at corners (±0.07,±0.03), from z=0.11 to z=0.012, radius 0.013
+for(let lx of[-0.07,0.07]){
+  for(let ly of[-0.03,0.03]){
+    const legGeom=new THREE.CapsuleGeometry(0.013,0.098,6,8);
+    const legMesh=new THREE.Mesh(legGeom,furMat);
+    legMesh.position.set(lx,0.061,ly);
+    legMesh.castShadow=true;
+    dogGroup.add(legMesh);
+  }
+}
+
+// Tail: capsule from (-0.11,0,0.15) to (-0.15,0,0.2), radius 0.01
+const tailGeom=new THREE.CapsuleGeometry(0.01,0.064,6,8);
+const tailMesh=new THREE.Mesh(tailGeom,fur2Mat);
+tailMesh.position.set(-0.13,0.175,0);
+tailMesh.rotation.z=-Math.atan2(0.05,0.04);
+tailMesh.castShadow=true;
+dogGroup.add(tailMesh);
+
+scene.add(dogGroup);
+showdogEl.onchange=()=>{if(!dogGroup.userData.present)dogGroup.visible=false;else dogGroup.visible=showdogEl.checked};
 
 // Goal marker
 const goalGeom=new THREE.ConeGeometry(0.08,0.25,8);
@@ -179,28 +258,70 @@ const pathMat=new THREE.LineBasicMaterial({color:0xfa0,linewidth:2});
 const path=new THREE.Line(new THREE.BufferGeometry(),pathMat);
 scene.add(path);
 
-// Camera frustums (optional)
-function makeFrustum(color){
+// Camera frustums with real geometry from twin
+// RS1 (top-down D435): pos (-0.007, 0.0, 0.8619), fovy 58°, optical axes: x=-base_x, y=-base_z, z=-base_y
+// RS2 (forward D435i): pos (-0.1301, 0.0, 0.3822), pitch ~30° down, fovy 58°
+const RS1_POS=[-0.007,0.8619,0];  // MuJoCo (x,z,-y)
+const RS2_POS=[-0.1301,0.3822,0];
+const FOVY_D=58.0;  // depth FOV degrees
+const FOVY_C=42.0;  // color FOV degrees
+
+function makeFrustum(name,pos,fovy,color,pitch){
   const group=new THREE.Group();
-  const mat=new THREE.LineBasicMaterial({color,transparent:true,opacity:0.5});
+  const aspect=848/480;  // D435 resolution
+  const depth=0.1;  // small frustum ~10cm deep
+  const halfY=Math.tan(fovy*Math.PI/180/2)*depth;
+  const halfX=halfY*aspect;
   
-  // Pyramid outline
+  // Wireframe pyramid
+  const mat=new THREE.LineBasicMaterial({color,transparent:true,opacity:0.5});
   const points=[
-    new THREE.Vector3(0,0,0),new THREE.Vector3(-0.3,-0.2,-0.6),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(0.3,-0.2,-0.6),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(0.3,0.2,-0.6),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(-0.3,0.2,-0.6),
-    new THREE.Vector3(-0.3,-0.2,-0.6),new THREE.Vector3(0.3,-0.2,-0.6),
-    new THREE.Vector3(0.3,-0.2,-0.6),new THREE.Vector3(0.3,0.2,-0.6),
-    new THREE.Vector3(0.3,0.2,-0.6),new THREE.Vector3(-0.3,0.2,-0.6),
-    new THREE.Vector3(-0.3,0.2,-0.6),new THREE.Vector3(-0.3,-0.2,-0.6)
+    new THREE.Vector3(0,0,0),new THREE.Vector3(-halfX,-halfY,-depth),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(halfX,-halfY,-depth),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(halfX,halfY,-depth),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(-halfX,halfY,-depth),
+    new THREE.Vector3(-halfX,-halfY,-depth),new THREE.Vector3(halfX,-halfY,-depth),
+    new THREE.Vector3(halfX,-halfY,-depth),new THREE.Vector3(halfX,halfY,-depth),
+    new THREE.Vector3(halfX,halfY,-depth),new THREE.Vector3(-halfX,halfY,-depth),
+    new THREE.Vector3(-halfX,halfY,-depth),new THREE.Vector3(-halfX,-halfY,-depth)
   ];
   const geom=new THREE.BufferGeometry().setFromPoints(points);
   const line=new THREE.LineSegments(geom,mat);
   group.add(line);
+  
+  // Cross-section plane for live image (near the tip)
+  const planeGeom=new THREE.PlaneGeometry(halfX*2*0.9,halfY*2*0.9);
+  const planeMat=new THREE.MeshBasicMaterial({color:0x444444,side:THREE.DoubleSide,transparent:true,opacity:0.3});
+  const plane=new THREE.Mesh(planeGeom,planeMat);
+  plane.position.z=-depth*0.9;
+  group.add(plane);
+  
+  group.position.set(...pos);
+  // RS1 looks down (optical -z = base -y): rotate -90° around x
+  // RS2 looks forward with pitch down: rotate pitch around local x
+  if(pitch!==0){
+    group.rotation.x=-pitch*Math.PI/180;
+  }else{
+    group.rotation.x=-Math.PI/2;  // RS1 down
+  }
   group.visible=false;
   return group;
 }
+
+// Create frustums for RS1 depth, RS1 color, RS2 depth, RS2 color
+const rs1dFrustum=makeFrustum('rs1_depth',RS1_POS,FOVY_D,0x00ffff,0);
+const rs1cFrustum=makeFrustum('rs1_color',[0.008,0.8619,0],FOVY_C,0x00ff00,0);
+const rs2dFrustum=makeFrustum('rs2_depth',RS2_POS,FOVY_D,0xffff00,30);
+const rs2cFrustum=makeFrustum('rs2_color',[-0.1301,0.3822,0.015],FOVY_C,0xff00ff,30);
+
+// Add to robot group so they move with the robot
+robotGroup.add(rs1dFrustum);
+robotGroup.add(rs1cFrustum);
+robotGroup.add(rs2dFrustum);
+robotGroup.add(rs2cFrustum);
+
+// Populate frustums array (FIX: this was empty, breaking the toggle)
+frustums=[rs1dFrustum,rs1cFrustum,rs2dFrustum,rs2cFrustum];
 
 camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked&&sceneLoaded)};
 showdogEl.onchange();
@@ -328,14 +449,16 @@ function updateState(st){
     }
     
     // Update dog
-    if(st.dog){
-      const[x,y,z]=mjToThree(st.dog[0],st.dog[1],0);
-      dog.position.set(x,0.15,z);
-      dog.userData.present=true;
-      dog.visible=showdogEl.checked;
+    if(st.dog&&st.dog.length>=3){
+      const[x,y,th]=st.dog;
+      const[dx,dy,dz]=mjToThree(x,y,0);
+      dogGroup.position.set(dx,dy,dz);
+      dogGroup.rotation.y=th;
+      dogGroup.userData.present=true;
+      dogGroup.visible=showdogEl.checked;
     }else{
-      dog.userData.present=false;
-      dog.visible=false;
+      dogGroup.userData.present=false;
+      dogGroup.visible=false;
     }
     
     // Update goal
@@ -407,6 +530,28 @@ function animate(){
   controls.update();
   renderer.render(scene,camera);
 }
+
+// Update camera panels (if enabled)
+function updateCameraPanels(){
+  if(rs1dEl.checked){
+    const img=document.getElementById('rs1d-img');
+    img.src='/cam/rs1_depth.jpg?t='+Date.now();
+  }
+  if(rs1cEl.checked){
+    const img=document.getElementById('rs1c-img');
+    img.src='/cam/rs1_color.jpg?t='+Date.now();
+  }
+  if(rs2dEl.checked){
+    const img=document.getElementById('rs2d-img');
+    img.src='/cam/rs2_depth.jpg?t='+Date.now();
+  }
+  if(rs2cEl.checked){
+    const img=document.getElementById('rs2c-img');
+    img.src='/cam/rs2_color.jpg?t='+Date.now();
+  }
+}
+
+setInterval(updateCameraPanels,200);  // 5 Hz camera panel updates
 
 loadScene();
 pollState();

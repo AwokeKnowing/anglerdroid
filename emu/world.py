@@ -649,8 +649,14 @@ class World:
             tmp = "/dev/shm/kevin_view.tmp.jpg"; open(tmp, "wb").write(jp.tobytes()); os.replace(tmp, "/dev/shm/kevin_view.jpg")
             if VIEW_DIR: open(os.path.join(VIEW_DIR, "f%06d.jpg" % self._vn), "wb").write(jp.tobytes())
         dg = getattr(self, "dog", None)
-        js = dict(t=float(dr.time), env=self.env.name, start=list(self.env.start), places={k: list(v) for k, v in self.env.places.items()}, kevin=[bx, by, yaw], collisions=self.collisions, dog_contacts=getattr(self, "dog_contacts", 0),
-                  dog=None if dg is None else [float(dr.mocap_pos[self.dog_mid][0]), float(dr.mocap_pos[self.dog_mid][1])])
+        if dg is not None:
+            dog_x, dog_y = float(dr.mocap_pos[self.dog_mid][0]), float(dr.mocap_pos[self.dog_mid][1])
+            qw, qx, qy, qz = [float(v) for v in dr.mocap_quat[self.dog_mid]]
+            dog_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            dog_pose = [dog_x, dog_y, dog_yaw]
+        else:
+            dog_pose = None
+        js = dict(t=float(dr.time), env=self.env.name, start=list(self.env.start), places={k: list(v) for k, v in self.env.places.items()}, kevin=[bx, by, yaw], collisions=self.collisions, dog_contacts=getattr(self, "dog_contacts", 0), dog=dog_pose)
         open("/dev/shm/kevin_sim.tmp.json", "w").write(json.dumps(js)); os.replace("/dev/shm/kevin_sim.tmp.json", "/dev/shm/kevin_sim.json")
         self._vn += 1
 
