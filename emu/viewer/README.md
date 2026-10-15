@@ -30,13 +30,17 @@ Open browser: http://localhost:8095
 **Live WebGL viewer:**
 - Three.js scene with orbit controls (drag to orbit, scroll to zoom)
 - Real-time state updates via polling `/state.json` (~20 Hz, tunnel-friendly)
-- Robot (green box with heading arrow)
+- Robot (emissive teal box 0.5×0.25×0.4m with bright green heading arrow)
 - Dog (brown sphere, when present)
 - Goal marker (red cone, when set)
 - Path visualization (orange line, when planned)
 - Environment walls/furniture (trimesh exported as BufferGeometry)
+- Auto-fit camera to scene bounds (chase angle view)
+- Hemisphere lighting + directional sun (bright, not dark void)
+- Scene-sized floor and grid (based on environment extent)
 - Camera frustum toggle (client-side show/hide, optional)
 - Chat box (POST to nav `/api/command`)
+- Console logging (F12 to debug scene export/load)
 
 **Legacy JPEG viewer (`/jpeg`):**
 - Server-side MuJoCo render with camera frustums
@@ -46,14 +50,54 @@ Open browser: http://localhost:8095
 ## Architecture
 
 **Static scene:** Environment geometry exported from `emu/envs.py` via `/scene.json`:
-- Boxes/cylinders: kind, size, pos, yaw, color (from MATS palette)
-- Meshes (walls): vertices/faces from trimesh STL, rendered as BufferGeometry
+- **Boxes/cylinders:** kind, size, pos, yaw, color (from MATS palette)
+- **Meshes (walls):** vertices/faces from trimesh STL, rendered as BufferGeometry
+- **Extent:** `[xmin, ymin, xmax, ymax]` for auto-sizing floor/grid and camera positioning
+- **Coordinate transform:** MuJoCo Z-up → Three.js Y-up via `[x,y,z]→[x,z,y]`
 
 **Live state:** Polling `/state.json` reads `/dev/shm/kevin_sim.json` (robot x,y,yaw; dog; env) + nav `/api/state` (goal, path) every 50ms
 - Tunnel-friendly (works through cloudflared quick tunnel)
 - Fallback SSE `/state` available but may buffer through proxies
 
 **Browser:** Three.js (CDN) with OrbitControls. Chat POSTs to existing `/chat` endpoint → nav `/api/command`
+
+---
+
+## Debugging
+
+**If walls missing (dark void with furniture only):**
+
+1. **Check server console** (where `python3 emu/viewer/viewer.py` runs):
+   ```
+   [viewer] exporting scene: env=casita, extent=(-0.2, -0.2, 9.9, 7.5), geoms=54
+   [viewer] loading mesh: /workspace/sim/casitahouse-walls-fixed.stl
+   [viewer] mesh loaded: 1523 verts, 3044 faces, scale=0.001
+   [viewer] mesh exported: 1523 verts, 3044 faces
+   [viewer] scene.json ready: 54 geoms
+   ```
+   - If missing: mesh export failed (trimesh not installed or STL not found)
+   - If exception: see traceback for root cause
+
+2. **Check browser console** (F12 in browser):
+   ```
+   Scene extent: 10.1m x 7.7m @ (4.8, 3.7)
+   Loading mesh: 1523 verts, 3044 faces
+   Scene loaded: 1 meshes, 53 boxes, 0 cylinders
+   ```
+   - If `0 meshes`: mesh export failed on server
+   - If `0 verts, 0 faces`: mesh is empty
+   - If exception: coordinate transform error
+
+3. **Common fixes:**
+   - Install trimesh: `pip3 install trimesh`
+   - Check STL exists: `ls sim/casitahouse-walls-fixed.stl`
+   - Verify coordinate system: MuJoCo Z-up → Three.js Y-up `[x,y,z]→[x,z,y]`
+
+**Expected output for casita:**
+- Server: 1523 verts, 3044 faces
+- Client: 1 meshes, 53 boxes, 0 cylinders
+- Walls visible (plaster color `0xdcd8cc`)
+- Camera framing whole house from chase angle
 
 **Reuse:** Patterns borrowed from `sim/kevin-urdf-twin/viewer/index.html` (Three.js URDF twin)
 
