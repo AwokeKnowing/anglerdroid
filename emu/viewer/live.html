@@ -148,7 +148,7 @@ async function loadScene(){
     const res=await fetch('/scene.json');
     const data=await res.json();
     
-    // Add boxes from scene
+    // Add geometry from scene
     data.geoms.forEach(g=>{
       if(g.kind==='box'){
         const geom=new THREE.BoxGeometry(g.size[0]*2,g.size[2]*2,g.size[1]*2);
@@ -169,6 +169,27 @@ async function loadScene(){
         mesh.castShadow=true;
         mesh.receiveShadow=true;
         scene.add(mesh);
+      }else if(g.kind==='mesh'&&g.vertices&&g.faces){
+        // Mesh (e.g. walls from trimesh)
+        const geom=new THREE.BufferGeometry();
+        const verts=[];const norms=[];
+        g.faces.forEach(f=>{
+          const v0=g.vertices[f[0]],v1=g.vertices[f[1]],v2=g.vertices[f[2]];
+          verts.push(v0[0],v0[2],v0[1],v1[0],v1[2],v1[1],v2[0],v2[2],v2[1]);
+          // Compute normal
+          const a=new THREE.Vector3(v1[0]-v0[0],v1[2]-v0[2],v1[1]-v0[1]);
+          const b=new THREE.Vector3(v2[0]-v0[0],v2[2]-v0[2],v2[1]-v0[1]);
+          const n=new THREE.Vector3().crossVectors(a,b).normalize();
+          norms.push(n.x,n.y,n.z,n.x,n.y,n.z,n.x,n.y,n.z);
+        });
+        geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+        geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
+        const color=g.color||0xdcd8cc;
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide});
+        const mesh=new THREE.Mesh(geom,mat);
+        mesh.castShadow=true;
+        mesh.receiveShadow=true;
+        scene.add(mesh);
       }
     });
     
@@ -178,52 +199,54 @@ async function loadScene(){
   }
 }
 
-// SSE state stream
-let sse=null;
-function connectSSE(){
-  sse=new EventSource('/state');
-  sse.onmessage=e=>{
-    try{
-      const st=JSON.parse(e.data);
-      
-      // Update robot
-      if(st.kevin){
-        robot.position.x=st.kevin[0];
-        robot.position.z=st.kevin[1];
-        robot.rotation.y=-st.kevin[2];
-      }
-      
-      // Update dog
-      if(st.dog){
-        dog.position.x=st.dog[0];
-        dog.position.z=st.dog[1];
-        dog.visible=true;
-      }else{
-        dog.visible=false;
-      }
-      
-      // Update goal
-      if(st.goal){
-        goal.position.x=st.goal[0];
-        goal.position.z=st.goal[1];
-        goal.visible=true;
-      }else{
-        goal.visible=false;
-      }
-      
-      // Update path
-      if(st.path&&st.path.length>0){
-        const points=st.path.map(p=>new THREE.Vector3(p[0],0.02,p[1]));
-        path.geometry.dispose();
-        path.geometry=new THREE.BufferGeometry().setFromPoints(points);
-        path.visible=true;
-      }else{
-        path.visible=false;
-      }
-      
-    }catch(e){console.error('State parse error:',e)}
-  };
-  sse.onerror=()=>{console.log('SSE error, reconnecting...');sse.close();setTimeout(connectSSE,2000)};
+// Polled state (tunnel-friendly)
+function updateState(st){
+  try{
+    // Update robot
+    if(st.kevin){
+      robot.position.x=st.kevin[0];
+      robot.position.z=st.kevin[1];
+      robot.rotation.y=-st.kevin[2];
+    }
+    
+    // Update dog
+    if(st.dog){
+      dog.position.x=st.dog[0];
+      dog.position.z=st.dog[1];
+      dog.visible=true;
+    }else{
+      dog.visible=false;
+    }
+    
+    // Update goal
+    if(st.goal){
+      goal.position.x=st.goal[0];
+      goal.position.z=st.goal[1];
+      goal.visible=true;
+    }else{
+      goal.visible=false;
+    }
+    
+    // Update path
+    if(st.path&&st.path.length>0){
+      const points=st.path.map(p=>new THREE.Vector3(p[0],0.02,p[1]));
+      path.geometry.dispose();
+      path.geometry=new THREE.BufferGeometry().setFromPoints(points);
+      path.visible=true;
+    }else{
+      path.visible=false;
+    }
+    
+  }catch(e){console.error('State update error:',e)}
+}
+
+async function pollState(){
+  try{
+    const res=await fetch('/state.json');
+    const st=await res.json();
+    updateState(st);
+  }catch(e){console.error('Poll error:',e)}
+  setTimeout(pollState,50);
 }
 
 // Chat
@@ -263,7 +286,7 @@ function animate(){
 }
 
 loadScene();
-connectSSE();
+pollState();
 animate();
 </script>
 </body>

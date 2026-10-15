@@ -196,15 +196,44 @@ class H(BaseHTTPRequestHandler):
                         for g in env.geoms:
                             color = {"plaster": 0xdcd8cc, "plaster2": 0xc8d0d8, "wood": 0x8c6138, "fabric": 0x4c5c78,
                                    "metal": 0x9ea2a8, "white": 0xededed, "dark": 0x262629}.get(g.mat, 0x888888)
-                            geoms.append({"kind": g.kind, "pos": list(g.pos), "size": list(g.size), "yaw": g.yaw, "color": color})
+                            gd = {"kind": g.kind, "pos": list(g.pos), "size": list(g.size), "yaw": g.yaw, "color": color}
+                            if g.kind == "mesh" and g.mesh:
+                                # Export mesh vertices/faces for walls (trimesh)
+                                try:
+                                    import trimesh
+                                    m = trimesh.load(g.mesh)
+                                    scale = g.size[0] if isinstance(g.size, (list, tuple)) else 1.0
+                                    # Transform vertices: scale + translate by pos (pos is offset from origin)
+                                    verts = (m.vertices * scale + np.array(g.pos)).tolist()
+                                    faces = m.faces.tolist()
+                                    gd["vertices"] = verts
+                                    gd["faces"] = faces
+                                except Exception as e:
+                                    print(f"[viewer] mesh export failed for {g.mesh}: {e}", flush=True)
+                            geoms.append(gd)
                         return self._send(json.dumps({"geoms": geoms}).encode())
-                except: pass
+                except Exception as e:
+                    print(f"[viewer] scene.json export failed: {e}", flush=True)
             return self._send(json.dumps({"geoms": []}).encode())
+        if p == "/state.json":
+            # Polled state (tunnel-friendly, prefer this over SSE)
+            S = sim()
+            st = {"kevin": None, "dog": None, "goal": None, "path": None}
+            if S:
+                st["kevin"] = S.get("kevin")
+                st["dog"] = S.get("dog")
+            try:
+                navst = json.loads(nav("/api/state"))
+                st["goal"] = navst.get("goal")
+                st["path"] = navst.get("path")
+            except: pass
+            return self._send(json.dumps(st).encode())
         if p == "/state":
-            # SSE stream for live state
+            # SSE stream for live state (may not work through cloudflared tunnel)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Accel-Buffering", "no")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             try:

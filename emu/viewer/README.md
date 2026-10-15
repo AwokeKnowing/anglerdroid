@@ -19,20 +19,22 @@ Open browser: http://localhost:8095
 
 ## Pages
 
-- **`/`** (default) — Live Three.js sim with client-side orbit controls, SSE state stream, chat
+- **`/`** (default) — Live Three.js sim with client-side orbit controls, polled state, chat
 - **`/jpeg`** — Legacy server-side JPEG render with camera frustums (KEVIN_EMU_VIEW=1 required)
-- **`/state`** — SSE endpoint for live state stream (robot, dog, goal, path)
-- **`/scene.json`** — Environment geometry export (boxes, cylinders with colors)
+- **`/state.json`** — Polled state endpoint (robot, dog, goal, path) — tunnel-friendly
+- **`/state`** — SSE endpoint for live state stream (may not work through cloudflared tunnel)
+- **`/scene.json`** — Environment geometry export (boxes, cylinders, meshes with vertices/faces)
 
 ## Features
 
 **Live WebGL viewer:**
 - Three.js scene with orbit controls (drag to orbit, scroll to zoom)
-- Real-time state updates via Server-Sent Events (~20 Hz)
+- Real-time state updates via polling `/state.json` (~20 Hz, tunnel-friendly)
 - Robot (green box with heading arrow)
 - Dog (brown sphere, when present)
 - Goal marker (red cone, when set)
 - Path visualization (orange line, when planned)
+- Environment walls/furniture (trimesh exported as BufferGeometry)
 - Camera frustum toggle (client-side show/hide, optional)
 - Chat box (POST to nav `/api/command`)
 
@@ -43,9 +45,13 @@ Open browser: http://localhost:8095
 
 ## Architecture
 
-**Static scene:** Environment geometry exported from `emu/envs.py` via `/scene.json` (boxes/cylinders with sizes, poses, colors from MATS palette)
+**Static scene:** Environment geometry exported from `emu/envs.py` via `/scene.json`:
+- Boxes/cylinders: kind, size, pos, yaw, color (from MATS palette)
+- Meshes (walls): vertices/faces from trimesh STL, rendered as BufferGeometry
 
-**Live state:** SSE stream reads `/dev/shm/kevin_sim.json` (robot x,y,yaw; dog; env) + nav `/api/state` (goal, path) every 50ms
+**Live state:** Polling `/state.json` reads `/dev/shm/kevin_sim.json` (robot x,y,yaw; dog; env) + nav `/api/state` (goal, path) every 50ms
+- Tunnel-friendly (works through cloudflared quick tunnel)
+- Fallback SSE `/state` available but may buffer through proxies
 
 **Browser:** Three.js (CDN) with OrbitControls. Chat POSTs to existing `/chat` endpoint → nav `/api/command`
 
