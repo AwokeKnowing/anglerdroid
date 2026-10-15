@@ -1,9 +1,9 @@
 """Kevin live sim viewer (lean, stdlib + cv2).  usage: viewer.py [port=8095] [nav_port=8090]
-3-D: the emulator's third-person render (/dev/shm/kevin_view.jpg, KEVIN_EMU_VIEW=1) with each camera drawn as a frustum
-pyramid on its mount and its live image (RGB / colorized depth) textured on the far plane.  Drag = orbit, wheel = zoom.
+Live WebGL: /live (default) - Three.js sim with WebSocket state stream, orbit controls, chat
+Legacy JPEG: /jpeg - server-side render with camera frustums
 Map: nav SLAM map + Kevin footprint (safety-state color) + trajectory + goal + planned path + labeled places + dog.
 Chat: text -> small parser -> nav POST /api/command (same interface as the nav page)."""
-import sys, os, json, math, re, time, threading, urllib.request, numpy as np, cv2
+import sys, os, json, math, re, time, threading, urllib.request, struct, hashlib, numpy as np, cv2
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8095; NAV = "http://localhost:%d" % (int(sys.argv[2]) if len(sys.argv) > 2 else 8090)
 FP = [(0.33, 0.27), (0.33, -0.27), (-0.33, -0.27), (-0.33, 0.27)]    # display footprint only
@@ -174,7 +174,8 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(b))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
         p = self.path.split("?")[0]
-        if p == "/": return self._send(PAGE.encode(), "text/html; charset=utf-8")
+        if p == "/": return self._send(open(os.path.join(os.path.dirname(__file__), "live.html")).read().encode(), "text/html; charset=utf-8")
+        if p == "/jpeg": return self._send(PAGE.encode(), "text/html; charset=utf-8")
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)
@@ -182,6 +183,46 @@ class H(BaseHTTPRequestHandler):
         if p == "/log":
             with lock: return self._send(json.dumps(LOG).encode())
         if p == "/sim.json": return self._send(json.dumps(sim()).encode())
+        if p == "/scene.json":
+            # Export current env geometry - try to load from sim state or use a default
+            S = sim()
+            if S and S.get("env"):
+                try:
+                    sys.path[:0] = [os.path.join(os.path.dirname(__file__), "..")]
+                    from envs import ENVS
+                    env = ENVS.get(S["env"], lambda _: None)(0)
+                    if env:
+                        geoms = []
+                        for g in env.geoms:
+                            color = {"plaster": 0xdcd8cc, "plaster2": 0xc8d0d8, "wood": 0x8c6138, "fabric": 0x4c5c78,
+                                   "metal": 0x9ea2a8, "white": 0xededed, "dark": 0x262629}.get(g.mat, 0x888888)
+                            geoms.append({"kind": g.kind, "pos": list(g.pos), "size": list(g.size), "yaw": g.yaw, "color": color})
+                        return self._send(json.dumps({"geoms": geoms}).encode())
+                except: pass
+            return self._send(json.dumps({"geoms": []}).encode())
+        if p == "/state":
+            # SSE stream for live state
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                while True:
+                    S = sim()
+                    if S:
+                        # Compact state: robot, dog, goal from sim.json + nav state
+                        st = {"kevin": S.get("kevin"), "dog": S.get("dog")}
+                        try:
+                            navst = json.loads(nav("/api/state"))
+                            st["goal"] = navst.get("goal")
+                            st["path"] = navst.get("path")
+                        except: pass
+                        self.wfile.write(("data: %s\n\n" % json.dumps(st)).encode())
+                        self.wfile.flush()
+                    time.sleep(0.05)
+            except: pass
+            return
         if p == "/favicon.ico": return self._send(b"", "image/x-icon")
         self._send(b"{}", code=404)
     def do_POST(self):
