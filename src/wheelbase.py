@@ -140,9 +140,29 @@ class WheelBase:
         self.left = ODriveAxisCAN(self.bus, 0, endpoints)
         self.right = ODriveAxisCAN(self.bus, 1, endpoints)
 
-        for axis in (self.left, self.right):
-            axis.clear_errors()
-            axis.disable_watchdog()
+        print("   ODrive faults before clear:")
+        self._read_axis_errors(self.left, "Left (node 0)")
+        self._read_axis_errors(self.right, "Right (node 1)")
+        for _round in range(2):
+            for axis in (self.left, self.right):
+                axis.clear_errors()
+                axis.disable_watchdog()
+            time.sleep(0.35)
+        print("   ODrive faults after clear:")
+        self._read_axis_errors(self.left, "Left (node 0)")
+        self._read_axis_errors(self.right, "Right (node 1)")
+        try:
+            vbus = self.left.get_vbus_voltage()
+            print("   vbus=%.1fV" % (vbus or 0.0))
+            if not vbus or vbus < 20.0:
+                print("   vbus still low — one more clear")
+                for axis in (self.left, self.right):
+                    axis.clear_errors()
+                time.sleep(0.5)
+                vbus = self.left.get_vbus_voltage()
+                print("   vbus=%.1fV" % (vbus or 0.0))
+        except Exception as e:
+            print("   vbus read failed: %s" % e)
 
         self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
         self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_IDLE)
@@ -151,6 +171,10 @@ class WheelBase:
         self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
         self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
         time.sleep(0.3)
+
+        print("   ODrive after closed-loop:")
+        self._read_axis_errors(self.left, "Left (node 0)")
+        self._read_axis_errors(self.right, "Right (node 1)")
 
         for axis in (self.left, self.right):
             axis.set_vel_ramp_rate(3.0)
@@ -546,6 +570,27 @@ class WheelBase:
                 'native_fails': self._enc_native_fails,
             }
 
+    def get_encoder_snapshot(self):
+        """Latest encoder + command snapshot for raw bags (no extra I/O)."""
+        vl, vr = self.get_wheel_velocities_mps()
+        with self._enc_lock:
+            tps_l = float(self._enc_vel[0])
+            tps_r = float(self._enc_vel[1])
+            ok = 1.0 if self._enc_ok else 0.0
+            age = (time.monotonic() - self._enc_last_good) if self._enc_last_good > 0 else 99.0
+        sl = self._last_sent_left
+        sr = self._last_sent_right
+        return {
+            "vl": float(vl),
+            "vr": float(vr),
+            "tps_l": tps_l,
+            "tps_r": tps_r,
+            "cmd_l": 0.0 if sl is None else float(sl),
+            "cmd_r": 0.0 if sr is None else float(sr),
+            "ok": ok,
+            "age_s": float(age),
+        }
+
     def _start_encoder_reader(self):
         self._enc_vel = [0.0, 0.0]    # [left_tps, right_tps] from encoder
         self._enc_lock = threading.Lock()
@@ -569,8 +614,9 @@ class WheelBase:
             try:
                 if self._enc_native:
                     with self.bus_lock:
-                        vl = self.left.get_encoder_vel_fast()
-                        vr = self.right.get_encoder_vel_fast()
+                        got = ODriveAxisCAN.poll_encoder_vels(
+                            self.bus, (0, 1), timeout=0.04)
+                    vl, vr = got.get(0), got.get(1)
                     if vl is None or vr is None:
                         self._enc_native_fails += 1
                         if self._enc_native_fails >= 3:

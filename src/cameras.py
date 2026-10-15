@@ -1,7 +1,11 @@
 """cameras.py – Hardware: 2x RealSense D435 + 1x USB webcam.
-Pre-allocated numpy buffers. Blocking grab(). No processing.
+Pre-allocated numpy buffers. Each camera's clock is wait_for_frames / V4L read
+on its own pump thread; capture/main wait for a new seq (≤1 frame late).
 """
 
+import os
+import threading
+import time
 import numpy as np
 import cv2
 
@@ -12,9 +16,13 @@ except ImportError:
     HAS_RS = False
 
 from robot_config import FRAME_W, FRAME_H
-RS_DEPTH_W, RS_DEPTH_H = 848, 480
+RS_DEPTH_W = int(os.environ.get("RS_DEPTH_W", "848"))
+RS_DEPTH_H = int(os.environ.get("RS_DEPTH_H", "480"))
+RS_FPS = int(os.environ.get("RS_FPS", "30"))
 RGB_CAP_W, RGB_CAP_H = 640, 480
 RS_DECIMATE_MAG = 3  # detail-first default (~45k verts on JP6). Do NOT drop mag for speed alone — see AGENTS.md Depth detail metric. Env override OK for bake-offs.
+# Two frame periods: miss one hitch, never spin past the camera clock.
+WAIT_FRAME_MS = int(os.environ.get("KEVIN_WAIT_FRAME_MS", "66"))
 
 
 def _set_sensor_opt(sensor, option, value):
@@ -102,26 +110,17 @@ class RSCamera:
     With decimate_mag=8 the pointcloud has ~106x60 = 6360 vertices;
     making downstream numpy processing trivial (<1 ms).
     Set compute_pointcloud=False for cameras that only provide color.
-    Set capture_ir=True to also capture stereo IR frames (for cuVSLAM).
+    Set capture_ir=True to also capture stereo IR frames (cuVSLAM / i777 ORB-SLAM3).
     """
 
     def __init__(self, serial, decimate_mag=RS_DECIMATE_MAG,
-                 compute_pointcloud=True, capture_ir=False):
+                 compute_pointcloud=True, capture_ir=False, emitter=True):
         if not HAS_RS:
             raise ImportError("pyrealsense2 not available")
 
-        cfg = rs.config()
-        cfg.enable_device(serial)
-        cfg.enable_stream(rs.stream.depth, RS_DEPTH_W, RS_DEPTH_H, rs.format.z16, 30)
-        cfg.enable_stream(rs.stream.color, FRAME_W, FRAME_H, rs.format.rgb8, 30)
-
         self._capture_ir = capture_ir
-        if capture_ir:
-            cfg.enable_stream(rs.stream.infrared, 1, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
-            cfg.enable_stream(rs.stream.infrared, 2, RS_DEPTH_W, RS_DEPTH_H, rs.format.y8, 30)
-
         self._pipe = rs.pipeline()
-        self.profile = self._pipe.start(cfg)
+        self.profile = self._start_streams(serial, RS_DEPTH_W, RS_DEPTH_H, capture_ir)
         # Discard a few frames while AE/laser settle — avoids first-grab timeouts.
         for _ in range(5):
             try:
@@ -144,10 +143,12 @@ class RSCamera:
 
         sensor = self.profile.get_device().first_depth_sensor()
         _set_sensor_opt(sensor, rs.option.visual_preset, 3)       # High Density
-        _set_sensor_opt(sensor, rs.option.laser_power, 360)
-        _set_sensor_opt(sensor, rs.option.emitter_enabled, 1)
+        _set_sensor_opt(sensor, rs.option.laser_power, 360 if emitter else 0)
+        _set_sensor_opt(sensor, rs.option.emitter_enabled, 1 if emitter else 0)
         _set_sensor_opt(sensor, rs.option.depth_units, 0.001)
         _set_sensor_opt(sensor, rs.option.receiver_gain, 16)
+        if not emitter:
+            print("cameras: %s IR emitter OFF (visual SLAM, not speckle)" % serial)
         # Cap exposure so low-light AE cannot stretch past ~30Hz budget.
         # Depth exposure is microseconds; 15000us = 15ms leaves headroom under 33ms.
         try:
@@ -198,83 +199,194 @@ class RSCamera:
             self._pc = None
             self.verts = None
 
+        dw, dh = self._depth_wh()
         self.color = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self.depth = np.zeros((dh, dw), dtype=np.uint16)
+        self.depth_stamp = 0.0
         # Pre-allocate IR buffers (if capturing IR, allocate on first grab)
         self.ir_left = None
         self.ir_right = None
         self.ok = False
+        # Double buffer: ingest writes work; publish swaps so readers hold a
+        # stable array for one more frame while the pump waits on the next.
+        self._color_work = self.color
+        self._color_pub = np.zeros_like(self.color)
+        self._depth_work = self.depth
+        self._depth_pub = np.zeros_like(self.depth)
+        self._verts_work = None
+        self._verts_pub = None
+        self._ir_l_work = None
+        self._ir_l_pub = None
+        self._ir_r_work = None
+        self._ir_r_pub = None
+        self.pub_lock = threading.Lock()
+        self.pub_seq = 0
+        self.pub_t = 0.0
+        print("cameras: %s depth %dx%d color %dx%d @ %d Hz" % (
+            serial, dw, dh, RGB_CAP_W, RGB_CAP_H, RS_FPS), flush=True)
 
-    def grab(self):
-        """Take the newest frameset without multi-second stalls.
+    def _cfg(self, serial, dw, dh, capture_ir):
+        cfg = rs.config()
+        cfg.enable_device(serial)
+        cfg.enable_stream(rs.stream.depth, dw, dh, rs.format.z16, RS_FPS)
+        cfg.enable_stream(rs.stream.color, RGB_CAP_W, RGB_CAP_H, rs.format.rgb8, RS_FPS)
+        if capture_ir:
+            cfg.enable_stream(rs.stream.infrared, 1, dw, dh, rs.format.y8, RS_FPS)
+            cfg.enable_stream(rs.stream.infrared, 2, dw, dh, rs.format.y8, RS_FPS)
+        return cfg
 
-        Prefer poll_for_frames (non-blocking). If empty, wait briefly (~1 frame).
-        Never wait hundreds of ms — that destroys 30Hz freshness.
-        Never raises — sets ok=False on miss.
-        Set KEVIN_GRAB_PROF=1 to accumulate poll/color/pc phase ms.
-        """
-        import os, time as _time
-        _prof = os.environ.get('KEVIN_GRAB_PROF') == '1'
-        _t0 = _time.monotonic() if _prof else 0.0
+    def _start_streams(self, serial, dw, dh, capture_ir):
+        """Prefer requested depth size @ RS_FPS; USB2 D435 often cannot do 848p."""
         try:
-            frames = self._pipe.poll_for_frames()
-            waited = False
-            if not frames:
-                frames = self._pipe.wait_for_frames(40)
-                waited = True
+            return self._pipe.start(self._cfg(serial, dw, dh, capture_ir))
+        except Exception as e:
+            if (dw, dh) == (640, 480):
+                raise
+            print("cameras: %s %dx%d@%d failed (%s); retry 640x480@%d"
+                  % (serial, dw, dh, RS_FPS, e, RS_FPS), flush=True)
+            try:
+                self._pipe.stop()
+            except Exception:
+                pass
+            self._pipe = rs.pipeline()
+            return self._pipe.start(self._cfg(serial, 640, 480, capture_ir))
+
+    def _depth_wh(self):
+        try:
+            vs = self.profile.get_stream(rs.stream.depth).as_video_stream_profile()
+            i = vs.get_intrinsics()
+            return int(i.width), int(i.height)
         except Exception:
-            self.ok = False
-            return False
-        _t1 = _time.monotonic() if _prof else 0.0
+            return RS_DEPTH_W, RS_DEPTH_H
+
+    def depth_intrinsics(self):
+        """fx, fy, ppx, ppy, width, height of the raw (undecimated) depth stream."""
+        try:
+            vs = self.profile.get_stream(rs.stream.depth).as_video_stream_profile()
+            i = vs.get_intrinsics()
+            return {
+                "fx": float(i.fx), "fy": float(i.fy),
+                "ppx": float(i.ppx), "ppy": float(i.ppy),
+                "width": int(i.width), "height": int(i.height),
+            }
+        except Exception:
+            return {}
+
+    def wait_frameset(self, timeout_ms=None):
+        """Block on the camera clock. Do not poll — that desyncs the loop."""
+        if timeout_ms is None:
+            timeout_ms = WAIT_FRAME_MS
+        try:
+            return self._pipe.wait_for_frames(int(timeout_ms))
+        except Exception:
+            return None
+
+    def _ensure_pair(self, raw, work, pub):
+        if work is None or work.shape != raw.shape:
+            work = np.zeros_like(raw)
+            pub = np.zeros_like(raw)
+        return work, pub
+
+    def ingest(self, frames):
+        """Copy + decimate + pc into the work slot. Does not publish."""
+        import os
+        _prof = os.environ.get("KEVIN_GRAB_PROF") == "1"
+        _t1 = time.monotonic() if _prof else 0.0
         d = frames.get_depth_frame()
         c = frames.get_color_frame()
-        if not d or not c:
+        if not d:
             self.ok = False
             return False
 
-        self.color[:] = np.asarray(c.get_data())
-        _t2 = _time.monotonic() if _prof else 0.0
+        raw_z = np.asarray(d.get_data())
+        if raw_z.shape != self._depth_work.shape:
+            self._depth_work = np.array(raw_z, dtype=np.uint16, copy=True)
+            self._depth_pub = np.zeros_like(self._depth_work)
+            self.depth = self._depth_pub
+        else:
+            np.copyto(self._depth_work, raw_z)
+        try:
+            self.depth_stamp = float(d.get_timestamp()) * 1e-3
+        except Exception:
+            self.depth_stamp = time.monotonic()
+
+        if c:
+            raw_c = np.asarray(c.get_data())
+            if raw_c.shape[0] != FRAME_H or raw_c.shape[1] != FRAME_W:
+                raw_c = cv2.resize(raw_c, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
+            np.copyto(self._color_work, raw_c)
+        _t2 = time.monotonic() if _prof else 0.0
 
         if self._compute_pc:
             d = self._decimate.process(d)
             points = self._pc.calculate(d)
             v = points.get_vertices()
             raw = np.asanyarray(v).view(np.float32).reshape(-1, 3)
-            if self.verts is None or self.verts.shape[0] != raw.shape[0]:
-                self.verts = np.zeros_like(raw)
-            np.copyto(self.verts, raw)
-        _t3 = _time.monotonic() if _prof else 0.0
+            self._verts_work, self._verts_pub = self._ensure_pair(
+                raw, self._verts_work, self._verts_pub)
+            np.copyto(self._verts_work, raw)
+        _t3 = time.monotonic() if _prof else 0.0
         if _prof:
-            # Rolling means on instance for probe scripts
             def _acc(name, dt):
-                n = getattr(self, '_prof_n', 0)
+                n = getattr(self, "_prof_n", 0)
                 prev = getattr(self, name, 0.0)
                 setattr(self, name, (prev * n + dt * 1000.0) / (n + 1))
-            if not hasattr(self, '_prof_n'):
+            if not hasattr(self, "_prof_n"):
                 self._prof_n = 0
-            _acc('_prof_poll_ms', _t1 - _t0)
-            _acc('_prof_color_ms', _t2 - _t1)
-            _acc('_prof_pc_ms', _t3 - _t2)
-            self._prof_waited_frac = (
-                (getattr(self, '_prof_waited_frac', 0.0) * self._prof_n + (1.0 if waited else 0.0))
-                / (self._prof_n + 1))
+            _acc("_prof_poll_ms", 0.0)
+            _acc("_prof_color_ms", _t2 - _t1)
+            _acc("_prof_pc_ms", _t3 - _t2)
+            self._prof_waited_frac = 1.0
             self._prof_n += 1
 
         if self._capture_ir:
             ir1 = frames.get_infrared_frame(1)
             ir2 = frames.get_infrared_frame(2)
             if ir1 and ir2:
-                # Pre-allocate IR buffers on first grab, then mutate in place
                 ir1_data = np.asarray(ir1.get_data())
                 ir2_data = np.asarray(ir2.get_data())
-                if self.ir_left is None or self.ir_left.shape != ir1_data.shape:
-                    self.ir_left = np.zeros_like(ir1_data)
-                if self.ir_right is None or self.ir_right.shape != ir2_data.shape:
-                    self.ir_right = np.zeros_like(ir2_data)
-                np.copyto(self.ir_left, ir1_data)
-                np.copyto(self.ir_right, ir2_data)
+                self._ir_l_work, self._ir_l_pub = self._ensure_pair(
+                    ir1_data, self._ir_l_work, self._ir_l_pub)
+                self._ir_r_work, self._ir_r_pub = self._ensure_pair(
+                    ir2_data, self._ir_r_work, self._ir_r_pub)
+                np.copyto(self._ir_l_work, ir1_data)
+                np.copyto(self._ir_r_work, ir2_data)
 
         self.ok = True
         return True
+
+    def publish(self):
+        """Swap work → published. Readers keep .color/.verts/.depth as pub."""
+        with self.pub_lock:
+            self._color_work, self._color_pub = self._color_pub, self._color_work
+            self._depth_work, self._depth_pub = self._depth_pub, self._depth_work
+            self.color = self._color_pub
+            self.depth = self._depth_pub
+            if self._verts_work is not None:
+                self._verts_work, self._verts_pub = self._verts_pub, self._verts_work
+                self.verts = self._verts_pub
+            if self._ir_l_work is not None:
+                self._ir_l_work, self._ir_l_pub = self._ir_l_pub, self._ir_l_work
+                self._ir_r_work, self._ir_r_pub = self._ir_r_pub, self._ir_r_work
+                self.ir_left = self._ir_l_pub
+                self.ir_right = self._ir_r_pub
+            self.pub_seq += 1
+            self.pub_t = time.monotonic()
+        return True
+
+    def grab_latest(self, timeout_ms=None):
+        """Wait for the next hardware frameset, ingest, publish. Camera clock."""
+        frames = self.wait_frameset(timeout_ms)
+        if not frames:
+            self.ok = False
+            return False
+        if not self.ingest(frames):
+            return False
+        return self.publish()
+
+    def grab(self):
+        """Compat for probes: blocking wait + ingest + publish."""
+        return self.grab_latest()
 
     def stop(self):
         try:
@@ -311,26 +423,18 @@ class WebCam:
             self._cap = None
             print("cameras: webcam not opened (check device path)")
 
-        self.color = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self._color_work = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self._color_pub = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
+        self.color = self._color_pub
         self.ok = False
+        self.pub_lock = threading.Lock()
+        self.pub_seq = 0
+        self.pub_t = 0.0
+        self._had_frame = False
 
-    def grab(self):
-        """Non-blocking when possible: never stall the 30Hz RS barrier.
-
-        Uses grab()+retrieve(). If no new USB frame is ready, keeps the last
-        color buffer and returns True so parallel RS grabs aren't gated on
-        webcam period (was a multi-10ms bleed on Orin).
-        """
-        if not self._cap or not self._cap.isOpened():
-            self.ok = False
+    def _ingest_bgr(self, f):
+        if f is None:
             return False
-        # Non-blocking poll of driver queue
-        if not self._cap.grab():
-            # No new frame — keep last self.color (sticky). Still "ok" if we ever had one.
-            return bool(getattr(self, '_had_frame', False))
-        ret, f = self._cap.retrieve()
-        if not ret or f is None:
-            return bool(getattr(self, '_had_frame', False))
         if f.ndim == 2:
             f = cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
         elif f.shape[2] == 4:
@@ -339,11 +443,124 @@ class WebCam:
             f = cv2.resize(f, (FRAME_W, FRAME_H), interpolation=cv2.INTER_AREA)
         f = f[::-1, ::-1]  # vflip + hflip (camera upside down and mirrored)
         f = cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
-        np.copyto(self.color, f)
+        np.copyto(self._color_work, f)
+        with self.pub_lock:
+            self._color_work, self._color_pub = self._color_pub, self._color_work
+            self.color = self._color_pub
+            self.pub_seq += 1
+            self.pub_t = time.monotonic()
         self._had_frame = True
         self.ok = True
         return True
 
+    def grab_latest(self, timeout_ms=None):
+        """Blocking V4L read — this thread is the RGB 30 Hz clock."""
+        if not self._cap or not self._cap.isOpened():
+            self.ok = False
+            return False
+        ret, f = self._cap.read()
+        if not ret:
+            return False
+        return self._ingest_bgr(f)
+
+    def grab(self):
+        """Non-blocking poll of the driver queue (sticky last color)."""
+        if not self._cap or not self._cap.isOpened():
+            self.ok = False
+            return False
+        if not self._cap.grab():
+            return bool(self._had_frame)
+        ret, f = self._cap.retrieve()
+        if not ret or f is None:
+            return bool(self._had_frame)
+        return self._ingest_bgr(f)
+
     def stop(self):
         if self._cap:
             self._cap.release()
+
+
+def _grab_cpus():
+    """Optional KEVIN_GRAB_CPU=rs1,rs2,rgb core ids. Off by default.
+
+    Pinning the waiter can cut scheduler jitter on wait_for_frames. The
+    published numpy still has to reach the process core, so a pin is not
+    free — measure before leaving it on.
+    """
+    raw = os.environ.get("KEVIN_GRAB_CPU", "").strip()
+    if not raw:
+        return {}
+    parts = [p.strip() for p in raw.split(",")]
+    names = ("rs1", "rs2", "rgb")
+    out = {}
+    for i, name in enumerate(names):
+        if i >= len(parts) or parts[i] == "":
+            continue
+        try:
+            out[name] = int(parts[i])
+        except ValueError:
+            pass
+    return out
+
+
+class FramePump:
+    """One thread per camera: block on the device, publish newest only."""
+
+    def __init__(self, cam, name, cpu=None):
+        self.cam = cam
+        self.name = name
+        self.cpu = cpu
+        self.seq = 0
+        self.pub_t = 0.0
+        self.ok = False
+        self._ev = threading.Event()
+        self._stop = threading.Event()
+        self._th = None
+
+    def start(self):
+        self._th = threading.Thread(
+            target=self._loop, name="grab-%s" % self.name, daemon=True)
+        self._th.start()
+        return self
+
+    def _loop(self):
+        if self.cpu is not None:
+            try:
+                os.sched_setaffinity(0, {int(self.cpu)})
+                print("cameras: grab-%s pinned to cpu %s" % (self.name, self.cpu),
+                      flush=True)
+            except Exception as e:
+                print("cameras: grab-%s affinity failed: %s" % (self.name, e),
+                      flush=True)
+        while not self._stop.is_set():
+            try:
+                ok = bool(self.cam.grab_latest())
+            except Exception:
+                ok = False
+            if ok:
+                self.seq = int(getattr(self.cam, "pub_seq", self.seq + 1))
+                self.pub_t = float(getattr(self.cam, "pub_t", time.monotonic()))
+                self.ok = True
+                self._ev.set()
+            elif self._stop.wait(0.001):
+                break
+
+    def wait_new(self, last_seq, timeout_s):
+        """True when pub_seq > last_seq. Sleeps on the camera event."""
+        deadline = time.monotonic() + float(timeout_s)
+        while self.seq <= last_seq and not self._stop.is_set():
+            rem = deadline - time.monotonic()
+            if rem <= 0.0:
+                return False
+            self._ev.clear()
+            if self.seq > last_seq:
+                return True
+            self._ev.wait(rem)
+        return self.seq > last_seq
+
+    def stop(self):
+        self._stop.set()
+        self._ev.set()
+        if self._th is not None:
+            self._th.join(timeout=1.5)
+            self._th = None

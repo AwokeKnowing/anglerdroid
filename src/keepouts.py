@@ -53,6 +53,7 @@ PAINT_HARD = 200
 NAMED_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "dog_bed": {"radius_m": 0.70, "kind": "soft", "ahead_m": 0.40},
     "checkered_door": {"radius_m": 0.55, "kind": "floor_mat", "ahead_m": 0.30},
+    "front_door": {"radius_m": 0.90, "kind": "hard", "ahead_m": 0.50},
     "treadmill": {"radius_m": 0.85, "kind": "hard", "ahead_m": 0.50},
 }
 
@@ -65,6 +66,7 @@ def _default() -> dict:
         "note": "polygons_map_m are [x,y] rings in meters, map frame at session origin.",
         "named": [
             {"id": "checkered_door", "label": "checkered area by door", "kind": "floor_mat"},
+            {"id": "front_door", "label": "front door opening", "kind": "hard"},
             {"id": "dog_bed", "label": "dog bed", "kind": "soft"},
             {"id": "treadmill", "label": "treadmill", "kind": "hard"},
         ],
@@ -208,7 +210,9 @@ def mark_named(
         "checkered_mat": "checkered_door",
         "mat": "checkered_door",
         "door_mat": "checkered_door",
-        "door": "checkered_door",
+        "door": "front_door",
+        "doorway": "front_door",
+        "front_door": "front_door",
         "tread": "treadmill",
     }
     key = aliases.get(key, key)

@@ -17,7 +17,6 @@ Atlas layout (960×960):
 
 import math
 import threading
-import concurrent.futures
 import time
 import numpy as np
 import cv2
@@ -33,7 +32,7 @@ from robot_config import (FRAME_W, FRAME_H,
                           RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT, SELF_MASK_VIZ_ALPHA,
                           WHEEL_HALF, FOOT_PAD_FWD, FOOT_PAD_BWD, FOOT_PAD_LAT,
                           MAST_RADIUS_PX)
-from cameras import RSCamera, WebCam, HAS_RS
+from cameras import RSCamera, WebCam, HAS_RS, FramePump, _grab_cpus, WAIT_FRAME_MS
 from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
@@ -57,6 +56,8 @@ from perception import (
     export_policy_feed,
     label_rs1_ego_gpu, KEVIN_GPU_SCATTER,
     fuse_rs2_into_ego_gpu, KEVIN_GPU_FUSE,
+    EGO80_H, EGO80_W, label_frame_80, labels_to_ego_float,
+    stamp_throttle_float, render_policy_bgr,
 )
 
 CAM_ROW_H = FRAME_H                          # 240
@@ -72,9 +73,14 @@ TD_PX_SIZE = np.float32(EGO_PX_SIZE)
 TD_FLOOR_CLIP = np.float32(0.91) # reject floor (farther than this Z). Fixed.
 # Known-pixel floor for "RS1 invalid → immobilize". Capture loop uses this.
 TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
+# One USB2 miss is not a dead camera. Hold last heightmap this many frames
+# (~330 ms @ 30 Hz) before immobilize.
+TOPDOWN_HOLD_FRAMES = 10
 
 # --- RS2 (forward camera) → bird's-eye rotation ---
-# Pitch = 25.6° - 90° = -64.4° (camera mounting angle compensation)
+# BEV warp still uses 25.6-90 (flatten onto the atlas). phys_h / floor vs
+# obstacle uses down-pitch from horizontal. 64.4° made bag floor a ~20°
+# slope (red cone wedge). Side-view fit 2026-09-14: 27.0° down, cam_h 0.475.
 FW_PITCH_DEG = 25.6 - 90.0
 _fw_pitch_rad = math.radians(FW_PITCH_DEG)
 _fw_R, _ = cv2.Rodrigues(np.float64([_fw_pitch_rad, 0, 0]))
@@ -86,9 +92,10 @@ FW_TRANSLATION = np.array([0.0, -1.0, 0.0], dtype=np.float32)
 FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max obstacle height to accept (m)
 FW_FLOOR_CLIP  = np.float32(0.15)   # ego-forward < 15cm from camera → free (not obstacle)
-FW_CAM_HEIGHT  = np.float32(0.97)   # RS2 forward camera height above floor (m)
-_fw_sin_pitch  = np.float32(abs(math.sin(_fw_pitch_rad)))  # sin(64.4°)≈0.903
-_fw_cos_pitch  = np.float32(abs(math.cos(_fw_pitch_rad)))  # cos(64.4°)≈0.431
+FW_PITCH_DOWN_DEG = 27.0
+FW_CAM_HEIGHT  = np.float32(0.475)  # RS2 height that puts bag floor at phys_h=0
+_fw_sin_pitch  = np.float32(math.sin(math.radians(FW_PITCH_DOWN_DEG)))
+_fw_cos_pitch  = np.float32(math.cos(math.radians(FW_PITCH_DOWN_DEG)))
 
 # RS2 (forward camera) extrinsic Y offset (~10cm higher than calibration).
 # Camera Y-down: camera-higher = negative Y offset.
@@ -731,13 +738,16 @@ class Vision:
     """Pre-allocated vision state. One capture thread; readers use .frames, .atlas, .timestamp."""
 
     def __init__(self, rs1_serial, rs2_serial, rgb1_device_id, headless=True,
-                 slam_backend='self', use_wheel_imu_prior=False):
+                 slam_backend='self', use_wheel_imu_prior=False,
+                 orbslam3_host=''):
         print("Vision: init start")
         self.rs1_serial = rs1_serial
         self.rs2_serial = rs2_serial
         self.rgb1_device_id = rgb1_device_id
         self._slam_backend = slam_backend
         self._use_wheel_imu_prior = use_wheel_imu_prior
+        self._orbslam3_host = (orbslam3_host or "").strip()
+        self._orbslam3_ship = None
 
         self.frames = [
             np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8),
@@ -750,12 +760,18 @@ class Vision:
         self._pitch_cal_request = False
         self._pitch_cal_done = False
         self._lock = threading.Lock()
+        self._cap_seq = 0
+        self._cap_ev = threading.Event()
+        self._frame_age_ms = 0.0
+        self._grab_miss = 0
+        self._pumps = {}
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._viz_obs_premask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._viz_known_premask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._topdown_ok = False
         self._topdown_known_px = 0
         self._topdown_lost_n = 0
+        self._topdown_miss_n = 0
         self._persistent_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._topdown_near_field = False
         self._near_field_close_count = 0
@@ -827,6 +843,8 @@ class Vision:
         self._ego_label_n = 0
         self._ego_metric_i = 0
         self._ego_label_ms = 0.0
+        self._raw_bag = None
+        self._imu_drain_since = 0
         self._ego_labels_enable = os.environ.get('KEVIN_EGO_LABELS', '0').strip() == '1'
         # Gated planner/costmap feed (default off). EGO_LABELS=1 also enables feed.
         self._ego_plan_enable = (
@@ -839,6 +857,8 @@ class Vision:
         self._ego_shim_valid = False
         self._ego_labels_every = max(1, int(os.environ.get('KEVIN_EGO_EVERY', '3')))
         self._evidence_map_enable = os.environ.get('KEVIN_EVIDENCE_MAP', '0').strip() == '1'
+        # Live-only obstacle map: skip gmap accumulate/project into planner+safety.
+        self._live_obs_only = os.environ.get('KEVIN_LIVE_OBS', '0').strip() == '1'
         self._evidence_map = EvidenceMap() if self._evidence_map_enable else None
         self._evidence_map_ms = 0.0
         self._evidence_map_metrics = {}
@@ -847,6 +867,12 @@ class Vision:
         self._policy_feed_labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._policy_feed_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._policy_feed_valid = False
+        # 80×60 policy tensor (same look as sim k_obs). Capture @ 30 Hz.
+        self._pol80_lab = np.zeros((EGO80_H, EGO80_W), dtype=np.uint8)
+        self._pol80_f = np.zeros((EGO80_H, EGO80_W), dtype=np.float32)
+        self._pol80_valid = False
+        self._pol80_png_t = 0.0
+        self._pol80_png = os.path.expanduser("~/.kevin/policy_ego80.png")
         # CAPTURE Hz reclaim: evidence updates less frequent than ego labels (default 2 = every 6 frames)
         self._evidence_every = max(1, int(os.environ.get('KEVIN_EVIDENCE_EVERY', '2')))
         self._evidence_update_n = 0
@@ -1184,6 +1210,72 @@ class Vision:
         if self._odom_thread is not None:
             self._odom_thread.set_wheelbase(wb)
 
+    def set_raw_bag(self, bag):
+        """Optional 30 Hz ship-thread raw bag (z16 + IMU + encoders + 80×60)."""
+        self._raw_bag = bag
+        print("vision: raw bag armed", flush=True)
+        if bag is None:
+            return
+        try:
+            if self._rs1 is not None:
+                bag.set_intrinsics("rs1", self._rs1.depth_intrinsics())
+            if self._rs2 is not None:
+                bag.set_intrinsics("rs2", self._rs2.depth_intrinsics())
+        except Exception as e:
+            print("vision: raw bag intrinsics skip: %s" % e, flush=True)
+
+    def _want_raw_bag_frame(self, wheels) -> bool:
+        """Write z16 only while driving (plus a short pad). Sit-look is not a bag."""
+        now = time.monotonic()
+        until = getattr(self, "_raw_motion_until", 0.0)
+        wb = self._wheelbase
+        if wb is not None:
+            try:
+                if wb.is_twist_for_active():
+                    until = now + 1.6
+            except Exception:
+                pass
+        if wheels is not None and len(wheels) >= 2:
+            if abs(float(wheels[0])) + abs(float(wheels[1])) > 0.03:
+                until = max(until, now + 0.5)
+        self._raw_motion_until = until
+        return now < until
+
+    def _offer_raw_bag(self, t):
+        bag = self._raw_bag
+        if bag is None:
+            return
+        try:
+            imu_pack = None
+            imu = self._imu
+            if imu is not None and imu.ok:
+                g, a, tt, self._imu_drain_since = imu.drain_ring(
+                    self._imu_drain_since, 16)
+                if g.shape[0] > 0:
+                    from raw_record import pack_imu
+                    imu_pack = pack_imu(g, a, tt)
+            wheels = None
+            if self._wheelbase is not None:
+                from raw_record import pack_wheels
+                wheels = pack_wheels(self._wheelbase.get_encoder_snapshot())
+            if not self._want_raw_bag_frame(wheels):
+                return
+            live = self._ego_labels if getattr(self, "_ego_did_label", False) else None
+            d1 = getattr(self._rs1, "depth", None) if (self._rs1 and self._rs1.ok) else None
+            d2 = getattr(self._rs2, "depth", None) if (self._rs2 and self._rs2.ok) else None
+            bag.offer(
+                t=float(t),
+                rs1_depth=d1,
+                rs2_depth=d2,
+                live_labels=live,
+                wheels=wheels,
+                imu_pack=imu_pack,
+            )
+        except Exception as e:
+            if not getattr(self, "_raw_bag_err", 0):
+                print("vision: raw bag offer: %s" % e, flush=True)
+            self._raw_bag_err = getattr(self, "_raw_bag_err", 0) + 1
+
     def start(self):
         if self._running:
             return
@@ -1195,13 +1287,20 @@ class Vision:
             self._thread.start()
             return
 
-        use_ir = (self._slam_backend == 'cuvslam')
+        use_ir = (self._slam_backend == 'cuvslam') or bool(self._orbslam3_host)
+        # D435 projector speckle looks like ORB texture but is body-fixed.
+        # Official ORB-SLAM3 D435i stereo example turns the emitter off.
+        # RS1 top-down laser stays on (obstacle depth). Its dots still light
+        # the floor in RS2 IR; i777 median-blurs them (ORBSLAM3_SPECKLE_K).
+        emit_on = True
+        if self._orbslam3_host:
+            emit_on = os.environ.get('KEVIN_ORBSLAM3_EMITTER', '0').strip() == '1'
         try:
             if self.rs1_serial:
                 self._rs1 = RSCamera(self.rs1_serial, compute_pointcloud=True)
             if self.rs2_serial:
                 self._rs2 = RSCamera(self.rs2_serial, compute_pointcloud=True,
-                                     capture_ir=use_ir)
+                                     capture_ir=use_ir, emitter=emit_on)
                 # Extract depth/color calibration for VO color UV alignment
                 if self._vo_color_align_enable and self._rs2.profile:
                     from perception import extract_rs_intrinsics_extrinsics, DepthToColorAlignment
@@ -1246,8 +1345,17 @@ class Vision:
                 self._cuvslam = None
 
         self._webcam = WebCam(self.rgb1_device_id)
-        self._grab_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=3, thread_name_prefix="camgrab")
+        cpus = _grab_cpus()
+        self._pumps = {}
+        if self._rs1:
+            self._pumps["rs1"] = FramePump(self._rs1, "rs1", cpu=cpus.get("rs1")).start()
+        if self._rs2:
+            self._pumps["rs2"] = FramePump(self._rs2, "rs2", cpu=cpus.get("rs2")).start()
+        if self._webcam is not None and self._webcam._cap is not None:
+            self._pumps["rgb"] = FramePump(self._webcam, "rgb", cpu=cpus.get("rgb")).start()
+        print("vision: frame pumps %s (wait=%dms, pin=%s)" % (
+            ",".join(self._pumps.keys()) or "none", WAIT_FRAME_MS,
+            cpus or "off"), flush=True)
 
         # Start high-rate odometry thread BEFORE capture loop
         # This ensures pose is continuously updated even if capture is slow
@@ -1266,8 +1374,20 @@ class Vision:
             target=self._vision_extras_loop, name="vision-extras", daemon=True)
         self._extras_thread.start()
         print("vision: odom thread started (target 100 Hz, wheel+IMU integration)")
-        print("vision: extras thread started (~3 Hz RGB hazards/faces side loop)")
+        print("vision: extras thread started (~3 Hz RGB only; ego80 is 30 Hz capture)")
         print("vision: capture thread started (slam=%s)" % self._slam_backend)
+        if self._orbslam3_host:
+            try:
+                from orbslam3_ship import OrbSlam3Ship, port_from_env, hz_from_env
+                self._orbslam3_ship = OrbSlam3Ship(
+                    self._orbslam3_host, port=port_from_env(), hz=hz_from_env(),
+                    rs_camera=self._rs2)
+                self._orbslam3_ship.start()
+            except Exception as e:
+                print("vision: ORB-SLAM3 ship failed (%s)" % e)
+                self._orbslam3_ship = None
+        if self._live_obs_only:
+            print("vision: live obstacle map (no gmap/evidence accumulate)")
 
     def _render_side_view(self):
         """Render a side-view cross-section showing height vs forward distance.
@@ -1365,7 +1485,9 @@ class Vision:
             print("pitch_cal: too few points (%d)" % len(pts))
             return
 
-        sin_p, cos_p = float(_fw_sin_pitch), float(_fw_cos_pitch)
+        # phys_h uses down-pitch from horizontal, not FW_PITCH_DEG (BEV warp).
+        sin_p = float(_fw_sin_pitch)
+        cos_p = float(_fw_cos_pitch)
         cam_h = float(FW_CAM_HEIGHT)
 
         phys_h = cam_h - pts[:, 1] * cos_p - pts[:, 2] * sin_p
@@ -1415,15 +1537,15 @@ class Vision:
         print("pitch_cal: RESULT error=%.3f° h_offset=%.1fcm (%d samples)" % (
             err_deg, med_hoff * 100, n_collected))
 
-        new_pitch = _fw_pitch_rad + med_delta
-        new_sin = float(abs(math.sin(new_pitch)))
-        new_cos = float(abs(math.cos(new_pitch)))
+        new_down = math.radians(FW_PITCH_DOWN_DEG) + med_delta
+        new_sin = float(math.sin(new_down))
+        new_cos = float(math.cos(new_down))
         new_cam_h = float(FW_CAM_HEIGHT) - med_hoff
 
         if abs(med_delta) > math.radians(0.05) or abs(med_hoff) > 0.005:
-            print("pitch_cal: correcting pitch %.2f° → %.2f° "
+            print("pitch_cal: correcting down-pitch %.2f° → %.2f° "
                   "(sin %.4f→%.4f, cos %.4f→%.4f) cam_h %.3f→%.3f" % (
-                  FW_PITCH_DEG, FW_PITCH_DEG + err_deg,
+                  FW_PITCH_DOWN_DEG, math.degrees(new_down),
                   sin_p, new_sin, cos_p, new_cos,
                   float(FW_CAM_HEIGHT), new_cam_h))
             self._gpu.update_pitch_params(new_sin, new_cos, cam_h=new_cam_h)
@@ -1439,15 +1561,61 @@ class Vision:
             t0 = time.monotonic()
             with self._lock:
                 self.timestamp = time.time()
+            self._cap_seq += 1
+            self._cap_ev.set()
             time.sleep(max(0, interval - (time.monotonic() - t0)))
 
+
+    def _update_policy_ego80(self):
+        """30 Hz capture: 80×60 from this tick's decimated verts. Policy acts at 5 Hz."""
+        v1 = getattr(self._rs1, "verts", None) if (self._rs1 and self._rs1.ok) else None
+        v2 = getattr(self._rs2, "verts", None) if (self._rs2 and self._rs2.ok) else None
+        if v1 is None:
+            return
+        label_frame_80(v1, v2, labels_out=self._pol80_lab)
+        labels_to_ego_float(self._pol80_lab, out=self._pol80_f)
+        sf = self._safety if getattr(self, "_safety", None) is not None else None
+        if sf is not None:
+            stamp_throttle_float(
+                self._pol80_f,
+                throt_f=max(0.0, 1.0 - float(sf.fwd_scale)),
+                throt_b=max(0.0, 1.0 - float(sf.bwd_scale)),
+                throt_l=max(0.0, 1.0 - float(sf.ang_scale)),
+                throt_r=max(0.0, 1.0 - float(sf.ang_scale)),
+            )
+        self._pol80_valid = True
+
+    def _dump_policy_ego80_png(self):
+        if not self._pol80_valid:
+            return
+        now = time.monotonic()
+        if now - self._pol80_png_t < 1.0:
+            return
+        self._pol80_png_t = now
+        try:
+            os.makedirs(os.path.dirname(self._pol80_png), exist_ok=True)
+            bgr = render_policy_bgr(self._pol80_f, scale=4)
+            bar = np.full((22, bgr.shape[1], 3), 12, dtype=np.uint8)
+            cv2.putText(
+                bar, "kevin 80x60 policy", (6, 16),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (220, 220, 220), 1, cv2.LINE_AA)
+            cv2.imwrite(self._pol80_png, np.concatenate([bar, bgr], axis=0))
+        except Exception as e:
+            if not getattr(self, "_pol80_png_err", 0):
+                print("vision: policy_ego80 png: %s" % e, flush=True)
+            self._pol80_png_err = 1
+
+    def get_policy_ego80(self):
+        """80×60 policy float (0 / 0.5 / 1 / 0.20). Same encoding as sim k_obs."""
+        if not self._pol80_valid:
+            return None
+        return self._pol80_f
 
     def _vision_extras_loop(self):
         """~3 Hz side loop: RGB image detections off the 30Hz critical path.
 
-        Chessboard / bump RGB, faces, gestures belong here (or on i777).
-        Sticky results feed self._topdown_hazard* for safety. Named keepout
-        `checkered_door` is the primary avoid for the door mat.
+        Policy 80×60 is on capture at 30 Hz. This thread only dumps the PNG
+        and runs RGB bump / chessboard. Faces/gestures are PeopleLive.
         """
         interval = 1.0 / 3.0
         while getattr(self, '_extras_running', False) and getattr(self, '_running', False):
@@ -1470,6 +1638,7 @@ class Vision:
                               % (hazard_reason, self._topdown_hazard_corner_count,
                                  self._topdown_hazard_edge_count))
                     self._extras_hazard_log_n = n + 1
+                self._dump_policy_ego80_png()
             except Exception as e:
                 if not getattr(self, '_extras_err_n', 0):
                     print("vision-extras error: %s" % e)
@@ -1477,31 +1646,75 @@ class Vision:
             dt = time.monotonic() - t0
             time.sleep(max(0.0, interval - dt))
 
+    def _wait_pumps(self, last, timeout_s):
+        """Wait for a new RS1+RS2 frameset. RGB waits too but does not fail the tick."""
+        deadline = time.monotonic() + float(timeout_s)
+        now = dict(last)
+        ok = True
+        for name in ("rs1", "rs2", "rgb"):
+            p = self._pumps.get(name)
+            if p is None:
+                continue
+            rem = max(0.0, deadline - time.monotonic())
+            got = p.wait_new(last.get(name, 0), rem)
+            now[name] = p.seq
+            if name != "rgb" and not got:
+                ok = False
+        return ok, now
+
+    def wait_capture(self, last_seq, timeout_s=None):
+        """Main-loop clock: next processed capture, or None on timeout."""
+        if timeout_s is None:
+            timeout_s = WAIT_FRAME_MS * 1e-3
+        deadline = time.monotonic() + float(timeout_s)
+        while self._cap_seq <= last_seq and self._running:
+            rem = deadline - time.monotonic()
+            if rem <= 0.0:
+                return None
+            self._cap_ev.clear()
+            if self._cap_seq > last_seq:
+                return self._cap_seq
+            self._cap_ev.wait(rem)
+        if self._cap_seq > last_seq:
+            return self._cap_seq
+        return None
+
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
         _stage_times = []  # Track: grab, pose+hazard, rs1_checks, rs2, obs_comb, odom, gmap, safety, render
         _use_cuvslam = (self._cuvslam is not None)
 
+        _pump_last = {k: 0 for k in self._pumps}
+        _wait_s = WAIT_FRAME_MS * 1e-3
         while self._running:
             _t0 = time.monotonic()
             _t_start = _t0
             self._capture_budget.reset_frame()
 
             try:
-                # Critical path: RealSense only (parallel).
-                _rs = [c for c in (self._rs1, self._rs2) if c]
-                if len(_rs) <= 1:
-                    for c in _rs:
-                        c.grab()
+                # Camera clock: block until each RS pump publishes a new seq.
+                # Pumps wait_for_frames on their own cores while we process.
+                if not any(k in self._pumps for k in ("rs1", "rs2")):
+                    time.sleep(1.0 / TARGET_FPS)
+                    _ok = False
                 else:
-                    list(self._grab_pool.map(lambda c: c.grab(), _rs))
+                    _ok, _pump_last = self._wait_pumps(_pump_last, _wait_s)
+                    if not _ok:
+                        self._grab_miss += 1
             except Exception as e:
                 # Never let a camera glitch kill the capture thread (blank atlas forever).
                 if not getattr(self, '_grab_err_n', 0):
-                    print("vision: grab error (continuing): %s" % e)
+                    print("vision: grab error (continuing): %s" % e, flush=True)
                 self._grab_err_n = getattr(self, '_grab_err_n', 0) + 1
             _t_grab = time.monotonic()
+            ages = []
+            for name in ("rs1", "rs2"):
+                p = self._pumps.get(name)
+                if p is not None and p.pub_t > 0:
+                    ages.append((_t_grab - p.pub_t) * 1000.0)
+            self._frame_age_ms = max(ages) if ages else 0.0
+            self._offer_raw_bag(_t_grab)
 
             # --- Pose update (cuVSLAM or wheel+visual from odom thread) ---
             if _use_cuvslam:
@@ -1528,10 +1741,16 @@ class Vision:
             _t_hazard = time.monotonic()
             
             # RS1 top-down depth → (obstacles, known), rotate 180°
-            # Use preallocated buffers (clear instead of allocate)
-            self._z1[:] = 0
-            self._k1[:] = 0
-            if self._rs1 and self._rs1.ok and self._rs1.verts is not None:
+            # Only clear on a fresh grab. A USB2 miss keeps last known so one
+            # late frameset does not look like an empty room / TOPDOWN LOST.
+            _rs1_fresh = bool(
+                self._rs1 and getattr(self._rs1, "ok", False)
+                and self._rs1.verts is not None
+            )
+            if _rs1_fresh:
+                self._z1[:] = 0
+                self._k1[:] = 0
+            if _rs1_fresh:
                 # GPU heightmap @30Hz for policy + sparse CPU reflexes
                 # GPU shader now handles border clipping (u_border uniform in scatter shader)
                 # Pass verts directly; skip CPU _clip_decimated_border
@@ -1616,12 +1835,15 @@ class Vision:
             known1 = self._k1[::-1, ::-1]
             # Top-down depth is ground truth for open-space. No valid known
             # coverage ⇒ immobilize (empty map must NOT look like free space).
-            self._topdown_known_px = int(np.count_nonzero(known1))
+            # Hold last good map across short grab misses (USB2 poll/color).
+            if _rs1_fresh:
+                self._topdown_known_px = int(np.count_nonzero(known1))
+                self._topdown_miss_n = 0
+            else:
+                self._topdown_miss_n = getattr(self, "_topdown_miss_n", 0) + 1
             self._topdown_ok = bool(
-                self._rs1 is not None
-                and getattr(self._rs1, 'ok', False)
-                and self._rs1.verts is not None
-                and self._topdown_known_px >= TOPDOWN_MIN_KNOWN
+                self._topdown_known_px >= TOPDOWN_MIN_KNOWN
+                and self._topdown_miss_n < TOPDOWN_HOLD_FRAMES
             )
             if not hasattr(self, '_k1_bbox_n'):
                 self._k1_bbox_n = 0
@@ -1839,7 +2061,8 @@ class Vision:
             # Optional: accumulate world evidence map (KEVIN_EVIDENCE_MAP=1; default off)
             # CAPTURE Hz reclaim: KEVIN_EVIDENCE_EVERY gates updates (default 2 = every 6 frames)
             _evidence_did_update = False
-            if (self._evidence_map is not None and self._ego_did_label
+            if (self._evidence_map is not None and not self._live_obs_only
+                    and self._ego_did_label
                     and (self._evidence_update_n % self._evidence_every == 0)):
                 _t_ev0 = time.monotonic()
                 try:
@@ -1883,7 +2106,9 @@ class Vision:
                     ego_known_shim=self._ego_known_shim if _shim_ok else None,
                     evidence_map=self._evidence_map,
                     pose_xy_theta=_plan_pose,
-                    prefer_evidence=bool(self._evidence_map_enable),
+                    prefer_evidence=(
+                        bool(self._evidence_map_enable)
+                        and not self._live_obs_only),
                     obs_out=self._obs_combined,
                     known_out=self._known_combined,
                     legacy_obs=self._obs_combined,
@@ -2115,7 +2340,9 @@ class Vision:
             # CONTRACT: never write keyframes when encoders untrusted / stuck
             # (skip_slam_update). When KEVIN_SLAM_DYNAMIC_MASK=1, _kf_obs is
             # the masked buffer (SELF + ephemeral), never raw obs.
-            if not skip_slam_update and self._capture_budget.should_run("gmap"):
+            if (not self._live_obs_only
+                    and not skip_slam_update
+                    and self._capture_budget.should_run("gmap")):
                 with self._capture_budget.stage("gmap"):
                     self._gpu.gmap_update_gpu(
                         self._obs_combined, self._known_combined,
@@ -2152,9 +2379,11 @@ class Vision:
             
             _t_gmap_up = time.monotonic()
 
-            ego_proj = self._gpu.gmap_project_gpu(
-                pose_src.x, pose_src.y, pose_src.theta,
-                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+            ego_proj = None
+            if not self._live_obs_only:
+                ego_proj = self._gpu.gmap_project_gpu(
+                    pose_src.x, pose_src.y, pose_src.theta,
+                    rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
 
             self._persistent_obs[:] = 0
             self._persistent_height[:] = 0
@@ -2175,11 +2404,12 @@ class Vision:
             # ── Check SLAM lock status (encoder + tracking quality) ───
             self._update_slam_lock_status()
             
+            rgb_hazard = bool(self._topdown_hazard) and not self._live_obs_only
             self._safety.update(self._persistent_obs, fused_yaw, fused_fwd,
                                 height_cm=self._persistent_height,
                                 topdown_near_field=self._topdown_near_field,
                                 topdown_overhang_approach=self._topdown_overhang_approach,
-                                topdown_hazard=self._topdown_hazard,
+                                topdown_hazard=rgb_hazard,
                                 topdown_soft_low_obstacle=self._topdown_soft_low_obstacle)
             
             # Hard immobilize conditions (CRITICAL SAFETY ONLY)
@@ -2189,7 +2419,7 @@ class Vision:
             immobilize_reason = None
             
             # CRITICAL: Check if stuck (wheels spinning but not moving)
-            if pose_src.is_stuck:
+            if pose_src.is_stuck and not self._live_obs_only:
                 immobilize = True
                 immobilize_reason = f"STUCK (wheels spinning, no motion)"
             
@@ -2248,18 +2478,31 @@ class Vision:
                 self._immobilize_warned = None
             
             _t_safety = time.monotonic()
+            try:
+                self._update_policy_ego80()
+            except Exception as e:
+                if not getattr(self, "_pol80_err_n", 0):
+                    print("vision: ego80 30Hz: %s" % e, flush=True)
+                self._pol80_err_n = getattr(self, "_pol80_err_n", 0) + 1
+            self._pol80_ms = (time.monotonic() - _t_safety) * 1000.0
 
             # --- GPU atlas render (DROPPABLE: viz for humans/i777, not policy) ---
             # Policy needs heightmap/obs/safety (already published above) at 30Hz.
             # Atlas paint can run at lower rate when budget tight.
             # Expected: render ~9ms; if budget exceeded, skip to stay under 33.3ms target.
             atlas = None
+            rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
+            rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
+            rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
+            # Keep look / HTTP cameras fresh even when GPU atlas is shed.
+            with self._lock:
+                self.frames[0][:] = rgb1
+                self.frames[1][:] = rgbd1
+                self.frames[2][:] = rgbd2
+                self.timestamp = time.time()
             if self._capture_budget.should_run("render"):
                 with self._capture_budget.stage("render"):
                     trail = pose_src.get_world_history()
-                    rgb1 = self._webcam.color if (self._webcam and self._webcam.ok) else black
-                    rgbd1 = self._rs1.color[::-1, ::-1] if (self._rs1 and self._rs1.ok) else black
-                    rgbd2 = self._rs2.color if (self._rs2 and self._rs2.ok) else black
 
                     bat_frac = 0.0
                     if self._wheelbase:
@@ -2311,15 +2554,11 @@ class Vision:
             _t_end = _t_render
 
             # === Stage timing collection ===
-            # Webcam last: never on RS grab clock or pose bucket
-            if self._webcam is not None:
-                try:
-                    self._webcam.grab()
-                except Exception:
-                    pass
+            self._cap_seq += 1
+            self._cap_ev.set()
 
             _stage_times.append((
-                (_t_grab - _t_start) * 1000.0,      # grab
+                (_t_grab - _t_start) * 1000.0,      # grab wait (camera clock)
                 (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose
                 (_t_rs1 - _t_hazard) * 1000.0,      # rs1_checks (near/overhang/soft + depth_topdown)
                 (_t_rs2 - _t_rs1) * 1000.0,         # rs2_process (GPU depth)
@@ -2328,6 +2567,7 @@ class Vision:
                 (_t_gmap_up - _t_odom) * 1000.0,    # gmap
                 (_t_safety - _t_gmap_up) * 1000.0,  # safety
                 (_t_render - _t_safety) * 1000.0,   # render
+                float(self._frame_age_ms),          # published-frame age at process start
             ))
             
             # Detailed report every 90 frames
@@ -2336,18 +2576,26 @@ class Vision:
                 avg = np.mean(recent, axis=0)
                 p95 = np.percentile(recent, 95, axis=0)
                 total = np.sum(avg)
-                labels = ["grab", "pose+hazard", "rs1_checks", "rs2_gpu", 
-                         "obs_comb", "odom", "gmap", "safety", "render"]
+                labels = ["wait", "pose+hazard", "rs1_checks", "rs2_gpu",
+                         "obs_comb", "odom", "gmap", "safety", "render", "age"]
+                work = avg[:9]
+                work_total = float(np.sum(work))
                 print("=" * 80)
-                print(f"CAPTURE TIMING (last 90 frames): TOTAL={total:.1f}ms ({1000/total:.1f} Hz)")
+                print(f"CAPTURE TIMING (last 90 frames): WORK={work_total:.1f}ms "
+                      f"age_p95={p95[9]:.1f}ms miss={self._grab_miss} "
+                      f"({1000.0 / max(work_total, 0.1):.1f} Hz work)")
                 print("=" * 80)
-                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%TOTAL':>8s}")
+                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%WORK':>8s}")
                 print("-" * 80)
                 for i, label in enumerate(labels):
-                    pct = (avg[i] / total) * 100.0
-                    print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                    if i < 9:
+                        pct = (avg[i] / work_total) * 100.0 if work_total > 0 else 0.0
+                        print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                    else:
+                        print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms")
                 print("=" * 80)
-                print(f"Target: 33.3ms/frame (30 Hz). Current: {total:.1f}ms ({1000/total:.1f} Hz)")
+                print(f"Target: 33.3ms/frame (30 Hz). Frame age p95 should be <33ms. "
+                      f"ego80={getattr(self, '_pol80_ms', 0.0):.1f}ms")
                 print("=" * 80)
 
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
@@ -2374,17 +2622,30 @@ class Vision:
                       "TOTAL=%.1fms (budget %.1fms @ 30Hz)%s" % (*avg, total_avg, 33.3, shed_info))
 
     def stop(self):
-        self._extras_running = False
-        pool = getattr(self, "_grab_pool", None)
-        if pool is not None:
+        if self._orbslam3_ship is not None:
             try:
-                pool.shutdown(wait=False, cancel_futures=True)
+                self._orbslam3_ship.stop()
             except Exception:
                 pass
-            self._grab_pool = None
+            self._orbslam3_ship = None
+        self._extras_running = False
+        for p in list(self._pumps.values()):
+            try:
+                p.stop()
+            except Exception:
+                pass
+        self._pumps = {}
         self._running = False
+        self._cap_ev.set()
         if self._thread:
             self._thread.join(timeout=2.0)
+        bag = self._raw_bag
+        if bag is not None:
+            try:
+                bag.close()
+            except Exception:
+                pass
+            self._raw_bag = None
         if self._odom_thread:
             self._odom_thread.stop()
         if self._rs1:
@@ -2434,7 +2695,7 @@ class Vision:
             if add_b:
                 overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + add_b, 0, 255).astype(np.uint8)
             overlay[m, 3] = 110
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 220), 1)
+            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0, 220), 1)
 
         for box in UNDER_ROBOT_BOXES:
             paint(*box, add_g=70)
@@ -2664,15 +2925,19 @@ class Vision:
             ts_cap = float(self.timestamp)
 
         # Global projection outside lock (GPU; may take ~0.3ms).
-        rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
-        rcy_f = float(CROSSHAIR_CY)
-        global_proj = self._gpu.gmap_project_gpu(
-            pose_x, pose_y, pose_theta,
-            rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
-        if global_proj is None:
+        # Live-only wander skips the accumulated map entirely.
+        if self._live_obs_only:
             self._policy_global_proj.fill(128)
         else:
-            np.copyto(self._policy_global_proj, global_proj)
+            rcx_f = float(CROSSHAIR_CX + ROBOT_CX_OFF)
+            rcy_f = float(CROSSHAIR_CY)
+            global_proj = self._gpu.gmap_project_gpu(
+                pose_x, pose_y, pose_theta,
+                rcx_f, rcy_f, float(TD_PX_SIZE), FRAME_H, FRAME_W)
+            if global_proj is None:
+                self._policy_global_proj.fill(128)
+            else:
+                np.copyto(self._policy_global_proj, global_proj)
 
         return {
             'ego_obs': self._policy_ego_obs,
@@ -2776,13 +3041,13 @@ class Vision:
                 return
             m = np.zeros((h, w), dtype=bool)
             m[y0:y1, x0:x1] = True
-            # Additive only — black stays dark (0,0,0)->(0,70,0); yellow/gray keep structure
+            # Additive only — black stays dark (0,0,0)->(0,70,0); yellow obs stay visible
             if add_g:
                 overlay[m, 1] = np.clip(rgb[m, 1].astype(np.int16) + add_g, 0, 255).astype(np.uint8)
             if add_b:
                 overlay[m, 2] = np.clip(rgb[m, 2].astype(np.int16) + add_b, 0, 255).astype(np.uint8)
             overlay[m, 3] = 110
-            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0, 220), 1)
+            cv2.rectangle(overlay, (x0, y0), (x1 - 1, y1 - 1), (255, 0, 0, 220), 1)
 
         for box in UNDER_ROBOT_BOXES:
             paint(*box, add_g=70)
@@ -2803,6 +3068,20 @@ class Vision:
             if x1 > x0 and y1 > y0:
                 boxmask[y0:y1, x0:x1] = True
         overlay[~boxmask, 3] = 255
+
+        # Axle-origin overlays (NOT image/crosshair center). Blue = plus-x
+        # throttle looks from the wheel-axle; cyan = chosen curve; gold = odom trail.
+        try:
+            from insect_planner import plus_x_throttle_boxes
+            for tx0, ty0, tx1, ty1 in plus_x_throttle_boxes():
+                cv2.rectangle(
+                    overlay, (tx0, ty0), (tx1 - 1, ty1 - 1), (0, 0, 255, 255), 2)
+            import local_executive
+            ins = getattr(local_executive, "_insect", None)
+            if ins is not None:
+                ins.paint_ego_overlay(overlay)
+        except Exception:
+            pass
 
         n = getattr(self, '_foot_dump_n', 0) + 1
         self._foot_dump_n = n

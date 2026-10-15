@@ -25,6 +25,10 @@ from .ego_rs1_fast import (
     _CUPY_AVAILABLE as GPU_AVAILABLE,
 )
 from .policy_feed import export_policy_feed
+from .fast_ego80 import (
+    downsample_labels_4, label_frame_80, label_from_z16, labels_to_ego_float,
+    render_policy_bgr, stamp_throttle_float, EGO80_H, EGO80_W, EGO80_PX,
+)
 
 __all__ = [
     "UNKNOWN", "SELF", "CLEAR", "OBSTACLE", "LABEL_NAMES",
@@ -38,4 +42,7 @@ __all__ = [
     "label_rs1_ego_gpu", "fuse_rs2_into_ego_gpu",
     "KEVIN_GPU_SCATTER", "KEVIN_GPU_FUSE", "GPU_AVAILABLE",
     "export_policy_feed",
+    "downsample_labels_4", "label_frame_80", "label_from_z16", "labels_to_ego_float",
+    "render_policy_bgr", "stamp_throttle_float",
+    "EGO80_H", "EGO80_W", "EGO80_PX",
 ]

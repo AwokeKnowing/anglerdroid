@@ -181,6 +181,30 @@ class DirectionalHelp:
         """
         norm = _normalize(transcript)
         
+        # Turn in place
+        m = re.search(r"\bturn(?:\s+a?\s*(little|bit))?\s+(left|right|around|back)\b", norm)
+        if m:
+            word = m.group(2)
+            mild = bool(m.group(1))
+            deg = {"left": 70.0, "right": -70.0, "around": 180.0, "back": 180.0}[word]
+            if mild:
+                deg = 40.0 if deg > 0 else -40.0
+            return ("turn", {
+                "type": "relative_bearing",
+                "bearing_deg": deg,
+                "distance_m": 0.30,
+                "label": "turn " + word,
+            })
+
+        # Go forward / ahead (not "go away")
+        if re.search(r"\b(go (forward|ahead|straight)|move forward|keep going)\b", norm):
+            return ("go_forward", {
+                "type": "relative_bearing",
+                "bearing_deg": 0.0,
+                "distance_m": 1.5,
+                "label": "forward",
+            })
+        
         # Stop/halt commands
         if re.search(r"\b(stop|halt|freeze|hold|stay)\b", norm):
             return ("stop", {"type": "clear"})
@@ -497,6 +521,8 @@ class PeopleBehaviorStub:
                 "go_away": "Sorry! Moving away.",
                 "wander": "Back to wandering!",
                 "look_at": "Looking!",
+                "turn": "Turning!",
+                "go_forward": "Going forward!",
             }.get(cmd_type, "Okay!")
             
             self._last_name_call = t

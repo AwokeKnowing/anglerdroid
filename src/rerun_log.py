@@ -1,8 +1,9 @@
 """Kevin Rerun logger — RGB, depth/height, obstacle map (prep; no drive).
 
 Rerun 0.37+ APIs: set_time / connect_grpc / save (not set_time_seconds / connect).
-Default: record to ~/.kevin/rerun/live.rrd so headless Orin keeps a replayable log.
-Optional: --rerun-connect / --rerun-spawn from main.
+Requires an explicit sink (--rerun-save / --rerun-connect / --rerun-spawn).
+rr.init() otherwise keeps a buffered sink in RAM until a viewer connects;
+atlas + overlays at ~5 Hz is tens of MB/s and will OOM Orin in minutes.
 
 BACKPRESSURE HANDLING (fail-soft for 30 Hz capture loop):
 - All logging is async via background thread with bounded queue (maxsize=2)
@@ -64,32 +65,56 @@ class KevinRerunLogger:
             print("rerun_log: disabled (missing sdk or --no-rerun)")
             return
 
+        # rr.init() always attaches an unbounded in-memory buffered sink until
+        # save/connect/spawn replaces it. Logging into that buffer is the leak.
+        want_spawn = bool(spawn)
+        want_connect = bool(connect_url)
+        want_save = bool(save_path) and not want_spawn
+        if not (want_spawn or want_connect or want_save):
+            print("rerun_log: disabled (no sink — pass --rerun-save, --rerun-connect, or --rerun-spawn)")
+            self.enabled = False
+            return
+
         rr.init(app_id)
-        if spawn:
+        sink_ok = False
+        if want_spawn:
             try:
                 rr.spawn(connect=True)
+                sink_ok = True
                 print("rerun_log: spawned viewer")
             except Exception as e:
                 print("rerun_log: spawn failed: %s" % e)
-        if connect_url:
+        if want_connect:
             try:
                 rr.connect_grpc(connect_url)
+                sink_ok = True
                 print("rerun_log: connect_grpc %s" % connect_url)
             except Exception as e:
                 print("rerun_log: connect_grpc failed: %s" % e)
-        if save_path and not spawn:
-            # File sink is the headless default (Orin has no local viewer need).
+        if want_save:
             # NOTE: rr.save() replaces sinks — do not combine with connect_grpc for live viz.
             try:
                 os.makedirs(os.path.dirname(os.path.expanduser(save_path)) or ".", exist_ok=True)
                 path = os.path.expanduser(save_path)
                 rr.save(path)
+                sink_ok = True
                 print("rerun_log: saving %s" % path)
                 if connect_url:
-                    print("rerun_log: WARNING save() may replace connect_grpc sink — prefer save_path=None when streaming")
+                    print("rerun_log: WARNING save() replaced connect_grpc sink")
             except Exception as e:
                 print("rerun_log: save failed: %s" % e)
-        
+
+        if not sink_ok:
+            print("rerun_log: disabled (sink attach failed; refusing in-memory buffer)")
+            self.enabled = False
+            try:
+                rec = getattr(rr, "get_global_data_recording", lambda: None)()
+                if rec is not None and hasattr(rec, "disconnect"):
+                    rec.disconnect()
+            except Exception:
+                pass
+            return
+
         # Start background logging thread with bounded queue (maxsize=2)
         self._log_queue = queue.Queue(maxsize=2)
         self._shutdown_event = threading.Event()

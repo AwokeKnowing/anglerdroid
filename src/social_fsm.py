@@ -34,7 +34,11 @@ INTIMATE_DIST = 0.5            # too close; do NOT enter unless invited
 APPROACH_STOP_DIST = 1.35      # target stop distance (middle of range)
 
 # Timing (seconds)
-WAIT_ENGAGE_TIMEOUT = 15.0     # silence → polite leave
+WAIT_ENGAGE_TIMEOUT = 15.0     # legacy alias; unengaged leave uses prompts
+CONVERSE_BUDGET_S = 120.0      # max chat if they keep talking
+CONVERSE_PROMPT_S = 12.0       # no reply this long → wrap and wander
+CONVERSE_PROMPT_MAX = 0        # do not nag; one greeting is the try
+CONVERSE_GONE_S = 25.0         # face lost this long → wrap up
 CONVERSE_TURN_MAX = 8.0        # keep conversational turns short
 COOLDOWN_NO_ENGAGE = 300.0     # 5 min after leave-without-chat
 COOLDOWN_ENGAGED = 90.0        # 1.5 min after conversation
@@ -72,6 +76,9 @@ class PersonEncounter:
     last_heard_time: float = 0.0
     last_spoke_time: float = 0.0
     last_seen_time: float = 0.0
+    converse_t0: float = 0.0
+    last_prompt_time: float = 0.0
+    prompt_count: int = 0
     engage_count: int = 0
     converse_turns: int = 0
     estimated_distance: float = 999.0
@@ -165,6 +172,26 @@ LEAVE_MESSAGES_ES = [
     "A explorar. ¡Mis ruedas están emocionadas!",
 ]
 
+# After the greeting, if they stay quiet, try once or twice more.
+CHAT_PROMPTS = [
+    "What's been going on?",
+    "I'm listening if you want to talk.",
+    "Still there? I can hang for a couple minutes.",
+]
+CHAT_PROMPTS_ES = [
+    "¿Qué has andado haciendo?",
+    "Te escucho si quieres platicar.",
+    "¿Sigues ahí? Puedo quedarme un par de minutos.",
+]
+WRAP_MESSAGES = [
+    "That was a good couple of minutes. I'll wander — call if you need me!",
+    "Good talking with you. I'll keep exploring!",
+]
+WRAP_MESSAGES_ES = [
+    "Fueron dos minutos ricos. Voy a explorar. ¡Llámame si me necesitas!",
+    "¡Qué gusto platicar! Sigo explorando.",
+]
+
 
 class SocialFSM:
     """Manages social conversation FSM for one person at a time.
@@ -182,6 +209,22 @@ class SocialFSM:
         self.encounters: Dict[str, PersonEncounter] = {}
         self.current_person: Optional[str] = None
         self._command_cooldown: float = 0.0
+
+    def on_timer(self, now: float) -> Optional[Dict]:
+        """Advance converse timers even if the face is off-camera this tick."""
+        person = self.current_person
+        if not person:
+            return None
+        enc = self.encounters.get(person)
+        if enc is None:
+            return None
+        if enc.state == SocialState.GREET and now - enc.greet_time >= 0.5:
+            self._begin_converse(enc, now)
+        if enc.state == SocialState.WAIT_ENGAGE:
+            self._begin_converse(enc, now)
+        if enc.state == SocialState.CONVERSE:
+            return self._converse_tick(person, enc, now)
+        return None
         
 
     def on_dismiss(self, name: str, now: float) -> Optional[Dict]:
@@ -210,6 +253,18 @@ class SocialFSM:
         if enc is None:
             return False
         return now < enc.cooldown_until
+
+    def in_conversation(self) -> bool:
+        """True while greeting or trying the 2-minute chat."""
+        person = self.current_person
+        if not person:
+            return False
+        enc = self.encounters.get(person)
+        if enc is None:
+            return False
+        return enc.state in (
+            SocialState.GREET, SocialState.WAIT_ENGAGE, SocialState.CONVERSE,
+        )
     
     def estimate_distance_from_box(self, box: Tuple[int, int, int, int]) -> float:
         """Heuristic distance estimation from face bounding box.
@@ -371,46 +426,18 @@ class SocialFSM:
             return self._update_approach_goal(name, box, enc, now)
         
         elif state == SocialState.GREET:
-            # Greeting spoken; transition to WAIT_ENGAGE
-            if now - enc.greet_time >= 0.5:  # brief delay after greeting
-                enc.state = SocialState.WAIT_ENGAGE
+            # Greeting spoken; start the 2-minute conversation try.
+            if now - enc.greet_time >= 0.5:
+                self._begin_converse(enc, now)
             return None
         
         elif state == SocialState.WAIT_ENGAGE:
-            # Waiting for engagement; check timeout
-            if now - enc.greet_time > WAIT_ENGAGE_TIMEOUT:
-                # No engagement; polite leave
-                enc.state = SocialState.LEAVE
-                self.current_person = None
-                self._start_cooldown(name, COOLDOWN_NO_ENGAGE, now)
-                prefer_spanish = name.strip().lower() in SPANISH_NAMES
-                leave_bank = LEAVE_MESSAGES_ES if prefer_spanish else LEAVE_MESSAGES
-                return {
-                    "action_type": "leave",
-                    "utterance": random.choice(leave_bank),  # polite leave, optional tiny joke
-                    "goal_hint": {"type": "resume_wander"},
-                    "state": "leave",
-                    "person": name,
-                }
-            return None
+            # Legacy wait → same 2-minute try (prompt / budget / leave).
+            self._begin_converse(enc, now)
+            return self._converse_tick(name, enc, now)
         
         elif state == SocialState.CONVERSE:
-            # Active conversation; stay engaged
-            # Timeout check: if no speech heard recently, leave
-            if now - enc.last_heard_time > WAIT_ENGAGE_TIMEOUT:
-                enc.state = SocialState.LEAVE
-                self.current_person = None
-                self._start_cooldown(name, COOLDOWN_ENGAGED, now)
-                prefer_spanish = name.strip().lower() in SPANISH_NAMES
-                leave_msg = "¡Fue un placer hablar contigo!" if prefer_spanish else "Good talking with you!"
-                return {
-                    "action_type": "leave",
-                    "utterance": leave_msg,
-                    "goal_hint": {"type": "resume_wander"},
-                    "state": "leave",
-                    "person": name,
-                }
-            return None
+            return self._converse_tick(name, enc, now)
         
         elif state == SocialState.LEAVE:
             # Already leaving; reset to idle
@@ -443,26 +470,19 @@ class SocialFSM:
             return None
         
         enc.last_heard_time = now
-        
-        if enc.state == SocialState.WAIT_ENGAGE:
-            # Engaged! Transition to CONVERSE
-            enc.state = SocialState.CONVERSE
+
+        if enc.state in (SocialState.WAIT_ENGAGE, SocialState.GREET):
+            self._begin_converse(enc, now)
+        if enc.state == SocialState.CONVERSE:
             enc.engaged_this_session = True
             enc.engage_count += 1
-            enc.converse_turns = 1
-            return self._generate_empathy_response(person, transcript, enc, now)
-        
-        elif enc.state == SocialState.CONVERSE:
-            # Continue conversation
             enc.converse_turns += 1
-            enc.last_heard_time = now
-            
-            # Keep turns short; sometimes acknowledge, sometimes just listen
-            if random.random() < 0.6:  # 60% chance to respond
+            enc.prompt_count = 0
+            # Always answer the first thing they say; later turns may just listen.
+            if enc.converse_turns <= 1 or random.random() < 0.75:
                 return self._generate_empathy_response(person, transcript, enc, now)
-            else:
-                return None
-        
+            return None
+
         return None
     
     def on_command(
@@ -547,6 +567,83 @@ class SocialFSM:
             "command": "unknown",
         }
     
+    def _begin_converse(self, enc: PersonEncounter, now: float) -> None:
+        """Enter CONVERSE and start the 2-minute budget."""
+        enc.state = SocialState.CONVERSE
+        if enc.converse_t0 <= 0.0:
+            enc.converse_t0 = enc.greet_time if enc.greet_time > 0.0 else now
+        if enc.last_heard_time <= 0.0:
+            enc.last_heard_time = enc.converse_t0
+        if enc.last_prompt_time <= 0.0:
+            enc.last_prompt_time = enc.converse_t0
+        self.current_person = enc.name
+
+    def _leave_chat(self, name: str, enc: PersonEncounter, now: float,
+                    utterance: str) -> Dict:
+        engaged = bool(enc.engaged_this_session)
+        enc.state = SocialState.LEAVE
+        self.current_person = None
+        self._start_cooldown(
+            name, COOLDOWN_ENGAGED if engaged else COOLDOWN_NO_ENGAGE, now)
+        enc.state = SocialState.IDLE_WANDER
+        enc.goal_hint = {"type": "resume_wander"} if self.drive_armed else None
+        return {
+            "action_type": "leave",
+            "utterance": utterance,
+            "goal_hint": {"type": "resume_wander"},
+            "state": "leave",
+            "person": name,
+        }
+
+    def _prompt_chat(self, name: str, enc: PersonEncounter, now: float) -> Dict:
+        prefer_spanish = name.strip().lower() in SPANISH_NAMES
+        bank = CHAT_PROMPTS_ES if prefer_spanish else CHAT_PROMPTS
+        utterance = bank[enc.prompt_count % len(bank)]
+        enc.prompt_count += 1
+        enc.last_prompt_time = now
+        enc.last_spoke_time = now
+        return {
+            "action_type": "prompt",
+            "utterance": utterance,
+            "goal_hint": {"type": "stop"},
+            "state": "converse",
+            "person": name,
+        }
+
+    def _converse_tick(self, name: str, enc: PersonEncounter, now: float):
+        """Stay for up to 2 minutes; prompt if quiet; leave if ignored or done."""
+        t0 = enc.converse_t0 or enc.greet_time or now
+        elapsed = now - t0
+        last_human = max(enc.last_heard_time, enc.converse_t0, enc.greet_time)
+        last_kevin = max(enc.last_prompt_time, enc.last_spoke_time, t0)
+        quiet = now - max(last_human, last_kevin)
+        prefer_spanish = name.strip().lower() in SPANISH_NAMES
+
+        if enc.last_seen_time > 0.0 and (now - enc.last_seen_time) >= CONVERSE_GONE_S:
+            wrap = random.choice(WRAP_MESSAGES_ES if prefer_spanish else WRAP_MESSAGES)
+            return self._leave_chat(name, enc, now, wrap)
+
+        if elapsed >= CONVERSE_BUDGET_S:
+            wrap = random.choice(WRAP_MESSAGES_ES if prefer_spanish else WRAP_MESSAGES)
+            return self._leave_chat(name, enc, now, wrap)
+
+        if not enc.engaged_this_session:
+            if quiet >= CONVERSE_PROMPT_S:
+                if enc.prompt_count >= CONVERSE_PROMPT_MAX:
+                    leave_bank = LEAVE_MESSAGES_ES if prefer_spanish else LEAVE_MESSAGES
+                    msg = random.choice([m for m in leave_bank if m] or leave_bank)
+                    return self._leave_chat(name, enc, now, msg)
+                return self._prompt_chat(name, enc, now)
+            return None
+
+        # They talked — hold the rest of the 2 minutes; nudge if it goes quiet.
+        if quiet >= CONVERSE_PROMPT_S:
+            if enc.prompt_count < CONVERSE_PROMPT_MAX:
+                return self._prompt_chat(name, enc, now)
+            wrap = "¡Fue un placer hablar contigo!" if prefer_spanish else "Good talking with you!"
+            return self._leave_chat(name, enc, now, wrap)
+        return None
+
     def _generate_greeting(
         self, 
         name: str, 
@@ -557,21 +654,40 @@ class SocialFSM:
         hour = time.localtime().tm_hour
         prefer_spanish = name.strip().lower() in SPANISH_NAMES
         
-        # Keep greetings short, warm, earnest (Hero / Astro Boy style)
+        # Invite a short chat — Kevin tries for ~2 minutes after a known face.
         if prefer_spanish:
             if 5 <= hour < 12:
-                greetings = [f"¡Buenos días, {name}!", f"¡Hola {name}! Buenos días."]
+                greetings = [
+                    f"¡Buenos días, {name}! ¿Me das dos minutos para platicar?",
+                    f"¡Hola {name}! Buenos días. ¿Platicamos un par de minutos?",
+                ]
             elif 12 <= hour < 18:
-                greetings = [f"¡Hola, {name}!", f"¡Qué tal, {name}!"]
+                greetings = [
+                    f"¡Hola, {name}! ¿Me das dos minutos para platicar?",
+                    f"¡Qué tal, {name}! ¿Platicamos un ratito?",
+                ]
             else:
-                greetings = [f"¡Buenas noches, {name}!", f"¡Hola {name}! Buenas noches."]
+                greetings = [
+                    f"¡Buenas noches, {name}! ¿Me das dos minutos para platicar?",
+                    f"¡Hola {name}! ¿Cómo te fue hoy? Tengo un par de minutos.",
+                ]
         else:
             if 5 <= hour < 12:
-                greetings = [f"Good morning, {name}!", f"Hi {name}! Nice morning."]
+                greetings = [
+                    f"Good morning, {name}! Got two minutes to chat?",
+                    f"Hi {name}! Nice morning. Want to talk for a couple minutes?",
+                ]
             elif 12 <= hour < 18:
-                greetings = [f"Hi, {name}!", f"Hey {name}!", f"Hello, {name}!"]
+                greetings = [
+                    f"Hi, {name}! Got two minutes to chat?",
+                    f"Hey {name}! Can I steal a couple minutes?",
+                    f"Hello, {name}! Want to talk for two minutes?",
+                ]
             else:
-                greetings = [f"Good evening, {name}!", f"Hi {name}! How was your day?"]
+                greetings = [
+                    f"Good evening, {name}! Got two minutes to chat?",
+                    f"Hi {name}! How was your day? I can hang for a couple minutes.",
+                ]
         
         utterance = random.choice(greetings)
         enc.last_spoke_time = now

@@ -7,11 +7,21 @@ CROSSHAIR_CX, CROSSHAIR_CY = 159, 119
 # Ego-space pixel size (metres)
 EGO_PX_SIZE = 0.010           # 1 px = 10 mm
 
-# Physical robot dimensions (metres / cm)
-WHEEL_DIAMETER_CM = 17.13
-WHEELBASE_CM = 34.0            # distance between left/right wheel centers
-WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0   # ~0.08565
-WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
+# Physical robot dimensions — James tape 2026-09-17 (axle origin).
+# Half-track 177 mm (axle → hub). Hub-to-hub 354 mm. Wheel radius 85 mm.
+# Body ±180 mm; caster sticks out to 200 mm aft. Clean turn disk 200 mm;
+# wander keep-clear 250 mm from axle (do not enter a gap you cannot turn in).
+WHEEL_DIAMETER_CM = 17.0
+WHEEL_HALFTRACK_CM = 17.7      # axle midpoint to hub
+WHEELBASE_CM = 2.0 * WHEEL_HALFTRACK_CM   # L hub to R hub = 35.4
+WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0   # 0.085
+WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.354
+TURN_R_M = 0.20
+WANDER_CLEAR_M = 0.25
+WANDER_CLEAR_CM = WANDER_CLEAR_M * 100.0
+BODY_FRONT_CM = 18.0
+BODY_AFT_CM = 18.0
+CASTER_AFT_CM = 20.0
 
 # ---------------------------------------------------------------------------
 # Self-mask / footprint geometry — ALL offsets in cm relative to the axle
@@ -22,19 +32,26 @@ WHEELBASE_M = WHEELBASE_CM / 100.0            # 0.34
 # Axle origin in ego pixels: (RCX, RCY).
 # ---------------------------------------------------------------------------
 
-# Body: 30 cm front-back × 33 cm left-right, centered on axle
-BODY_LEN_CM = 30.0            # along +X (forward)
+# Body footprint: 180 mm forward of axle, 180 mm aft. Caster is extra.
+BODY_LEN_CM = BODY_FRONT_CM + BODY_AFT_CM
 BODY_WID_CM = 33.0            # along +Y (left)
-BODY_CX_CM = 0.0              # body center vs axle
+BODY_CX_CM = 0.5 * (BODY_FRONT_CM - BODY_AFT_CM)
 BODY_CY_CM = 0.0
 
-# Wheels: one box each, 18×6 cm (diameter × tire width), centers on axle line
-WHEEL_LEN_CM = 18.0           # along +X
-WHEEL_WID_CM = 6.0            # along +Y
+# Drive wheels at the axle. Box is a bit fatter than the 85 mm radius
+# tire so self-returns do not leak as obs.
+WHEEL_LEN_CM = 20.0           # along +X
+WHEEL_WID_CM = 10.0           # along +Y (tread)
 WHEEL_L_CX_CM = 0.0
-WHEEL_L_CY_CM = WHEELBASE_CM / 2.0    # left (+Y)
+WHEEL_L_CY_CM = WHEEL_HALFTRACK_CM    # left (+Y)
 WHEEL_R_CX_CM = 0.0
-WHEEL_R_CY_CM = -WHEELBASE_CM / 2.0   # right (−Y)
+WHEEL_R_CY_CM = -WHEEL_HALFTRACK_CM   # right (−Y)
+
+# Rear caster: body ends at 180 mm, caster rim at 200 mm.
+CASTER_LEN_CM = CASTER_AFT_CM - BODY_AFT_CM
+CASTER_WID_CM = 8.0
+CASTER_CX_CM = -0.5 * (BODY_AFT_CM + CASTER_AFT_CM)
+CASTER_CY_CM = 0.0
 
 # Mast column (self-hits, not floor-clear). Size/offset from URDF (~3 cm post
 # near back wall); slightly fattened so depth self-returns get stripped.
@@ -49,10 +66,12 @@ ROBOT_H = int(round(BODY_WID_CM))   # side-to-side
 ROBOT_CX_OFF = -78            # x offset of axle from crosshair center
 WHEEL_HALF = int(round(WHEEL_LEN_CM / 2.0))  # compat import only
 
-# Safety scan pads (NOT baked into self-mask boxes)
+# Safety scan pads (NOT baked into self-mask boxes). Rear pad is 0 —
+# the caster box already is the aft face. Lat pad brings FOOT out to
+# ~25 cm (wander-clear) from the axle.
 FOOT_PAD_FWD = 0
-FOOT_PAD_BWD = 10
-FOOT_PAD_LAT = 4
+FOOT_PAD_BWD = 0
+FOOT_PAD_LAT = 2
 
 # Axle origin in ego pixels
 RCX = CROSSHAIR_CX + ROBOT_CX_OFF   # 81
@@ -79,13 +98,14 @@ def _ego_box_from_axle(cx_cm, cy_cm, sx_cm, sy_cm):
 BODY_BOX = _ego_box_from_axle(BODY_CX_CM, BODY_CY_CM, BODY_LEN_CM, BODY_WID_CM)
 WHEEL_L_BOX = _ego_box_from_axle(WHEEL_L_CX_CM, WHEEL_L_CY_CM, WHEEL_LEN_CM, WHEEL_WID_CM)
 WHEEL_R_BOX = _ego_box_from_axle(WHEEL_R_CX_CM, WHEEL_R_CY_CM, WHEEL_LEN_CM, WHEEL_WID_CM)
+CASTER_BOX = _ego_box_from_axle(CASTER_CX_CM, CASTER_CY_CM, CASTER_LEN_CM, CASTER_WID_CM)
 MAST_BOX = _ego_box_from_axle(MAST_CX_CM, MAST_CY_CM, MAST_LEN_CM, MAST_WID_CM)
 
 # Named pixel aliases for body (compat)
 BODY_X0, BODY_Y0, BODY_X1, BODY_Y1 = BODY_BOX
 
 # Legacy FOOT_* AABB around hull + safety pads (safety.py forward/back scans)
-_hull = [BODY_BOX, WHEEL_L_BOX, WHEEL_R_BOX, MAST_BOX]
+_hull = [BODY_BOX, WHEEL_L_BOX, WHEEL_R_BOX, CASTER_BOX, MAST_BOX]
 FOOT_X0 = max(0, min(b[0] for b in _hull) - FOOT_PAD_BWD)
 FOOT_Y0 = max(0, min(b[1] for b in _hull) - FOOT_PAD_LAT)
 FOOT_X1 = min(FRAME_W, max(b[2] for b in _hull) + FOOT_PAD_FWD)
@@ -105,6 +125,7 @@ UNDER_ROBOT_BOXES = [
     BODY_BOX,       # body floor
     WHEEL_L_BOX,    # left wheel
     WHEEL_R_BOX,    # right wheel
+    CASTER_BOX,     # rear caster
 ]
 SELF_IGNORE_BOXES = [
     MAST_BOX,       # mast column

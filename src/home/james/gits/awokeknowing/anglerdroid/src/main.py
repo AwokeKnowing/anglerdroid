@@ -1,0 +1,482 @@
+"""
+main.py - 30 fps loop: frames + tool calls; optional rerun. Entrypoint for anglerdroid v2.
+"""
+
+import os
+import time
+import argparse
+import speech_io
+import tools
+import vision as vision_mod
+import navigator
+import local_executive
+import house_bot as house_bot_mod
+import people_live as people_live_mod
+
+from rerun_log import KevinRerunLogger, available as rerun_available
+from loop_timing import FrameBudget
+
+
+TARGET_FPS = 30
+LOOP_DT = 1.0 / TARGET_FPS
+BUDGET_MS = 1000.0 / TARGET_FPS  # 33.33 ms at 30 fps
+SHED_THRESHOLD = 0.85  # Shed droppable stages if >85% of budget used
+
+
+def main():
+    parser = argparse.ArgumentParser(description="AnglerDroid v2 main loop")
+    parser.add_argument("--no-wheelbase", action="store_true", help="Do not init real wheelbase (e.g. dev machine)")
+    parser.add_argument("--no-rerun", action="store_true", help="Disable rerun logging")
+    parser.add_argument("--rerun-save", default="",
+                        help="Rerun .rrd path (default ~/.kevin/rerun/live.rrd unless --rerun-spawn)")
+    parser.add_argument("--rerun-connect", default="",
+                        help="Optional rerun+http://host:9876/proxy viewer URL")
+    parser.add_argument("--rerun-spawn", action="store_true",
+                        help="Spawn a local Rerun viewer (skips file save by default)")
+    parser.add_argument("--rerun-hz", type=float, default=5.0,
+                        help="Max rate for RGB/depth/obs rerun logs (default 5 Hz)")
+    parser.add_argument("--rs1", default="", help="RealSense 1 serial")
+    parser.add_argument("--rs2", default="", help="RealSense 2 serial")
+    parser.add_argument("--rgb1", default="", help="RGB camera device (e.g. /dev/video1); empty = auto-detect USB webcam")
+    parser.add_argument("--gemini-key", default="", help="Gemini API key (or set GEMINI_KEY env)")
+    parser.add_argument("--gemini-model", default="", help="Gemini model name (default: gemini-2.5-flash)")
+    parser.add_argument("--auth-email", default="", help="Email allowed full control (default: everyone)")
+    parser.add_argument("--google-client-id", default="", help="Google OAuth client ID for sign-in")
+    parser.add_argument("--http-port", type=int, default=8080, help="HTTP server port")
+    parser.add_argument("--ws-port", type=int, default=8081, help="WebSocket server port")
+    parser.add_argument("--brain-url", default="",
+                        help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
+    parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
+                        help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
+    parser.add_argument("--wheel-imu-prior", action="store_true",
+                        help="EXPERIMENT: Use wheel+IMU prediction prior (for self-slam-wheel-imu-prior-v0)")
+    parser.add_argument("--auto-local", action="store_true",
+                        help="Enable LocalExecutive mid-layer (xy/wander mailbox → VFH/MPPI/NeuralRL)")
+    parser.add_argument("--local-planner", default="vfh",
+                        choices=["vfh", "mppi", "neural_rl", "insect"],
+                        help="LocalExecutive backend: vfh, mppi, neural_rl, or insect (5 Hz v,w + visit doughnut)")
+    parser.add_argument("--wander", action="store_true",
+                        help="With --auto-local, start continuous ~1m wander immediately")
+    parser.add_argument("--house-bot", action="store_true",
+                        help="Curious look-before-leap + local speak")
+    parser.add_argument("--people", action="store_true",
+                        help="Face greet + name-call/dirs (speech only; auto with --house-bot)")
+    args = parser.parse_args()
+
+    gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
+    brain_url = args.brain_url or os.environ.get("BRAIN_URL", "")
+
+    # Rerun (RGB + height/depth + obstacle map); prep only — does not arm drive
+    every_n = max(1, int(round(TARGET_FPS / max(0.5, float(args.rerun_hz)))))
+    if args.no_rerun or not rerun_available():
+        rerun_logger = KevinRerunLogger(enabled=False)
+    else:
+        save_kw = {}
+        if args.rerun_spawn:
+            save_kw["save_path"] = None  # viewer stream; skip file
+        elif args.rerun_save:
+            save_kw["save_path"] = args.rerun_save
+        elif args.rerun_connect:
+            # connect_grpc + rr.save() replaces the sink — skip file when streaming to a viewer
+            save_kw["save_path"] = None
+        # else: module default ~/.kevin/rerun/live.rrd
+        rerun_logger = KevinRerunLogger(
+            enabled=True,
+            connect_url=args.rerun_connect or None,
+            spawn=bool(args.rerun_spawn),
+            every_n=every_n,
+            **save_kw,
+        )
+
+    # Wheelbase (real or None)
+    wb = None
+    if not args.no_wheelbase:
+        try:
+            import wheelbase as wb_mod
+            wb = wb_mod.WheelBase()
+        except Exception as e:
+            print(f"wheelbase not started: {e}")
+
+    # Vision
+    from vision import Vision
+    rs1, rs2 = args.rs1, args.rs2
+    if not rs1 or not rs2:
+        try:
+            import pyrealsense2 as _rs
+            _serials = [d.get_info(_rs.camera_info.serial_number)
+                        for d in _rs.context().devices]
+            _serials.sort()
+            if not rs1 and len(_serials) >= 1:
+                rs1 = _serials[0]
+            if not rs2 and len(_serials) >= 2:
+                rs2 = _serials[1]
+            print("main: RealSense serials rs1=%s rs2=%s"
+                  % (rs1 or "(none)", rs2 or "(none)"))
+        except Exception as e:
+            print("main: RealSense enumerate failed: %s" % e)
+    rgb1 = args.rgb1
+    if not rgb1:
+        try:
+            from cameras import find_rgb_device
+            rgb1 = find_rgb_device() or ""
+        except Exception as e:
+            print("main: RGB auto-detect failed: %s" % e)
+            rgb1 = ""
+    if rgb1.startswith("dev/"):
+        rgb1 = "/" + rgb1
+    print("main: RGB device %s" % (rgb1 or "(none)"))
+    vis = Vision(
+        rs1_serial=rs1 or "",
+        rs2_serial=rs2 or "",
+        rgb1_device_id=rgb1,
+        slam_backend=args.slam,
+        use_wheel_imu_prior=args.wheel_imu_prior,
+    )
+    vis.set_wheelbase(wb)
+    vis.start()
+
+    # UI (web server + Gemini)
+    from ui import UI
+    u = UI(
+        gemini_key=gemini_key,
+        gemini_model=args.gemini_model,
+        auth_email=args.auth_email,
+        google_client_id=args.google_client_id,
+        http_port=args.http_port,
+        ws_port=args.ws_port,
+        brain_url=brain_url,
+    )
+    u.start()
+
+    tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
+    try:
+        speech_io.apply_speak_sink(persist=True)
+        speech_io.start_say_server()
+    except Exception as e:
+        print("main: speech sink/say-server skip: %s" % e)
+    if args.auto_local:
+        local_executive.set_planner(args.local_planner)
+        print("main: LocalExecutive ENABLED (mailbox: goto_xy / wander)")
+        print("main: local planner armed: %s" % args.local_planner)
+        if args.wander:
+            local_executive.set_wander()
+            print("main: wander started (%s)" % args.local_planner)
+    hb = None
+    if args.house_bot:
+        hb = house_bot_mod.HouseBot(vis, enabled=True)
+        hb.start()
+    elif not args.auto_local:
+        local_executive.clear()
+    people = None
+    if args.people or args.house_bot or args.wander:
+        if args.wander and not args.people and not args.house_bot:
+            print("main: --wander implies face chat (--people)")
+        people = people_live_mod.PeopleLive(vis, enabled=True)
+        people.start()
+
+    print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
+    print("  budget=%.1f ms/frame | shed threshold=%.0f%% | every 90 frames: fps, avg process_ms, stage breakdown, sheds" % (BUDGET_MS, SHED_THRESHOLD * 100))
+    frame_id = 0
+    last_report = time.monotonic()
+    last_slam_status = time.monotonic()
+    process_sum = 0.0
+    wait_sum = 0.0
+    
+    # Frame budget for per-stage timing and shedding
+    budget = FrameBudget(budget_ms=BUDGET_MS, shed_threshold=SHED_THRESHOLD)
+    
+    try:
+        while True:
+            loop_start = time.monotonic()
+            budget.reset_frame()
+            
+            # Periodic SLAM lock status (every 10 seconds)
+            if loop_start - last_slam_status >= 10.0:
+                slam_locked = vis.slam_locked
+                slam_reason = vis.slam_lock_reason
+                is_stuck = vis.is_stuck
+                stuck_count = vis.stuck_count
+                
+                lock_symbol = "🟢" if slam_locked else "🔴"
+                stuck_warn = f" | 🚨 STUCK (count={stuck_count})" if is_stuck else ""
+                
+                print(f"{lock_symbol} SLAM: {'LOCKED' if slam_locked else f'NOT LOCKED ({slam_reason})'}{stuck_warn}")
+                if not slam_locked:
+                    print(f"   ⚠️  Map-frame navigation disabled — fix: {slam_reason}")
+                if is_stuck:
+                    print(f"   🚨 WHEELS SPINNING BUT NOT MOVING — immobilized")
+                last_slam_status = loop_start
+
+            # Get latest atlas only (no frame copies) - CRITICAL PATH
+            with budget.stage("atlas"):
+                atlas, ts = tools.get_atlas()
+                if atlas is not None:
+                    u.send_atlas(atlas)
+
+
+            # Rerun logging - DROPPABLE (skip if over budget)
+            if rerun_logger.enabled and budget.should_run("rerun"):
+                with budget.stage("rerun"):
+                    # Throttled RGB + ego obs/height; atlas when present.
+                    frames = None
+                    obs = getattr(vis, "_persistent_obs", None)
+                    height = getattr(vis, "_persistent_height", None)
+                    # Only copy camera frames on log ticks (every_n gate inside logger
+                    # still needs the arrays — peek counter via force=False path).
+                    if rerun_logger.due:
+                        try:
+                            frames, _atlas2, _ts2 = tools.get_frames()
+                        except Exception:
+                            frames = None
+                    rgb = rs1 = rs2 = None
+                    if frames is not None and len(frames) >= 3:
+                        rgb, rs1, rs2 = frames[0], frames[1], frames[2]
+                    # Hull self-mask (multi-box) + trust/FOV overlays (throttled)
+                    mask_overlay = trust_overlay = safety_foot_rs1 = foot_underlay = foot_overlay = safety_foot = None
+                    if rerun_logger.due:
+                        mask_overlay = vis.get_rs1_mask_overlay()
+                        trust_overlay = vis.get_rs1_trust_mask_overlay()
+                        safety_foot_rs1 = vis.get_rs1_safety_foot_overlay()
+                        foot_underlay = vis.get_robot_footprint_underlay()
+                        foot_overlay = vis.get_robot_footprint_overlay()
+                        safety_foot = vis.get_safety_foot_overlay()
+                    rerun_logger.maybe_log(
+                        ts=ts,
+                        atlas=atlas,
+                        rgb=rgb,
+                        rs1=rs1,
+                        rs2=rs2,
+                        obs=obs,
+                        height_cm=height,
+                        safety={
+                            "fwd": getattr(vis, "safety_fwd_scale", 1.0),
+                            "bwd": getattr(vis, "safety_bwd_scale", 1.0),
+                            "ang": getattr(vis, "safety_ang_scale", 1.0),
+                        },
+                        rs1_mask_overlay=mask_overlay,
+                        rs1_trust_mask_overlay=trust_overlay,
+                        rs1_safety_foot_overlay=safety_foot_rs1,
+                        robot_footprint_underlay=foot_underlay,
+                        robot_footprint_overlay=foot_overlay,
+                        safety_foot_overlay=safety_foot,
+                    )
+
+            # Propagate debug flags from UI to vision
+            vis.debug_depth = u.debug_flags.get("depth", False)
+            if u.calibrate_requested:
+                u.calibrate_requested = False
+                vis.request_calibration()
+            vis._gpu.clear_vis = u.debug_flags.get("clear_vis", False)
+
+            # Safety override — directional scaling (fwd / bwd / angular independent) - CRITICAL
+            with budget.stage("safety"):
+                if wb is not None:
+                    wb.set_safety_scales(vis.safety_fwd_scale, vis.safety_bwd_scale,
+                                         vis.safety_ang_scale)
+
+            # Gamepad + local planner + navigator - CRITICAL PATH
+            with budget.stage("planner"):
+                wb = tools.get_wheelbase()
+                gamepad_active = False
+                if wb is not None:
+                    wb._check_gamepad_health()
+                    left_tps = 0.0
+                    right_tps = 0.0
+                    if wb.gamepad is not None:
+                        vels = wb.gamepad.diffDrive()
+                        left_norm = vels.get("left", 0.0)
+                        right_norm = vels.get("right", 0.0)
+                        if abs(left_norm) < 0.08:
+                            left_norm = 0.0
+                        if abs(right_norm) < 0.08:
+                            right_norm = 0.0
+                        left_tps = left_norm * 0.5
+                        right_tps = right_norm * 0.5
+                    gamepad_active = abs(left_tps) > 0 or abs(right_tps) > 0
+
+                    if gamepad_active:
+                        wb.cancel_twist_for()
+                        navigator.clear_goal()
+                        try:
+                            tools.set_wheel_vels(left_tps, right_tps)
+                        except RuntimeError as e:
+                            if "CAN bus failed" in str(e):
+                                print(f"main: {e} — shutting down")
+                                break
+                            raise
+                    elif not wb.is_twist_for_active():
+                        twist = None
+                        if args.auto_local and local_executive.is_active():
+                            pose = getattr(vis, "_pose", None)
+                            px = py = pth = None
+                            if pose is not None:
+                                px, py, pth = pose.x, pose.y, pose.theta
+                            # VFH uses atlas quadrant; MPPI uses ego persistent_obs
+                            obs = getattr(vis, "_persistent_obs", None)
+                            twist = local_executive.tick(
+                                atlas, px, py, pth, obs_map=obs)
+                        if twist is None and atlas is not None:
+                            twist = navigator.compute_twist(atlas)
+                        if twist is not None:
+                            if not getattr(vis, "topdown_depth_ok", True):
+                                wb.cancel_twist_for()
+                                tools.twist(0.0, 0.0)
+                            else:
+                                try:
+                                    tools.twist(twist[0], twist[1])
+                                except RuntimeError as e:
+                                    if "CAN bus failed" in str(e):
+                                        print(f"main: {e} — shutting down")
+                                        break
+                                    raise
+                        else:
+                            try:
+                                tools.set_wheel_vels(0.0, 0.0)
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+
+            # Tool calls from agent (only act if gamepad is idle) - DROPPABLE
+            if not gamepad_active and budget.should_run("tool_calls"):
+                with budget.stage("tool_calls"):
+                    pending = tools.get_pending_tool_calls()
+                    for call in pending:
+                        name = call.get("name")
+                        cargs = call.get("args", {})
+                        if name == "twist_for":
+                            fwd = cargs.get("forward_mps", 0)
+                            ang = cargs.get("angular_rads", 0)
+                            dur = cargs.get("duration_secs", 2.0)
+                            sf = wb._safety_fwd if fwd > 0 else wb._safety_bwd if fwd < 0 else 1.0
+                            print("exec: twist_for(%.2f, %.2f, %.1fs) safety_fwd=%.2f safety_ang=%.2f" % (
+                                fwd, ang, dur, sf, wb._safety_ang))
+                            navigator.clear_goal()
+                            try:
+                                tools.twist_for(
+                                    fwd, ang,
+                                    duration_secs=dur,
+                                    ramp_in_secs=cargs.get("ramp_in_secs", 0.0),
+                                    ramp_out_secs=cargs.get("ramp_out_secs", 0.0),
+                                )
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+                        elif name == "stop":
+                            if wb:
+                                wb.cancel_twist_for()
+                            local_executive.clear()
+                            navigator.clear_goal()
+                            tools.stop()
+                        elif name == "navigate":
+                            local_executive.clear()
+                            hdg = cargs.get("heading_deg")
+                            if hdg is not None:
+                                navigator.set_goal(float(hdg))
+                            else:
+                                navigator.clear_goal()
+                        elif name == "goto_xy":
+                            if not args.auto_local:
+                                print("exec: goto_xy ignored (pass --auto-local)")
+                            else:
+                                local_executive.set_goal_xy(cargs.get("x", 0.0), cargs.get("y", 0.0))
+                                print("exec: goto_xy(%.2f, %.2f)" % (float(cargs.get("x", 0)), float(cargs.get("y", 0))))
+                        elif name == "wander":
+                            if not args.auto_local:
+                                print("exec: wander ignored (pass --auto-local)")
+                            else:
+                                local_executive.set_wander()
+                                print("exec: wander")
+                        elif name == "local_stop":
+                            local_executive.clear()
+                            navigator.clear_goal()
+                            tools.stop()
+                        elif name == "twist":
+                            try:
+                                tools.twist(cargs.get("forward_mps", 0), cargs.get("angular_rads", 0))
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+                        elif name == "set_wheel_vels":
+                            try:
+                                tools.set_wheel_vels(cargs.get("left_tps", 0), cargs.get("right_tps", 0))
+                            except RuntimeError as e:
+                                if "CAN bus failed" in str(e):
+                                    print(f"main: {e} — shutting down")
+                                    break
+                                raise
+
+            # Throttle to 30 fps
+            process_sec = time.monotonic() - loop_start
+            process_ms = process_sec * 1000.0
+            sleep_time = LOOP_DT - process_sec
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            wait_ms = sleep_time * 1000.0 if sleep_time > 0 else 0.0
+            process_sum += process_ms
+            wait_sum += wait_ms
+            frame_id += 1
+            if frame_id % 90 == 0:
+                now = time.monotonic()
+                elapsed = now - last_report
+                actual_fps = 90.0 / elapsed if elapsed > 0 else 0
+                avg_process = process_sum / 90.0
+                avg_wait = wait_sum / 90.0
+                process_sum = 0.0
+                wait_sum = 0.0
+                last_report = now
+                
+                # Get lifetime stats for stage breakdown and shed counts
+                lifetime = budget.get_lifetime_stats()
+                stage_counts = lifetime.get("stage_counts", {})
+                shed_counts = lifetime.get("shed_counts", {})
+                
+                # Format stage timing info
+                stage_info = []
+                for stage in ["atlas", "safety", "planner", "rerun", "tool_calls"]:
+                    count = stage_counts.get(stage, 0)
+                    if count > 0:
+                        stage_info.append("%s=%d" % (stage, count))
+                
+                # Format shed info
+                shed_info = ""
+                if shed_counts:
+                    shed_parts = ["%s=%d" % (k, v) for k, v in sorted(shed_counts.items())]
+                    shed_info = "  shed:[%s]" % ",".join(shed_parts)
+                
+                # Navigation info
+                nav_info = ""
+                hdg = navigator.get_goal()
+                if hdg is not None:
+                    nav_info = "  nav=%.0f°" % hdg
+                st = local_executive.status()
+                if st.get("active"):
+                    nav_info += "  local=%s" % st.get("mode")
+                
+                print("  fps=%.1f  process=%.1f ms  wait=%.1f ms  (budget %.1f ms)%s" % (
+                    actual_fps, avg_process, avg_wait, BUDGET_MS, nav_info))
+                print("    stages:[%s]%s" % (",".join(stage_info), shed_info))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        vis.stop()
+        u.stop()
+        navigator.clear_goal()
+        local_executive.clear()
+        try:
+            if hb: hb.stop()
+        except Exception:
+            pass
+        if wb:
+            wb.shutdown()
+        rerun_logger.shutdown()
+        print("main: shutdown complete")
+
+
+if __name__ == "__main__":
+    main()
