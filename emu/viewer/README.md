@@ -30,14 +30,16 @@ Open browser: http://localhost:8095
 **Live WebGL viewer:**
 - Three.js scene with orbit controls (drag to orbit, scroll to zoom)
 - Real-time state updates via polling `/state.json` (~20 Hz, tunnel-friendly)
-- Robot (emissive teal box 0.5×0.25×0.4m with bright green heading arrow)
+- Robot (bright cyan emissive box 0.5×0.25×0.4m with yellow heading arrow)
 - Dog (brown sphere, when present)
 - Goal marker (red cone, when set)
 - Path visualization (orange line, when planned)
 - Environment walls/furniture (trimesh exported as BufferGeometry)
+- Translucent walls (60% opacity, see rooms from outside)
 - Auto-fit camera to scene bounds (chase angle view)
-- Hemisphere lighting + directional sun (bright, not dark void)
-- Scene-sized floor and grid (based on environment extent)
+- Frame house button (reset camera to show whole scene)
+- Sky-blue background with bright outdoor lighting (no fog)
+- Large floor and grid (scene extent + 8m margin)
 - Camera frustum toggle (client-side show/hide, optional)
 - Chat box (POST to nav `/api/command`)
 - Console logging (F12 to debug scene export/load)
@@ -62,6 +64,22 @@ Open browser: http://localhost:8095
 **Browser:** Three.js (CDN) with OrbitControls. Chat POSTs to existing `/chat` endpoint → nav `/api/command`
 
 ---
+
+## Design Decisions
+
+**i777 deploy root cause (2026-10-15):**
+- Original viewer had `scene.fog = new THREE.Fog(..., 8, 15)` + fixed camera at `(-3, 2.5, 4)`
+- Result: only nearby sofa visible; walls/Kevin/house fogged out beyond 8m
+- Scene.json was fine (53 geoms + 1 wall mesh 3380 faces)
+- Fix: remove fog, sky-blue background, auto-frame camera, translucent walls
+
+**Current design:**
+- No fog (entire scene visible)
+- Sky-blue background (`0x87ceeb`) for outdoor daytime look
+- Translucent walls (60% opacity, glass-house effect)
+- Bright cyan robot + yellow arrow (high visibility)
+- Auto-frame on scene load + manual "Frame house" button
+- Large ground/grid (extent + 8m margin)
 
 ## Debugging
 
