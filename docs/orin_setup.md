@@ -218,13 +218,38 @@ See `docs/bringup.md` for full checklist (wheels-up, e-stop, hand-over-lens, flo
 - **`deploy/orin/README.md`** — udev/systemd deployment instructions
 - **`scripts/build_orin_cuda.sh`** — CUDA verification + MPPI kernel build
 
-## Serials / Inventory
+## Robot Inventory
 
-Known serials as of 2026-10-15:
+Per-robot configuration lives in `robots/<robot_id>/inventory.json`. See `robots/README.md` for schema.
+
+### kevin001 (live jetbot)
 
 | Device | Serial | Role | Notes |
 |--------|--------|------|-------|
 | D435i | 944622074292 | RS2 (forward) | FW 5.15.1, IMU working after RSUSB build |
-| D435 (non-i) | (absent) | RS1 (top-down) | Not present at snapshot time |
+| D435 (non-i) | (absent) | RS1 (top-down) | Not present at 2026-10-15 snapshot |
 
-**Phase 1/2 (future):** `robots/kevin001/inventory.json` with serials, power mode, MAC addresses. Not implemented yet.
+**Platform:** kevin, **Tire:** stock, **CAN:** can1, **Power:** 40W
+
+### Usage
+
+Set `KEVIN_ROBOT=kevin001` to load inventory for camera serial→role mapping and CAN interface:
+
+```bash
+KEVIN_ROBOT=kevin001 python scripts/bringup_check.py
+KEVIN_ROBOT=kevin001 scripts/bringup_run.sh 0.3
+```
+
+Falls back to autodetection (product name: D435i → RS2, D435 → RS1) if unset or inventory not found.
+
+### Calibration Policy
+
+**Live `src/calibration.json` stays gitignored.** Inventory is identity + serials only. Auto-cal writes the live calibration file after parked 10s windows (pitch/roll/height from gravity + floor RANSAC). Twin stays nominal; only real robots get `calibration.json`.
+
+### Depth Role Probe
+
+`scripts/bringup_check.py` includes a simple depth role probe (warning only, not hard fail):
+- Top-down camera: median depth < 0.8m (looking at floor under mast)
+- Forward camera: median depth ≥ 0.8m (typical scene depth)
+- Warns if inventory/product-name role disagrees with probe
+- Skips gracefully when only one camera present

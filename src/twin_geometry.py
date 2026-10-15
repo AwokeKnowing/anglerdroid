@@ -59,11 +59,24 @@ def height(name):
 def realsense_roles(rs=None):
     """(rs1_serial, rs2_serial) by PHYSICAL role, never by sort order:
     RS1 = top-down mast D435 (twin realsense_d435, no IMU), RS2 = forward low D435i (twin realsense_d435i, IMU).
-    Env KEVIN_RS1_SERIAL / KEVIN_RS2_SERIAL override. Real units: RS1 815412070676, RS2 944622074292."""
+    Precedence: 1) KEVIN_RS1_SERIAL/KEVIN_RS2_SERIAL env, 2) KEVIN_ROBOT inventory, 3) product name autodetect."""
     import os
     if rs is None: import pyrealsense2 as rs
     devs = [(d.get_info(rs.camera_info.serial_number), d.get_info(rs.camera_info.name)) for d in rs.context().devices]
     r1, r2 = os.environ.get("KEVIN_RS1_SERIAL"), os.environ.get("KEVIN_RS2_SERIAL")
+    
+    # Load from robot inventory if KEVIN_ROBOT set
+    robot_id = os.environ.get("KEVIN_ROBOT")
+    if robot_id and not (r1 and r2):
+        inv_path = os.path.join(os.path.dirname(_HERE), "robots", robot_id, "inventory.json")
+        if os.path.exists(inv_path):
+            inv = json.load(open(inv_path))
+            for cam in inv.get("cameras", []):
+                serial = cam.get("serial")
+                if serial and cam.get("role") == "RS1": r1 = r1 or serial
+                if serial and cam.get("role") == "RS2": r2 = r2 or serial
+    
+    # Autodetect by product name if still missing
     for s, n in sorted(devs):
         if n.upper().endswith("D435I"): r2 = r2 or s
     for s, n in sorted(devs):

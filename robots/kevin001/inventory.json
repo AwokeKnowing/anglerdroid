@@ -1,0 +1,21 @@
+{
+  "robot_id": "kevin001",
+  "platform": "kevin",
+  "tire_profile": "stock",
+  "can_iface": "can1",
+  "cameras": [
+    {
+      "serial": "944622074292",
+      "role": "RS2",
+      "product": "Intel RealSense D435I",
+      "notes": "Forward-facing, FW 5.15.1, IMU working after RSUSB build"
+    },
+    {
+      "serial": null,
+      "role": "RS1",
+      "product": "Intel RealSense D435 (expected)",
+      "notes": "Top-down mast camera, not present at 2026-10-15 snapshot"
+    }
+  ],
+  "notes": "Live jetbot Orin NX, JetPack 7.2, 40W power mode. USB3 required (cameras currently on USB2). See docs/orin_setup.md."
+}

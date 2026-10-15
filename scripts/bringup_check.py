@@ -9,9 +9,33 @@ def res(name, ok, info=""): R.append((name, ok)); print("%-4s %-34s %s" % ("PASS
 
 import pyrealsense2 as rs
 import twin_geometry as TG
+
+def depth_role_probe(serial, rs_ctx):
+    """Quick depth role heuristic: top-down ≈ shallow mean depth, forward ≈ deeper + pitched. Returns 'topdown'/'forward'/None."""
+    try:
+        cfg = rs.config(); cfg.enable_device(serial); cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+        pipe = rs.pipeline(rs_ctx); pipe.start(cfg); time.sleep(0.3)
+        for _ in range(5): pipe.wait_for_frames()  # skip warmup
+        frames = pipe.wait_for_frames(); depth = np.asanyarray(frames.get_depth_frame().get_data(), dtype=np.uint16) * 0.001
+        pipe.stop()
+        valid = depth[(depth > 0.1) & (depth < 5.0)]; mean_d = np.median(valid) if len(valid) > 1000 else 999
+        return "topdown" if mean_d < 0.8 else "forward"  # top-down mast ~0.5m to floor, forward ~1-3m typical
+    except: return None
+
 devs = [(d.get_info(rs.camera_info.name), d.get_info(rs.camera_info.serial_number), d.get_info(rs.camera_info.usb_type_descriptor)) for d in rs.context().devices]
 r1, r2 = TG.realsense_roles(rs)
 res("realsense roles", bool(r1 and r2), "RS1(D435 top-down)=%s RS2(D435i fwd)=%s" % (r1, r2))
+
+# Depth role probe (warning only, not hard fail)
+if r1 and r2:
+    probe_r1, probe_r2 = depth_role_probe(r1, rs.context()), depth_role_probe(r2, rs.context())
+    role_ok = (probe_r1 in (None, "topdown")) and (probe_r2 in (None, "forward"))
+    res("depth role probe", role_ok, "RS1=%s RS2=%s  (WARN if mismatch; product-name may be swapped)" % (probe_r1, probe_r2))
+elif r1 or r2:
+    res("depth role probe", True, "skipped (only one camera present)")
+else:
+    res("depth role probe", True, "skipped (no cameras)")
+
 res("realsense on USB 3", all(u.startswith("3") for _, _, u in devs), str(devs) + "  (USB 2 -> no 848x480, no IMU: plug into the Orin's 10 Gb/s port/hub)")
 
 if "--no-cam" not in sys.argv and r1 and r2:

@@ -20,9 +20,10 @@ Order matters; stop at the first FAIL. Physical e-stop (mast) within reach the w
    chain with the wifi dongle + CANable) -> 848x480 depth fails, D435i IMU "not available", RS1 delivered no frames.
    Plug the D435 + D435i into the Orin's 10 Gb/s port (or a USB 3 hub on it), short USB-C 3.x cables.
    `lsusb -t` must show them under `Bus 002 ... 10000M`.
-2. **Pre-flight (read-only, never moves motors):** `cd ~/anglerdroid && ~/.venv-kevinnav/bin/python scripts/bringup_check.py`
-   — roles by product name, USB 3, RS1/RS2 30 Hz, IMU gravity + stamps, ODrive CAN heartbeats (both axes, no errors),
-   safety envelope unit checks, calibration.json sanity. All PASS before going on.
+2. **Pre-flight (read-only, never moves motors):** `cd ~/anglerdroid && KEVIN_ROBOT=kevin001 ~/.venv-kevinnav/bin/python scripts/bringup_check.py`
+   — loads `robots/kevin001/inventory.json` for camera serials/CAN; checks roles (product name + depth probe), USB 3, RS1/RS2 30 Hz, 
+   IMU gravity + stamps, ODrive CAN heartbeats (both axes, no errors), safety envelope unit checks, calibration.json sanity. All PASS before going on.
+   Omit `KEVIN_ROBOT=` to use autodetection (product name only).
 3. **Wheels up** (chassis on a box, both wheels free): `scripts/bringup_run.sh 0.3`, then
    `drive 0.1 0 2` / `drive -0.1 0 2` / `drive 0 0.5 2` / `drive 0 -0.5 2` via the page http://jetbot:8080 or `curl -s localhost:8080/api/command -d '{"text":"drive 0.1 0 2"}'`.  Check: correct wheel
    directions, forward = +x, left turn = CCW, wheel speed in the log matches command, stops on `stop`.
