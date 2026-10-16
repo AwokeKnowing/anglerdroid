@@ -29,6 +29,9 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <div id="hud">Kevin Live Sim · Drag orbit · Scroll zoom · loading…</div>
 <div id="controls">
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
+<label title="every chat line except stop goes straight to LightNav-0 as the instruction (shared by all viewers)"><input type="checkbox" id="sendallvln"> Send all to LightNav</label>
+<label><input type="checkbox" id="showvln" checked> Show LightNav waypoints</label>
+<div id="vlnhud" style="font:11px monospace;color:#8cf;max-width:260px"></div>
 <label><input type="checkbox" id="showdog" checked> Show yorkie</label>
 <label><input type="checkbox" class="campanel" data-cam="rs1_depth"> RS1 depth (top)</label>
 <label><input type="checkbox" class="campanel" data-cam="rs1_color"> RS1 color (top)</label>
@@ -307,8 +310,8 @@ function updateState(st){
 
 // ---- shared state: WebSocket /ws (same origin => works via cloudflared), HTTP polling fallback
 let ws=null,wsOK=false,lastSeq=0,lastMsgT=0,pollOn=false,wsFails=0;const myName='web-'+Math.random().toString(36).slice(2,6);
-function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();updateState(st);renderLog(st.log);
-  hud.textContent='Kevin Live Sim · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+' · drag orbit (yours only)'}
+function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();if(st.goal_env)st.goal=st.goal_env;if(st.path_env)st.path=st.path_env;updateState(st);updateVLN(st);renderLog(st.log);
+  document.getElementById('hud').textContent='Kevin Live Sim · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+' · drag orbit (yours only)'}
 function connectWS(){
   try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws')}catch(e){startPoll();return}
   ws.onopen=()=>{wsOK=true;wsFails=0};
@@ -324,6 +327,31 @@ async function pollState(){
 function startPoll(){if(!pollOn){pollOn=true;pollState()}}
 setInterval(()=>{if(wsOK&&performance.now()-lastMsgT>3000&&ws){try{ws.close()}catch(e){}}},1000);   // stalled ws -> reconnect/poll
 let logN=-1;
+// ---- LightNav (VLN) overlay: last ~5 waypoint sets (older fade), chosen goal marker, HUD line; shared 'send all' mode
+const V3=(x,y,z)=>new THREE.Vector3(x,z,-y);
+const vlnGroup=new THREE.Group();scene.add(vlnGroup);
+const vlnGoal=new THREE.Mesh(new THREE.OctahedronGeometry(0.09),new THREE.MeshStandardMaterial({color:0x33ddff,emissive:0x1188aa}));vlnGoal.visible=false;scene.add(vlnGoal);
+const sendAllEl=document.getElementById('sendallvln'),showVlnEl=document.getElementById('showvln'),vlnHud=document.getElementById('vlnhud');
+sendAllEl.onchange=()=>{const on=sendAllEl.checked;if(wsOK&&ws)ws.send(JSON.stringify({type:'mode',send_all_vln:on,who:myName}));
+  else fetch('/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({send_all_vln:on,who:myName})})};
+let vlnKey='';
+function updateVLN(st){
+  if(typeof st.send_all_vln==='boolean'&&document.activeElement!==sendAllEl)sendAllEl.checked=st.send_all_vln;
+  const V=st.vln;
+  if(!V){vlnHud.textContent='';vlnGroup.clear();vlnGoal.visible=false;return}
+  const L=V.last;vlnHud.textContent='VLN '+(V.active?'▶ "'+(V.instruction||'')+'"':'idle')+(L?' · '+L.ms.toFixed(0)+' ms'+(L.stop?' · STOP':'')+' · #'+V.stats.calls:'')+(V.error?' · err '+V.error.slice(0,40):'');
+  vlnGroup.visible=showVlnEl.checked;
+  const sets=V.sets||[],key=sets.map(k=>k.seq).join(',');
+  if(key!==vlnKey){vlnKey=key;vlnGroup.clear();
+    sets.forEach((k,i)=>{const pts=(k.wp_env||k.wp_map||[]),op=0.25+0.75*(i+1)/sets.length;if(!pts.length)return;
+      const P=pts.map(p=>V3(p[0],p[1],0.04));
+      vlnGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(P),new THREE.LineBasicMaterial({color:0x33ddff,transparent:true,opacity:op})));
+      const g=new THREE.BufferGeometry().setFromPoints(P);
+      vlnGroup.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x33ddff,size:0.05,transparent:true,opacity:op})));});
+    const last=sets[sets.length-1],gp=last&&(last.goal_env||last.goal);
+    vlnGoal.userData.has=!!gp;if(gp)vlnGoal.position.copy(V3(gp[0],gp[1],0.12))}
+  vlnGoal.visible=!!vlnGoal.userData.has&&showVlnEl.checked;
+}
 function renderLog(L){if(!L)return;const txt=L.map(r=>r[0]+' '+r[1]+': '+r[2]).join('\n');if(txt===logEl.textContent)return;
   logEl.textContent=txt;logEl.scrollTop=1e9;if(!showlogEl.checked&&L.length){showlogEl.checked=true;logEl.classList.add('show')}}
 

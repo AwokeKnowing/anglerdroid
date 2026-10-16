@@ -29,6 +29,13 @@ def env2nav(S, x, y):
     nx, ny, na = NAVPOSE[0] or (0.0, 0.0, 0.0)
     dx, dy = x - gx, y - gy; c, s = math.cos(-ga), math.sin(-ga); u, v = c * dx - s * dy, s * dx + c * dy   # robot frame
     c, s = math.cos(na), math.sin(na); return nx + c * u - s * v, ny + s * u + c * v
+def nav2env(S, x, y):
+    """inverse of env2nav: nav map frame -> env (GT) frame for drawing nav/VLN geometry in the 3-D view."""
+    gx, gy, ga = S.get("kevin") or S.get("start") or (0.0, 0.0, 0.0)
+    nx, ny, na = NAVPOSE[0] or (0.0, 0.0, 0.0)
+    dx, dy = x - nx, y - ny; c, s = math.cos(-na), math.sin(-na); u, v = c * dx - s * dy, s * dx + c * dy
+    c, s = math.cos(ga), math.sin(ga); return [round(gx + c * u - s * v, 3), round(gy + s * u + c * v, 3)]
+MODE = {"send_all_vln": False}
 TRAJ = []; LOG = []; LOGN = [0]; follow = {"on": False}; lock = threading.Lock(); MAPJPG = [b""]
 def log(who, t):
     with lock: LOG.append([time.strftime("%H:%M:%S"), who, t]); del LOG[:-60]; LOGN[0] += 1
@@ -67,6 +74,12 @@ def handle(text, who="you"):
     if re.search(r"\bfollow\b.*\bdog\b", t):
         follow["on"] = True; return "following the dog at ~1.1-1.4 m (re-goal every 1.5 s)"
     follow["on"] = False
+    if MODE["send_all_vln"]:                                    # 'Send all to LightNav': only an exact stop is not an instruction
+        c = AGENT.exact(t)
+        if c is not None and c["kind"] == "stop": nav_cmd("stop"); return "stop (%.0f ms)" % ((time.monotonic() - t0) * 1e3)
+        raw = " ".join(str(text).split())                      # the line as typed: no place/LLM rewriting
+        res = nav_cmd("ask " + raw)
+        return "→ LightNav: '%s'%s" % (raw, "" if res.get("kind") == "ask" else " (%s)" % (res.get("msg") or res))
     places = list((HUB["st"].get("places") or {}).keys())
     r = AGENT.interpret(t, places)
     if not r["cmds"]: return r["reply"] or "?"
@@ -86,6 +99,9 @@ def chat(text, who="you"):
     if not t: return ""
     log(who, t); rep = handle(t, who); log("kevin", rep); return rep
 
+def set_mode(on, who="?"):
+    if MODE["send_all_vln"] != on: MODE["send_all_vln"] = on; log(who, "Send all to LightNav: %s" % ("ON" if on else "OFF"))
+
 def hub():   # authoritative merged state for every client (WS broadcast + /state.json polling), ~15 Hz
     while True:
         t0 = time.time(); S = sim(); st = {"t": t0}
@@ -94,7 +110,15 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
             n = json.loads(nav("/api/state"))
             st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
                       safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"))
+            V = n.get("vln")
+            if V and S:                                          # env-frame copies for the 3-D view
+                for k in V.get("sets") or []:
+                    k["wp_env"] = [nav2env(S, *p) for p in k.get("wp_map") or []]; k["goal_env"] = k.get("goal") and nav2env(S, *k["goal"])
+            st["vln"] = V
+            if S and n.get("goal"): st["goal_env"] = nav2env(S, *n["goal"][:2])
+            if S and n.get("path"): st["path_env"] = [nav2env(S, *p[:2]) for p in n["path"]]
         except Exception as e: st["nav_error"] = str(e)[:80]
+        st["send_all_vln"] = MODE["send_all_vln"]
         with lock: st["log"] = LOG[-30:]; st["log_n"] = LOGN[0]
         with CL_LOCK: st["clients"] = len(CLIENTS)
         HUB["seq"] += 1; st["seq"] = HUB["seq"]; HUB["st"] = st
@@ -349,6 +373,7 @@ class H(BaseHTTPRequestHandler):
                         txt = str(d.get("text", ""))
                         if AGENT.exact(preprocess(txt)) and AGENT.exact(preprocess(txt))["kind"] == "stop": chat(txt, who)   # inline: instant
                         else: threading.Thread(target=chat, args=(txt, who), daemon=True).start()
+                    elif d.get("type") == "mode" and "send_all_vln" in d: set_mode(bool(d["send_all_vln"]), str(d.get("who") or "?")[:24])
                     elif d.get("type") == "ping": ws.send(json.dumps(dict(type="pong", t=d.get("t"), seq=HUB["seq"])))
             except Exception: pass
             finally:
@@ -396,6 +421,9 @@ class H(BaseHTTPRequestHandler):
         self._send(b"{}", code=404)
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
+        if self.path == "/mode":
+            if "send_all_vln" in d: set_mode(bool(d["send_all_vln"]), str(d.get("who") or "?")[:24])
+            return self._send(json.dumps(MODE).encode())
         if self.path == "/chat":
             who = re.sub(r"[^\w .-]", "", str(d.get("who") or "you"))[:24] or "you"
             return self._send(json.dumps({"reply": chat(d.get("text", ""), who)}).encode())
