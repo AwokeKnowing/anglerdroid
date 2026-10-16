@@ -351,7 +351,7 @@ class Brain:
         return dict(t=time.time(), pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg,
                     goal=None if self.goal is None else list(self.goal), label=self.goal_label,
                     path=None if (p is None or p.path is None) else p.path[::5].round(3).tolist(),
-                    places=self.places.d, cmd=getattr(self, "last", {}), slam=self.slam.stats,
+                    places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks),
                     timing=self.stats.summary(), plan_timing=None if p is None else p.timing,
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])

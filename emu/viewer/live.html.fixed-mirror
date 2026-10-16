@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Kevin Live Sim</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:100vh}
+#c{display:block;width:100%;height:100%}
+#hud{position:fixed;top:8px;left:8px;background:#000a;padding:6px 10px;border-radius:4px;font-size:12px;pointer-events:none;z-index:2}
+#chat{position:fixed;bottom:0;left:0;right:0;background:#111;border-top:1px solid #333;display:flex;padding:8px;gap:8px;z-index:2}
+#chat input{flex:1;background:#222;border:1px solid #444;color:#fff;padding:8px;font:14px system-ui}
+#chat button{background:#0a5;border:none;color:#fff;padding:8px 20px;cursor:pointer;font:14px system-ui}
+#chat button:hover{background:#0b6}
+#log{position:fixed;bottom:60px;left:8px;right:8px;max-height:200px;overflow:auto;background:#0008;padding:6px;font:11px monospace;white-space:pre-wrap;display:none;z-index:2}
+#log.show{display:block}
+#controls{position:fixed;top:8px;right:8px;background:#000a;padding:6px;border-radius:4px;display:flex;flex-direction:column;gap:4px;z-index:2}
+#controls label{font-size:11px;display:flex;align-items:center;cursor:pointer}
+#controls input[type=checkbox]{margin-right:6px}
+#controls button{font-size:11px;padding:4px 8px;cursor:pointer;background:#234;color:#fff;border:1px solid #456;border-radius:3px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">Kevin Live Sim · Drag orbit · Scroll zoom · loading…</div>
+<div id="controls">
+<label><input type="checkbox" id="camvis" checked> Camera frustums</label>
+<label><input type="checkbox" id="showdog"> Show dog marker</label>
+<label><input type="checkbox" id="showlog"> Show log</label>
+<button type="button" id="framebtn">Frame house</button>
+</div>
+<div id="log"></div>
+<div id="chat">
+<input id="q" placeholder="go to couch | forward 2 | turn left | stop" autocomplete="off">
+<button id="send">Send</button>
+</div>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+// MuJoCo Z-up (x,y,z) → Three Y-up with correct handedness: (x, z, -y)
+function mjToThree(x,y,z){return new THREE.Vector3(x,z,-y)}
+
+const canvas=document.getElementById('c');
+const hud=document.getElementById('hud');
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87a0b4);
+
+const camera=new THREE.PerspectiveCamera(55,window.innerWidth/window.innerHeight,0.05,200);
+camera.position.set(8,12,18);
+
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setSize(window.innerWidth,window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+
+const controls=new OrbitControls(camera,canvas);
+controls.target.set(3.5,0.5,-7);
+controls.enableDamping=true;
+controls.dampingFactor=0.08;
+controls.maxPolarAngle=Math.PI*0.49;
+controls.update();
+
+scene.add(new THREE.AmbientLight(0xffffff,0.85));
+const hemi=new THREE.HemisphereLight(0xddeeff,0x443322,0.55);
+scene.add(hemi);
+const dir=new THREE.DirectionalLight(0xffffff,0.9);
+dir.position.set(6,14,4);
+dir.castShadow=true;
+dir.shadow.camera.left=-12;dir.shadow.camera.right=12;
+dir.shadow.camera.top=16;dir.shadow.camera.bottom=-4;
+dir.shadow.camera.near=1;dir.shadow.camera.far=40;
+dir.shadow.mapSize.width=2048;dir.shadow.mapSize.height=2048;
+scene.add(dir);
+
+const ground=new THREE.Mesh(
+  new THREE.PlaneGeometry(40,40),
+  new THREE.MeshStandardMaterial({color:0x3a4a3a,roughness:0.95})
+);
+ground.rotation.x=-Math.PI/2;
+ground.position.y=-0.01;
+ground.receiveShadow=true;
+scene.add(ground);
+const grid=new THREE.GridHelper(40,40,0x668866,0x334433);
+grid.position.y=0.001;
+scene.add(grid);
+
+let sceneLoaded=false;
+let framed=false;
+let robot=null,frustums=[];
+const camvisEl=document.getElementById('camvis');
+const showdogEl=document.getElementById('showdog');
+const worldBox=new THREE.Box3();
+
+// Kevin footprint: dark chassis + mast stub + heading arrow (not a neon toy)
+const robotGroup=new THREE.Group();
+const robotBody=new THREE.Mesh(
+  new THREE.BoxGeometry(0.45,0.18,0.36),
+  new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.55,metalness:0.25})
+);
+robotBody.position.y=0.11;
+robotBody.castShadow=true;
+robotGroup.add(robotBody);
+const robotTop=new THREE.Mesh(
+  new THREE.BoxGeometry(0.16,0.22,0.12),
+  new THREE.MeshStandardMaterial({color:0x1a1d22,roughness:0.5})
+);
+robotTop.position.set(0.05,0.28,0);
+robotGroup.add(robotTop);
+const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.2,0),0.5,0xffcc33,0.12,0.08);
+robotGroup.add(arrowHelper);
+scene.add(robotGroup);
+robot=robotGroup;
+
+// Dog marker off by default — sim yorkie is real but this marker looked like a toy
+const dog=new THREE.Mesh(
+  new THREE.SphereGeometry(0.12,12,12),
+  new THREE.MeshStandardMaterial({color:0x8b6914,roughness:0.7})
+);
+dog.position.y=0.12;
+dog.visible=false;
+scene.add(dog);
+
+const goal=new THREE.Mesh(
+  new THREE.ConeGeometry(0.12,0.35,8),
+  new THREE.MeshStandardMaterial({color:0xff2244,emissive:0xaa0000,emissiveIntensity:0.6})
+);
+goal.position.y=0.18;
+goal.visible=false;
+scene.add(goal);
+
+const path=new THREE.Line(new THREE.BufferGeometry(),new THREE.LineBasicMaterial({color:0xffaa00}));
+scene.add(path);
+
+function makeFrustum(color){
+  const group=new THREE.Group();
+  const mat=new THREE.LineBasicMaterial({color,transparent:true,opacity:0.5});
+  const points=[
+    new THREE.Vector3(0,0,0),new THREE.Vector3(-0.3,-0.2,-0.6),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0.3,-0.2,-0.6),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(0.3,0.2,-0.6),
+    new THREE.Vector3(0,0,0),new THREE.Vector3(-0.3,0.2,-0.6),
+    new THREE.Vector3(-0.3,-0.2,-0.6),new THREE.Vector3(0.3,-0.2,-0.6),
+    new THREE.Vector3(0.3,-0.2,-0.6),new THREE.Vector3(0.3,0.2,-0.6),
+    new THREE.Vector3(0.3,0.2,-0.6),new THREE.Vector3(-0.3,0.2,-0.6),
+    new THREE.Vector3(-0.3,0.2,-0.6),new THREE.Vector3(-0.3,-0.2,-0.6)
+  ];
+  group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),mat));
+  group.visible=false;
+  return group;
+}
+camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked&&sceneLoaded)};
+
+function frameHouse(){
+  if(worldBox.isEmpty()){
+    controls.target.set(3.5,0.5,-7);
+    camera.position.set(10,11,-20);
+  }else{
+    const c=new THREE.Vector3();
+    const s=new THREE.Vector3();
+    worldBox.getCenter(c);
+    worldBox.getSize(s);
+    const radius=Math.max(s.x,s.y,s.z)*0.75+2;
+    controls.target.copy(c);
+    camera.position.set(c.x+radius*0.7, c.y+radius*0.85, c.z+radius*0.95);
+  }
+  controls.update();
+  framed=true;
+  hud.textContent='Kevin Live Sim · Drag orbit · Scroll zoom · framed';
+}
+
+document.getElementById('framebtn').onclick=frameHouse;
+
+async function loadScene(){
+  try{
+    const res=await fetch('/scene.json');
+    const data=await res.json();
+    const geoms=data.geoms||[];
+    let nBox=0,nMesh=0,nOther=0;
+    worldBox.makeEmpty();
+
+    geoms.forEach(g=>{
+      let mesh=null;
+      if(g.kind==='box'){
+        // half-extents (sx,sy,sz) in MuJoCo → full size in Three after (x,z,-y)
+        const geom=new THREE.BoxGeometry(g.size[0]*2,g.size[2]*2,g.size[1]*2);
+        const color=(typeof g.color==='number')?g.color:0x888888;
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.65,metalness:0.05});
+        mesh=new THREE.Mesh(geom,mat);
+        mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
+        mesh.rotation.y=g.yaw||0; // with -y map, keep +yaw
+        nBox++;
+      }else if(g.kind==='cyl'){
+        const geom=new THREE.CylinderGeometry(g.size[0],g.size[0],g.size[1]*2,16);
+        const color=(typeof g.color==='number')?g.color:0x888888;
+        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({color,roughness:0.6}));
+        mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
+        nOther++;
+      }else if(g.kind==='mesh'&&g.vertices&&g.faces){
+        const geom=new THREE.BufferGeometry();
+        const verts=[];const norms=[];
+        g.faces.forEach(f=>{
+          const v0=g.vertices[f[0]],v1=g.vertices[f[1]],v2=g.vertices[f[2]];
+          // (x,y,z)_mj → (x,z,-y)_three
+          verts.push(v0[0],v0[2],-v0[1], v1[0],v1[2],-v1[1], v2[0],v2[2],-v2[1]);
+          const a=new THREE.Vector3(v1[0]-v0[0],v1[2]-v0[2],-(v1[1]-v0[1]));
+          const b=new THREE.Vector3(v2[0]-v0[0],v2[2]-v0[2],-(v2[1]-v0[1]));
+          const n=new THREE.Vector3().crossVectors(a,b).normalize();
+          norms.push(n.x,n.y,n.z, n.x,n.y,n.z, n.x,n.y,n.z);
+        });
+        geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
+        geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
+        const color=(typeof g.color==='number')?g.color:0xdcd8cc;
+        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({
+          color,roughness:0.85,metalness:0.0,side:THREE.DoubleSide,
+          transparent:true,opacity:0.88,depthWrite:true
+        }));
+        nMesh++;
+      }
+      if(mesh){
+        mesh.castShadow=true;
+        mesh.receiveShadow=true;
+        scene.add(mesh);
+        worldBox.expandByObject(mesh);
+      }
+    });
+
+    sceneLoaded=true;
+    hud.textContent=`Kevin Live Sim · ${nBox} boxes · ${nMesh} wall mesh · Drag orbit`;
+    frameHouse();
+  }catch(e){
+    console.error('Failed to load scene:',e);
+    hud.textContent='Scene load failed: '+e.message;
+  }
+}
+
+function updateState(st){
+  try{
+    if(st.kevin){
+      robot.position.copy(mjToThree(st.kevin[0],st.kevin[1],0));
+      robot.rotation.y=st.kevin[2];
+    }
+    if(st.dog&&showdogEl.checked){
+      dog.position.copy(mjToThree(st.dog[0],st.dog[1],0));
+      dog.position.y=0.12;
+      dog.visible=true;
+    }else dog.visible=false;
+    if(st.goal){
+      goal.position.copy(mjToThree(st.goal[0],st.goal[1],0));
+      goal.position.y=0.18;
+      goal.visible=true;
+    }else goal.visible=false;
+    if(st.path&&st.path.length>0){
+      const points=st.path.map(p=>mjToThree(p[0],p[1],0.05));
+      path.geometry.dispose();
+      path.geometry=new THREE.BufferGeometry().setFromPoints(points);
+      path.visible=true;
+    }else path.visible=false;
+  }catch(e){console.error('State update error:',e)}
+}
+
+async function pollState(){
+  try{
+    const res=await fetch('/state.json');
+    const st=await res.json();
+    updateState(st);
+  }catch(e){console.error('Poll error:',e)}
+  setTimeout(pollState,100);
+}
+
+const qEl=document.getElementById('q');
+const sendBtn=document.getElementById('send');
+const logEl=document.getElementById('log');
+const showlogEl=document.getElementById('showlog');
+showlogEl.onchange=()=>{logEl.classList.toggle('show',showlogEl.checked)};
+
+async function sendChat(text){
+  try{
+    const res=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
+    const r=await res.json();
+    logEl.textContent=(logEl.textContent.split('\n').slice(-20).join('\n')+'\n> '+text+'\n'+r.reply).trim();
+    logEl.scrollTop=1e9;
+  }catch(e){logEl.textContent+='\nError: '+e.message}
+}
+sendBtn.onclick=()=>{const t=qEl.value.trim();if(t){sendChat(t);qEl.value=''}};
+qEl.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();sendBtn.click()}};
+
+window.addEventListener('resize',()=>{
+  camera.aspect=window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth,window.innerHeight);
+});
+
+function animate(){
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene,camera);
+}
+loadScene();
+pollState();
+animate();
+</script>
+</body>
+</html>

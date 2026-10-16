@@ -1,10 +1,17 @@
 """Kevin live sim viewer (lean, stdlib + cv2).  usage: viewer.py [port=8095] [nav_port=8090]
-Live WebGL: /live (default) - Three.js sim with WebSocket state stream, orbit controls, chat
+Live WebGL: / (default) - Three.js sim. Shared state over WebSocket /ws (~15 Hz, all clients identical, chat log shared),
+  /state.json polling fallback. Orbit camera is purely client-side (no server camera). Chat -> nav.agent (grammar, else local LLM).
 Legacy JPEG: /jpeg - server-side render with camera frustums
 Map: nav SLAM map + Kevin footprint (safety-state color) + trajectory + goal + planned path + labeled places + dog.
 Chat: text -> small parser -> nav POST /api/command (same interface as the nav page)."""
 import sys, os, json, math, re, time, threading, urllib.request, struct, hashlib, numpy as np, cv2
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path[:0] = [os.path.dirname(os.path.abspath(__file__)), _ROOT]
+import ws as WSL                       # emu/viewer/ws.py: stdlib WebSocket (works through cloudflared)
+from nav import agent as AGENT          # chat agent: grammar pass-through + local LLM -> validated commands
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from emu import shm
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8095; NAV = "http://localhost:%d" % (int(sys.argv[2]) if len(sys.argv) > 2 else 8090)
 FP = [(0.33, 0.27), (0.33, -0.27), (-0.33, -0.27), (-0.33, 0.27)]    # display footprint only
 COL = {"ok": (80, 200, 80), "limited": (0, 200, 255), "blocked": (40, 40, 255), "no_depth": (200, 0, 200)}
@@ -14,33 +21,6 @@ def nav(path, body=None):
 def sim():
     try: return json.load(open("/dev/shm/kevin_sim.json"))
     except Exception: return None
-
-CAMS = {"rs1_depth": ("kevin_rs1", "depth"), "rs1_color": ("kevin_rs1", "color"), "rs2_depth": ("kevin_rs2", "depth"), "rs2_color": ("kevin_rs2", "color")}
-_BLK = {}
-def cam_jpeg(name):
-    """live JPEG of one sim RealSense stream straight from /dev/shm (depth colorized 0.2..4 m). Returns (bytes, err)."""
-    if name not in CAMS: return None, "unknown camera %s (use %s)" % (name, ", ".join(CAMS))
-    sh, key = CAMS[name]
-    try:
-        from emu import shm
-        info = json.load(open(shm.INFO_PATH)); pid = info.get("pid")
-        b = _BLK.get(sh)
-        if b is None or b[1] != pid:
-            dev = [d for d in info["devices"].values() if d.get("shm") == sh][0]
-            b = _BLK[sh] = (shm.Block(sh, dev["layout"]), pid)
-        blk = b[0]
-        for _ in range(5):
-            s0 = int(blk.hdr[0])
-            if s0 & 1: time.sleep(0.002); continue
-            a = blk.arr[key].copy()
-            if int(blk.hdr[0]) == s0: break
-        if key == "depth":
-            d = a.astype(np.float32) / 1000.0
-            v = np.clip((d - 0.2) / 3.8, 0, 1); im = cv2.applyColorMap((255 * (1 - v)).astype(np.uint8), cv2.COLORMAP_JET); im[a == 0] = 0
-        else: im = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
-        ok, jp = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, 70]); return jp.tobytes(), None
-    except Exception as e:
-        _BLK.pop(sh, None); return None, "shm %s unavailable: %s" % (sh, e)
 NAVPOSE = [None]
 def env2nav(S, x, y):
     """env (GT) -> nav map frame via the current GT pose and nav pose (like emu.eval's gt.to_map); falls back to the
@@ -49,25 +29,82 @@ def env2nav(S, x, y):
     nx, ny, na = NAVPOSE[0] or (0.0, 0.0, 0.0)
     dx, dy = x - gx, y - gy; c, s = math.cos(-ga), math.sin(-ga); u, v = c * dx - s * dy, s * dx + c * dy   # robot frame
     c, s = math.cos(na), math.sin(na); return nx + c * u - s * v, ny + s * u + c * v
-TRAJ = []; LOG = []; follow = {"on": False}; lock = threading.Lock(); MAPJPG = [b""]
+TRAJ = []; LOG = []; LOGN = [0]; follow = {"on": False}; lock = threading.Lock(); MAPJPG = [b""]
 def log(who, t):
-    with lock: LOG.append([time.strftime("%H:%M:%S"), who, t]); del LOG[:-60]
+    with lock: LOG.append([time.strftime("%H:%M:%S"), who, t]); del LOG[:-60]; LOGN[0] += 1
 
-def handle(text):
-    t = text.strip().lower().rstrip(".!?"); t = re.sub(r"^(please|kevin|hey kevin)\s+", "", t); t = re.sub(r"\s+please$", "", t)
+SEQ = {"q": [], "gen": 0}; HUB = {"st": {}, "seq": 0}; CLIENTS = set(); CL_LOCK = threading.Lock()
+
+def nav_cmd(t):
+    try: r = json.loads(nav("/api/command", {"text": t}) or b"{}")
+    except Exception as e: r = {"kind": "error", "msg": str(e)}
+    return r
+
+MOTION = {"goto_place", "goto_xy", "relative", "turn", "face", "drive", "ask"}
+def sequencer():   # runs multi-step agent plans one motion at a time; any new command (last wins) or stop clears it
+    while True:
+        time.sleep(0.25)
+        with lock:
+            if not SEQ["q"]: continue
+            gen = SEQ["gen"]
+        mode = (HUB["st"].get("mode") or "idle")
+        if mode not in ("idle",): continue
+        with lock:
+            if SEQ["gen"] != gen or not SEQ["q"]: continue
+            t = SEQ["q"].pop(0)
+        nav_cmd(t); log("kevin", "→ " + t)
+
+def preprocess(t):
+    t = t.strip().lower().rstrip(".!?"); t = re.sub(r"^(please|kevin|hey kevin)[ ,]+", "", t); t = re.sub(r"\s+please$", "", t)
+    if re.fullmatch(r"(come back|come here|go home|return|go back( home)?|home)", t): t = "go to living room"
+    t = re.sub(r"^(go|drive|head|navigate)( over)? to (the )?", "go to ", t)
+    return t
+
+def handle(text, who="you"):
+    """one chat line -> reply text (also logged).  Grammar commands run immediately (stop < 50 ms); otherwise the LLM agent."""
+    t0 = time.monotonic(); t = preprocess(text)
+    with lock: SEQ["q"] = []; SEQ["gen"] += 1                 # last command wins
     if re.search(r"\bfollow\b.*\bdog\b", t):
         follow["on"] = True; return "following the dog at ~1.1-1.4 m (re-goal every 1.5 s)"
     follow["on"] = False
-    if re.fullmatch(r"(come back|come here|go home|return|go back( home)?|home)", t): t = "go to living room"
-    t = re.sub(r"^(go|drive|head|navigate)( over)? to (the )?", "go to ", t)
-    t = re.sub(r"^go to (?:the )?", "go to ", t)
-    m = re.fullmatch(r"(?:go |move |drive )?(forward|ahead|back|backward)s?\s*([\d.]+)?\s*(m|meters?|metres?)?", t)
-    if m: t = "%s %s" % ("forward" if m[1] in ("forward", "ahead") else "back", m[2] or "1")
-    m = re.fullmatch(r"turn (left|right|around)\s*([\d.]+)?\s*(deg|degrees)?", t)
-    if m: t = "turn left 180" if m[1] == "around" else "turn %s %s" % (m[1], m[2] or "90")
-    try: r = json.loads(nav("/api/command", {"text": t}) or b"{}")
-    except Exception as e: r = {"error": str(e)}
-    return "%s -> %s" % (t, r.get("msg") or r.get("reply") or json.dumps(r)[:200])
+    places = list((HUB["st"].get("places") or {}).keys())
+    r = AGENT.interpret(t, places)
+    if not r["cmds"]: return r["reply"] or "?"
+    first, rest = r["cmds"][0], r["cmds"][1:]
+    res = nav_cmd(first[0]); ms = (time.monotonic() - t0) * 1e3
+    with lock:
+        motion_seen = first[1]["kind"] in MOTION
+        for tx, c in rest:
+            if c["kind"] in MOTION or motion_seen: SEQ["q"].append(tx); motion_seen = True
+            else: nav_cmd(tx)
+    plan = " → ".join(tx for tx, _ in r["cmds"])
+    if r["via"] == "grammar": return "%s (%.0f ms)" % (plan, ms)
+    return "%s  [%s, %.1f s]" % ((r["reply"] + " " if r["reply"] else "") + "→ " + plan, AGENT.MODEL, r["ms"] / 1e3)
+
+def chat(text, who="you"):
+    t = str(text)[:300].strip()
+    if not t: return ""
+    log(who, t); rep = handle(t, who); log("kevin", rep); return rep
+
+def hub():   # authoritative merged state for every client (WS broadcast + /state.json polling), ~15 Hz
+    while True:
+        t0 = time.time(); S = sim(); st = {"t": t0}
+        if S: st.update(kevin=S.get("kevin"), dog=S.get("dog"), collisions=S.get("collisions"), env=S.get("env"))
+        try:
+            n = json.loads(nav("/api/state"))
+            st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
+                      safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"))
+        except Exception as e: st["nav_error"] = str(e)[:80]
+        with lock: st["log"] = LOG[-30:]; st["log_n"] = LOGN[0]
+        with CL_LOCK: st["clients"] = len(CLIENTS)
+        HUB["seq"] += 1; st["seq"] = HUB["seq"]; HUB["st"] = st
+        msg = json.dumps(dict(type="state", **st), default=float)
+        with CL_LOCK: cl = list(CLIENTS)
+        for c in cl:
+            try: c.send(msg)
+            except Exception:
+                with CL_LOCK: CLIENTS.discard(c)
+        time.sleep(max(0.01, 1 / 15 - (time.time() - t0)))
 
 def follower():
     last = 0
@@ -168,6 +205,36 @@ def mapper():
             pass
         time.sleep(max(0.05, 0.25 - (time.time() - t0)))
 
+CAMS = {"rs1_depth": ("kevin_rs1", "depth"), "rs1_color": ("kevin_rs1", "color"), "rs2_depth": ("kevin_rs2", "depth"), "rs2_color": ("kevin_rs2", "color"), "mast_rgb": ("kevin_mast", "color")}
+_BLK = {}
+def cam_jpeg(name):
+    """live JPEG of one sim RealSense stream straight from /dev/shm (depth colorized 0.2..4 m). Returns (bytes, err)."""
+    if name not in CAMS: return None, "unknown camera %s (use %s)" % (name, ", ".join(CAMS))
+    sh, key = CAMS[name]
+    try:
+        from emu import shm
+        info = json.load(open(shm.INFO_PATH)); pid = info.get("pid")
+        b = _BLK.get(sh)
+        if b is None or b[1] != pid:
+            dev = info["mast"] if sh == "kevin_mast" else [d for d in info["devices"].values() if d.get("shm") == sh][0]
+            b = _BLK[sh] = (shm.Block(sh, dev["layout"]), pid)
+        blk = b[0]
+        for _ in range(5):
+            s0 = int(blk.hdr[0])
+            if s0 & 1: time.sleep(0.002); continue
+            a = blk.arr[key].copy()
+            if int(blk.hdr[0]) == s0: break
+        if key == "depth":
+            d = a.astype(np.float32) / 1000.0
+            v = np.clip((d - 0.2) / 3.8, 0, 1); im = cv2.applyColorMap((255 * (1 - v)).astype(np.uint8), cv2.COLORMAP_JET); im[a == 0] = 0
+        else: im = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+        ok, jp = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, 70]); return jp.tobytes(), None
+    except Exception as e:
+        _BLK.pop(sh, None); return None, "shm %s unavailable: %s" % (sh, e)
+class _CamShm:   # shm-name matching (hotpatch, browser-verified): /cam/<name>.jpg
+    get_jpeg = staticmethod(cam_jpeg)
+CAMSHM = _CamShm()
+
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Kevin sim</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px system-ui;display:flex;height:100vh}#v{flex:1;position:relative;overflow:hidden}
 #v img{width:100%;height:100%;object-fit:contain;cursor:grab;user-select:none}#r{width:560px;display:flex;flex-direction:column;border-left:1px solid #333}
@@ -184,7 +251,7 @@ loop(img,'/view.jpg?v=2',120);loop(m,'/map.jpg',250);
 let cam={az:0,elev:-62,dist:3.2,camvis:true},drag=null;
 const camvisEl=document.getElementById('camvis');
 camvisEl.onchange=()=>{cam.camvis=camvisEl.checked;sendCam()};
-function sendCam(){fetch('/cam',{method:'POST',body:JSON.stringify(cam)})}
+function sendCam(){/* M1: server-shared camera (POST /cam) removed; orbit is per-client in the WebGL viewer (/) */}
 img.onmousedown=e=>{drag=[e.clientX,e.clientY];e.preventDefault()};
 window.onmouseup=()=>{drag=null};
 window.onmousemove=e=>{if(!drag)return;cam.az-=(e.clientX-drag[0])*0.4;cam.elev=Math.max(-89,Math.min(-5,cam.elev-(e.clientY-drag[1])*0.3));drag=[e.clientX,e.clientY];sendCam()};
@@ -202,11 +269,22 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?")[0]
         if p == "/": return self._send(open(os.path.join(os.path.dirname(__file__), "live.html")).read().encode(), "text/html; charset=utf-8")
-        if p == "/assets/kevin_lite.glb": return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
         if p == "/jpeg": return self._send(PAGE.encode(), "text/html; charset=utf-8")
+        if p == "/assets/kevin_lite.glb":
+            try: return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
+            except Exception: return self._send(b"", code=404)
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)
+        if p.startswith("/cam/"):
+            cam_name = p[5:-4] if p.endswith(".jpg") else None
+            if cam_name:
+                jpg, err = CAMSHM.get_jpeg(cam_name)
+                if jpg:
+                    return self._send(jpg, "image/jpeg")
+                else:
+                    return self._send(json.dumps({"error": err}).encode(), "application/json", 503)
+            return self._send(json.dumps({"error": "bad request"}).encode(), "application/json", 400)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
             with lock: return self._send(json.dumps(LOG).encode())
@@ -221,6 +299,9 @@ class H(BaseHTTPRequestHandler):
                     env = ENVS.get(S["env"], lambda _: None)(0)
                     if env:
                         geoms = []
+                        extent = env.extent if hasattr(env, 'extent') else (-5, -5, 5, 5)
+                        print(f"[viewer] exporting scene: env={S['env']}, extent={extent}, geoms={len(env.geoms)}", flush=True)
+                        
                         for g in env.geoms:
                             color = {"plaster": 0xdcd8cc, "plaster2": 0xc8d0d8, "wood": 0x8c6138, "fabric": 0x4c5c78,
                                    "metal": 0x9ea2a8, "white": 0xededed, "dark": 0x262629}.get(g.mat, 0x888888)
@@ -229,20 +310,51 @@ class H(BaseHTTPRequestHandler):
                                 # Export mesh vertices/faces for walls (trimesh)
                                 try:
                                     import trimesh
+                                    print(f"[viewer] loading mesh: {g.mesh}", flush=True)
                                     m = trimesh.load(g.mesh)
                                     scale = g.size[0] if isinstance(g.size, (list, tuple)) else 1.0
+                                    print(f"[viewer] mesh loaded: {len(m.vertices)} verts, {len(m.faces)} faces, scale={scale}", flush=True)
                                     # Transform vertices: scale + translate by pos (pos is offset from origin)
                                     verts = (m.vertices * scale + np.array(g.pos)).tolist()
                                     faces = m.faces.tolist()
                                     gd["vertices"] = verts
                                     gd["faces"] = faces
+                                    print(f"[viewer] mesh exported: {len(verts)} verts, {len(faces)} faces", flush=True)
                                 except Exception as e:
                                     print(f"[viewer] mesh export failed for {g.mesh}: {e}", flush=True)
+                                    import traceback
+                                    traceback.print_exc()
                             geoms.append(gd)
-                        return self._send(json.dumps({"geoms": geoms}).encode())
+                        
+                        result = {"geoms": geoms, "extent": list(extent)}
+                        print(f"[viewer] scene.json ready: {len(geoms)} geoms", flush=True)
+                        return self._send(json.dumps(result).encode())
                 except Exception as e:
                     print(f"[viewer] scene.json export failed: {e}", flush=True)
-            return self._send(json.dumps({"geoms": []}).encode())
+                    import traceback
+                    traceback.print_exc()
+            return self._send(json.dumps({"geoms": [], "extent": [-5, -5, 5, 5]}).encode())
+        if p == "/ws" and "websocket" in (self.headers.get("Upgrade") or "").lower():
+            ws = WSL.WS(self)
+            try:
+                ws.send(json.dumps(dict(type="hello", seq=HUB["seq"]))); ws.send(json.dumps(dict(type="state", **HUB["st"]), default=float))
+                with CL_LOCK: CLIENTS.add(ws)
+                while True:
+                    m = ws.recv()
+                    if m is None: break
+                    try: d = json.loads(m)
+                    except Exception: continue
+                    if d.get("type") == "chat":
+                        who = re.sub(r"[^\w .-]", "", str(d.get("who") or "you"))[:24] or "you"
+                        txt = str(d.get("text", ""))
+                        if AGENT.exact(preprocess(txt)) and AGENT.exact(preprocess(txt))["kind"] == "stop": chat(txt, who)   # inline: instant
+                        else: threading.Thread(target=chat, args=(txt, who), daemon=True).start()
+                    elif d.get("type") == "ping": ws.send(json.dumps(dict(type="pong", t=d.get("t"), seq=HUB["seq"])))
+            except Exception: pass
+            finally:
+                with CL_LOCK: CLIENTS.discard(ws)
+            return
+        if p == "/state.json" and HUB["st"]: return self._send(json.dumps(HUB["st"], default=float).encode())
         if p == "/state.json":
             # Polled state (tunnel-friendly, prefer this over SSE)
             S = sim()
@@ -280,23 +392,16 @@ class H(BaseHTTPRequestHandler):
                     time.sleep(0.05)
             except: pass
             return
-        if p.startswith("/cam/") and p.endswith(".jpg"):
-            b, err = cam_jpeg(p[5:-4])
-            return self._send(b, "image/jpeg") if b else self._send(json.dumps({"error": err}).encode(), code=503)
         if p == "/favicon.ico": return self._send(b"", "image/x-icon")
         self._send(b"{}", code=404)
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
-        if self.path == "/cam":
-            c = {k: float(d[k]) for k in ("az", "elev", "dist") if k in d}
-            c["camvis"] = bool(d.get("camvis", True))
-            open("/dev/shm/kevin_view_cam.tmp", "w").write(json.dumps(c)); os.replace("/dev/shm/kevin_view_cam.tmp", "/dev/shm/kevin_view_cam.json")
-            return self._send(b"{}")
         if self.path == "/chat":
-            t = str(d.get("text", ""))[:200]; log("you", t); r = handle(t); log("kevin", r); return self._send(json.dumps({"reply": r}).encode())
+            who = re.sub(r"[^\w .-]", "", str(d.get("who") or "you"))[:24] or "you"
+            return self._send(json.dumps({"reply": chat(d.get("text", ""), who)}).encode())
         self._send(b"{}", code=404)
 
 if __name__ == "__main__":
-    for f in (follower, mapper, labeler, egoloop): threading.Thread(target=f, daemon=True).start()
+    for f in (hub, sequencer, follower, mapper, labeler, egoloop): threading.Thread(target=f, daemon=True).start()
     print("viewer on :%d (nav %s)" % (PORT, NAV), flush=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()

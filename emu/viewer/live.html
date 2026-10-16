@@ -34,6 +34,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <label><input type="checkbox" class="campanel" data-cam="rs1_color"> RS1 color (top)</label>
 <label><input type="checkbox" class="campanel" data-cam="rs2_depth"> RS2 depth (fwd)</label>
 <label><input type="checkbox" class="campanel" data-cam="rs2_color"> RS2 color (fwd)</label>
+<label><input type="checkbox" class="campanel" data-cam="mast_rgb"> Mast RGB (LightNav)</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
 <button type="button" id="framebtn">Frame house</button>
 </div>
@@ -304,14 +305,27 @@ function updateState(st){
   }catch(e){console.error('State update error:',e)}
 }
 
-async function pollState(){
-  try{
-    const res=await fetch('/state.json');
-    const st=await res.json();
-    updateState(st);
-  }catch(e){console.error('Poll error:',e)}
-  setTimeout(pollState,100);
+// ---- shared state: WebSocket /ws (same origin => works via cloudflared), HTTP polling fallback
+let ws=null,wsOK=false,lastSeq=0,lastMsgT=0,pollOn=false,wsFails=0;const myName='web-'+Math.random().toString(36).slice(2,6);
+function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();updateState(st);renderLog(st.log);
+  hud.textContent='Kevin Live Sim · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+' · drag orbit (yours only)'}
+function connectWS(){
+  try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws')}catch(e){startPoll();return}
+  ws.onopen=()=>{wsOK=true;wsFails=0};
+  ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.type==='state')onState(m)}catch(err){}};
+  ws.onclose=()=>{wsOK=false;ws=null;wsFails++;startPoll();setTimeout(connectWS,Math.min(10000,1000*wsFails))};
+  ws.onerror=()=>{};
 }
+async function pollState(){
+  if(wsOK){pollOn=false;return}
+  try{const res=await fetch('/state.json');onState(await res.json())}catch(e){}
+  setTimeout(pollState,150);
+}
+function startPoll(){if(!pollOn){pollOn=true;pollState()}}
+setInterval(()=>{if(wsOK&&performance.now()-lastMsgT>3000&&ws){try{ws.close()}catch(e){}}},1000);   // stalled ws -> reconnect/poll
+let logN=-1;
+function renderLog(L){if(!L)return;const txt=L.map(r=>r[0]+' '+r[1]+': '+r[2]).join('\n');if(txt===logEl.textContent)return;
+  logEl.textContent=txt;logEl.scrollTop=1e9;if(!showlogEl.checked&&L.length){showlogEl.checked=true;logEl.classList.add('show')}}
 
 const qEl=document.getElementById('q');
 const sendBtn=document.getElementById('send');
@@ -320,12 +334,8 @@ const showlogEl=document.getElementById('showlog');
 showlogEl.onchange=()=>{logEl.classList.toggle('show',showlogEl.checked)};
 
 async function sendChat(text){
-  try{
-    const res=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});
-    const r=await res.json();
-    logEl.textContent=(logEl.textContent.split('\n').slice(-20).join('\n')+'\n> '+text+'\n'+r.reply).trim();
-    logEl.scrollTop=1e9;
-  }catch(e){logEl.textContent+='\nError: '+e.message}
+  if(wsOK&&ws){ws.send(JSON.stringify({type:'chat',text,who:myName}));return}
+  try{await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text,who:myName})})}catch(e){logEl.textContent+='\nError: '+e.message}
 }
 sendBtn.onclick=()=>{const t=qEl.value.trim();if(t){sendChat(t);qEl.value=''}};
 qEl.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();sendBtn.click()}};
@@ -342,7 +352,7 @@ function animate(){
   renderer.render(scene,camera);
 }
 loadScene();
-pollState();
+connectWS();setTimeout(()=>{if(!wsOK)startPoll()},1500);
 animate();
 </script>
 </body>

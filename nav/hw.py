@@ -33,6 +33,15 @@ class Hardware:
         self._rs2_lock = threading.Lock(); self.rs2_seq = 0; self.rs2_stamp = 0.0
         self._run = True
         threading.Thread(target=self._rs2_pump, daemon=True, name="rs2").start()
+        # command heartbeat (M1): the brain loop's period jitters (p99 ~550 ms seen) past wheelbase's 0.5 s stale
+        # watchdog, which then IDLEs the axes mid-goal.  Re-send the LAST (already safety-filtered + capped) command
+        # at HB_HZ, but only while the brain is fresh (last drive() < HB_FRESH_S ago).  Once stale we send ONE zero
+        # and stop sending, so wheelbase's 0.5 s watchdog and the ODrive watchdog remain the safety net underneath.
+        # Never invents motion: it only repeats what drive() was given, and goes silent if drive() stops.
+        self._drv_lock = threading.Lock(); self._cmd = (0.0, 0.0, 0.0)          # v, w, monotonic stamp
+        self._hb_zeroed = True; self.hb_stats = dict(sent=0, zeroed=0)
+        if self.wb is not None and os.environ.get("KEVIN_HB", "1") == "1":
+            threading.Thread(target=self._hb_loop, daemon=True, name="cmd-heartbeat").start()
 
     def _rs2_pump(self):
         while self._run:
@@ -77,11 +86,33 @@ class Hardware:
         g = (G.mean(0) - TG.GYRO_BIAS) * TG.GYRO_SCALE
         return float((TG.IMU_R @ g)[2])                    # gyro (optical) -> base z via the twin IMU frame
 
+    HB_HZ = 20.0; HB_FRESH_S = 0.3
+
     def drive(self, v, w):
-        if self.wb: self.wb.twist(float(v), float(w))
+        if not self.wb: return
+        with self._drv_lock:
+            self._cmd = (float(v), float(w), time.monotonic()); self._hb_zeroed = False
+            self.wb.twist(float(v), float(w))
+
+    def _hb_loop(self):
+        dt = 1.0 / self.HB_HZ
+        while self._run:
+            time.sleep(dt)
+            with self._drv_lock:
+                v, w, t = self._cmd
+                age = time.monotonic() - t
+                try:
+                    if age < self.HB_FRESH_S:
+                        if age >= dt * 0.5: self.wb.twist(v, w); self.hb_stats["sent"] += 1     # skip if drive() just sent
+                    elif not self._hb_zeroed:
+                        self.wb.twist(0.0, 0.0); self._hb_zeroed = True; self.hb_stats["zeroed"] += 1
+                except Exception:
+                    pass
 
     def close(self):
         self._run = False
         if self.wb:
-            try: self.wb.twist(0.0, 0.0); self.wb.shutdown()
+            try:
+                with self._drv_lock: self._cmd = (0.0, 0.0, 0.0); self.wb.twist(0.0, 0.0)
+                self.wb.shutdown()
             except Exception: pass
