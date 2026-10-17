@@ -632,15 +632,16 @@ class World:
                 if self.d.time >= n_cam / FPS:
                     n_cam += 1
                     with cv:
-                        rq["job"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5])); cv.notify()
+                        rq["job"] = rq["slow"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5])); cv.notify_all()
             if now - last_report > 10:
                 s = self.state()
-                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz" % (
-                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / (now - last_report), self._ncam / (now - last_report)), flush=True)
-                steps = 0; self._ncam = 0; last_report = now
+                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz" % (
+                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / (now - last_report), self._ncam / (now - last_report), self._ncol / (now - last_report)), flush=True)
+                steps = 0; self._ncam = 0; self._ncol = 0; last_report = now
             time.sleep(0.0008)
 
     _ncam = 0
+    _ncol = 0
 
     def _view(self, dr, imgs):
         """Third-person chase view (KEVIN_EMU_VIEW=1, ~10 Hz): own model copy with a brighter headlight + extra lights,
@@ -714,17 +715,19 @@ class World:
         self._vn += 1
 
     def _render_loop(self, rq, cv):
+        """Two render lanes so the expensive colour cameras can never starve depth (safety latency):
+          FAST (this thread): every camera tick (FPS = 30 Hz) render RS1 (top-down) depth first, then RS2 depth
+                 (KEVIN_EMU_FAST_RS2=1, default), depth-only passes with the D4xx noise model.  It is the ONLY writer
+                 of kevin_rs1/kevin_rs2; colour/IR produced by the slow lane ride along with the next depth write.
+          SLOW (own thread + own GL contexts): RS1/RS2 colour, IR pairs, mast, viewer -- runs as fast as it can on the
+                 newest pose (adaptive rate), never blocks the fast lane."""
         import cv2
         mj = self.mj; m = self.m; dr = mj.MjData(m)
         Rd = mj.Renderer(m, DH, DW); Rd.enable_depth_rendering()
-        Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
-        Rc = mj.Renderer(m, CH, CW)
-        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
         rng = np.random.default_rng(7)
         NB = 8   # pre-generated noise banks (generating 400k normals per frame costs more than the render)
         zn = [rng.standard_normal((DH, DW), dtype=np.float32) for _ in range(NB)]
         drop = [rng.random((DH, DW), dtype=np.float32) < self.a.holes for _ in range(NB)]
-        irn = [rng.normal(0, 2.0, (DH, DW)).astype(np.float32) for _ in range(NB)]
         k = [0]
         # D4xx stereo depth model (Intel D400 datasheet 337029; "Tuning depth cameras for best performance" whitepaper):
         #   depth origin = LEFT IR imager; RMS error = Z^2 * subpixel / (f_px * B), subpixel ~0.08, B = 50 mm;
@@ -754,9 +757,46 @@ class World:
             bad[:, :-1] |= smin[:, 1:] <= xr[:, :-1] - 0.5                             # something to the right lands left of us
             zz *= 1000.0; zz[bad] = 0
             return zz.astype(np.uint16)
+        FAST_RS2 = os.environ.get("KEVIN_EMU_FAST_RS2", "1") == "1"
+        lane = {"pend1": {}, "pend2": {}, "d1": None, "d2": None, "lock": threading.Lock()}
+        st = threading.Thread(target=self._slow_lane, args=(rq, cv, lane, FAST_RS2), daemon=True); st.start()
+        jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
+        while True:
+            with cv:
+                while rq["job"] is None: cv.wait()
+                st_ns, qpos, mocap, mquat, wz = rq["job"]; rq["job"] = None
+            dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
+            d1 = depth("rs1_depth")                                # top-down (safety) first, every tick
+            if "rs1" in self.blind: d1[:] = 0
+            with lane["lock"]:
+                p1 = lane["pend1"]; lane["pend1"] = {}
+            self.b1.write(st_ns + jt(), depth=d1, **p1)
+            if FAST_RS2:
+                d2 = depth("rs2_ir1")
+                if "rs2" in self.blind: d2[:] = 0
+                with lane["lock"]:
+                    p2 = lane["pend2"]; lane["pend2"] = {}
+                self.b2.write(st_ns + jt(), depth=d2, **p2); lane["d2"] = d2
+            else:
+                with lane["lock"]:
+                    p2 = lane["pend2"]; lane["pend2"] = {}
+                if p2: self.b2.write(p2.pop("_st"), **p2)
+            lane["d1"] = d1; self._ncam += 1
+
+    def _slow_lane(self, rq, cv, lane, fast_rs2):
+        import cv2
+        mj = self.mj; m = self.m; dr = mj.MjData(m)
+        Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
+        Rc = mj.Renderer(m, CH, CW)
+        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
+        Rd2 = None
+        if not fast_rs2: Rd2 = mj.Renderer(m, DH, DW); Rd2.enable_depth_rendering()
+        rng = np.random.default_rng(8); NB = 8
+        irn = [rng.normal(0, 2.0, (DH, DW)).astype(np.float32) for _ in range(NB)]
+        irn2 = [np.tile(b, (2, 2)) for b in irn]   # 2x banks: random window per frame instead of np.roll copies
+        fpx = _intr(DW, DH, FOVY_D)["fx"]
         def rgb(R, cam):
             R.update_scene(dr, cam); return R.render()
-        W3 = np.array([0.299 * 0.9, 0.587 * 0.9, 0.114 * 0.9], np.float32)
         fx = {}
         if realism.REAL:      # camera pipeline: AE, vignetting, yaw motion blur, shot/read noise; mast also lens distortion
             ci, mt = _intr(CW, CH, FOVY_C), MAST_TRUE
@@ -766,40 +806,39 @@ class World:
         def fxa(name, img, w):
             return fx[name](img, w) if name in fx else img
         from concurrent.futures import ThreadPoolExecutor
-        pool = ThreadPoolExecutor(2)       # CamFX (cv2, GIL released) overlaps with the next renders / depth noise
-        cv2.setNumThreads(1)               # the sim is CPU-bound: no cv2 worker oversubscription on top of our 2 threads
-        irn2 = [np.tile(b, (2, 2)) for b in irn]   # 2x banks: random window per frame instead of np.roll copies
+        pool = ThreadPoolExecutor(2)       # CamFX (cv2, GIL released) overlaps with the next renders
+        cv2.setNumThreads(1)               # the sim is CPU-bound: no cv2 worker oversubscription
+        last = None
         while True:
             with cv:
-                while rq["job"] is None: cv.wait()
-                st_ns, qpos, mocap, mquat, wz = rq["job"]; rq["job"] = None
+                while rq.get("slow") is None or rq["slow"] is last: cv.wait()
+                last = job = rq["slow"]
+            st_ns, qpos, mocap, mquat, wz = job
             dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
-            d1 = depth("rs1_depth")
-            if "rs1" in self.blind: d1[:] = 0
             f1 = pool.submit(fxa, "rs1_color", rgb(Rc, "rs1_color"), wz); f2 = pool.submit(fxa, "rs2_color", rgb(Rc, "rs2_color"), wz)
-            out1 = dict(depth=d1); out = dict(depth=depth("rs2_ir1"))
-            if "rs2" in self.blind: out["depth"][:] = 0
+            o1, o2 = {}, {}
             if Rc8 is not None:
-                for dev, o in (("rs1", out1), ("rs2", out)):
+                for dev, o in (("rs1", o1), ("rs2", o2)):
                     for nm in ("ir1", "ir2"):
-                        g = cv2.cvtColor(rgb(Rc8, dev + "_" + nm), cv2.COLOR_RGB2GRAY).astype(np.float32) * np.float32(0.9)   # = @ W3, 10x faster
-                        # read noise is temporally independent on a real imager: a fixed 8-frame bank added at the same
-                        # pixel positions acts like body-fixed texture and pulls visual odometry toward zero motion.
-                        # Random 2-D shift of a bank pattern per frame -> no static pattern, ~1 ms.
+                        g = cv2.cvtColor(rgb(Rc8, dev + "_" + nm), cv2.COLOR_RGB2GRAY).astype(np.float32) * np.float32(0.9)
+                        # read noise is temporally independent on a real imager: random 2-D shift of a bank pattern
                         if realism.REAL:
                             L = abs(wz) * 0.004 * fpx
                             if L >= 1.0: g = cv2.blur(g, (int(round(L)) | 1, 1))
                         oy, ox = int(rng.integers(DH)), int(rng.integers(DW))
                         g += irn2[int(rng.integers(NB))][oy:oy + DH, ox:ox + DW]
                         o[nm] = np.clip(g, 0, 255).astype(np.uint8)
-            out1["color"] = f1.result(); out["color"] = f2.result()
-            jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
-            self.b1.write(st_ns + jt(), **out1)
-            self.b2.write(st_ns + jt(), **out); self._ncam += 1
+            o1["color"] = f1.result(); o2["color"] = f2.result()
+            if Rd2 is not None:                                    # RS2 depth in the slow lane only if not fast
+                Rd2.update_scene(dr, "rs2_ir1"); Rd2.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
+                o2["depth"] = (Rd2.render() * 1000.0).astype(np.uint16); o2["_st"] = st_ns
+            with lane["lock"]:
+                lane["pend1"] = o1; lane["pend2"] = o2
+            self._ncol += 1
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
                 t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
-            if VIEW and self._ncam % 3 == 0:
-                self._view(dr, {"rs1_depth": out1["depth"], "rs1_color": out1["color"], "rs2_ir1": out["depth"], "rs2_color": out["color"]})
+            if VIEW and self._ncol % 2 == 0 and lane["d1"] is not None:
+                self._view(dr, {"rs1_depth": lane["d1"], "rs1_color": o1["color"], "rs2_ir1": lane["d2"] if lane["d2"] is not None else o2.get("depth"), "rs2_color": o2["color"]})
 
 
 def main():
