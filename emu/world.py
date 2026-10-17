@@ -41,6 +41,10 @@ FPS = 30
 #   realsense_d435i_imu_optical   (-0.1382, -0.0055, 0.3921)
 # NB: the stack's vision.TD_X_OFFSET (-75 px) implies the RS1 centre 4 cm ahead of the axle; the twin says 0.7 cm behind.
 RS1_POS = (-0.007, 0.0, 0.8619); RS1C_POS = (0.008, 0.0, 0.8619)
+# mast RGB (USB16MP01 board camera at the tip of beam_mast_top; twin frames.rgb, optical z = base +x, pitch 0).  Rendered
+# at MAST_HZ into shm kevin_mast for the VLN (LightNav-0).  The twin has no lens FOV: KEVIN_MAST_HFOV (deg) until measured.
+MAST_POS = (0.0291, 0.0, 0.8905); MW, MH = 640, 480; MAST_HFOV = float(os.environ.get("KEVIN_MAST_HFOV", "100"))
+MAST_FOVY = math.degrees(2 * math.atan(math.tan(math.radians(MAST_HFOV) / 2) * MH / MW)); MAST_HZ = float(os.environ.get("KEVIN_MAST_HZ", "10"))
 RS2_POS = (-0.1301, 0.0, 0.3822); RS2C_DY = 0.015; RS2_IMU = (-0.1382, -0.0055, 0.3921)
 RS2_PITCH = math.radians(27.0); BASELINE = 0.050
 # true (as-mounted) forward D435i pose: nominal unless KEVIN_EMU_RS2_RAND=1 (per seed: pitch U(24,30) deg, base roll
@@ -217,6 +221,7 @@ def compose(env: envs.Env, tire: str) -> str:
     ET.SubElement(base, "camera", name="rs1_ir1", pos="%g %g %g" % RS1_POS, xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_D))
     ET.SubElement(base, "camera", name="rs1_ir2", pos="%g %g %g" % (RS1_POS[0] - BASELINE, RS1_POS[1], RS1_POS[2]), xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_D))
     ET.SubElement(base, "camera", name="rs1_color", pos="%g %g %g" % RS1C_POS, xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_C))
+    ET.SubElement(base, "camera", name="mast_rgb", pos="%g %g %g" % MAST_POS, xyaxes="0 -1 0 0 0 1", fovy="%.3f" % MAST_FOVY)
     pr = math.radians(RS2_TRUE["pitch_deg"]); s, c = math.sin(pr), math.cos(pr); dz = RS2_TRUE["dz"]
     for nm, dy in (("rs2_ir1", 0.0), ("rs2_ir2", -BASELINE), ("rs2_color", RS2C_DY)):
         ET.SubElement(base, "camera", name=nm, pos="%g %g %g" % (RS2_POS[0], RS2_POS[1] + dy, RS2_POS[2] + dz), xyaxes=_rs2_axes((0, -1, 0), (s, 0, c)), fovy=str(FOVY_D if "ir" in nm else FOVY_C))
@@ -425,6 +430,7 @@ class World:
         self.b1 = shm.Block("kevin_rs1", L1, create=True); self.b2 = shm.Block("kevin_rs2", L2, create=True)
         self.imu = shm.ImuRing("kevin_imu", create=True)
         self.gt = shm.Block("kevin_gt", [("pose", (12,), "f8")], create=True)
+        self.bm = shm.Block("kevin_mast", [("color", (MH, MW, 3), "u1")], create=True)
         di, ci = _intr(DW, DH, FOVY_D), _intr(CW, CH, FOVY_C)
         I3 = [1, 0, 0, 0, 1, 0, 0, 0, 1]
         def st(i, t): return dict(i, pose=[I3, t])
@@ -434,6 +440,8 @@ class World:
                        streams=dict(depth=st(di, [0, 0, 0]), color=st(ci, [-0.015, 0, 0]), ir1=st(di, [0, 0, 0]), ir2=st(di, [BASELINE, 0, 0]))),
             ser2: dict(name="Intel RealSense D435I", fps=FPS, shm="kevin_rs2", layout=[[n, list(s), d] for n, s, d in L2], imu="kevin_imu",
                        streams=dict(depth=st(di, [0, 0, 0]), color=st(ci, [-0.015, 0, 0]), ir1=st(di, [0, 0, 0]), ir2=st(di, [BASELINE, 0, 0])))},
+            "mast": dict(shm="kevin_mast", layout=[["color", [MH, MW, 3], "u1"]], intr=_intr(MW, MH, MAST_FOVY), hfov_deg=MAST_HFOV, fovy_deg=MAST_FOVY,
+                         pos=MAST_POS, pitch_deg=0.0, hz=MAST_HZ),
             "env": self.env.name, "seed": self.a.seed, "places": self.env.places, "start": self.env.start, "tire": self.a.tire,
             "mounts": dict(rs1=RS1_POS, rs2=RS2_POS, rs2_imu=RS2_IMU, rs2_pitch_deg=math.degrees(RS2_PITCH), rs2_true=RS2_TRUE), "pid": os.getpid(), "t0": time.monotonic()}
         np.savez_compressed("/dev/shm/kevin_gt_map.npz", occ=self.env.gt, origin=np.array(self.env.gt_origin), res=envs.GT_RES)
@@ -665,6 +673,7 @@ class World:
         Rd = mj.Renderer(m, DH, DW); Rd.enable_depth_rendering()
         Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
         Rc = mj.Renderer(m, CH, CW)
+        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
         rng = np.random.default_rng(7)
         NB = 8   # pre-generated noise banks (generating 400k normals per frame costs more than the render)
         zn = [rng.standard_normal((DH, DW), dtype=np.float32) for _ in range(NB)]
@@ -722,6 +731,8 @@ class World:
             jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
             self.b1.write(st_ns + jt(), **out1)
             self.b2.write(st_ns + jt(), **out); self._ncam += 1
+            if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
+                t_mast[0] = st_ns; self.bm.write(st_ns, color=rgb(Rm, "mast_rgb"))
             if VIEW and self._ncam % 3 == 0:
                 self._view(dr, {"rs1_depth": out1["depth"], "rs1_color": out1["color"], "rs2_ir1": out["depth"], "rs2_color": out["color"]})
 

@@ -1,7 +1,9 @@
 """LightNav-0 (or any server speaking its WebSocket protocol: login/reset/next) as a high-level goal source.
 
-ask <instruction> -> stream RS2 color frames to the model (~1-2 Hz on i777), take its 10 SE(2) robot-frame
-waypoints, and hand the farthest one to the planner as a map-frame goal.  The 30 Hz loop, MPPI and the
+ask <instruction> -> stream MAST RGB frames (USB16MP01 at the mast tip, pitch 0, ~0.98 m: inside LightNav-0's training
+camera range; NOT the 27-deg-pitched D435i) at a fixed FPS (4, the model's training rate: the server keeps the frame
+history, so frames must arrive at a steady clock), get its (10, 3) robot-frame waypoints [forward_m, lateral_m(+left),
+yaw_rad(+ccw)] (cumulative, relative to the pose at that frame), and hand the farthest one to the planner as a map-frame goal.  The 30 Hz loop, MPPI and the
 safety envelope are unchanged: the VLM only ever proposes goals.  'stop' (or the model's stop flag) ends it.
 
 state() exposes the last calls for the viewer (waypoints in the map frame, using the pose at the frame the image was
@@ -12,6 +14,39 @@ import numpy as np
 import cv2
 
 LOGDIR = os.path.expanduser(os.environ.get("KEVIN_VLN_LOG", "~/.kevin/emu/vln_log"))
+FPS = float(os.environ.get("KEVIN_VLN_FPS", "4"))
+
+
+class MastCam:
+    """Mast RGB source.  sim: shm kevin_mast (emu/world.py);  real: the USB webcam (cameras.find_rgb_device / KEVIN_RGB_DEV).
+    Falls back to the RS2 colour stream (flagged in state) only if no mast camera exists."""
+    def __init__(self, hw):
+        self.hw = hw; self.kind = None; self.blk = None; self.cap = None; self.err = None
+
+    def _open(self):
+        if os.environ.get("KEVIN_HAL") == "sim":
+            try:
+                from emu import shm
+                m = shm.read_info(wait_s=0.5)["mast"]; self.blk = shm.Block(m["shm"], m["layout"]); self.kind = "mast_sim"; self.meta = m; return
+            except Exception as e: self.err = "no sim mast shm: %r" % e
+        else:
+            try:
+                from cameras import find_rgb_device
+                dev = find_rgb_device()
+                if dev is not None:
+                    self.cap = cv2.VideoCapture(dev); self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640); self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480); self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # newest frame, not a stale buffered one
+                    if self.cap.isOpened(): self.kind = "mast_usb"; return
+                self.err = "no USB mast camera"
+            except Exception as e: self.err = "mast camera: %r" % e
+        self.kind = "rs2_fallback"
+
+    def grab(self):
+        """-> RGB uint8 (H, W, 3) or None."""
+        if self.kind is None: self._open()
+        if self.kind == "mast_sim": return self.blk.read()[2]["color"]
+        if self.kind == "mast_usb":
+            ok, f = self.cap.read(); return f[..., ::-1].copy() if ok else None
+        _, _, _, color, *_ = self.hw.rs2_snapshot(); return color
 
 
 def to_map(pose, wp):
@@ -24,7 +59,7 @@ class VLN:
     def __init__(self, url, brain, lookahead=None, connect=None):
         self.url = url; self.b = brain; self.text = None; self.stats = dict(calls=0, last_ms=0.0, mean_ms=0.0, errors=0)
         self.last = None; self.sets = collections.deque(maxlen=5); self.error = None; self._ev = threading.Event(); self._lock = threading.Lock()
-        self._connect = connect; self._log = None
+        self._connect = connect; self._log = None; self.cam = MastCam(brain.hw); self.fps = 0.0
         threading.Thread(target=self._loop, daemon=True, name="vln").start()
 
     def instruct(self, text):
@@ -34,7 +69,7 @@ class VLN:
 
     def state(self):
         with self._lock:
-            return dict(url=self.url, instruction=self.text, active=bool(self.text), error=self.error, stats=dict(self.stats),
+            return dict(url=self.url, camera=self.cam.kind, camera_err=self.cam.err, fps=round(self.fps, 2), target_fps=FPS, instruction=self.text, active=bool(self.text), error=self.error, stats=dict(self.stats),
                         last=self.last, sets=list(self.sets))
 
     def _jsonl(self, rec):
@@ -53,18 +88,28 @@ class VLN:
                 with connect(self.url, max_size=None) as ws:
                     rq = lambda a, d: (ws.send(json.dumps(dict(action=a, data=d))), json.loads(ws.recv()))[1]["data"]
                     rq("login", dict(clientId="kevin")); rq("reset", {}); seq = 0; self.error = None
+                    tick = time.monotonic(); tprev = None
                     while self.text:
                         instr = self.text
-                        _, _, _, color, *_ = self.b.hw.rs2_snapshot()
+                        # fixed 4 fps frame clock: the model's history assumes evenly spaced frames
+                        dt = tick - time.monotonic()
+                        if dt > 0: time.sleep(dt)
+                        tick = max(tick + 1.0 / FPS, time.monotonic() - 0.5 / FPS)
+                        color = self.cam.grab()
+                        if color is None: time.sleep(0.05); continue
+                        pose = tuple(float(v) for v in self.b.slam.pose())              # pose at image time
                         ok, jpg = cv2.imencode(".jpg", color[..., ::-1] if color.ndim == 3 else color, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        pose = tuple(float(v) for v in self.b.slam.pose()); t0 = time.monotonic(); seq += 1
+                        tn = time.monotonic()
+                        if tprev: self.fps = 0.8 * self.fps + 0.2 / max(tn - tprev, 1e-3) if self.fps else 1.0 / max(tn - tprev, 1e-3)
+                        tprev = tn; t0 = time.monotonic(); seq += 1
                         d = rq("next", dict(seq=seq, image=base64.b64encode(jpg.tobytes()).decode(), instruction=instr))
                         ms = (time.monotonic() - t0) * 1e3
+                        if d.get("rc", 0) != 0: raise RuntimeError("lightnav rc=%s %s" % (d.get("rc"), d.get("msg")))
                         raw = (d.get("actions") or {}).get("actions") or []
                         wp = np.asarray(raw, float); wp = wp.reshape(-1, wp.shape[-1]) if wp.size else np.zeros((0, 2))
                         stop = bool(d.get("stop")) or len(wp) == 0
                         wmap = to_map(pose, wp.tolist()); goal = None if stop else wmap[-1]
-                        rec = dict(t=time.time(), seq=seq, instruction=instr, ms=round(ms, 1), pose=[round(v, 3) for v in pose],
+                        rec = dict(t=time.time(), seq=seq, instruction=instr, ms=round(ms, 1), server_ms=d.get("latency_ms"), cam=self.cam.kind, fps=round(self.fps, 2), visible=d.get("visible"), pose=[round(v, 3) for v in pose],
                                    wp=wp.round(3).tolist(), wp_map=wmap, goal=goal, stop=stop)
                         with self._lock:
                             self.stats["calls"] += 1; self.stats["last_ms"] = round(ms, 1)
@@ -74,7 +119,6 @@ class VLN:
                         if stop:
                             self.b.command("stop"); self.b.log("VLN: model says stop"); self.text = None; break
                         self.b.command("go to %.3f %.3f" % tuple(goal))       # proposal only: planner + MPPI + safety unchanged
-                        time.sleep(0.05)
             except Exception as e:
                 with self._lock: self.stats["errors"] += 1; self.error = repr(e)[:200]
                 self.b.log("VLN error: %r" % e); self.text = None

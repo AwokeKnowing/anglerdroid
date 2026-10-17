@@ -2,14 +2,15 @@
 python tests/test_vln.py"""
 import glob, json, math, os, sys, tempfile, time
 sys.path[:0] = [os.path.dirname(os.path.abspath(__file__)), os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))]
-os.environ["KEVIN_VLN_LOG"] = tempfile.mkdtemp()
+os.environ["KEVIN_VLN_LOG"] = tempfile.mkdtemp(); os.environ["KEVIN_RGB_DEV"] = "none"; os.environ.pop("KEVIN_HAL", None)
 import fake_lightnav as F
 from nav import vln as VL
 VL.LOGDIR = os.environ["KEVIN_VLN_LOG"]
 srv, n = F.lightnav(18050, delay=0.15, stop_after=4)
 b = F.FakeBrain(pose=(1.0, 2.0, math.pi / 2)); v = VL.VLN("ws://127.0.0.1:18050", b)
 v.instruct("go to the dog")
-time.sleep(0.05); b._pose = [5.0, 5.0, 0.0]          # robot moves while the first call is in flight: transform must use the image-time pose
+while n["next"] < 1: time.sleep(0.005)
+b._pose = [5.0, 5.0, 0.0]          # robot moves while the first call is in flight: transform must use the image-time pose
 t0 = time.time()
 while v.text and time.time() - t0 < 10: time.sleep(0.05)
 S = v.state(); first = S["sets"][0]
@@ -28,4 +29,6 @@ assert len(L) == 5 and L[0]["instruction"] == "go to the dog" and L[0]["goal"] =
 b2 = F.FakeBrain(); v2 = VL.VLN("ws://127.0.0.1:1", b2); v2.instruct("x"); time.sleep(1.0)
 print("dead server:", v2.state()["error"], b2.cmds)
 assert v2.state()["error"] and not v2.state()["active"] and b2.cmds == []
+print("camera", S["camera"], "fps %.2f (target %.1f)" % (S["fps"], S["target_fps"]))
+assert 3.0 < S["fps"] <= 4.4
 print("PASS")
