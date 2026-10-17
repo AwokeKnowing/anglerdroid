@@ -28,6 +28,9 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <canvas id="c"></canvas>
 <div id="hud">Kevin Live Sim · Drag orbit · Scroll zoom · loading…</div>
 <div id="controls">
+<label title="Kevin, map, path, goals, places and LightNav are drawn where SLAM thinks they are"><input type="checkbox" id="showslam" checked> SLAM map (Kevin's world)</label>
+<label><input type="checkbox" id="showplaces" checked> Places</label>
+<label title="simulator ground truth: true house + true Kevin (ghost). Drift shows as the two separating">Sim truth&nbsp;<select id="gtmode" style="font-size:11px"><option value="off">off</option><option value="faint" selected>faint</option><option value="full">full</option></select></label>
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
 <label title="every chat line except stop goes straight to LightNav-0 as the instruction (shared by all viewers)"><input type="checkbox" id="sendallvln"> Send all to LightNav</label>
 <label><input type="checkbox" id="showvln" checked> Show LightNav waypoints</label>
@@ -40,6 +43,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <label><input type="checkbox" class="campanel" data-cam="mast_rgb"> Mast RGB (LightNav)</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
 <button type="button" id="framebtn">Frame house</button>
+<button type="button" id="kevbtn">Close-up on Kevin</button>
 </div>
 <div id="campanels"></div>
 <div id="log"></div>
@@ -103,6 +107,16 @@ const grid=new THREE.GridHelper(40,40,0x668866,0x334433);
 grid.position.y=0.001;
 scene.add(grid);
 
+// Frames: everything nav knows lives in navFrame (nav map frame); navFrame is placed in the scene by the server's
+// fixed anchor (nav->env, from GT at nav start; identity on the real robot).  gtGroup = sim ground truth (house, ghost).
+const navFrame=new THREE.Group();scene.add(navFrame);
+const gtGroup=new THREE.Group();scene.add(gtGroup);
+const gtModeEl=document.getElementById('gtmode'),showSlamEl=document.getElementById('showslam'),showPlacesEl=document.getElementById('showplaces');
+gtModeEl.value=localStorage.getItem('kv_gtmode')||'faint';
+const gtMats=[];   // [material, full-opacity]
+function applyGT(){const m=gtModeEl.value;localStorage.setItem('kv_gtmode',m);gtGroup.visible=m!=='off';
+  gtMats.forEach(([mt,op])=>{mt.transparent=true;mt.opacity=m==='full'?op:Math.min(op,0.22);mt.depthWrite=m==='full';mt.needsUpdate=true})}
+gtModeEl.onchange=applyGT;
 let sceneLoaded=false;
 let framed=false;
 let robot=null,frustums=[];
@@ -127,13 +141,20 @@ robotTop.position.set(0.05,0.28,0);
 robotGroup.add(robotTop);
 const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.2,0),0.5,0xffcc33,0.12,0.08);
 robotGroup.add(arrowHelper);
-scene.add(robotGroup);
+navFrame.add(robotGroup);
 robot=robotGroup;
+// ghost = where the simulator says Kevin really is (GT); only meaningful in sim
+const ghost=new THREE.Group();ghost.visible=false;gtGroup.add(ghost);
+{const gm=new THREE.MeshBasicMaterial({color:0x66ff99,transparent:true,opacity:0.35,depthWrite:false});
+ const b=new THREE.Mesh(new THREE.BoxGeometry(0.42,0.3,0.42),gm);b.position.set(-0.07,0.15,0);ghost.add(b);
+ ghost.add(new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.31,0),0.45,0x66ff99,0.12,0.08));}
 // Real Kevin mesh (kevin_lite.glb, Y-up, +X forward); hide box placeholder once loaded
 new GLTFLoader().load('/assets/kevin_lite.glb',g=>{
   const k=g.scene; k.position.y=0.0856; // lift wheels (min y=-0.0856) onto floor
   k.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true}});
   robotGroup.add(k); robotBody.visible=false; robotTop.visible=false;
+  const gk=k.clone(true);gk.traverse(o=>{if(o.isMesh){o.material=new THREE.MeshBasicMaterial({color:0x66ff99,transparent:true,opacity:0.3,depthWrite:false});o.castShadow=false}});
+  ghost.clear();ghost.add(gk);
 },undefined,e=>console.warn('kevin glb load failed, keeping placeholder',e));
 
 // Yorkie built from emu/world.py dog_* geoms (body frame: x fwd, y left, z up; mocap at floor)
@@ -152,7 +173,7 @@ const dog=new THREE.Group();
   cap(0.01,[-0.11,0,0.15],[-0.15,0,0.2],fur2);
 }
 dog.visible=false;
-scene.add(dog);
+scene.add(dog);   // dog pose is sim GT (env frame)
 
 const goal=new THREE.Mesh(
   new THREE.ConeGeometry(0.12,0.35,8),
@@ -160,10 +181,50 @@ const goal=new THREE.Mesh(
 );
 goal.position.y=0.18;
 goal.visible=false;
-scene.add(goal);
+navFrame.add(goal);
 
 const path=new THREE.Line(new THREE.BufferGeometry(),new THREE.LineBasicMaterial({color:0xffaa00}));
-scene.add(path);
+navFrame.add(path);
+
+// ---- SLAM occupancy map (nav /api/map.png via viewer /slam.png): floor texture + extruded occupied cells
+const slamGroup=new THREE.Group();navFrame.add(slamGroup);
+const slamPlane=new THREE.Mesh(new THREE.PlaneGeometry(1,1),new THREE.MeshBasicMaterial({transparent:true,depthWrite:false,side:THREE.DoubleSide}));
+slamPlane.rotation.x=-Math.PI/2;slamPlane.position.y=0.004;slamPlane.renderOrder=1;slamPlane.visible=false;slamGroup.add(slamPlane);
+const SLAM_MAXI=60000,SLAM_H=0.22;
+const slamCells=new THREE.InstancedMesh(new THREE.BoxGeometry(1,1,1),new THREE.MeshStandardMaterial({color:0x5a6f8c,roughness:0.7}),SLAM_MAXI);
+slamCells.count=0;slamCells.castShadow=true;slamCells.frustumCulled=false;slamGroup.add(slamCells);
+let slamV=-1,slamBusy=false,slamBox=null;
+function updateSlam(meta){
+  slamGroup.visible=showSlamEl.checked;
+  if(!meta||meta.v===slamV||slamBusy)return;slamBusy=true;
+  const im=new Image();im.onload=()=>{slamBusy=false;slamV=meta.v;
+    const W=im.width,H=im.height,res=(meta.x1-meta.x0)/W;
+    const cv=document.createElement('canvas');cv.width=W;cv.height=H;const cx=cv.getContext('2d');cx.drawImage(im,0,0);
+    const tex=new THREE.CanvasTexture(cv);tex.magFilter=THREE.NearestFilter;tex.minFilter=THREE.LinearFilter;tex.colorSpace=THREE.SRGBColorSpace;
+    if(slamPlane.material.map)slamPlane.material.map.dispose();slamPlane.material.map=tex;slamPlane.material.needsUpdate=true;
+    slamPlane.scale.set(meta.x1-meta.x0,meta.y1-meta.y0,1);slamPlane.position.x=(meta.x0+meta.x1)/2;slamPlane.position.z=-(meta.y0+meta.y1)/2;slamPlane.visible=true;
+    const D=cx.getImageData(0,0,W,H).data,k=2,m=new THREE.Matrix4();let n=0;   // 2x2 px (4 cm) blocks, any occupied px
+    for(let r=0;r<H-1&&n<SLAM_MAXI;r+=k)for(let c=0;c<W-1&&n<SLAM_MAXI;c+=k){
+      let o=false;for(let dr=0;dr<k&&!o;dr++)for(let dc=0;dc<k;dc++){const a=((r+dr)*W+c+dc)*4;if(D[a+3]>200){o=true;break}}
+      if(!o)continue;const x=meta.x0+(c+k/2)*res,y=meta.y1-(r+k/2)*res;
+      m.makeScale(k*res,SLAM_H,k*res);m.setPosition(x,SLAM_H/2,-y);slamCells.setMatrixAt(n++,m)}
+    slamCells.count=n;slamCells.instanceMatrix.needsUpdate=true;
+    slamBox=new THREE.Box3(mjToThree(meta.x0,meta.y1,0),mjToThree(meta.x1,meta.y0,0.5));
+  };im.onerror=()=>{slamBusy=false};im.src='/slam.png?v='+meta.v;
+}
+showSlamEl.onchange=()=>{slamGroup.visible=showSlamEl.checked};
+
+// ---- labelled places (nav frame): pin + text sprite
+const placeGroup=new THREE.Group();navFrame.add(placeGroup);let placeKey='';
+function textSprite(t){const c=document.createElement('canvas'),x=c.getContext('2d');x.font='bold 40px system-ui';const w=Math.ceil(x.measureText(t).width)+24;
+  c.width=w;c.height=56;x.font='bold 40px system-ui';x.fillStyle='#000a';x.fillRect(0,0,w,56);x.fillStyle='#ffd34d';x.fillText(t,12,42);
+  const tx=new THREE.CanvasTexture(c);tx.colorSpace=THREE.SRGBColorSpace;const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tx,depthTest:false,transparent:true}));
+  sp.scale.set(0.003*w,0.003*56,1);sp.renderOrder=5;return sp}
+function updatePlaces(P){placeGroup.visible=showPlacesEl.checked;const key=JSON.stringify(P||{});if(key===placeKey)return;placeKey=key;
+  placeGroup.children.forEach(o=>{if(o.material&&o.material.map)o.material.map.dispose()});placeGroup.clear();
+  for(const [nm,p] of Object.entries(P||{})){const pin=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,0.5,8),new THREE.MeshBasicMaterial({color:0xffd34d}));
+    pin.position.copy(mjToThree(p[0],p[1],0.25));placeGroup.add(pin);const sp=textSprite(nm.replace(/_/g,' '));sp.position.copy(mjToThree(p[0],p[1],0.62));placeGroup.add(sp)}}
+showPlacesEl.onchange=()=>{placeGroup.visible=showPlacesEl.checked};
 
 // Camera FOV frustums from emu/world.py mounts (twin URDF optical frames), in Kevin body frame (mj: x fwd, y left, z up).
 // Solid ~10 cm pyramid + faint FOV lines to 1.2 m (VIEW_CLIP). Cyan = depth (58 deg fovy, 848x480), yellow = RGB (42 deg, 640x480).
@@ -201,14 +262,15 @@ document.querySelectorAll('.campanel').forEach(cb=>{cb.onchange=()=>{const n=cb.
   else if(panels[n]){panels[n].el.remove();delete panels[n]}}});
 
 function frameHouse(){
-  if(worldBox.isEmpty()){
+  const box=worldBox.isEmpty()&&slamBox?slamBox.clone().applyMatrix4(navFrame.matrixWorld):worldBox;   // real robot: frame the SLAM map
+  if(box.isEmpty()){
     controls.target.set(3.5,0.5,-7);
     camera.position.set(10,11,-20);
   }else{
     const c=new THREE.Vector3();
     const s=new THREE.Vector3();
-    worldBox.getCenter(c);
-    worldBox.getSize(s);
+    box.getCenter(c);
+    box.getSize(s);
     const radius=Math.max(s.x,s.y,s.z)*0.75+2;
     controls.target.copy(c);
     camera.position.set(c.x+radius*0.7, c.y+radius*0.85, c.z+radius*0.95);
@@ -219,6 +281,8 @@ function frameHouse(){
 }
 
 document.getElementById('framebtn').onclick=frameHouse;
+document.getElementById('kevbtn').onclick=()=>{const p=new THREE.Vector3();robot.getWorldPosition(p);const d=camera.position.clone().sub(controls.target).normalize();
+  controls.target.copy(p);camera.position.copy(p).addScaledVector(d,3.2);if(camera.position.y<1.6)camera.position.y=1.6;controls.update()};
 
 async function loadScene(){
   try{
@@ -234,7 +298,7 @@ async function loadScene(){
         // half-extents (sx,sy,sz) in MuJoCo → full size in Three after (x,z,-y)
         const geom=new THREE.BoxGeometry(g.size[0]*2,g.size[2]*2,g.size[1]*2);
         const color=(typeof g.color==='number')?g.color:0x888888;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.65,metalness:0.05});
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.65,metalness:0.05});gtMats.push([mat,1.0]);
         mesh=new THREE.Mesh(geom,mat);
         mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
         mesh.rotation.y=g.yaw||0; // with -y map, keep +yaw
@@ -242,7 +306,7 @@ async function loadScene(){
       }else if(g.kind==='cyl'){
         const geom=new THREE.CylinderGeometry(g.size[0],g.size[0],g.size[1]*2,16);
         const color=(typeof g.color==='number')?g.color:0x888888;
-        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({color,roughness:0.6}));
+        const cm=new THREE.MeshStandardMaterial({color,roughness:0.6});gtMats.push([cm,1.0]);mesh=new THREE.Mesh(geom,cm);
         mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
         nOther++;
       }else if(g.kind==='mesh'&&g.vertices&&g.faces){
@@ -260,21 +324,21 @@ async function loadScene(){
         geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
         geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
         const color=(typeof g.color==='number')?g.color:0xdcd8cc;
-        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({
+        const wm=new THREE.MeshStandardMaterial({
           color,roughness:0.85,metalness:0.0,side:THREE.DoubleSide,
           transparent:true,opacity:0.88,depthWrite:true
-        }));
+        });gtMats.push([wm,0.88]);mesh=new THREE.Mesh(geom,wm);
         nMesh++;
       }
       if(mesh){
         mesh.castShadow=true;
         mesh.receiveShadow=true;
-        scene.add(mesh);
+        gtGroup.add(mesh);
         worldBox.expandByObject(mesh);
       }
     });
 
-    sceneLoaded=true;
+    sceneLoaded=true;applyGT();
     hud.textContent=`Kevin Live Sim · ${nBox} boxes · ${nMesh} wall mesh · Drag orbit`;
     frameHouse();
   }catch(e){
@@ -283,13 +347,19 @@ async function loadScene(){
   }
 }
 
+let errTxt='';
 function updateState(st){
   try{
-    if(st.kevin){
-      robot.position.copy(mjToThree(st.kevin[0],st.kevin[1],0));
-      robot.rotation.y=st.kevin[2];
-    }
-    if(st.dog&&showdogEl.checked){
+    const A=st.anchor||[0,0,0];navFrame.position.copy(mjToThree(A[0],A[1],0));navFrame.rotation.y=A[2];navFrame.updateMatrixWorld(true);
+    if(st.pose){robot.position.copy(mjToThree(st.pose[0],st.pose[1],0));robot.rotation.y=st.pose[2];robot.visible=true}   // SLAM pose
+    else if(st.kevin&&!st.anchor){robot.position.copy(mjToThree(st.kevin[0],st.kevin[1],0));robot.rotation.y=st.kevin[2]}
+    errTxt='';
+    if(st.kevin){ghost.position.copy(mjToThree(st.kevin[0],st.kevin[1],0));ghost.rotation.y=st.kevin[2];ghost.visible=true;
+      if(st.pose){const w=new THREE.Vector3();robot.getWorldPosition(w);const g=ghost.position;
+        const de=((st.pose[2]+A[2]-st.kevin[2])*180/Math.PI+540)%360-180;errTxt=' · SLAM vs truth '+Math.hypot(w.x-g.x,w.z-g.z).toFixed(2)+' m '+de.toFixed(0)+'°'}}
+    else ghost.visible=false;
+    updateSlam(st.slam_map);updatePlaces(st.places);
+    if(st.dog&&showdogEl.checked&&gtModeEl.value!=='off'){
       dog.position.copy(mjToThree(st.dog[0],st.dog[1],0));
       if(st.dog.length>2)dog.rotation.y=st.dog[2];
       dog.visible=true;
@@ -310,8 +380,8 @@ function updateState(st){
 
 // ---- shared state: WebSocket /ws (same origin => works via cloudflared), HTTP polling fallback
 let ws=null,wsOK=false,lastSeq=0,lastMsgT=0,pollOn=false,wsFails=0;const myName='web-'+Math.random().toString(36).slice(2,6);
-function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();if(st.goal_env)st.goal=st.goal_env;if(st.path_env)st.path=st.path_env;updateState(st);updateVLN(st);renderLog(st.log);
-  document.getElementById('hud').textContent='Kevin Live Sim · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+' · drag orbit (yours only)'}
+function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();updateState(st);updateVLN(st);renderLog(st.log);
+  document.getElementById('hud').textContent='Kevin · SLAM frame · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+errTxt+' · drag orbit (yours only)'}
 function connectWS(){
   try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws')}catch(e){startPoll();return}
   ws.onopen=()=>{wsOK=true;wsFails=0};
@@ -329,8 +399,8 @@ setInterval(()=>{if(wsOK&&performance.now()-lastMsgT>3000&&ws){try{ws.close()}ca
 let logN=-1;
 // ---- LightNav (VLN) overlay: last ~5 waypoint sets (older fade), chosen goal marker, HUD line; shared 'send all' mode
 const V3=(x,y,z)=>new THREE.Vector3(x,z,-y);
-const vlnGroup=new THREE.Group();scene.add(vlnGroup);
-const vlnGoal=new THREE.Mesh(new THREE.OctahedronGeometry(0.09),new THREE.MeshStandardMaterial({color:0x33ddff,emissive:0x1188aa}));vlnGoal.visible=false;scene.add(vlnGoal);
+const vlnGroup=new THREE.Group();navFrame.add(vlnGroup);   // waypoints are in nav's map frame
+const vlnGoal=new THREE.Mesh(new THREE.OctahedronGeometry(0.09),new THREE.MeshStandardMaterial({color:0x33ddff,emissive:0x1188aa}));vlnGoal.visible=false;navFrame.add(vlnGoal);
 const sendAllEl=document.getElementById('sendallvln'),showVlnEl=document.getElementById('showvln'),vlnHud=document.getElementById('vlnhud');
 sendAllEl.onchange=()=>{const on=sendAllEl.checked;if(wsOK&&ws)ws.send(JSON.stringify({type:'mode',send_all_vln:on,who:myName}));
   else fetch('/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({send_all_vln:on,who:myName})})};
@@ -343,12 +413,12 @@ function updateVLN(st){
   vlnGroup.visible=showVlnEl.checked;
   const sets=V.sets||[],key=sets.map(k=>k.seq).join(',');
   if(key!==vlnKey){vlnKey=key;vlnGroup.clear();
-    sets.forEach((k,i)=>{const pts=(k.wp_env||k.wp_map||[]),op=0.25+0.75*(i+1)/sets.length;if(!pts.length)return;
+    sets.forEach((k,i)=>{const pts=(k.wp_map||[]),op=0.25+0.75*(i+1)/sets.length;if(!pts.length)return;
       const P=pts.map(p=>V3(p[0],p[1],0.04));
       vlnGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(P),new THREE.LineBasicMaterial({color:0x33ddff,transparent:true,opacity:op})));
       const g=new THREE.BufferGeometry().setFromPoints(P);
       vlnGroup.add(new THREE.Points(g,new THREE.PointsMaterial({color:0x33ddff,size:0.05,transparent:true,opacity:op})));});
-    const last=sets[sets.length-1],gp=last&&(last.goal_env||last.goal);
+    const last=sets[sets.length-1],gp=last&&last.goal;
     vlnGoal.userData.has=!!gp;if(gp)vlnGoal.position.copy(V3(gp[0],gp[1],0.12))}
   vlnGoal.visible=!!vlnGoal.userData.has&&showVlnEl.checked;
 }

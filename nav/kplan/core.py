@@ -12,6 +12,14 @@ class Limits:
     # proximity speed rule (hard): v*t_react + v^2/(2 a_brake) <= d - d_safe ; plus a comfort ramp
     a_brake=1.5; t_react=0.10; d_safe=0.03; d_full=0.50; v_near=0.15; d_near=0.05   # a_brake = nav.safety (drive decel ~1.6 m/s^2: ODrive vel_ramp 3 turns/s^2)
 
+def integrate_v(v, a, dt, v_min, v_max):
+    """Integrate an MPPI acceleration command over one control tick.  Braking never carries through zero into the
+    opposite direction within a tick (a decelerate-to-stop is not a reverse command); a sustained command does
+    reverse on the next tick, and that motion is the one MPPI checked (edt_rev while v < 0)."""
+    n = v + a * dt
+    if v * n < 0: n = 0.0
+    return float(min(max(n, v_min), v_max))
+
 def v_cap_clear(d, L=Limits):
     """d = outline clearance (m, min EDT over the 12-gon boundary). Returns the speed cap (m/s)."""
     x=(d-L.d_safe).clamp(min=0)

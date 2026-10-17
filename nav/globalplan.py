@@ -17,27 +17,34 @@ def coarse_res(grid):
     return max(1, int(round(RES / grid.res))) * grid.res
 
 
-def coarse_blocked(grid, inflate=0.20):
+def coarse_blocked(grid, inflate=0.20, obs=None):
+    """obs: nav.obslayer.ObsLayer -- the current observation overrides the map where the RS1 sees right now."""
     cres = coarse_res(grid); f = int(round(cres / grid.res)); n = grid.n // f
-    L = grid.L[:n * f, :n * f].reshape(n, f, n, f)
-    occ = ((L > 1.5).sum((1, 3)) >= 1).astype(np.uint8)        # confident hits only (single noisy hits don't close doors)
+    fine = grid.L[:n * f, :n * f] > 1.5                          # confident hits only (single noisy hits don't close doors)
+    if obs is not None and obs.pose is not None:                 # layer only the few-metre patch the frame covers
+        x, y = obs.pose[:2]; r = 3.0; o = grid.origin
+        a0, a1 = max(int((x - r - o[0]) / grid.res), 0), min(int((x + r - o[0]) / grid.res), n * f)
+        b0, b1 = max(int((y - r - o[1]) / grid.res), 0), min(int((y + r - o[1]) / grid.res), n * f)
+        if a1 > a0 and b1 > b0:
+            fine = fine.copy(); fine[b0:b1, a0:a1] = obs.apply(fine[b0:b1, a0:a1], o + np.array([a0, b0]) * grid.res, grid.res)[0]
+    occ = fine.reshape(n, f, n, f).any((1, 3)).astype(np.uint8)
     r = max(1, int(round(inflate / cres)))                       # nearest whole cell (0.24 -> 6x4 cm, 0.21 -> 5x4 cm)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     return cv2.dilate(occ, k).astype(bool), occ.astype(bool)
 
 
-def plan(grid, start, goal):
+def plan(grid, start, goal, obs=None):
     """Try the full robot half-width first, then a tighter inflation (doors/narrow passes; MPPI does the exact footprint)."""
     for infl in (0.24, 0.21):                     # robot half-width is 0.207 (wheels); 0.12 routed through 0.3 m gaps (MPPI then stuck)
-        r = _plan(grid, start, goal, infl)
+        r = _plan(grid, start, goal, infl, obs)
         if r is not None: r["inflate"] = infl; return r
     return None
 
 
-def _plan(grid, start, goal, inflate):
+def _plan(grid, start, goal, inflate, obs=None):
     """-> dict(xy=(N,2) map-frame path, goal=reachable goal, snap_m=distance requested->reachable, ms) or None."""
     t = time.perf_counter()
-    blk, occ = coarse_blocked(grid, inflate); n = blk.shape[0]; o = grid.origin; cres = coarse_res(grid)
+    blk, occ = coarse_blocked(grid, inflate, obs); n = blk.shape[0]; o = grid.origin; cres = coarse_res(grid)
     def cell(p): return (min(max(int((p[1] - o[1]) / cres), 0), n - 1), min(max(int((p[0] - o[0]) / cres), 0), n - 1))
     s, g = cell(start), cell(goal)
     free = ~blk; free[s] = True

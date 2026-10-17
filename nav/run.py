@@ -26,7 +26,7 @@ class Stats:
     def add(self, k, v): self.d[k].append(v)
     def summary(self):
         out = {}
-        for k, q in self.d.items():
+        for k, q in list(self.d.items()):            # the 30 Hz loop may add a key meanwhile
             a = np.asarray(q, float)
             if len(a): out[k] = dict(mean=round(float(a.mean()), 3), p50=round(float(np.percentile(a, 50)), 3),
                                      p99=round(float(np.percentile(a, 99)), 3), max=round(float(a.max()), 3), n=len(a))
@@ -36,7 +36,7 @@ class Stats:
 class Brain:
     def __init__(self, hw: Hardware, match=True, plan=True):
         self.hw = hw; self.ego = Ego(); self.ego.intr = hw.rs1.depth_intrinsics() if hasattr(hw.rs1, "depth_intrinsics") else None; self.rs2 = Rs2Cloud(hw.rs2_intr)
-        self.rec = None
+        self.rec = None; self.t0 = round(time.time(), 3)          # session id: the map frame is this run's start pose
         if os.environ.get("KEVIN_RECORD"):
             from nav.record import Recorder
             self.rec = Recorder(os.environ["KEVIN_RECORD"]); print("[nav] recording to %s" % self.rec.d, flush=True)
@@ -49,6 +49,9 @@ class Brain:
         if plan:
             from nav.plan import Planner
             self.planner = Planner(self.slam.grid)
+        from nav.obslayer import ObsLayer
+        self.obs = ObsLayer()                       # current RS1 frame, authoritative over the map where it sees (planners)
+        if self.planner is not None: self.planner.obs = self.obs
         self.mode = "idle"; self.msg = ""; self.v = 0.0; self.w = 0.0; self.turn_target = None
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
@@ -107,7 +110,7 @@ class Brain:
         if self.planner is None: self.log("planner disabled"); return
         from nav import globalplan as GP
         pose = self.slam.pose(); xy = np.asarray(xy, float)
-        g = GP.plan(self.slam.grid, pose[:2], xy)
+        g = GP.plan(self.slam.grid, pose[:2], xy, self.obs)
         if g is None:
             self.mode = "idle"; self.log("unreachable: no path to %s (%.2f, %.2f)" % (label or "point", xy[0], xy[1])); return
         self.gpath = g; self.goal_req = xy; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
@@ -115,16 +118,31 @@ class Brain:
         self._prog = (self.goal_t0, pose); self._stuck = 0; self._snap_logged = False; self._resume_path = False; self.mode = "path"; self._best_d = 1e9; self._best_t = self.goal_t0
         ok = self._set_sub(pose)
         if not ok:
-            if getattr(self, "_bo_retry", False): self._bo_fail = True; return                 # retry during a back-out: keep backing
-            if len(getattr(self, "trail", [])) > 3:
-                # wedged (start inside the inflated map, e.g. in a doorway): the way we came in is known free -> back
-                # out slowly along our own trail (safety filter still applies), then plan again
-                self._backing_for = (xy, heading, label); self.back_trail = list(self.trail); self.back_d = 0.0; self.back_p = pose[:2]
-                self.mode = "backout"; self.log("no local path from here: backing out along the way in"); return
+            if getattr(self, "_bo_retry", False): self._bo_fail = True; return                 # retry after a retreat: caller decides
+            # wedged (e.g. in a doorway): leave along the way we came in (see _retreat), then plan again
+            if self._retreat((xy, heading, label), "no local path from here"): return
             self.mode = "idle"; self.log("unreachable: local planner found no path toward %s" % (label or "point")); return
         self._backing_for = None
         note = "" if g["snap_m"] < 0.05 else " (closest reachable point, %.2f m from it)" % g["snap_m"]
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
+
+    def _retreat(self, goal_for, why):
+        """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point ~0.6 m back is
+        an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
+        the RS1 currently sees as free (World.edt_rev).  Afterwards the original goal is planned again."""
+        tr = list(getattr(self, "trail", [])); x, y, th = self.slam.pose()
+        if len(tr) < 3 or self.planner is None: return False
+        d = 0.0; tgt = None
+        for i in range(len(tr) - 1, 0, -1):
+            d += math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1])
+            if d >= 0.6: tgt = tr[i - 1]; break
+        tgt = tgt or tr[0]
+        if math.hypot(tgt[0] - x, tgt[1] - y) < 0.15: return False
+        ok, _ = self.planner.set_goal((x, y, th, self.v, self.w), np.asarray(tgt, float), None)
+        if not ok: return False
+        self._backing_for = goal_for; self.back_tgt = np.asarray(tgt, float); self.back_t0 = time.monotonic(); self.mode = "backout"
+        self.log("%s: retreating along the way in (%.2f m)" % (why, math.hypot(tgt[0] - x, tgt[1] - y)))
+        return True
 
     def _set_sub(self, pose):
         from nav import globalplan as GP
@@ -138,15 +156,15 @@ class Brain:
         from nav import globalplan as GP
         n = 0
         while self.running:
-            time.sleep(0.8 if self.mode in ("path", "recover") else 2.0); n += 1
+            time.sleep(0.8 if self.mode in ("path", "backout") else 2.0); n += 1
             try:
                 pose = self.slam.pose()
                 self.planner.refresh(pose[:2]); self.stats.add("map_refresh_ms", self.planner.timing["refresh_ms"])
                 if self.mode == "path" and self.goal is not None:
                     if n % 3 == 0:                                    # global replan ~every 2.4 s on the grown map
-                        g = GP.plan(self.slam.grid, pose[:2], self.goal_req)
+                        g = GP.plan(self.slam.grid, pose[:2], self.goal_req, self.obs)
                         if self._stuck >= 2:          # repeated no-progress: the goal pocket is tighter than the
-                            gc = GP._plan(self.slam.grid, pose[:2], self.goal_req, 0.30)   # plan claims; aim for a
+                            gc = GP._plan(self.slam.grid, pose[:2], self.goal_req, 0.30, self.obs)   # plan claims; aim for a
                             if gc is not None:                                               # conservatively reachable point
                                 if gc["snap_m"] > 0.05 and not getattr(self, "_snap_logged", False):
                                     self._snap_logged = True; self.log("goal pocket too tight: aiming for closest reachable point (%.2f m from %s)" % (gc["snap_m"], self.goal_label or "goal"))
@@ -170,6 +188,7 @@ class Brain:
         self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0)
         lab = self.ego.update(verts)
         ego_obs = self.ego.obstacle_xy(max_n=1500); valid = self.ego.valid_fraction()
+        if valid > 0: self.obs.update(self.slam.pose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
         snap = None
         seq, st = self.hw.rs2_seq, self.hw.rs2_stamp
         if seq != self._rs2_seq:
@@ -211,16 +230,16 @@ class Brain:
         x, y, th = self.slam.pose(); dt = 1.0 / HZ
         tr = self.__dict__.setdefault("trail", [])                    # breadcrumbs of where Kevin actually drove
         if not tr or math.hypot(tr[-1][0] - x, tr[-1][1] - y) > 0.05: tr.append((x, y)); del tr[:-80]
-        L = self.planner and __import__("core").Limits
+        L = self.planner and __import__("core").Limits; integrate_v = __import__("core").integrate_v
         if self.mode == "path" and self.planner is not None:
-            if math.hypot(self.goal[0] - x, self.goal[1] - y) < 0.12:
+            if math.hypot(self.goal[0] - x, self.goal[1] - y) < 0.20:          # xy goal tolerance (Nav2 SimpleGoalChecker default 0.25 m)
                 if self.goal_heading is not None: self.turn_target = self.goal_heading; self.mode = "turn"
                 else: self._arrive()
             else:
                 tp = time.perf_counter(); r = self.planner.step((x, y, th, self.v, self.w)); self.stats.add("mppi_ms", (time.perf_counter() - tp) * 1e3)
                 if r:
                     a, al = r
-                    self.v = float(np.clip(self.v + a * dt, L.v_min, L.v_max)); self.w = float(np.clip(self.w + al * dt, -L.w_max, L.w_max))
+                    self.v = integrate_v(self.v, a, dt, L.v_min, L.v_max); self.w = float(np.clip(self.w + al * dt, -L.w_max, L.w_max))
                 tn = time.monotonic(); dg = math.hypot(self.goal[0] - x, self.goal[1] - y)
                 if dg < getattr(self, "_best_d", 1e9) - 0.10: self._best_d = dg; self._best_t = tn
                 if tn - self._prog[0] > 5.0:
@@ -233,46 +252,21 @@ class Brain:
                             self.log("stopped %.2f m short of %s (closest reachable)" % (dg, self.goal_label or "goal")); return
                         self._stuck += 1
                         if self._stuck >= 4: self.mode = "idle"; self.goal = None; self.planner.cancel(); self.log("gave up: stuck (unreachable from here)")
-                        elif len(getattr(self, "trail", [])) > 3:     # reverse along our own trail (known free), then replan
-                            self._backing_for = (self.goal_req, self.goal_heading, self.goal_label); self.back_trail = list(self.trail)
-                            self.back_d = 0.0; self.back_p = (x, y); self._bo_stuck = self._stuck; self.mode = "backout"
-                            self.log("no progress (%d): backing out along the way in" % self._stuck)
-                        else:                                         # no trail yet: blind reverse-out, then replan
-                            self.log("no progress (%d): reversing out" % self._stuck); self.mode = "recover"; self.rec_until = tn + 1.5
+                        else:
+                            self._bo_stuck = self._stuck
+                            if not self._retreat((self.goal_req, self.goal_heading, self.goal_label), "no progress (%d)" % self._stuck):
+                                k = self._stuck; self._bo_stuck = 0; self._goto(self.goal_req, self.goal_heading, self.goal_label); self._stuck = k   # replan here (fresh observation), keep the count
                     self._prog = (tn, (x, y, th))
-        elif self.mode == "backout":
-            bt = self.back_trail; self.back_d += math.hypot(x - self.back_p[0], y - self.back_p[1]); self.back_p = (x, y)
-            while len(bt) > 1 and math.hypot(bt[-1][0] - x, bt[-1][1] - y) < 0.2: bt.pop()
-            if len(bt) <= 1 or self.back_d > 0.8 or (self.back_d > 0.25 and int(self.back_d / 0.25) != int((self.back_d - 0.01) / 0.25)):
-                self.v = self.w = 0.0; xy, hd, lb = self._backing_for; fin = len(bt) <= 1 or self.back_d > 0.8
-                self._bo_fail = False; self._bo_retry = True; self._goto(xy, hd, lb); self._bo_retry = False                                    # retry planning
-                if getattr(self, "_bo_stuck", 0) and not self._bo_fail: self._stuck = self._bo_stuck; self._bo_stuck = 0   # keep the stuck count (gives up after 4)
-                if self._bo_fail:
-                    if fin:
-                        self._backing_for = None; self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (after backing out)" % (lb or "point"))
-                    else: self.mode = "backout"
+        elif self.mode == "backout":                                  # MPPI to the retreat point (see _retreat)
+            done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > 12.0
+            r = None if done else self.planner.step((x, y, th, self.v, self.w))
+            if r is None:
+                self.v = self.w = 0.0; xy, hd, lb = self._backing_for; self._backing_for = None
+                self._bo_fail = False; self._bo_retry = True; self._goto(xy, hd, lb); self._bo_retry = False
+                if self._bo_fail: self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (after retreating)" % (lb or "point"))
+                elif getattr(self, "_bo_stuck", 0): self._stuck = self._bo_stuck; self._bo_stuck = 0   # keep the stuck count (gives up after 4)
             else:
-                a = math.atan2(bt[-1][1] - y, bt[-1][0] - x); e = wrap(a - (th + math.pi))
-                self.v = -0.10; self.w = float(np.clip(1.5 * e, -0.5, 0.5))
-        elif self.mode == "recover":
-            if time.monotonic() > self.rec_until:
-                self.v = self.w = 0.0
-                if getattr(self, "_turn_after", None) is not None:
-                    self.turn_target = self._turn_after; self._turn_after = None; self._turn_ok = True; self.mode = "turn"
-                elif self.goal is not None:
-                    self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
-                    # MPPI dithers when the path leaves backwards and the box can't swing its corners: face the
-                    # global path ~0.6 m ahead first (turn mode checks R275 and reverses again if too tight)
-                    gp = getattr(self, "gpath", None)
-                    if gp is not None and len(gp["xy"]) > 1:
-                        P = np.asarray(gp["xy"]); i = int(np.argmin(np.hypot(P[:, 0] - x, P[:, 1] - y)))
-                        j = i + 1 + int(np.argmax(np.cumsum(np.hypot(*np.diff(P[i:], axis=0).T)) > 0.6)) if i + 1 < len(P) else i
-                        hd = math.atan2(P[min(j, len(P) - 1), 1] - y, P[min(j, len(P) - 1), 0] - x)
-                        if abs(wrap(hd - th)) > math.radians(60):
-                            self.turn_target = hd; self._resume_path = True; self.mode = "turn"; self._turn_t0 = time.monotonic()
-                            self.log("recover: turning to face the path (%.0f deg)" % math.degrees(wrap(hd - th)))
-                else: self.mode = "idle"
-            else: self.v = max(self.v - 1.5 / HZ, -0.15); self.w = 0.0
+                a, al = r; self.v = integrate_v(self.v, a, dt, L.v_min, L.v_max); self.w = float(np.clip(self.w + al * dt, -L.w_max, L.w_max))
         elif self.mode == "drive":
             v, w, tend = self.drive_cmd
             if time.monotonic() > tend: self.v = self.w = 0.0; self.mode = "idle"; self.log("drive done")
@@ -284,13 +278,18 @@ class Brain:
             if getattr(self, "_resume_path", False) and time.monotonic() - getattr(self, "_turn_t0", 0) > 6.0:
                 e = 0.0; self.w = 0.0                                   # blocked spin: give the path back to MPPI
             if abs(e) < math.radians(3) and abs(self.w) < 0.3:
-                self.v = self.w = 0.0; self._turn_ok = False
+                self.v = self.w = 0.0
                 if getattr(self, "_resume_path", False) and self.goal is not None:  # noqa
                     self._resume_path = False; self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
                 else: self._arrive()
-            elif self.planner is not None and self.planner.clearance((x, y)) < 0.275 and not getattr(self, "_turn_ok", False):
-                self.mode = "recover"; self.rec_until = time.monotonic() + 1.2; self.log("too tight to spin (R275): reversing first")
-                self._turn_after = self.turn_target
+            elif self.planner is not None and self.planner.clearance((x, y)) < 0.275:
+                # no room to spin in place (current observation + map): never back up blind to make room.  Mid-route the
+                # path goes back to MPPI (it can make a multi-point turn, reversing only into observed-free space); a final
+                # heading at the goal is skipped honestly.
+                self.v = self.w = 0.0
+                if getattr(self, "_resume_path", False) and self.goal is not None:
+                    self._resume_path = False; self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
+                else: self.log("no room to turn in place: final heading skipped"); self._arrive()
             else: self.v = 0.0; self.w = float(np.clip(2.2 * e, -1.6, 1.6))
         else:
             self.v = self.w = 0.0
@@ -348,7 +347,7 @@ class Brain:
     def state(self):
         x, y, th = self.slam.pose()
         p = self.planner
-        return dict(t=time.time(), pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg,
+        return dict(t=time.time(), t0=self.t0, pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg,
                     goal=None if self.goal is None else list(self.goal), label=self.goal_label,
                     path=None if (p is None or p.path is None) else p.path[::5].round(3).tolist(),
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,

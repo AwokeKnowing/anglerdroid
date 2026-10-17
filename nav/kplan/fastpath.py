@@ -25,6 +25,8 @@ for _l in (_L,_L2):
     _l.band.argtypes=[_P,ctypes.c_int,_P,ctypes.c_int,ctypes.c_int,ctypes.c_int,ctypes.c_float,ctypes.c_float,ctypes.c_float,ctypes.c_float]
 R_PLAN=0.24   # tight circle footprint for planning (axle-centred)
 
+INFEASIBLE=1e4   # MPPI: a rollout with dead=1 (footprint hit, or reversed into space not observed free) gets no weight unless all do
+
 class MapCPU:
     """Per map update. Cheap: reuses World's EDT / coarse grids (already needed by MPPI)."""
     def __init__(s, world, rplan=None, share=None):
@@ -245,14 +247,15 @@ class PathMPPI(MPPI):
         U=(s.U.unsqueeze(1)+eps)
         U[...,0]=U[...,0].clamp(-L.a_max,L.a_max); U[...,1]=U[...,1].clamp(-L.alpha_max,L.alpha_max)
         state=state.float().contiguous()
-        cost,deadf,TX=_mt.rollout(U,state,s.goal,s.fp,s.edt,L,dt,3)
+        cost,deadf,TX=_mt.rollout(U,state,s.goal,s.fp,s.edt,L,dt,3,erev=s.w.edt_rev)
         dead=deadf>0
         cost=cost+s.ahead_pt*s.path_ctg(TX[:,:,-1,:2].contiguous(),state)
-        beta=cost.min(1,keepdim=True).values
-        wts=torch.softmax(-(cost-beta)/s.lam,1)
+        csel=cost+dead.float()*INFEASIBLE                                      # colliding / reversing-blind rollouts are infeasible, not just costly
+        beta=csel.min(1,keepdim=True).values
+        wts=torch.softmax(-(csel-beta)/s.lam,1)
         Unew=(wts[...,None,None]*U).sum(1)
-        best=cost.argmin(1); bi=torch.arange(B,device=s.dev)
-        _,d1,chx=_mt.rollout(Unew.unsqueeze(1).contiguous(),state,s.goal,s.fp,s.edt,L,dt,6)
+        best=csel.argmin(1); bi=torch.arange(B,device=s.dev)
+        _,d1,chx=_mt.rollout(Unew.unsqueeze(1).contiguous(),state,s.goal,s.fp,s.edt,L,dt,6,erev=s.w.edt_rev)
         fb=(d1[:,0]>0)&~dead[bi,best]
         Uc=torch.where(fb[:,None,None],U[bi,best],Unew)
         u0=Uc[:,0].clone(); s.U=torch.cat([Uc[:,1:],Uc[:,-1:]*0.0],1)

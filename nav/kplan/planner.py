@@ -12,12 +12,18 @@ from core import Limits, footprint_samples, edt_capped, cost_to_go, SIL12, v_cap
 
 HARD_CLR=0.200   # axle clearance below which a coarse cell is blocked (robot half-width 0.2036 / 12-gon 0.21)
 PREF_CLR=0.40
+INFEASIBLE=1e4   # MPPI: a rollout with dead=1 (footprint hit, or reversed into space not observed free) gets no weight unless all do
+
 class World:
-    def __init__(s, occ_np, dev='cuda', coarse=10):
+    def __init__(s, occ_np, dev='cuda', coarse=10, rev_block=None):
+        """rev_block: optional bool mask of cells that may not be entered while REVERSING (not currently observed free);
+        edt_rev = clearance to obstacles or those cells.  Without it reversing uses the normal clearance."""
         t=time.time(); s.dev=dev
         s.occ=torch.from_numpy(occ_np).to(dev); s.H,s.W=s.occ.shape
         torch.cuda.synchronize(); t1=time.time()
-        s.edt=edt_capped(s.occ,cap_px=80); torch.cuda.synchronize(); t2=time.time()
+        s.edt=edt_capped(s.occ,cap_px=80)
+        s.edt_rev=edt_capped(s.occ|torch.from_numpy(rev_block).to(dev),cap_px=80) if rev_block is not None else s.edt.clone()
+        torch.cuda.synchronize(); t2=time.time()
         s.res=0.01; s.cres=coarse*0.01; s.k=coarse
         e=s.edt.float().unsqueeze(0).unsqueeze(0)
         s.cmax=F.max_pool2d(e,coarse)[0,0]; s.cmean=F.avg_pool2d(e,coarse)[0,0]
@@ -74,12 +80,12 @@ class MPPI:
         w=torch.maximum(torch.minimum(w+al*dt,wl),-wl)
         th=th+w*dt; x=x+v*torch.cos(th)*dt; y=y+v*torch.sin(th)*dt
         return x,y,th,v,w
-    def clearance(s, x, y, th):
-        """min EDT over footprint boundary samples; x,y,th (...)"""
+    def clearance(s, x, y, th, edt=None):
+        """min EDT over footprint boundary samples; x,y,th (...); edt: field (default s.edt; s.w.edt_rev when reversing)"""
         c,sn=torch.cos(th)[...,None],torch.sin(th)[...,None]
         px=x[...,None]+c*s.fp[:,0]-sn*s.fp[:,1]; py=y[...,None]+sn*s.fp[:,0]+c*s.fp[:,1]
         ix=(px*100).long().clamp(0,s.w.W-1); iy=(py*100).long().clamp(0,s.w.H-1)
-        return edt_at(s.edt,iy,ix).float().amin(-1)
+        return edt_at(s.edt if edt is None else edt,iy,ix).float().amin(-1)
     @torch.no_grad()
     def plan(s, state, nprop=5):
         if s.fast: return s.plan_fast(state, nprop)
@@ -94,14 +100,15 @@ class MPPI:
         U=(s.U.unsqueeze(1)+eps)
         U[...,0]=U[...,0].clamp(-L.a_max,L.a_max); U[...,1]=U[...,1].clamp(-L.alpha_max,L.alpha_max)
         state=state.float().contiguous()
-        cost,deadf,TX=_mt.rollout(U,state,s.goal,s.fp,s.edt,L,dt,3)
+        cost,deadf,TX=_mt.rollout(U,state,s.goal,s.fp,s.edt,L,dt,3,erev=s.w.edt_rev)
         dead=deadf>0
         cost=cost+10*bilinear(s.field,TX[:,:,-1,:2],s.w.cres)
-        beta=cost.min(1,keepdim=True).values
-        wts=torch.softmax(-(cost-beta)/s.lam,1)
+        csel=cost+dead.float()*INFEASIBLE                                      # colliding / reversing-blind rollouts are infeasible, not just costly
+        beta=csel.min(1,keepdim=True).values
+        wts=torch.softmax(-(csel-beta)/s.lam,1)
         Unew=(wts[...,None,None]*U).sum(1)
-        best=cost.argmin(1); bi=torch.arange(B,device=s.dev)
-        _,d1,chx=_mt.rollout(Unew.unsqueeze(1).contiguous(),state,s.goal,s.fp,s.edt,L,dt,6)
+        best=csel.argmin(1); bi=torch.arange(B,device=s.dev)
+        _,d1,chx=_mt.rollout(Unew.unsqueeze(1).contiguous(),state,s.goal,s.fp,s.edt,L,dt,6,erev=s.w.edt_rev)
         ch=chx[:,0]; dead1=d1[:,0]>0
         fb=dead1&~dead[bi,best]
         Uc=torch.where(fb[:,None,None],U[bi,best],Unew)
@@ -132,7 +139,7 @@ class MPPI:
         for t in range(H):
             x,y,th,v,w=s.step_dyn(x,y,th,v,w,U[:,:,t,0],U[:,:,t,1],dt,L,v_cap_clear(clr))
             TX[:,:,t,0]=x;TX[:,:,t,1]=y;TX[:,:,t,2]=th
-            clr=s.clearance(x,y,th)
+            clr=torch.where(v<0,s.clearance(x,y,th,s.w.edt_rev),s.clearance(x,y,th))
             dead|=clr<0.012
             ax=edt_at(s.edt,(y*100).long().clamp(0,s.w.H-1),(x*100).long().clamp(0,s.w.W-1)).float()
             cost+=dead.float()*50+20*torch.relu(0.06-clr)
@@ -145,10 +152,11 @@ class MPPI:
         nearT=torch.exp(-dg/0.15)
         cost+=10*ctg + 3*nearT*(1-torch.cos(th-gth)) + 2*nearT*(v.abs()+w.abs()*0.3)
         cost+=0.002*(U**2).sum((2,3))
-        beta=cost.min(1,keepdim=True).values
-        wts=torch.softmax(-(cost-beta)/s.lam,1)
+        csel=cost+dead.float()*INFEASIBLE                                      # colliding / reversing-blind rollouts are infeasible, not just costly
+        beta=csel.min(1,keepdim=True).values
+        wts=torch.softmax(-(csel-beta)/s.lam,1)
         Unew=(wts[...,None,None]*U).sum(1)
-        best=cost.argmin(1)
+        best=csel.argmin(1)
         s.U=Unew
         bi=torch.arange(B,device=s.dev)
         # chosen trajectory: rollout of the averaged plan; fall back to the best sample if it collides

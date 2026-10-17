@@ -17,6 +17,16 @@ python emu/viewer/viewer.py 8095 8090
 
 Open browser: http://localhost:8095
 
+## 3-D frame: Kevin's SLAM world
+
+The robot only knows its SLAM map, so the 3-D view shows that world: Kevin at the SLAM pose, the SLAM occupancy map
+(floor texture + occupied cells extruded 22 cm, from nav `/api/map.png` via `/slam.png`), planned path, goal, labelled
+places and LightNav waypoints, all in nav's map frame.  The map frame is placed in the scene by a fixed anchor
+(nav -> env, from sim GT when the nav session starts, keyed by nav `t0`, kept in `/dev/shm/kevin_viewer_anchor.json`;
+identity on the real robot).  "Sim truth" (off / faint / full, per browser) overlays the true house and a green
+ghost of the true Kevin; the HUD shows the SLAM-vs-truth error.  "Send all to LightNav" persists in
+`~/.kevin/emu/viewer_mode.json`.
+
 ## Pages
 
 - **`/`** (default) — Live Three.js sim with client-side orbit controls, polled state, chat

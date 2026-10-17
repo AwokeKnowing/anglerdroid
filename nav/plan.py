@@ -27,18 +27,24 @@ class Planner:
         self.lock = threading.Lock(); self.goal = None; self.path = None; self.status = "idle"
         self.timing = dict(refresh_ms=0.0, newgoal_ms=0.0, plan_ms=0.0); self._map_ver = -1
         self.need_replan = False
+        self.obs = None                                                   # nav.obslayer.ObsLayer (current RS1 frame), set by run.py
 
     # ------------------------------------------------------------ map -> planning window
     def _occ_window(self):
+        """-> (occ, rev_block) 1 cm window.  Map memory with the current observation layered on top (obs layer:
+        observed obstacles block, observed floor clears drift ghosts); rev_block = not currently observed free."""
         g = self.g; s = int(round(g.res / 0.01))
         c0 = np.floor((self.org - g.origin) / g.res).astype(int); n5 = self.N // s
-        occ5 = np.zeros((n5, n5), np.uint8)
+        occ5 = np.zeros((n5, n5), bool)
         r0, r1 = max(c0[1], 0), min(c0[1] + n5, g.n); q0, q1 = max(c0[0], 0), min(c0[0] + n5, g.n)
         if r1 > r0 and q1 > q0:
             occ5[r0 - c0[1]:r1 - c0[1], q0 - c0[0]:q1 - c0[0]] = g.occupied()[r0:r1, q0:q1]
-        occ = cv2.resize(occ5, (self.N, self.N), interpolation=cv2.INTER_NEAREST).astype(bool)
+        trav = np.zeros_like(occ5)
+        if self.obs is not None: occ5, trav = self.obs.apply(occ5, g.origin + c0 * g.res, g.res)
+        occ = cv2.resize(occ5.astype(np.uint8), (self.N, self.N), interpolation=cv2.INTER_NEAREST).astype(bool)
+        rev = ~cv2.resize(trav.astype(np.uint8), (self.N, self.N), interpolation=cv2.INTER_NEAREST).astype(bool)
         occ[0, :] = occ[-1, :] = occ[:, 0] = occ[:, -1] = True
-        return occ
+        return occ, rev
 
     def refresh(self, robot_xy):
         """Recentre if needed, rebuild EDT/coarse grids in place + CPU A* grids. ~10-40 ms, off the control loop."""
@@ -46,10 +52,10 @@ class Planner:
         rel = np.asarray(robot_xy) - self.org
         if (rel < 3.0).any() or (rel > self.win - 3.0).any():
             self.org = np.round(np.asarray(robot_xy) - self.win / 2, 2); self.need_replan = True
-        occ = self._occ_window()
-        Wn = KP.World(occ, dev=self.W.dev)
+        occ, rev = self._occ_window()
+        Wn = KP.World(occ, dev=self.W.dev, rev_block=rev)
         with self.lock:
-            for k in ("edt", "cmax", "cmean", "cblocked", "ccost"):
+            for k in ("edt", "edt_rev", "cmax", "cmean", "cblocked", "ccost"):
                 getattr(self.W, k).copy_(getattr(Wn, k))
             m = FP.MapCPU(self.W)
             self.m = m; self.NG.m = m

@@ -160,6 +160,7 @@ class Ego:
         # top sitting over the rear deck (office: mast vs desk edge, 204 contacts). Nothing of the robot except the
         # mast column reaches 55 cm there (open floor: 0 such px), so SELF/OBSTACLE >= 55 cm inside the hull = overhang.
         m = m | (self.over_ok & ((self.lab == OBSTACLE) | (self.lab == SELF)) & (self.hgt >= 55))
+        self.obs_mask = m                                              # safety-grade obstacles this frame (planner obstacle layer)
         mm = m if getattr(self, "lab_map", None) is None else (m & (self.lab_map == OBSTACLE))
         self.map_obs = np.stack([self.X[mm], self.Y[mm]], 1)
         P = np.stack([self.X[m], self.Y[m]], 1)

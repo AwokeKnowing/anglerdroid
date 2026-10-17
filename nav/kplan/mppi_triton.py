@@ -31,7 +31,7 @@ def _vcap(d, v_max, a_brake, t_react, d_safe, d_full, v_near, d_near):
     return tl.minimum(tl.minimum(hard, ramp), v_max)
 
 @triton.jit
-def _rollout(U, state, goal, fp, edt, estride, Hm, Wm,
+def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
              cost_o, dead_o, tx_o, K, dt,
              v_max, v_min, a_brake, t_react, d_safe, d_full, v_near, d_near,
              a_lat, w_max, v_wheel, track,
@@ -49,7 +49,8 @@ def _rollout(U, state, goal, fp, edt, estride, Hm, Wm,
     for t in range(H):
         a = tl.load(ub + 2*t, mask=mask, other=0.0); al = tl.load(ub + 2*t + 1, mask=mask, other=0.0)
         usq += a*a + al*al
-        vc = _vcap(clr, v_max, a_brake, t_react, d_safe, d_full, v_near, d_near)
+        vc = tl.minimum(_vcap(clr, v_max, a_brake, t_react, d_safe, d_full, v_near, d_near),   # + approach scaling (see mppi_cuda)
+                        tl.maximum(0.08, v_max*tl.sqrt((x-gx)*(x-gx) + (y-gy)*(y-gy))/0.6))
         v0 = v
         v = tl.minimum(tl.maximum(v + a*dt, v_min), v_max)
         lim = tl.maximum(vc, tl.abs(v0) - a_brake*dt)
@@ -62,7 +63,7 @@ def _rollout(U, state, goal, fp, edt, estride, Hm, Wm,
         tl.store(txb + t*TXC, x, mask=mask); tl.store(txb + t*TXC + 1, y, mask=mask); tl.store(txb + t*TXC + 2, th, mask=mask)
         if TXC == 6:
             tl.store(txb + t*TXC + 3, v, mask=mask); tl.store(txb + t*TXC + 4, w, mask=mask); tl.store(txb + t*TXC + 5, vc, mask=mask)
-        clr = _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask)
+        clr = tl.where(v < 0, _clear(x, y, th, fp, P, erev, eoff, Hm, Wm, mask), _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask))
         dead = tl.where(clr < 0.012, 1.0, dead)
         ix = tl.minimum(tl.maximum((x*100.0).to(tl.int32), 0), Wm-1)
         iy = tl.minimum(tl.maximum((y*100.0).to(tl.int32), 0), Hm-1)
@@ -80,16 +81,17 @@ def _rollout(U, state, goal, fp, edt, estride, Hm, Wm,
     cost += 3*nT*(1 - tl.cos(th - gth)) + 2*nT*(tl.abs(v) + tl.abs(w)*0.3) + 0.002*usq
     tl.store(cost_o + b*K + k, cost, mask=mask); tl.store(dead_o + b*K + k, dead, mask=mask)
 
-def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None):
+def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None, erev=None):
     """U (B,K,H,2) f32 contiguous; state (B,5); goal (B,3); edt (H,W) or (B,H,W) f16.
     Returns cost (B,K) [excl. 10*ctg], dead (B,K) f32 0/1, tx (B,K,H,txc)."""
     B, K, H, _ = U.shape
     if cost is None: cost = torch.empty(B, K, device=U.device)
     if dead is None: dead = torch.empty(B, K, device=U.device)
     if tx is None: tx = torch.empty(B, K, H, txc, device=U.device)
+    if erev is None: erev = edt                      # reverse clearance (see mppi_cuda.rollout)
     Hm, Wm = edt.shape[-2:]; est = 0 if edt.dim() == 2 else Hm*Wm
     BLOCK = 64 if K >= 64 else 16
-    _rollout[(B, triton.cdiv(K, BLOCK))](U, state.contiguous(), goal.contiguous(), fp, edt, est, Hm, Wm, cost, dead, tx, K, float(dt),
+    _rollout[(B, triton.cdiv(K, BLOCK))](U, state.contiguous(), goal.contiguous(), fp, edt, erev.contiguous(), est, Hm, Wm, cost, dead, tx, K, float(dt),
         float(L.v_max), float(L.v_min), float(L.a_brake), float(L.t_react), float(L.d_safe), float(L.d_full), float(L.v_near), float(L.d_near),
         float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), H=H, P=fp.shape[0], TXC=txc, BLOCK=BLOCK, num_warps=2)
     return cost, dead, tx

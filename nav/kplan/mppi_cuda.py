@@ -21,18 +21,23 @@ __device__ __forceinline__ float vcap(float d,const LP&L){
   float r=fminf(fmaxf((d-L.d_near)/(L.d_full-L.d_near),0.f),1.f);
   float ramp=L.v_near+(L.v_max-L.v_near)*r;
   return fminf(fminf(hard,ramp),L.v_max); }
-__global__ void k_roll(const float* U,const float* st,const float* goal,const float* fp,int P,const __half* edt,long long es,int Hm,int Wm,
+#define APPROACH_D 0.6f
+#define APPROACH_VMIN 0.08f
+__global__ void k_roll(const float* U,const float* st,const float* goal,const float* fp,int P,const __half* edt,const __half* erv,long long es,int Hm,int Wm,
   float* co,float* deo,float* tx,int K,int H,int TXC,float dt,LP L){
   int b=blockIdx.y, k=blockIdx.x*blockDim.x+threadIdx.x; if(k>=K) return;
   const float* s=st+b*5; float x=s[0],y=s[1],th=s[2],v=s[3],w=s[4];
   float gx=goal[b*3],gy=goal[b*3+1],gth=goal[b*3+2];
   const __half* e=edt+(long long)b*es;
+  const __half* er=erv+(long long)b*es;   // clearance to obstacles OR not-currently-observed-free space: used while reversing
   float cost=0,dead=0,usq=0;
   float clr=clearf(x,y,th,fp,P,e,Hm,Wm);
   const float* ub=U+((long long)b*K+k)*(H*2); float* tb=tx+((long long)b*K+k)*(H*TXC);
   for(int t=0;t<H;t++){
     float a=ub[2*t], al=ub[2*t+1]; usq+=a*a+al*al;
-    float vc=vcap(clr,L), v0=v;
+    // approach velocity scaling (Nav2 RPP use_approach_linear_velocity_scaling): slow down near the goal, so a goal
+    // just behind/beside is reached by turning, not by a fast loop or a reverse
+    float vc=fminf(vcap(clr,L),fmaxf(APPROACH_VMIN,L.v_max*sqrtf((x-gx)*(x-gx)+(y-gy)*(y-gy))/APPROACH_D)), v0=v;
     v=fminf(fmaxf(v+a*dt,L.v_min),L.v_max);
     float lim=fmaxf(vc,fabsf(v0)-L.a_brake*dt);
     v=fmaxf(fminf(v,lim),-fminf(lim,-L.v_min));
@@ -43,7 +48,7 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
     th=th+w*dt; x=x+v*cosf(th)*dt; y=y+v*sinf(th)*dt;
     tb[t*TXC]=x; tb[t*TXC+1]=y; tb[t*TXC+2]=th;
     if(TXC==6){ tb[t*TXC+3]=v; tb[t*TXC+4]=w; tb[t*TXC+5]=vc; }
-    clr=clearf(x,y,th,fp,P,e,Hm,Wm);
+    clr=clearf(x,y,th,fp,P,v<0.f?er:e,Hm,Wm);
     if(clr<0.012f) dead=1.f;
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
@@ -58,25 +63,27 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
   float dx=x-gx, dy=y-gy, nT=expf(-sqrtf(dx*dx+dy*dy)/0.15f);
   cost+=3*nT*(1-cosf(th-gth))+2*nT*(fabsf(v)+fabsf(w)*0.3f)+0.002f*usq;
   co[(long long)b*K+k]=cost; deo[(long long)b*K+k]=dead; }
-void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,torch::Tensor edt,int64_t es,int64_t Hm,int64_t Wm,
+void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,torch::Tensor edt,torch::Tensor erv,int64_t es,int64_t Hm,int64_t Wm,
   torch::Tensor co,torch::Tensor de,torch::Tensor tx,int64_t TXC,double dt,std::vector<double> l){
   int B=U.size(0),K=U.size(1),H=U.size(2);
   LP L{(float)l[0],(float)l[1],(float)l[2],(float)l[3],(float)l[4],(float)l[5],(float)l[6],(float)l[7],(float)l[8],(float)l[9],(float)l[10],(float)l[11],(float)l[12],(float)l[13]};
   int T=K>=64?64:32; dim3 g((K+T-1)/T,B);
   k_roll<<<g,T,0,c10::cuda::getCurrentCUDAStream()>>>(U.data_ptr<float>(),st.data_ptr<float>(),goal.data_ptr<float>(),fp.data_ptr<float>(),(int)fp.size(0),
-    (const __half*)edt.data_ptr<at::Half>(),es,(int)Hm,(int)Wm,co.data_ptr<float>(),de.data_ptr<float>(),tx.data_ptr<float>(),K,H,(int)TXC,(float)dt,L); }
+    (const __half*)edt.data_ptr<at::Half>(),(const __half*)erv.data_ptr<at::Half>(),es,(int)Hm,(int)Wm,co.data_ptr<float>(),de.data_ptr<float>(),tx.data_ptr<float>(),K,H,(int)TXC,(float)dt,L); }
 '''
-_ext = load_inline('kplan_mppi_cuda_v3', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
+_ext = load_inline('kplan_mppi_cuda_v5', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
                    cuda_sources=_SRC, functions=['roll'], extra_cuda_cflags=['-O3'], verbose=False)
 
-def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None):
+def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None, erev=None):
+    """erev: clearance field used for steps with v < 0 (obstacles + space not currently observed free); None -> edt."""
     B, K, H, _ = U.shape
+    if erev is None: erev = edt
     if cost is None: cost = torch.empty(B, K, device=U.device)
     if dead is None: dead = torch.empty(B, K, device=U.device)
     if tx is None: tx = torch.empty(B, K, H, txc, device=U.device)
-    assert edt.dtype == torch.float16 and U.dtype == torch.float32
+    assert edt.dtype == torch.float16 and erev.dtype == torch.float16 and erev.shape == edt.shape and U.dtype == torch.float32
     Hm, Wm = edt.shape[-2:]; est = 0 if edt.dim() == 2 else Hm*Wm
-    _ext.roll(U.contiguous(), state.float().contiguous(), goal.float().contiguous(), fp.float().contiguous(), edt.contiguous(), est, Hm, Wm, cost, dead, tx, txc, float(dt),
+    _ext.roll(U.contiguous(), state.float().contiguous(), goal.float().contiguous(), fp.float().contiguous(), edt.contiguous(), erev.contiguous(), est, Hm, Wm, cost, dead, tx, txc, float(dt),
               [float(L.v_max), float(L.v_min), float(L.a_brake), float(L.t_react), float(L.d_safe), float(L.d_full), float(L.v_near), float(L.d_near),
                float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), float(getattr(L, "rev_w", 4.0)), float(getattr(L, "head_w", 1.5))])
     return cost, dead, tx

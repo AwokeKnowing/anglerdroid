@@ -2,6 +2,10 @@
 Live WebGL: / (default) - Three.js sim. Shared state over WebSocket /ws (~15 Hz, all clients identical, chat log shared),
   /state.json polling fallback. Orbit camera is purely client-side (no server camera). Chat -> nav.agent (grammar, else local LLM).
 Legacy JPEG: /jpeg - server-side render with camera frustums
+3-D frame: the robot lives in its SLAM world, so the 3-D view draws Kevin, the SLAM occupancy map, path, goal, places and
+  LightNav waypoints in nav's map frame.  That frame is placed in the scene by a fixed ANCHOR (nav frame -> env frame,
+  taken from GT when nav starts; identity on the real robot), so the sim ground truth (house mesh, true Kevin ghost,
+  dog) can be overlaid as an optional reference and SLAM drift shows as the two drifting apart.
 Map: nav SLAM map + Kevin footprint (safety-state color) + trajectory + goal + planned path + labeled places + dog.
 Chat: text -> small parser -> nav POST /api/command (same interface as the nav page)."""
 import sys, os, json, math, re, time, threading, urllib.request, struct, hashlib, numpy as np, cv2
@@ -35,7 +39,27 @@ def nav2env(S, x, y):
     nx, ny, na = NAVPOSE[0] or (0.0, 0.0, 0.0)
     dx, dy = x - nx, y - ny; c, s = math.cos(-na), math.sin(-na); u, v = c * dx - s * dy, s * dx + c * dy
     c, s = math.cos(ga), math.sin(ga); return [round(gx + c * u - s * v, 3), round(gy + s * u + c * v, 3)]
+MODE_FILE = os.path.expanduser("~/.kevin/emu/viewer_mode.json")
 MODE = {"send_all_vln": False}
+try: MODE.update({k: v for k, v in json.load(open(MODE_FILE)).items() if k in MODE})   # survives viewer restarts
+except Exception: pass
+ANCHOR_FILE = "/dev/shm/kevin_viewer_anchor.json"
+ANCHOR = {"t0": None, "a": [0.0, 0.0, 0.0], "src": "identity"}
+try: ANCHOR.update(json.load(open(ANCHOR_FILE)))
+except Exception: pass
+def update_anchor(S, n):
+    """nav frame -> scene (env) frame, fixed per nav session (nav t0).  Sim: GT pose composed with the inverse nav pose
+    at the first state seen for that session (nav's frame is its start pose, so this is the start alignment when the
+    viewer is up while nav starts, as live.sh / restarts do).  Real robot: identity."""
+    t0 = n.get("t0")
+    if t0 is not None and ANCHOR["t0"] == t0: return
+    if S and S.get("kevin") and n.get("pose"):
+        gx, gy, ga = S["kevin"][:3]; nx, ny, na = n["pose"][:3]; aa = ga - na; c, s = math.cos(aa), math.sin(aa)
+        a = [gx - (c * nx - s * ny), gy - (s * nx + c * ny), aa]; src = "sim GT at nav start"
+    else: a = [0.0, 0.0, 0.0]; src = "identity"
+    ANCHOR.update(t0=t0, a=[round(v, 5) for v in a], src=src)
+    try: json.dump(ANCHOR, open(ANCHOR_FILE, "w"))
+    except Exception: pass
 TRAJ = []; LOG = []; LOGN = [0]; follow = {"on": False}; lock = threading.Lock(); MAPJPG = [b""]
 def log(who, t):
     with lock: LOG.append([time.strftime("%H:%M:%S"), who, t]); del LOG[:-60]; LOGN[0] += 1
@@ -100,7 +124,10 @@ def chat(text, who="you"):
     log(who, t); rep = handle(t, who); log("kevin", rep); return rep
 
 def set_mode(on, who="?"):
-    if MODE["send_all_vln"] != on: MODE["send_all_vln"] = on; log(who, "Send all to LightNav: %s" % ("ON" if on else "OFF"))
+    if MODE["send_all_vln"] != on:
+        MODE["send_all_vln"] = on; log(who, "Send all to LightNav: %s" % ("ON" if on else "OFF"))
+        try: os.makedirs(os.path.dirname(MODE_FILE), exist_ok=True); json.dump(MODE, open(MODE_FILE, "w"))
+        except Exception: pass
 
 NAVEV = {"t": None}
 def relay_nav_events(events):
@@ -128,15 +155,11 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
             st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
                       safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"))
             relay_nav_events(n.get("events"))
-            V = n.get("vln")
-            if V and S:                                          # env-frame copies for the 3-D view
-                for k in V.get("sets") or []:
-                    k["wp_env"] = [nav2env(S, *p) for p in k.get("wp_map") or []]; k["goal_env"] = k.get("goal") and nav2env(S, *k["goal"])
-            st["vln"] = V
-            if S and n.get("goal"): st["goal_env"] = nav2env(S, *n["goal"][:2])
-            if S and n.get("path"): st["path_env"] = [nav2env(S, *p[:2]) for p in n["path"]]
+            update_anchor(S, n)
+            st["vln"] = n.get("vln")                            # wp_map / goal: nav frame, drawn under the anchor like everything nav
+            st["odom"] = n.get("odom")
         except Exception as e: st["nav_error"] = str(e)[:80]
-        st["send_all_vln"] = MODE["send_all_vln"]
+        st["send_all_vln"] = MODE["send_all_vln"]; st["anchor"] = ANCHOR["a"]; st["anchor_src"] = ANCHOR["src"]; st["slam_map"] = SLAMMAP["meta"]
         with lock: st["log"] = [r[:3] for r in LOG[-30:]]; st["log_n"] = LOGN[0]
         with CL_LOCK: st["clients"] = len(CLIENTS)
         HUB["seq"] += 1; st["seq"] = HUB["seq"]; HUB["st"] = st
@@ -219,6 +242,7 @@ def mapper():
             st = json.loads(nav("/api/state")); meta = json.loads(nav("/api/map.json")); png = nav("/api/map.png")
             M = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE); M = cv2.cvtColor(M, cv2.COLOR_GRAY2BGR)
             x0m, y0m, x1m = meta["x0"], meta["y0"], meta["x1"]; H0 = M.shape[0]; r = H0 / (x1m - x0m)
+            if time.time() - SLAMMAP["t"] > 1.0: slam_rgba(M[:, :, 0], meta)
             x, y, th = st["pose"]; NAVPOSE[0] = (x, y, th)
             with lock:
                 if not TRAJ or math.hypot(TRAJ[-1][0] - x, TRAJ[-1][1] - y) > 0.03: TRAJ.append((x, y)); del TRAJ[:-3000]
@@ -246,6 +270,18 @@ def mapper():
         except Exception as e:
             pass
         time.sleep(max(0.05, 0.25 - (time.time() - t0)))
+
+SLAMMAP = {"png": b"", "meta": None, "t": 0.0, "v": 0}
+def slam_rgba(G, meta):
+    """nav map.png (20 m window, 2 cm, row 0 = +y edge; 20 occupied / 200 seen free / 60 unknown) -> RGBA PNG for the
+    3-D view (unknown transparent).  The client textures a floor plane with it and extrudes the occupied cells."""
+    A = np.zeros(G.shape + (4,), np.uint8)
+    occ = G < 40; free = (G > 150)
+    A[free] = (225, 232, 238, 150); A[occ] = (30, 34, 44, 255)              # cv2 writes BGRA
+    ok, png = cv2.imencode(".png", A)
+    if ok:
+        SLAMMAP["v"] += 1; SLAMMAP["png"] = png.tobytes(); SLAMMAP["t"] = time.time()
+        SLAMMAP["meta"] = dict(meta, v=SLAMMAP["v"], w=int(G.shape[1]), h=int(G.shape[0]))
 
 CAMS = {"rs1_depth": ("kevin_rs1", "depth"), "rs1_color": ("kevin_rs1", "color"), "rs2_depth": ("kevin_rs2", "depth"), "rs2_color": ("kevin_rs2", "color"), "mast_rgb": ("kevin_mast", "color")}
 _BLK = {}
@@ -327,6 +363,7 @@ class H(BaseHTTPRequestHandler):
                 else:
                     return self._send(json.dumps({"error": err}).encode(), "application/json", 503)
             return self._send(json.dumps({"error": "bad request"}).encode(), "application/json", 400)
+        if p == "/slam.png": return self._send(SLAMMAP["png"], "image/png") if SLAMMAP["png"] else self._send(b"", code=404)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
             with lock: return self._send(json.dumps([r[:3] for r in LOG]).encode())
