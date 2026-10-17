@@ -22,7 +22,8 @@ from robot_config import RCX, RCY, EGO_PX_SIZE
 from perception.labels import CLEAR
 from twin_geometry import FOOTPRINT_SAFE
 
-SWEPT_M = 2.0          # trail length whose footprint counts as known traversable
+SWEPT_M = 4.0          # trail length whose footprint counts as known traversable (= nav.run trail, 80 x 5 cm: the
+                       # retreat to the last rotation-feasible pose may reverse along all of it)
 
 NONE, FREE, OBST, BODY = 0, 1, 2, 3
 

@@ -15,6 +15,7 @@ from nav.hw import Hardware
 from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform
 from nav.safety import Envelope
+import twin_geometry as _TG
 from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 
@@ -132,21 +133,27 @@ class Brain:
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
 
     def _retreat(self, goal_for, why):
-        """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point ~0.6 m back is
-        an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
+        """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point (the last
+        trail pose with room to spin, below) is an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
         the RS1 currently sees as free (World.edt_rev).  Afterwards the original goal is planned again."""
         tr = list(getattr(self, "trail", [])); x, y, th = self.slam.pose()
         if len(tr) < 3 or self.planner is None: return False
-        d = 0.0; tgt = None
+        # target: the most recent trail pose where Kevin can spin in place (axle clearance >= R_ROTATE, current map +
+        # observation).  From there every direction is open again.  The whole trail is swept-footprint 'known
+        # traversable' (obslayer SWEPT_M = trail length), so MPPI may reverse along it.  No such pose on the trail ->
+        # its far end.  Never less than 0.15 m (that is not a retreat).
+        d = 0.0; tgt = None; rot = False
         for i in range(len(tr) - 1, 0, -1):
             d += math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1])
-            if d >= 0.6: tgt = tr[i - 1]; break
+            if d >= 0.15 and self.planner.clearance(tr[i - 1]) >= _TG.R_ROTATE: tgt = tr[i - 1]; rot = True; break
         tgt = tgt or tr[0]
         if math.hypot(tgt[0] - x, tgt[1] - y) < 0.15: return False
         ok, _ = self.planner.set_goal((x, y, th, self.v, self.w), np.asarray(tgt, float), None)
         if not ok: return False
-        self._backing_for = goal_for; self.back_tgt = np.asarray(tgt, float); self.back_t0 = time.monotonic(); self.mode = "backout"
-        self.log("%s: retreating along the way in (%.2f m)" % (why, math.hypot(tgt[0] - x, tgt[1] - y)))
+        self._backing_for = goal_for; self.back_tgt = np.asarray(tgt, float); self.back_t0 = time.monotonic(); self.back_T = 12.0 + 2.0 * d / abs(__import__('core').Limits.v_min);   # 2x the time at full reverse speed
+        self.mode = "backout"
+        self.log("%s: retreating along the way in (%.2f m) to %s" % (why, math.hypot(tgt[0] - x, tgt[1] - y),
+                 "the last spot with room to turn around" if rot else "the start of the trail (no room to turn on it)"))
         return True
 
     def _set_sub(self, pose):
@@ -270,7 +277,7 @@ class Brain:
                                 k = self._stuck; self._bo_stuck = 0; self._goto(self.goal_req, self.goal_heading, self.goal_label); self._stuck = k   # replan here (fresh observation), keep the count
                     self._prog = (tn, (x, y, th))
         elif self.mode == "backout":                                  # MPPI to the retreat point (see _retreat)
-            done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > 12.0
+            done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > getattr(self, 'back_T', 12.0)
             r = None if done else self.planner.step((x, y, th, self.v, self.w))
             if r is None:
                 self.v = self.w = 0.0; xy, hd, lb = self._backing_for; self._backing_for = None
@@ -294,7 +301,7 @@ class Brain:
                 if getattr(self, "_resume_path", False) and self.goal is not None:  # noqa
                     self._resume_path = False; self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
                 else: self._arrive()
-            elif self.planner is not None and self.planner.clearance((x, y)) < 0.275:
+            elif self.planner is not None and self.planner.clearance((x, y)) < _TG.R_ROTATE:
                 # no room to spin in place (current observation + map): never back up blind to make room.  Mid-route the
                 # path goes back to MPPI (it can make a multi-point turn, reversing only into observed-free space); a final
                 # heading at the goal is skipped honestly.

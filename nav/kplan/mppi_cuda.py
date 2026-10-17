@@ -22,6 +22,8 @@ __device__ __forceinline__ float vcap(float d,const LP&L){
   float ramp=L.v_near+(L.v_max-L.v_near)*r;
   return fminf(fminf(hard,ramp),L.v_max); }
 #define APPROACH_D 0.6f
+#define R_ROTATE @R_ROTATE@f
+#define R_PASS @R_PASS@f
 #define APPROACH_VMIN 0.08f
 __global__ void k_roll(const float* U,const float* st,const float* goal,const float* fp,int P,const __half* edt,const __half* erv,long long es,int Hm,int Wm,
   float* co,float* deo,float* tx,int K,int H,int TXC,float dt,LP L){
@@ -53,7 +55,7 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
     cost+=dead*50+20*fmaxf(0.06f-clr,0.f);
-    cost+=dt*(expf(-clr/0.15f)+2.0f*fminf(fmaxf(0.275f-ax,0.f)/0.075f,1.f));
+    cost+=dt*(expf(-clr/0.15f)+2.0f*fminf(fmaxf(R_ROTATE-ax,0.f)/(R_ROTATE-R_PASS),1.f));   // not-turnable (twin_geometry)
     float dx=x-gx, dy=y-gy, nr=expf(-sqrtf(dx*dx+dy*dy)/0.25f);
     // reverse is for escapes: cost grows with clearance (free space -> turn and drive forward)
     float cr=fminf(fmaxf((clr-0.05f)/0.20f,0.f),1.f), dg=sqrtf(dx*dx+dy*dy);
@@ -71,7 +73,10 @@ void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,t
   k_roll<<<g,T,0,c10::cuda::getCurrentCUDAStream()>>>(U.data_ptr<float>(),st.data_ptr<float>(),goal.data_ptr<float>(),fp.data_ptr<float>(),(int)fp.size(0),
     (const __half*)edt.data_ptr<at::Half>(),(const __half*)erv.data_ptr<at::Half>(),es,(int)Hm,(int)Wm,co.data_ptr<float>(),de.data_ptr<float>(),tx.data_ptr<float>(),K,H,(int)TXC,(float)dt,L); }
 '''
-_ext = load_inline('kplan_mppi_cuda_v5', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
+import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
+import twin_geometry as _TG
+_SRC = _SRC.replace('@R_ROTATE@', '%.4f' % _TG.R_ROTATE).replace('@R_PASS@', '%.4f' % _TG.R_PASS)
+_ext = load_inline('kplan_mppi_cuda_v6', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
                    cuda_sources=_SRC, functions=['roll'], extra_cuda_cflags=['-O3'], verbose=False)
 
 def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None, erev=None):

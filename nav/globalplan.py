@@ -35,7 +35,8 @@ def coarse_blocked(grid, inflate=0.20, obs=None):
 
 def plan(grid, start, goal, obs=None):
     """Try the full robot half-width first, then a tighter inflation (doors/narrow passes; MPPI does the exact footprint)."""
-    for infl in (0.24, 0.21):                     # robot half-width is 0.207 (wheels); 0.12 routed through 0.3 m gaps (MPPI then stuck)
+    from twin_geometry import R_PASS, HALF_W
+    for infl in (R_PASS, HALF_W):                 # half-width + envelope margin, then the bare half-width (0.12 routed through 0.3 m gaps)
         r = _plan(grid, start, goal, infl, obs)
         if r is not None: r["inflate"] = infl; return r
     return None
@@ -64,13 +65,23 @@ def _plan(grid, start, goal, inflate, obs=None):
     r0, r1 = max(min(s[0], g[0]) - m, 0), min(max(s[0], g[0]) + m + 1, n)
     c0, c1 = max(min(s[1], g[1]) - m, 0), min(max(s[1], g[1]) + m + 1, n)
     F = free[r0:r1, c0:c1]; H, W = F.shape; idx = np.arange(H * W).reshape(H, W)
+    # turn-aware edge cost.  A cell where the robot cannot spin in place (axle clearance < R_ROTATE) is a stretch it can
+    # only leave forwards or by backing out the way it came; if it turns out to be blocked, it is driven twice (in and
+    # back out).  So its worst-case length is 2x: edges cost length * (1 + not_rotatable), the mean of their two ends.
+    # Open space is preferred whenever the detour is shorter than the narrow stretch it avoids, and a narrow path is
+    # still taken when it is the only one (its trail is then the known reversible exit, see nav.run._retreat).
+    from twin_geometry import R_ROTATE
+    clr = cv2.distanceTransform((~occ[r0:r1, c0:c1]).astype(np.uint8), cv2.DIST_L2, 5) * cres
+    mult = 1.0 + (clr < R_ROTATE).astype(float)
     rows, cols, wts = [], [], []
     for dy, dx, w in ((0, 1, 1.0), (1, 0, 1.0), (1, 1, 1.4142), (1, -1, 1.4142)):
         if dx >= 0:
             A = idx[0:H - dy, 0:W - dx]; B = idx[dy:H, dx:W]; ok = F[0:H - dy, 0:W - dx] & F[dy:H, dx:W]
         else:
             A = idx[0:H - dy, 1:W]; B = idx[dy:H, 0:W - 1]; ok = F[0:H - dy, 1:W] & F[dy:H, 0:W - 1]
-        rows.append(A[ok]); cols.append(B[ok]); wts.append(np.full(ok.sum(), w))
+        mA = mult[0:H - dy, 0:W - dx] if dx >= 0 else mult[0:H - dy, 1:W]
+        mB = mult[dy:H, dx:W] if dx >= 0 else mult[dy:H, 0:W - 1]
+        rows.append(A[ok]); cols.append(B[ok]); wts.append(w * 0.5 * (mA[ok] + mB[ok]))
     rows, cols, wts = np.concatenate(rows), np.concatenate(cols), np.concatenate(wts)
     G = csr_matrix((wts, (rows, cols)), shape=(H * W, H * W))
     si = idx[s[0] - r0, s[1] - c0]; gi = idx[g[0] - r0, g[1] - c0]

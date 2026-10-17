@@ -99,3 +99,14 @@ def _hull(P):
 # out ~3 cm beyond the SIL12 rear diagonals (URDF collision geometry is inside SIL12; the MuJoCo lite deck is not).
 # TODO(twin): reconcile kevin_lite deck with the URDF; until then guard the larger of the two.
 FOOTPRINT_SAFE = _hull(np.vstack([SIL12, [[-0.1995, -0.15], [-0.1995, 0.15]]]))
+
+
+# ---- turn-aware planning radii (axle-centred; a diff-drive robot spins about the axle midpoint) ---------------------
+# The Nav2 costmap convention: the INSCRIBED radius bounds translation (the hull fits through a gap of 2*half-width),
+# the CIRCUMSCRIBED radius bounds rotation (spinning sweeps the disc of radius R_CIRC).  Every planner/turn threshold
+# is one of these plus the safety envelope margin, so nothing is a separately tuned number.
+SAFETY_MARGIN = 0.035                                        # nav.safety.Envelope stops the sweep inside this margin
+R_CIRC = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())     # 0.274 (rear deck corners)
+HALF_W = float(np.abs(FOOTPRINT_SAFE[:, 1]).max())                             # 0.210 (wheels)
+R_ROTATE = R_CIRC + SAFETY_MARGIN    # axle clearance needed to spin in place without the envelope trimming it (0.309)
+R_PASS = HALF_W + SAFETY_MARGIN      # axle clearance needed to drive straight through without trimming (0.245)

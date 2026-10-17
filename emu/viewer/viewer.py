@@ -153,7 +153,8 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
         try:
             n = json.loads(nav("/api/state"))
             st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
-                      safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"))
+                      safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"),
+                      bump=dict(latched=((n.get("bump") or {}).get("latched")), armed=(n.get("bump") or {}).get("armed")))
             relay_nav_events(n.get("events"))
             update_anchor(S, n)
             st["vln"] = n.get("vln")                            # wp_map / goal: nav frame, drawn under the anchor like everything nav
@@ -264,6 +265,10 @@ def mapper():
             cv2.polylines(M, [np.array([px(x + c * u - s * v, y + s * u + c * v) for u, v in FP], np.int32)], True, COL.get(ss, (80, 200, 80)), 2)
             cv2.arrowedLine(M, px(x, y), px(x + 0.4 * c, y + 0.4 * s), (0, 220, 0), 2, tipLength=0.3)
             cv2.putText(M, "%s | safety %s x%.2f | %s" % (st.get("mode"), ss, saf.get("scale", 1.0), (st.get("msg") or "")[:46]), (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
+            bl = ((st.get("bump") or {}).get("latched")) or None
+            if bl and bl.get("x") is not None:                      # latched contact (nav/bump.py): red X + label
+                cv2.drawMarker(M, px(bl["x"], bl["y"]), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 18, 3)
+                cv2.putText(M, "BUMP " + str(bl.get("dir")), px(bl["x"] + 0.1, bl["y"] + 0.1), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1, cv2.LINE_AA)
             if S: cv2.putText(M, "contacts %s  dog contacts %s" % (S.get("collisions"), S.get("dog_contacts")), (6, S_ - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
             if EGO[0] is not None: E_ = EGO[0]; M[S_ - E_.shape[0] - 22:S_ - 22, S_ - E_.shape[1]:] = E_
             MAPJPG[0] = cv2.imencode(".jpg", M, [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()

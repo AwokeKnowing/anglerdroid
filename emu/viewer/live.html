@@ -381,7 +381,7 @@ function updateState(st){
 // ---- shared state: WebSocket /ws (same origin => works via cloudflared), HTTP polling fallback
 let ws=null,wsOK=false,lastSeq=0,lastMsgT=0,pollOn=false,wsFails=0;const myName='web-'+Math.random().toString(36).slice(2,6);
 function onState(st){lastSeq=st.seq||lastSeq;lastMsgT=performance.now();updateState(st);updateVLN(st);renderLog(st.log);
-  document.getElementById('hud').textContent='Kevin · SLAM frame · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+errTxt+' · drag orbit (yours only)'}
+  document.getElementById('hud').textContent='Kevin · SLAM frame · '+(wsOK?'live (ws)':'polling')+' · '+(st.clients||0)+' viewer(s) · '+(st.mode||'?')+(st.safety&&st.safety!='ok'?' · safety '+st.safety:'')+(st.bump&&st.bump.latched?' · BUMP '+st.bump.latched.dir+' (stopped; any command clears)':'')+(st.bump&&st.bump.armed===false?' · bump detector calibrating':'')+errTxt+' · drag orbit (yours only)'}
 function connectWS(){
   try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws')}catch(e){startPoll();return}
   ws.onopen=()=>{wsOK=true;wsFails=0};

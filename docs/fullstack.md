@@ -481,3 +481,64 @@ What the emulator modeled **before** this change: ideal unless noted.
 - Viewer style (emu/world.py, VIEW only): each camera is a small solid pyramid (apex = optical centre, 8 cm deep for depth, 10 cm see-through for colour) with the live image on a small plane 3.5 cm behind the apex; full FOV drawn as thin translucent lines to VIEW_CLIP = 0.2..1.2 m with faint near/far rectangles. The big far-plane image boards are gone.
 - Viewer style revised (James): no pyramid bodies. Each camera = thin translucent frustum edge lines from the lens to 1.2 m + faint near (0.2 m) / far rectangles; the live image fills the frustum cross-section 10 cm (depth) / 9 cm (colour) in front of the lens, camera-oriented.
 - cas_full4 (all fixes: noslip/frictionloss, chi2, back-out, IMU stamps, frustum-line view): 5/9 (2 of them "closest reachable"), 0 wall contacts, 0 dog, SLAM max 0.84 m / final 0.80 m (worse than cas_full3 0.29 m), back-out never triggered. ab3 A/B: IMU arm beats wheels-only in realistic noise, but both arms are below the earlier ab_ runs -> regression/variance to investigate.
+
+## Turn-aware planning + contact (bump) detector (2026-10-17, James 9:55 PT)
+
+### Turn radius (planner)
+All thresholds come from the footprint (`src/twin_geometry.py`, axle-centred, since a diff drive spins about the axle midpoint):
+`R_CIRC` = 0.274 m (rear deck corners; spinning sweeps this disc), `HALF_W` = 0.210 m (wheels), and the safety envelope
+margin 0.035 m. So `R_ROTATE = R_CIRC + margin = 0.309` is the axle clearance needed to spin in place, and `R_PASS = HALF_W + margin = 0.245`
+is the clearance needed to drive straight through. (This is the Nav2 inscribed/circumscribed costmap convention.)
+- **Global (globalplan.py):** inflation is `R_PASS`, then `HALF_W` (it was 0.24/0.21, so behaviour is unchanged). The edge cost is
+  `length x (1 + [clearance < R_ROTATE])`. A stretch where Kevin cannot turn around may have to be driven twice: in, then
+  backed out the way he came. Its worst-case length is therefore 2x. Open space wins whenever the detour is shorter than that.
+  A narrow path is still used when it is the only one. Tests: `tests/test_globalplan.py` (prefers_room_to_turn and
+  narrow_still_allowed_when_only_way; with the cost removed, the first one takes the slot).
+- **Local MPPI (cuda/triton/torch):** the not-turnable term ramps from 0 at `R_ROTATE` to 1 at `R_PASS`. It used to be hand
+  constants 0.275/0.075. Turn mode refuses an in-place spin below `R_ROTATE`.
+- **Stuck recovery (`run._retreat`):** the goal is the most recent trail pose with clearance >= `R_ROTATE`, i.e. the last
+  place with room to turn around. It is planned with MPPI, not a blind reverse. If no trail pose has that much room, the
+  goal is the far end of the trail. `obslayer.SWEPT_M` is now 4 m, the full 80 x 5 cm trail, so reversing along it counts
+  as known traversable (we just drove there). The retreat timeout scales with distance.
+
+### Contact detector (nav/bump.py), additive safety
+The existing safety is unchanged: the top-down immobilise, 0.25/0.5 s staleness, the envelope stop and the ODrive watchdog.
+The bump detector can only add a stop.
+- **Model:** per wheel, the measured motor current (ODrive cyclic Get_Iq 0x14, `iq_msg_rate_ms=10`) is fitted against
+  [1, sgn v, v, a, sgn v*|w|]. The fit is RLS, identified online while driving normally (friction, viscous, inertia,
+  caster scrub). Residual sigma comes from a running RMS.
+- **Triggers:**
+  - The residual pushes in the direction of travel by >= 5 sigma for 3 ticks (100 ms).
+  - Or a wheel is commanded to move but measures < 30 % of the command for 0.3 s while pushing >= 3 sigma (stall).
+- **IMU:** the residual between the IMU's specific force and the rigid-body acceleration from the encoders (lever arm
+  included) never trips on its own. Tried as a trigger, even corroborated, it gave false positives from caster/floor
+  chatter and a wrong-sign direction on a frontal hit, because on impact the encoders decelerate with the body. It is
+  used for the side of the contact and is logged.
+- **On detection:** stop now (with a 0.5 s hold), cancel the goal and LightNav, mark the contact edge of the footprint in
+  the SLAM map (2 hits = confident), and latch `state.bump.latched` (dir, why, x, y). The event goes out as a nav log
+  event, which the chat relay picks up. The viewer HUD shows "BUMP <dir>" and the map shows a red X. Any new command
+  clears the latch.
+- **Calibration:** nothing trips on hand constants in A or m/s^2. Until 600 moving ticks (~20 s of driving), sigma uses a
+  1 A prior, so only gross events trip. The fit persists in `~/.kevin/bump_cal_<KEVIN_HAL>.json` (`bump_cal_real.json` on the robot).
+- **Sim realism:** MuJoCo contact loads the wheel joints, and the ODrive PI model (Kt 0.9506, `current_soft_max` 10 A) turns
+  that into Iq. The IMU is now the mean of the 1 kHz physics samples over each 5 ms output period. It used to be one raw
+  sample, which aliased contact chatter to +-40 m/s^2; a real BMI055 low-pass filters internally.
+- **Sim test (`tests/sim_bump_reverse.py`, nav stopped):** normal driving (straight, arcs, spins, until armed), then a
+  0.15 m/s reverse into a box 10 cm behind the rear edge, then forward into a box. Result: 0 false positives. Reverse
+  detected 'rear' 0.11 s after the ground-truth contact (1.6 cm further travel); forward detected 'front' at 0.19-0.20 s
+  (3 cm). PASS on 2 consecutive runs.
+
+### Validating on the real robot (do this before trusting it)
+1. Check that currents arrive. With nav running, `GET /api/state` should show `bump.sigma_I` changing from the prior and no
+   `bump_err` in stats. If `Hardware.motor_currents()` returns None, the S1 is not streaming Iq: check `iq_msg_rate_ms`
+   in `src/s1-odrive-config.py`.
+2. Calibrate. Delete `~/.kevin/bump_cal_real.json`. Drive normally (gamepad or goals) for at least 1 minute with turns, arcs and
+   carpet/threshold crossings, until `bump.armed` is true. Note `sigma_I` (sim: ~0.25-0.33 A).
+3. False-positive check. Drive 10+ minutes of normal tours. `bump.stats.events` must stay 0. Record `stats.max_zI`
+   (sim: up to 9.5 per tick, but never 3 ticks in a row over 5).
+4. Contact check, at low speed. Put a cardboard box or pillow 10 cm behind the rear edge and send `drive -0.1 0 3` (chat
+   or `POST /api/command {"text": "drive -0.1 0 3"}`). Expect "BUMP rear: motor current ... over model" within about
+   0.2 s. The safety envelope may stop first if the RS1 sees the box; for a true blind-rear test, use a low object or one
+   below the camera's view. Repeat forward and at a side corner.
+5. If step 3 shows false positives, do not lower the thresholds. Look at which feature is unmodelled (log `ev.zI`,
+   v_cmd, w_cmd) and add it to the regressor.

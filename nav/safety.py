@@ -10,7 +10,7 @@ import math, time
 import numpy as np
 
 import nav  # noqa (src on path)
-from twin_geometry import SIL12, FOOTPRINT_SAFE                    # twin footprint polygon (+ sim deck corners)
+from twin_geometry import SIL12, FOOTPRINT_SAFE, SAFETY_MARGIN                    # twin footprint polygon (+ sim deck corners)
 
 
 def _edges(poly):
@@ -22,7 +22,7 @@ def _edges(poly):
 
 
 class Envelope:
-    def __init__(self, margin=0.035, a_brake=1.5, t_react=0.10, stale_s=0.25, min_valid=0.05, reach=2.0):
+    def __init__(self, margin=SAFETY_MARGIN, a_brake=1.5, t_react=0.10, stale_s=0.25, min_valid=0.05, reach=2.0):
         self.n, self.c = _edges(FOOTPRINT_SAFE); self.margin = margin; self.a = a_brake; self.tr = t_react
         self.stale = stale_s; self.min_valid = min_valid; self.reach = reach
         self.interventions = 0; self.immobilised = 0; self.ticks = 0; self._was = False

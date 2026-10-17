@@ -62,6 +62,28 @@ def test_leave_inflated_band_never_closer():
     assert d.min() >= np.hypot(start[0] - 5.02, start[1] - 5.02) - 0.05, d.min()      # within one coarse cell
 
 
+def _narrow_vs_open(close_detour):
+    """Barrier x 4.5..7.0, y -1.0..1.0 with a 0.60 m slot along y=0 (axle clearance 0.30 < R_ROTATE: no room to spin,
+    but drivable).  Around the barrier's top end (y > 1.0) is open.  Start (3.5, 0), goal (8, 0).
+    slot: 4.5 m long, 2.5 m of it not rotatable;  detour: ~6.3 m, all rotatable."""
+    g = Grid(0.02)
+    g.wall(4.5, 0.30, 7.0, 1.0); g.wall(4.5, -1.0, 7.0, -0.30)
+    if close_detour: g.wall(4.5, 1.0, 7.0, 4.0); g.wall(4.5, -4.0, 7.0, -1.0)
+    return GP.plan(g, (3.5, 0.0), (8.0, 0.0))
+
+
+def test_prefers_room_to_turn():
+    """Turn-aware edge cost (length x (1 + not_rotatable)): the 2.5 m slot costs ~5 m (it may have to be driven out
+    again), so the 6.3 m open detour wins; plain shortest path would take the slot (4.5 m)."""
+    r = _narrow_vs_open(False); assert r is not None
+    assert r["xy"][:, 1].max() > 1.0, "took the narrow slot although the open detour is cheaper in worst-case length"
+
+
+def test_narrow_still_allowed_when_only_way():
+    r = _narrow_vs_open(True); assert r is not None and r["snap_m"] < 0.05
+    assert np.abs(r["xy"][:, 1]).max() < 0.3, "the slot is the only way; it must still be used"
+
+
 if __name__ == "__main__":
     for k, f in list(globals().items()):
         if k.startswith("test_"): f(); print("ok", k)
