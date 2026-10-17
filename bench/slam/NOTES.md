@@ -91,6 +91,66 @@ The rs2_color estimate is within −1% to +6%. The mast estimate is consistently
 - **Monocular feed-forward SLAM** (VGGT-SLAM) on floor-heavy, rotation-dominant views with sparse keyframes (165–334 kf over 9001 frames) is not usable as an odometry source. Treat it as a global mapper only.
 - **slam2** (the current stack, wheel+gyro+scan matching) was the most robust over the long run. ORB-SLAM3 was the most accurate while it lived, but crashed.
 
+## 2d. Our combined estimator: kslam (+ kfuse), plus LingBot-Map. All numbers measured.
+Bench files are in `bench/slam/`. Per-sequence tables are in `bench/slam/results/casita_*.md`.
+
+ATE and yaw are anchored at the start pose:
+| seq | method | ate_xy m | final_xy m | yaw_max ° | yaw/360 ° | ate_aligned m |
+|---|---|---|---|---|---|---|
+| spins | kslam | 0.045 | 0.051 | 2.21 | 0.26 | 0.021 |
+| spins | slam2 | 0.035 | 0.066 | 4.08 | 0.49 | 0.028 |
+| tour | **kslam** | 0.211 | 0.344 | **2.83** | **0.31** | 0.127 |
+| tour | slam2 | 0.184 | 0.352 | 11.48 | 1.26 | 0.126 |
+| tour | kslam_vo (cuVSLAM translation) | 0.693 | 0.826 | 2.83 | 0.31 | 0.376 |
+| long | **kslam** | 0.716 | 0.959 | **4.78** | **0.54** | 0.364 |
+| long | kslam_vo | **0.536** | **0.517** | 4.78 | 0.54 | **0.211** |
+| long | slam2 | 0.592 | 0.796 | 5.21 | 0.59 | 0.353 |
+| tour_p24 (true RS2 pitch 24°, belief 27°) | kslam (self-cal) / no self-cal | 0.232 / 0.223 | | 3.66 / 3.35 | | 0.127 / 0.119 |
+
+LingBot-Map, uncalibrated, streaming at 392 px, KV window 16, SDPA, 5.1–5.2 GB:
+| seq | camera | ate_aligned (Sim3) | yaw_max | speed |
+|---|---|---|---|---|
+| spins | mast | 0.833 | 179.8° | 6.9 FPS |
+| spins | rs2_color | 0.729 | 172.6° | 6.9 FPS |
+| tour | mast | 0.68 | 178.3° | 6.9 FPS |
+| tour | rs2_color | 1.804 | 179.0° | 7.0 FPS |
+
+LingBot-Map focal estimates: mast 252.8 / 255.8 (truth 240.3, +5–6%); rs2_color 582.3 / 609.3 (truth 625.2).
+
+Self-calibration (measured):
+- **RS2 pitch** from the floor plane: estimated 23.65° with true 24.0° and belief 27° (p24 sequence). With truth 27° it estimated 26.85 / 26.65 / 26.03 (spins / tour / long).
+  - Camera height: 0.466 m vs twin 0.468 m (0.382 m + axle 0.0857 m).
+- **Gyro yaw scale**: estimated −0.0073 / −0.0063 / −0.0107. Effective truth is −0.0081 (from the drawn per-axis errors projected through the IMU mount).
+- **Mast lens (mastcal)**: rotation-consistency calibration on in-place turns, using kslam heading and no target or map.
+
+| seq | fx (truth 240.34) | k1 (truth −0.050) | k2 (truth 0.008) | HFOV (truth 109.97°) |
+|---|---|---|---|---|
+| spins | 243.71 | −0.0498 | 0.0085 | 109.01° |
+| tour | 244.06 | −0.0483 | 0.0080 | 108.86° |
+| long | 244.32 | −0.0443 | 0.0057 | 108.85° |
+
+  HFOV here is the edge-ray angle, including distortion; the pinhole-fx HFOV is 106.18°. For comparison:
+
+| source | fx | error vs truth |
+|---|---|---|
+| robot belief (100° HFOV) | 268.5 | +11.7% |
+| VGGT-SLAM | 326–333 | +36–39% |
+| LingBot-Map | 253–256 | +5–6% |
+| mastcal | 243.7–244.3 | +1.4–1.7% |
+
+### What the numbers say
+1. Heading drift is solved by structure, not by a better matcher. Manhattan wall directions from RS2 depth normals, learned online with no map, cut tour yaw_max from 11.5° (slam2) to 2.8°. The residual check against GT gave median 0.6° and p90 2.0° per observation.
+2. Off-the-shelf VO/SLAM on this robot's views is fragile.
+   - cuVSLAM drifts 26–123° on tour/long through rug bumps, close low-texture views and floor-dominated frames. A self-mask did not fix it.
+   - ORB-SLAM3 is the most accurate while alive (5 mm on spins) but crashed with a Sophus NaN at 80 s on long.
+   - Feed-forward models (VGGT-SLAM 2.0, LingBot-Map) lose heading on in-place spins: yaw flips of about 180°, a rotation-only degeneracy at small KV/window sizes.
+3. Use learned models for what they are good at:
+   - dense geometry and global mapping on i777, not odometry;
+   - a focal prior (LingBot-Map +5%). Fine calibration comes from geometry (mastcal +1.5%).
+4. Translation is now the main error, from wheel slip on rug edges and the 0.3% radius error.
+   - VO translation helped on long (ATE 0.72 → 0.54 m) but hurt on tour (0.21 → 0.69 m).
+   - The next step is loop closure / map relocalization edges in an i777 pose graph, not more odometry.
+
 ## 3. Architecture (proposal)
 - **Robot (Orin): local pose and local map, always autonomous.**
   - EKF on SE(2)+z: wheel odometry is the prior; the gyro covers short windows; ZUPT from cmd.
@@ -108,7 +168,24 @@ The rs2_color estimate is within −1% to +6%. The mast estimate is consistently
   - Mast intrinsics: per-session focal from a feed-forward model is unreliable at 106° (see the +36% above). Use a geometric approach: refine fx, k1, k2 by BA against RS2-depth-anchored landmarks, or run a self-calibrating BA (COLMAP-style) on i777 over a spin sequence, seeded from the 100° belief.
   - RS2 pitch: estimate from the floor plane in depth (RANSAC) every few seconds, plus gravity from the D435i accelerometer.
 
+## 3b. Recommended system ("kslam", ours)
+- **On the robot (Orin, CPU-light):**
+  - kslam EKF: wheel prior; gyro with online scale/bias; ZUPT; Manhattan heading from RS2 depth at 5 Hz (49 ms/frame in Python offline, not optimised); floor-plane pitch/height self-cal; auto self-occlusion mask.
+  - Local 2D/2.5D map in the odom frame.
+  - The safety layer stays independent.
+- **On i777:**
+  - Pose graph: kslam odometry edges; loop-closure edges from place recognition plus metric RGB-D registration (or ORB-SLAM3/cuVSLAM relocalization kept as an edge source, never as the pose owner); Manhattan as a unary heading prior.
+  - Dense reconstruction (TSDF / splats) at the corrected poses. LingBot-Map (Apache) or MapAnything-apache can serve as a dense-geometry prior for the mast camera.
+  - mastcal is re-run per session to keep mast intrinsics current.
+  - Sends `T_map_odom` at about 1 Hz.
+  - On link loss the robot continues in the odom frame with growing covariance.
+
 ## 4. Unresolved / caveats
 - Sim IR stereo has no projector speckle or real rolling-shutter artifacts, so ORB/cuVSLAM numbers are optimistic.
 - GPU contention: LightNav vLLM uses 14.5 GB and ollama qwen2.5:7b 6.6 GB. The ollama model was unloaded temporarily for the GPU runs and must be reloaded.
-- Tour and long sequences: in progress.
+- MASt3R-SLAM: install unfinished (CUDA backend compile interrupted by the 11:30 i777 crash); not measured.
+- ABot-Recon, MapAnything, DA3 and AMB3R were not installed (GPU budget and time). AMB3R has no license.
+- Live sim restarted once at 15:36 PDT from the slambench worktree (merged with the live branch). Measurements:
+  - camera rate 18.5–19.9 Hz with realism, vs 20.0–20.8 Hz before;
+  - offline selftest under contention: realism on 16 Hz vs off 20 Hz.
+- Decor plants and the lamp base collide, so the GT map changed slightly.
