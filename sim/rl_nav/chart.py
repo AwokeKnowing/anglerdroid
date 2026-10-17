@@ -21,11 +21,28 @@ CLIP_CANVAS = Path(
 )
 _CLIP_STAMP = 0.0
 
+POOL_SEC_RE = re.compile(r"house pool n=\d+.*?sec=([\d.]+)")
+
+
+def pool_ceil(path: Path = LOG) -> float | None:
+    """Deprecated house-gen fog count (sec=). Do not use as reward ceiling."""
+    if not path.is_file():
+        return None
+    first = None
+    for line in path.read_text(errors="replace").splitlines():
+        m = POOL_SEC_RE.search(line)
+        if m:
+            first = float(m.group(1))
+            break
+    return first
+
+
 UPD_RE = re.compile(
     r"upd\s+(\d+)\s+step=(\d+)\s+sps=([\d.]+)\s+ent=([\d.]+)"
     r".*?hits=([\d.]+).*?crash=([\d.]+).*?clear=([\d.]+).*?stg=(\d+)"
     r"(?:.*?loss=([-\d.]+))?(?:.*?ret=([-\d.]+))?(?:.*?ceil=([\d.]+))?"
-    r"(?:.*?cover=([\d.]+))?"
+    r"(?:.*?(?:rewards|cover)=([\d.]+))?(?:.*?contact=([-\d.]+))?(?:.*?cfrac=([\d.]+))?"
+    r"(?:.*?stuck_s=([-\d.]+))?"
 )
 
 
@@ -47,15 +64,27 @@ def parse_log(path: Path) -> list[dict]:
             "crash": float(m.group(6)),
             "clear": float(m.group(7)),
             "stg": stg,
-            "ceil": float(m.group(11)) if m.group(11) else 80.0,
         }
-        rec["ret_ceil"] = rec["ceil"] + 1.0
+        if m.group(11):
+            rec["ceil"] = float(m.group(11))
+            rec["ret_ceil"] = rec["ceil"] + 1.0
+        else:
+            rec["ceil"] = None
+            rec["ret_ceil"] = None
         if m.group(9):
             rec["loss"] = float(m.group(9))
         if m.group(10):
             rec["ret"] = float(m.group(10))
         if m.group(12):
-            rec["cover"] = float(m.group(12))
+            rec["rewards"] = rec["cover"] = float(m.group(12))
+        if m.group(13):
+            rec["contact"] = float(m.group(13))
+        if m.group(14):
+            rec["contact_frac"] = float(m.group(14))
+        if m.lastindex and m.lastindex >= 15 and m.group(15):
+            rec["stuck_s"] = float(m.group(15))
+        elif rec.get("contact") is not None:
+            rec["stuck_s"] = float(rec["contact"]) * 0.20
         rows.append(rec)
     return rows
 
@@ -73,8 +102,16 @@ def parse_jsonl(path: Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
         stg = int(rec.get("stg", rec.get("stage", 0)))
-        rec.setdefault("ceil", float(rec.get("ceil", 80.0)))
-        rec.setdefault("ret_ceil", float(rec.get("ceil", 80.0)) + 1.0)
+        rec["stg"] = stg
+        if rec.get("ceil") is None:
+            rec.pop("ceil", None)
+        else:
+            rec["ceil"] = float(rec["ceil"])
+            rec.setdefault("ret_ceil", rec["ceil"] + 1.0)
+        if "rewards" not in rec and "cover" in rec:
+            rec["rewards"] = rec["cover"]
+        elif "cover" not in rec and "rewards" in rec:
+            rec["cover"] = rec["rewards"]
         rows.append(rec)
     return rows
 
@@ -128,21 +165,39 @@ def render_canvas(rows: list[dict]) -> str:
         raise ValueError("no rows")
     pts = downsample(rows, 40)
     last = rows[-1]
-    ceil = float(last.get("ceil", 1.0))
-    hits = float(last.get("hits", 0.0))
-    crash = float(last.get("crash", 0.0))
-    clear = float(last.get("clear", 0.0))
-    ent = float(last.get("ent", 0.0))
+    ceil = float(last.get("ceil") or 1.0)
+    hits = float(last.get("hits", 0.0) or 0.0)
+    rew = float(last.get("rewards", last.get("cover", 0.0)) or 0.0)
+    crash = float(last.get("crash", 0.0) or 0.0)
+    ent = float(last.get("ent", 0.0) or 0.0)
     step = int(last.get("step", 0))
-    sps = float(last.get("sps", 0.0))
+    sps = float(last.get("sps", 0.0) or 0.0)
     stg = int(last.get("stg", 0))
-    gap = max(0.0, ceil - hits)
     loss_pts = downsample([r for r in rows if "loss" in r], 40)
     ret_pts = downsample([r for r in rows if "ret" in r], 40)
     cats = _cats(pts)
-    hits_s = _fmt([float(r["hits"]) for r in pts])
-    ceil_s = _fmt([float(r.get("ceil", 1.0)) for r in pts])
-    crash_s = _fmt([float(r["crash"]) for r in pts])
+
+    def _c(r):
+        v = r.get("ceil")
+        return float(v) if v is not None else ceil
+
+    hits_s = _fmt([float(r.get("hits") or 0.0) for r in pts])
+    ceil_s = _fmt([_c(r) for r in pts])
+    rew_s = _fmt([float(r.get("rewards", r.get("cover", 0.0)) or 0.0) for r in pts])
+    crash_s = _fmt([float(r.get("crash") or 0.0) for r in pts])
+    cfrac_s = _fmt([float(r.get("contact_frac", 0.0) or 0.0) for r in pts])
+
+    def _stuck(r):
+        if r.get("stuck_s") is not None:
+            return float(r["stuck_s"])
+        if r.get("contact") is not None:
+            return float(r["contact"]) * 0.20
+        return 0.0
+
+    stuck_s = _fmt([_stuck(r) for r in pts])
+    stuck_last = _stuck(last)
+    cfrac_last = float(last.get("contact_frac", 0.0) or 0.0)
+    stuck_ymax = max(8.0, max((_stuck(r) for r in pts), default=0.0) * 1.25)
 
     loss_block = ""
     if len(loss_pts) >= 2:
@@ -151,7 +206,7 @@ def render_canvas(rows: list[dict]) -> str:
         <H2>PPO loss</H2>
         <Text size="small" tone="secondary">
           Clipped surrogate + value + entropy. Lower is not always better if
-          hits are not rising. Source: sim/rl_nav/out · last {len(loss_pts)} samples.
+          rewards / episode are not rising.
         </Text>
         <LineChart
           categories={{{_cats(loss_pts)}}}
@@ -163,27 +218,44 @@ def render_canvas(rows: list[dict]) -> str:
 
     ret_block = ""
     if len(ret_pts) >= 2:
+        ret_ceil_s = _fmt([float(r.get("ceil") or ceil) for r in ret_pts])
         ret_block = f"""
       <Stack gap={{8}}>
-        <H2>Episode return vs sparse ceiling</H2>
+        <H2>Episode return</H2>
         <Text size="small" tone="secondary">
-          Sparse max is every visitable fog tile plus a clear bonus
-          (stage {stg} → {int(last.get("ret_ceil", ceil + 1))} ).
-          Early stages also shape toward unseen space.
+          Sum of paint − stall − contact. One claim ≈ 1.0 before penalties.
+          Green line is packing budget (open area / 4 m²).
         </Text>
         <LineChart
           categories={{{_cats(ret_pts)}}}
           series={{[
             {{ name: "mean episode return", data: {_fmt([float(r["ret"]) for r in ret_pts])}, tone: "info" }},
-            {{ name: "all rewards every episode", data: {_fmt([float(r.get("ret_ceil", r.get("ceil", 1) + 1)) for r in ret_pts])}, tone: "success" }},
+            {{ name: "packing ceiling", data: {ret_ceil_s}, tone: "success" }},
           ]}}
           height={{200}}
-          beginAtZero
-          referenceLines={{[{{ value: {float(last.get("ret_ceil", ceil + 1)):.2f}, label: "all rewards every episode", tone: "success" }}]}}
+          beginAtZero={{false}}
         />
       </Stack>"""
 
-    ymax = max(ceil, 1.0, max(float(r["hits"]) for r in pts)) * 1.15
+    rew_block = f"""
+      <Stack gap={{8}}>
+        <H2>Reward fraction</H2>
+        <Text size="small" tone="secondary">
+          Claims / packing ceiling. Curriculum gates 0.32 / 0.45 / 0.55 / 0.65 / 0.72.
+          LOS 2 m suppress — a room behind a wall still counts.
+        </Text>
+        <LineChart
+          categories={{{cats}}}
+          series={{[
+            {{ name: "rewards fraction", data: {rew_s}, tone: "info" }},
+          ]}}
+          height={{180}}
+          beginAtZero
+          yMax={{1}}
+        />
+      </Stack>"""
+
+    ymax = max(ceil, 1.0, max((float(r.get("hits") or 0.0) for r in pts), default=0.0)) * 1.15
     updated = time.strftime("%Y-%m-%d %H:%M:%S")
     return f"""import {{
   Callout,
@@ -202,53 +274,75 @@ export default function RlNavLive() {{
       <Stack gap={{8}}>
         <H1>rl_nav training</H1>
         <Text tone="secondary">
-          Fog-of-war tiles (~0.4 m) painted in a body disk with wall LOS.
-          Ceiling is every walkable tile (about {int(ceil)}). Stage {stg}.
-          Canvas rewrites every 60 s. Updated {updated}.
+          WanderAround: open-floor waypoints ≥50 cm from walls, 2 m LOS
+          suppress (walls keep the far room). Ceiling is area / 4 m²
+          (about {ceil:.1f}). Stage {stg}. Canvas rewrites every 60 s.
+          Updated {updated}.
         </Text>
       </Stack>
 
-      <Grid columns={{4}} gap={{16}}>
-        <Stat value="{hits:.1f}" label="fog tiles / episode" />
-        <Stat value="{ceil:.0f}" label="visitable tiles" tone="success" />
-        <Stat value="{gap:.2f}" label="gap to ceiling" tone="warning" />
+      <Grid columns={{5}} gap={{16}}>
+        <Stat value="{hits:.1f} / {ceil:.1f}" label="rewards / episode" />
+        <Stat value="{rew:.0%}" label="reward fraction" />
+        <Stat value="{stuck_last:.1f}s" label="time in collision / ep" tone="danger" />
+        <Stat value="{cfrac_last:.0%}" label="episode time overlapping" tone="warning" />
         <Stat value="{(step / 1e6):.1f}M" label="policy steps" />
       </Grid>
 
       <Callout tone="info">
-        Dashed chip and green series are the theoretical max if the policy
-        sees every free tile. Crash {crash:.0%} · clear {clear:.0%} · entropy {ent:.2f} · {sps:.0f} sps.
+        Collision time is hull-overlap seconds per episode (5 Hz steps).
+        Target 0 s. Reward ceiling {ceil:.1f} · entropy {ent:.2f} · {sps:.0f} sps.
       </Callout>
 
       <Stack gap={{8}}>
-        <H2>Fog tiles seen vs visitable ceiling</H2>
+        <H2>Time in collision</H2>
         <Text size="small" tone="secondary">
-          Rolling mean body-disk fog tiles per episode. X axis is policy steps.
-          Source: sim/rl_nav/out/train.log · downsampled to {len(pts)} points.
+          Seconds per episode the rotated hull overlapped a wall (episode
+          continues). {cfrac_last:.0%} of episode time. Target is a flat 0.
+        </Text>
+        <LineChart
+          categories={{{cats}}}
+          series={{[{{ name: "seconds in collision / episode", data: {stuck_s}, tone: "danger" }}]}}
+          height={{220}}
+          beginAtZero
+          yMax={{{stuck_ymax:.2f}}}
+        />
+      </Stack>
+
+      <Stack gap={{8}}>
+        <H2>Rewards vs packing ceiling</H2>
+        <Text size="small" tone="secondary">
+          Claims per episode vs open-floor area / (2 m)². LOS only — tiles
+          through a wall stay. Not every house can cash the full budget.
         </Text>
         <LineChart
           categories={{{cats}}}
           series={{[
-            {{ name: "fog tiles / episode", data: {hits_s}, tone: "info" }},
-            {{ name: "all visitable tiles", data: {ceil_s}, tone: "success" }},
+            {{ name: "rewards / episode", data: {hits_s}, tone: "info" }},
+            {{ name: "packing ceiling", data: {ceil_s}, tone: "success" }},
           ]}}
           height={{240}}
           beginAtZero
           yMax={{{ymax:.2f}}}
-          referenceLines={{[{{ value: {ceil:.2f}, label: "all rewards every episode", tone: "success" }}]}}
+          referenceLines={{[{{ value: {ceil:.2f}, label: "max packing rewards", tone: "success" }}]}}
         />
       </Stack>
+{rew_block}
 {loss_block}
 {ret_block}
 
       <Stack gap={{8}}>
-        <H2>Crash fraction</H2>
+        <H2>Overlap fraction</H2>
         <Text size="small" tone="secondary">
-          Footprint / mover hits. Target is 0. Source: same log.
+          Same signal as seconds, as a fraction of policy steps. crash_frac
+          is the old cut==2 death rate and stays ~0.
         </Text>
         <LineChart
           categories={{{cats}}}
-          series={{[{{ name: "crash fraction", data: {crash_s}, tone: "danger" }}]}}
+          series={{[
+            {{ name: "fraction of steps in collision", data: {cfrac_s}, tone: "danger" }},
+            {{ name: "crash fraction (unused)", data: {crash_s}, tone: "warning" }},
+          ]}}
           height={{160}}
           beginAtZero
           yMax={{1}}
@@ -276,12 +370,28 @@ def _series(rows: list[dict], n: int = 64) -> dict:
     for r in pts:
         step = int(r.get("step", 0))
         labs.append(f"{step / 1e6:.1f}M" if step >= 1_000_000 else f"{step / 1000:.0f}k")
+
+    def pref(*keys: str) -> list[float | None]:
+        out: list[float | None] = []
+        for r in pts:
+            v = None
+            for k in keys:
+                if k in r and r[k] is not None:
+                    v = float(r[k])
+                    break
+            out.append(v)
+        return out
+
     return {
         "labels": labs,
         "hits": nums("hits"),
         "ceil": nums("ceil"),
-        "cover": nums("cover"),
+        "rewards": pref("rewards", "cover"),
+        "cover": pref("rewards", "cover"),
         "crash": nums("crash"),
+        "contact": nums("contact"),
+        "contact_frac": nums("contact_frac"),
+        "stuck_s": nums("stuck_s"),
         "ent": nums("ent"),
         "loss": nums("loss"),
         "ret": nums("ret"),
@@ -315,8 +425,12 @@ def write_stats(rows: list[dict] | None = None) -> Path:
     rec = {
         "step": last.get("step", meta.get("step", 0)),
         "sps": last.get("sps", 0),
-        "cover": last.get("cover", 0),
+        "rewards": last.get("rewards", last.get("cover", 0)),
+        "cover": last.get("rewards", last.get("cover", 0)),
         "crash": last.get("crash", 0),
+        "contact": last.get("contact", 0),
+        "contact_frac": last.get("contact_frac", 0),
+        "stuck_s": last.get("stuck_s", float(last.get("contact", 0) or 0) * 0.20),
         "clear": last.get("clear", 0),
         "path": last.get("path", last.get("mean_path", 0)),
         "hits": last.get("hits", 0),
@@ -325,13 +439,14 @@ def write_stats(rows: list[dict] | None = None) -> Path:
         "stg": last.get("stg", 0),
         "loss": last.get("loss", 0),
         "ret": last.get("ret", 0),
-        "ceil": last.get("ceil", 0),
+        "ceil": last.get("ceil") or 0,
         "t_sim": meta.get("t_sim", 0),
         "mtime": meta.get("mtime", 0),
         "play_s": play_s,
         "pack_max_s": pack_max_s,
         "how": meta.get("how", ""),
-        "ep_cover": meta.get("cover", 0),
+        "ep_cover": meta.get("rewards", meta.get("cover", 0)),
+        "ep_rewards": meta.get("rewards", meta.get("cover", 0)),
         "ep_hits": meta.get("hits", 0),
         "ep_n_free": meta.get("n_free", 0),
         "stats_at": time.time(),

@@ -109,7 +109,53 @@ def test_rerun_logger_nonblocking_under_backpressure():
         print(f"test_rerun_logger_nonblocking: OK ({elapsed_ms:.1f}ms for 20 calls, {log._drop_count} drops)")
 
 
+def test_rerun_logger_refuses_buffered_sink():
+    """rr.init() without save/connect/spawn buffers forever — do not enable."""
+    import rerun_log as m
+    from rerun_log import KevinRerunLogger
+
+    log = KevinRerunLogger(enabled=True, save_path=None, spawn=False, connect_url=None)
+    assert log.enabled is False
+    assert log._log_thread is None
+    img = np.zeros((24, 32, 3), dtype=np.uint8)
+    assert log.maybe_log(ts=1.0, rgb=img) is False
+
+    class _Boom:
+        def init(self, *a, **k):
+            raise AssertionError("rr.init must not run without a sink")
+
+    old_has, old_rr = m.HAS_RERUN, m.rr
+    m.HAS_RERUN, m.rr = True, _Boom()
+    try:
+        log = KevinRerunLogger(enabled=True, save_path=None, spawn=False, connect_url=None)
+        assert log.enabled is False
+        assert log._log_thread is None
+    finally:
+        m.HAS_RERUN, m.rr = old_has, old_rr
+
+    class _FailConnect:
+        def __init__(self):
+            self.inited = False
+        def init(self, *a, **k):
+            self.inited = True
+        def connect_grpc(self, *a, **k):
+            raise RuntimeError("no viewer")
+        def get_global_data_recording(self):
+            return None
+
+    fake = _FailConnect()
+    m.HAS_RERUN, m.rr = True, fake
+    try:
+        log = KevinRerunLogger(enabled=True, connect_url="rerun+http://127.0.0.1:9/proxy")
+        assert fake.inited
+        assert log.enabled is False
+        assert log._log_thread is None
+    finally:
+        m.HAS_RERUN, m.rr = old_has, old_rr
+
+
 if __name__ == "__main__":
+    test_rerun_logger_refuses_buffered_sink()
     test_rerun_logger_writes_rgb_depth_obs()
     test_rerun_logger_throttle()
     test_rerun_logger_nonblocking_under_backpressure()

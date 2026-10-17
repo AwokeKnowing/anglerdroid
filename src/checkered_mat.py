@@ -272,54 +272,31 @@ class TopdownHazardDetector:
         # Convert to grayscale for detection
         gray = cv2.cvtColor(forward_region, cv2.COLOR_RGB2GRAY)
         
-        # ── 1. Check for BROWN BORDER (HSV + rectangular frame) FIRST ──
-        # This is the PRIMARY detector for James' checkered door mat with brown wood border
-        brown_detected, brown_conf, brown_perim = _detect_brown_border(
-            gray, forward_region,
-            brown_hsv_lower=self.brown_hsv_lower,
-            brown_hsv_upper=self.brown_hsv_upper,
-            min_perimeter=self.brown_min_perimeter,
-            min_area=self.brown_min_area
-        )
-        self.brown_confidence = brown_conf
-        self.brown_perimeter = brown_perim
+        # Brown-border HSV never worked (false-pins on carpet / furniture).
+        # detect_brown_border() still exists for unit tests; extras do not call it.
+        self.brown_confidence = 0.0
+        self.brown_perimeter = 0.0
         
-        # ── 2. Check for BUMP (edge detection) if no brown border ──
+        # ── 2. Check for BUMP (edge detection) ──
         # Wood bump / threshold shows as strong horizontal edges in topdown view
-        if not brown_detected:
-            edges = cv2.Canny(gray, self.bump_edge_thresh, self.bump_edge_thresh * 2)
-            
-            # Look for HORIZONTAL edges that span the image width (not scattered edges)
-            # Sum edges along each row → find rows with many edge pixels
-            row_edge_counts = np.sum(edges > 0, axis=1)  # Count edge pixels per row
-            
-            # Bump = continuous horizontal line with strong edges spanning width
-            # Require: (1) high % of width covered, (2) multiple consecutive rows
-            width_thresh = w * 0.6  # At least 60% of image width (conservative, avoid noise)
-            strong_rows = row_edge_counts >= width_thresh
-            
-            # Count consecutive runs of strong rows (bump = at least 2-3 consecutive rows)
-            consecutive = 0
-            max_consecutive = 0
-            for has_edges in strong_rows:
-                if has_edges:
-                    consecutive += 1
-                    max_consecutive = max(max_consecutive, consecutive)
-                else:
-                    consecutive = 0
-            
-            self.edge_count = max_consecutive  # Longest run of consecutive edge rows
-            bump_detected = max_consecutive >= 1  # At least 1 row with strong horizontal edge
-        else:
-            # Skip bump detection if brown border found
-            self.edge_count = 0
-            bump_detected = False
+        edges = cv2.Canny(gray, self.bump_edge_thresh, self.bump_edge_thresh * 2)
+        row_edge_counts = np.sum(edges > 0, axis=1)
+        width_thresh = w * 0.6
+        strong_rows = row_edge_counts >= width_thresh
+        consecutive = 0
+        max_consecutive = 0
+        for has_edges in strong_rows:
+            if has_edges:
+                consecutive += 1
+                max_consecutive = max(max_consecutive, consecutive)
+            else:
+                consecutive = 0
+        self.edge_count = max_consecutive
+        bump_detected = max_consecutive >= 1
         
-        # ── 3. Check for CHECKERED MAT (corner detection) as OPTIONAL FALLBACK ──
-        # Only run if brown border and bump both failed (expensive, ~34ms)
-        # Kept as fallback for other checkered patterns without brown borders
+        # ── 3. Checkered-mat chessboard corners (expensive, only if no bump)
         checkered_detected = False
-        if not brown_detected and not bump_detected:
+        if not bump_detected:
             pattern_size = (self.checkerboard_cols, self.checkerboard_rows)
             found, corners = cv2.findChessboardCorners(gray, pattern_size, self._flags)
             
@@ -342,12 +319,9 @@ class TopdownHazardDetector:
             self.corner_count = 0
         
         # ── 4. Combine detections with temporal filtering ──
-        # Priority: brown_border > bump > checkered
-        detected_now = brown_detected or bump_detected or checkered_detected
-        if brown_detected:
-            reason_now = 'brown_border'
-            self.detection_confidence = brown_conf
-        elif bump_detected:
+        # brown_border is disabled. Remaining RGB extras: bump, checkered.
+        detected_now = bump_detected or checkered_detected
+        if bump_detected:
             reason_now = 'bump'
         elif checkered_detected:
             reason_now = 'checkered'

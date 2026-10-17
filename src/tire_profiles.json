@@ -1,0 +1,43 @@
+{
+ "_doc": "Kevin tire profiles: single source of truth (mirrored byte-identical in anglerdroid src/tire_profiles.json and kevin-urdf-twin simready/tire_profiles.json). Select with env KEVIN_TIRE=stock|soft_v3_2 (twin: also --tire flag / ?tire= URL param). Default stock until James confirms the soft tires are installed. See docs/tire_profiles.md.",
+ "env": "KEVIN_TIRE",
+ "default": "stock",
+ "aliases": {"soft": "soft_v3_2", "stock": "stock", "botwheel": "stock"},
+ "profiles": {
+  "stock": {
+   "label": "ODrive BotWheel stock rubber tire",
+   "wheel_r_loaded_m": 0.08565,
+   "wheel_r_free_m": 0.08565,
+   "robot_wheel_diameter_cm": null,
+   "wheel_mass_kg": 2.2,
+   "tire_extra_mass_kg": 0.0,
+   "ride_dz_m": 0.0,
+   "caster_spacer_m": 0.0,
+   "radial_k_n_per_mm": null,
+   "mj_tire_solref": [0.004, 1],
+   "mj_tire_solimp": [0.95, 0.99, 0.001],
+   "tire_friction": [0.9, 0.005, 0.0001],
+   "twin_urdf": "urdf/kevin.urdf",
+   "suffix": "",
+   "status": "measured (twin geometry); robot_config keeps James's tape value 17.0 cm"
+  },
+  "soft_v3_2": {
+   "label": "KevinFlex soft over-tire v3.2 (95A TPU, 20 spokes)",
+   "wheel_r_loaded_m": 0.100,
+   "wheel_r_free_m": 0.1038,
+   "robot_wheel_diameter_cm": 20.0,
+   "wheel_mass_kg": 2.37,
+   "tire_extra_mass_kg": 0.17,
+   "ride_dz_m": 0.01435,
+   "caster_spacer_m": 0.01435,
+   "radial_k_n_per_mm": 14.0,
+   "mj_tire_solref": [0.0446, 1],
+   "mj_tire_solimp": [0.5, 0.5, 0.001],
+   "_mj_note": "solref/solimp calibrated in kevin_full_soft: 3.8 mm static sink at 49 N/wheel = 12.9 N/mm, free R 103.8 -> loaded 100.0 mm; bounce ~7 Hz",
+   "tire_friction": [0.9, 0.005, 0.0001],
+   "twin_urdf": "urdf/kevin_soft_v3_2.urdf",
+   "suffix": "_soft_v3_2",
+   "status": "NOMINAL design values - re-measure loaded radius (roll 10 turns) and ride height after install; friction unmeasured (stock value kept)"
+  }
+ }
+}

@@ -25,9 +25,35 @@ try:
 except ImportError:
     HAS_CUVSLAM = False
 
-CAMERA_HEIGHT_M = 0.97
-CAMERA_SETBACK_M = 0.13
-CAMERA_PITCH_DEG = 64.4
+from tire_profile import RIDE_DZ_M as _TIRE_DZ  # v310 tire switch
+# 2026-10-13 rig from the digital twin (source of truth). History: since d3f0a73 (2026-09-05) this module built
+# ONE RealSense stereo rig (RS2 IR1+IR2) with hand constants 0.97 m / 0.13 m / 64.4 deg; 0.13 + 64.4 describe the
+# forward D435i (bag-fit 25.6 deg down), 0.97 is ~the top-down D435 mast height -> mixed, and the quaternion
+# rotated the camera 64.4 deg UP (+x rotation in a Y-down rig). Now every camera's rig_from_camera comes from the
+# twin optical frames (rs1_ir1/ir2 = top-down D435, rs2_ir1/ir2 = forward D435i), IMU from rs2_imu.
+# KEVIN_CUVSLAM_RIG = dual (default: both RealSenses, 4 cameras / 2 stereo pairs) | rs2 (forward pair only).
+import os
+import twin_geometry as _TG
+RIG_MODE = os.environ.get("KEVIN_CUVSLAM_RIG", "dual").strip().lower()
+# rig frame = cuVSLAM convention X-right, Y-down, Z-forward, origin on the floor under the axle centre
+_R_RIG_BASE = np.array([[0, -1, 0], [0, 0, -1], [1, 0, 0]], float)      # base (x fwd, y left, z up) -> rig
+
+
+def rig_from_twin(frame):
+    """(R 3x3, t 3) of a twin optical frame in the cuVSLAM rig frame."""
+    t, R = _TG.frame(frame)
+    t = np.asarray(t, float) + np.array([0.0, 0.0, _TG.AXLE_H_M])          # base_link (axle) -> floor origin
+    return _R_RIG_BASE @ np.asarray(R, float), _R_RIG_BASE @ t
+
+
+def _quat(R):
+    """3x3 -> [x, y, z, w]."""
+    w = math.sqrt(max(0.0, 1.0 + R[0, 0] + R[1, 1] + R[2, 2])) / 2
+    x = math.copysign(math.sqrt(max(0.0, 1.0 + R[0, 0] - R[1, 1] - R[2, 2])) / 2, R[2, 1] - R[1, 2])
+    y = math.copysign(math.sqrt(max(0.0, 1.0 - R[0, 0] + R[1, 1] - R[2, 2])) / 2, R[0, 2] - R[2, 0])
+    z = math.copysign(math.sqrt(max(0.0, 1.0 - R[0, 0] - R[1, 1] + R[2, 2])) / 2, R[1, 0] - R[0, 1])
+    return [x, y, z, w]
+
 
 DEFAULT_IR_SIZE = (848, 480)
 DEFAULT_IR_FOCAL = (424.0, 424.0)
@@ -53,11 +79,7 @@ class CuVSLAMTracker:
     .get_world_history(), .reset()) so the rest of the pipeline works unchanged.
     """
 
-    def __init__(self, rs2_profile=None,
-                 camera_height=CAMERA_HEIGHT_M,
-                 camera_setback=CAMERA_SETBACK_M,
-                 camera_pitch_deg=CAMERA_PITCH_DEG,
-                 imu_pipeline=None):
+    def __init__(self, rs2_profile=None, rs1_profile=None, imu_pipeline=None, rig_mode=None):
         """Initialize cuVSLAM tracker with optional IMU integration.
         
         Args:
@@ -72,9 +94,9 @@ class CuVSLAMTracker:
                 "cuvslam not installed. Requires Python 3.10+, CUDA 12+. "
                 "See https://github.com/NVlabs/pycuvslam")
 
-        self._cam_h = camera_height
-        self._cam_setback = camera_setback
-        self._cam_pitch_deg = camera_pitch_deg
+        self.rig_mode = (rig_mode or RIG_MODE)
+        if self.rig_mode == "dual" and rs1_profile is None and rs2_profile is not None:
+            print("cuvslam: dual rig requested but no RS1 IR profile -> rs2-only rig"); self.rig_mode = "rs2"
         self._imu = imu_pipeline
         self._use_imu = (imu_pipeline is not None and imu_pipeline.ok)
 
@@ -83,10 +105,8 @@ class CuVSLAMTracker:
         cuvslam.set_verbosity(1)
         print("cuvslam: GPU warm-up %.0fms" % ((time.monotonic() - t0) * 1000))
 
-        if rs2_profile is not None:
-            self._setup_from_profile(rs2_profile)
-        else:
-            self._setup_defaults()
+        devs = [("rs2", rs2_profile)] if self.rig_mode == "rs2" else [("rs1", rs1_profile), ("rs2", rs2_profile)]
+        self._build_rig_twin(devs)
 
         # Configure IMU if available
         if self._use_imu:
@@ -97,8 +117,8 @@ class CuVSLAMTracker:
                 accelerometer_random_walk=IMU_ACCEL_RANDOM_WALK,
                 frequency=IMU_FREQUENCY,
             )
-            # Add IMU to rig (sensor index 0)
-            # IMU calibration sets extrinsics relative to rig frame
+            Ri, ti = rig_from_twin("rs2_imu")                       # twin D435i IMU frame
+            imu_cal.rig_from_imu = cuvslam.Pose(rotation=_quat(Ri), translation=ti.tolist())
             self._rig.set_imu_calibration(0, imu_cal)
             
             odom_mode = cuvslam.Tracker.OdometryMode.Inertial
@@ -109,7 +129,7 @@ class CuVSLAMTracker:
 
         odom_cfg = cuvslam.Tracker.OdometryConfig(
             odometry_mode=odom_mode,
-            horizontal_stereo_camera=True,
+            rectified_stereo_camera=True,      # pycuvslam 16: was horizontal_stereo_camera (removed kwarg)
             async_sba=True,
             enable_observations_export=False,
             enable_landmarks_export=False,
@@ -143,68 +163,28 @@ class CuVSLAMTracker:
 
     # ── rig setup ───────────────────────────────────────────────────
 
-    def _setup_from_profile(self, profile):
-        """Extract stereo intrinsics and baseline from RS2 pipeline profile."""
+    @staticmethod
+    def _intrinsics(profile, idx):
+        if profile is None:
+            return DEFAULT_IR_SIZE, DEFAULT_IR_FOCAL, DEFAULT_IR_PP
         import pyrealsense2 as rs
+        it = profile.get_stream(rs.stream.infrared, idx).as_video_stream_profile().get_intrinsics()
+        return (it.width, it.height), (it.fx, it.fy), (it.ppx, it.ppy)
 
-        ir1_stream = profile.get_stream(rs.stream.infrared, 1)
-        ir2_stream = profile.get_stream(rs.stream.infrared, 2)
-        ir1_intr = ir1_stream.as_video_stream_profile().get_intrinsics()
-        ir2_intr = ir2_stream.as_video_stream_profile().get_intrinsics()
-
-        extr = ir2_stream.get_extrinsics_to(ir1_stream)
-        baseline = abs(extr.translation[0])
-
-        self._build_rig(
-            ir1_intr.width, ir1_intr.height,
-            ir1_intr.fx, ir1_intr.fy, ir1_intr.ppx, ir1_intr.ppy,
-            ir2_intr.fx, ir2_intr.fy, ir2_intr.ppx, ir2_intr.ppy,
-            baseline)
-
-        print("cuvslam: RS2 intrinsics %dx%d  "
-              "left(fx=%.1f fy=%.1f ppx=%.1f ppy=%.1f)  baseline=%.4fm" % (
-                  ir1_intr.width, ir1_intr.height,
-                  ir1_intr.fx, ir1_intr.fy, ir1_intr.ppx, ir1_intr.ppy,
-                  baseline))
-
-    def _setup_defaults(self):
-        """Approximate D435 intrinsics when SDK profile unavailable."""
-        w, h = DEFAULT_IR_SIZE
-        fx, fy = DEFAULT_IR_FOCAL
-        ppx, ppy = DEFAULT_IR_PP
-        self._build_rig(w, h, fx, fy, ppx, ppy, fx, fy, ppx, ppy,
-                        DEFAULT_BASELINE)
-        print("cuvslam: using default D435 intrinsics (no RS2 profile)")
-
-    def _build_rig(self, w, h,
-                   lfx, lfy, lppx, lppy,
-                   rfx, rfy, rppx, rppy,
-                   baseline):
-        pitch_rad = math.radians(self._cam_pitch_deg)
-        qx = math.sin(pitch_rad / 2)
-        qw = math.cos(pitch_rad / 2)
-
-        left_cam = cuvslam.Camera(
-            size=[w, h],
-            principal=[lppx, lppy],
-            focal=[lfx, lfy],
-        )
-        left_cam.rig_from_camera = cuvslam.Pose(
-            rotation=[qx, 0.0, 0.0, qw],
-            translation=[0.0, -self._cam_h, -self._cam_setback],
-        )
-
-        right_cam = cuvslam.Camera(
-            size=[w, h],
-            principal=[rppx, rppy],
-            focal=[rfx, rfy],
-        )
-        right_cam.rig_from_camera = cuvslam.Pose(
-            rotation=[qx, 0.0, 0.0, qw],
-            translation=[baseline, -self._cam_h, -self._cam_setback],
-        )
-
-        self._rig = cuvslam.Rig([left_cam, right_cam])
+    def _build_rig_twin(self, devs):
+        """Cameras in order [rs1_ir1, rs1_ir2, rs2_ir1, rs2_ir2] (dual) or [rs2_ir1, rs2_ir2]; stereo pairs adjacent,
+        left first. Intrinsics from the SDK profile (defaults if none); extrinsics ONLY from the twin."""
+        cams = []; self.rig_table = []
+        for dev, prof in devs:
+            for k in (1, 2):
+                size, f, pp = self._intrinsics(prof, k)
+                R, t = rig_from_twin("%s_ir%d" % (dev, k))
+                c = cuvslam.Camera(size=list(size), principal=list(pp), focal=list(f))
+                c.rig_from_camera = cuvslam.Pose(rotation=_quat(R), translation=t.tolist())
+                cams.append(c); self.rig_table.append(("%s_ir%d" % (dev, k), size, f, pp, R, t))
+        self._rig = cuvslam.Rig(cams)
+        for n, size, f, pp, R, t in self.rig_table:
+            print("cuvslam: %-7s %dx%d f=%.1f t_rig=(%.4f %.4f %.4f) view_rig=(%.3f %.3f %.3f)" % (n, size[0], size[1], f[0], *t, *R[:, 2]))
 
     # ── tracking ────────────────────────────────────────────────────
 
@@ -253,7 +233,7 @@ class CuVSLAMTracker:
                 print("cuvslam: warning - no IMU measurements between frames")
                 self._imu_warn_logged = True
 
-    def track(self, ir_left, ir_right, timestamp_ns):
+    def track(self, ir_left, ir_right, timestamp_ns, rs1_left=None, rs1_right=None):
         """Process a stereo IR frame pair and update pose.
 
         Args:
@@ -273,8 +253,12 @@ class CuVSLAMTracker:
         if self._use_imu:
             self._register_imu_measurements(timestamp_ns)
 
-        pose_est, slam_pose = self._tracker.track(
-            timestamp_ns, [ir_left, ir_right])
+        if self.rig_mode == "dual":
+            if rs1_left is None or rs1_right is None: return None      # rig needs all 4 images
+            imgs = [rs1_left, rs1_right, ir_left, ir_right]
+        else:
+            imgs = [ir_left, ir_right]
+        pose_est, slam_pose = self._tracker.track(timestamp_ns, imgs)
 
         if pose_est.world_from_rig is None:
             self._tracking = False

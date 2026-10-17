@@ -195,7 +195,7 @@ class RlNavLive:
 
     def act(self, ego, *, v_scale=1.0, w_scale=1.0, plus_x=None):
         now = time.monotonic()
-        if now - self._last_t < 0.16 and self._n:
+        if now - self._last_t < DT_POLICY and self._n:
             return self._last_cmd
         ego = np.array(ego, dtype=np.float32, copy=True)
         if ego.ndim == 3:

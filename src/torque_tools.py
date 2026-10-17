@@ -318,7 +318,7 @@ def torque_from_force_angular(
 
 def estimate_contact_force(
     current_a: float,
-    torque_constant: float = 0.02,
+    torque_constant: float = 8.27 / 8.7,   # BotWheel Kt 0.9506 Nm/A (Kv 8.7)
     gear_ratio: float = 1.0
 ) -> float:
     """Estimate contact force from motor current (for force sensing).

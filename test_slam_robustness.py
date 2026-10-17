@@ -77,7 +77,8 @@ def test_tracking_quality_metrics():
     
     from pose import PoseEstimator
     
-    pose = PoseEstimator(wheelbase_m=0.34, wheel_radius_m=0.08565)
+    from robot_config import WHEELBASE_M, WHEEL_RADIUS_M
+    pose = PoseEstimator(wheelbase_m=WHEELBASE_M, wheel_radius_m=WHEEL_RADIUS_M)
     
     # Simulate some updates with visual odometry
     for i in range(10):

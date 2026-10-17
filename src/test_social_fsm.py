@@ -27,6 +27,9 @@ from social_fsm import (
     CONVERSATIONAL_DIST_MIN,
     CONVERSATIONAL_DIST_MAX,
     APPROACH_STOP_DIST,
+    CONVERSE_BUDGET_S,
+    CONVERSE_PROMPT_S,
+    CONVERSE_PROMPT_MAX,
     WAIT_ENGAGE_TIMEOUT,
     COOLDOWN_NO_ENGAGE,
     COOLDOWN_ENGAGED,
@@ -118,27 +121,28 @@ def test_fsm_greet_at_conversational_distance():
 
 
 def test_fsm_wait_engage_timeout():
-    """Test WAIT_ENGAGE → LEAVE after 15 second timeout."""
+    """Unengaged chat: if they never talk, leave and wander."""
     fsm = SocialFSM(drive_armed=False)
     
-    # Greet James
     box = (150, 100, 50, 50)
     fsm.on_face_seen("James", 0.9, box, now=100.0)
     fsm.on_face_seen("James", 0.9, box, now=100.6)  # greet
-    
-    # Wait for engagement timeout
-    # After greeting, state should be GREET, then WAIT_ENGAGE
     fsm.encounters["James"].state = SocialState.WAIT_ENGAGE
+    fsm.encounters["James"].greet_time = 100.6
+    fsm.encounters["James"].converse_t0 = 0.0
+    fsm.encounters["James"].last_heard_time = 0.0
+    fsm.encounters["James"].last_prompt_time = 0.0
+    fsm.encounters["James"].last_spoke_time = 100.6
+    fsm.encounters["James"].prompt_count = 0
     
-    # Before timeout: no leave
-    action = fsm.on_face_seen("James", 0.9, box, now=100.6 + WAIT_ENGAGE_TIMEOUT - 1.0)
-    assert action is None or action["action_type"] != "leave", "Should not leave before timeout"
+    action = fsm.on_face_seen("James", 0.9, box, now=100.6 + CONVERSE_PROMPT_S - 1.0)
+    assert action is None or action["action_type"] != "leave"
     
-    # After timeout: should leave
-    action = fsm.on_face_seen("James", 0.9, box, now=100.6 + WAIT_ENGAGE_TIMEOUT + 1.0)
+    leave_at = 100.6 + CONVERSE_PROMPT_S + 0.5
+    action = fsm.on_face_seen("James", 0.9, box, now=leave_at)
     assert action is not None
-    assert action["action_type"] == "leave", f"Expected 'leave' after timeout, got {action['action_type']}"
-    assert fsm.is_on_cooldown("James", now=100.6 + WAIT_ENGAGE_TIMEOUT + 1.0)
+    assert action["action_type"] == "leave", action
+    assert fsm.is_on_cooldown("James", leave_at)
     
     print("✅ test_fsm_wait_engage_timeout passed")
     return True
@@ -176,43 +180,89 @@ def test_fsm_engagement_starts_conversation():
 def test_cooldown_no_engage_vs_engaged():
     """Test cooldown periods: 5 min after no-engage, 1.5 min after conversation."""
     fsm = SocialFSM(drive_armed=False)
-    
-    # Scenario 1: leave without engagement
     box = (150, 100, 50, 50)
     fsm.on_face_seen("James", 0.9, box, now=100.0)
     fsm.encounters["James"].state = SocialState.WAIT_ENGAGE
     fsm.encounters["James"].greet_time = 100.0
+    fsm.encounters["James"].last_spoke_time = 100.0
+    fsm.encounters["James"].prompt_count = 0
+    fsm.encounters["James"].last_prompt_time = 100.0
     
-    # Timeout → leave
-    action = fsm.on_face_seen("James", 0.9, box, now=100.0 + WAIT_ENGAGE_TIMEOUT + 1.0)
+    leave_at = 100.0 + CONVERSE_PROMPT_S + 0.5
+    action = fsm.on_face_seen("James", 0.9, box, now=leave_at)
     assert action["action_type"] == "leave"
+    assert fsm.is_on_cooldown("James", leave_at + COOLDOWN_NO_ENGAGE - 10.0)
+    assert not fsm.is_on_cooldown("James", leave_at + COOLDOWN_NO_ENGAGE + 10.0)
     
-    # Should be on cooldown for COOLDOWN_NO_ENGAGE
-    now_check = 100.0 + WAIT_ENGAGE_TIMEOUT + 1.0
-    assert fsm.is_on_cooldown("James", now_check + COOLDOWN_NO_ENGAGE - 10.0)
-    assert not fsm.is_on_cooldown("James", now_check + COOLDOWN_NO_ENGAGE + 10.0)
-    
-    # Scenario 2: engaged conversation
     from social_fsm import PersonEncounter
     
     fsm.reset_encounter("Erika")
     enc2 = PersonEncounter(name="Erika")
     enc2.state = SocialState.CONVERSE
+    enc2.greet_time = 200.0
+    enc2.converse_t0 = 200.0
     enc2.last_heard_time = 200.0
+    enc2.last_spoke_time = 200.0
+    enc2.last_prompt_time = 200.0
+    enc2.prompt_count = 0
     enc2.engaged_this_session = True
     fsm.encounters["Erika"] = enc2
     fsm.current_person = "Erika"
     
-    # Conversation timeout → leave
-    action = fsm.on_face_seen("Erika", 0.9, box, now=200.0 + WAIT_ENGAGE_TIMEOUT + 1.0)
+    leave_at2 = 200.0 + CONVERSE_PROMPT_S + 0.5
+    action = fsm.on_face_seen("Erika", 0.9, box, now=leave_at2)
     assert action["action_type"] == "leave"
-    
-    # Should be on cooldown for COOLDOWN_ENGAGED (shorter)
-    now_check2 = 200.0 + WAIT_ENGAGE_TIMEOUT + 1.0
-    assert fsm.is_on_cooldown("Erika", now_check2 + COOLDOWN_ENGAGED - 10.0)
-    assert not fsm.is_on_cooldown("Erika", now_check2 + COOLDOWN_ENGAGED + 10.0)
+    assert fsm.is_on_cooldown("Erika", leave_at2 + COOLDOWN_ENGAGED - 10.0)
+    assert not fsm.is_on_cooldown("Erika", leave_at2 + COOLDOWN_ENGAGED + 10.0)
     
     print("✅ test_cooldown_no_engage_vs_engaged passed")
+    return True
+
+
+def test_two_minute_budget_wraps():
+    """Engaged chat lasts toward 2 minutes, then wraps."""
+    from social_fsm import PersonEncounter
+    fsm = SocialFSM(drive_armed=False)
+    box = (150, 100, 50, 50)
+    enc = PersonEncounter(name="James")
+    enc.state = SocialState.CONVERSE
+    enc.greet_time = 10.0
+    enc.converse_t0 = 10.0
+    enc.last_heard_time = 10.0
+    enc.last_spoke_time = 10.0
+    enc.engaged_this_session = True
+    fsm.encounters["James"] = enc
+    fsm.current_person = "James"
+    
+    mid = 10.0 + CONVERSE_BUDGET_S - 5.0
+    enc.last_heard_time = mid
+    enc.last_spoke_time = mid
+    action = fsm.on_face_seen("James", 0.9, box, now=mid)
+    assert action is None or action["action_type"] != "leave", action
+    
+    action = fsm.on_face_seen("James", 0.9, box, now=10.0 + CONVERSE_BUDGET_S + 0.5)
+    assert action is not None
+    assert action["action_type"] == "leave", action
+    assert "wander" in (action.get("utterance") or "").lower() or "talking" in (
+        action.get("utterance") or "").lower() or "exploring" in (
+        action.get("utterance") or "").lower()
+    
+    print("✅ test_two_minute_budget_wraps passed")
+    return True
+
+
+def test_greet_starts_converse():
+    """After the greeting, Kevin enters CONVERSE (2-minute try)."""
+    fsm = SocialFSM(drive_armed=False)
+    box = (150, 100, 50, 50)
+    fsm.on_face_seen("James", 0.9, box, now=100.0)
+    fsm.on_face_seen("James", 0.9, box, now=100.6)
+    assert fsm.encounters["James"].state == SocialState.GREET
+    action = fsm.on_face_seen("James", 0.9, box, now=101.2)
+    assert fsm.encounters["James"].state == SocialState.CONVERSE
+    assert fsm.in_conversation()
+    assert action is None or action["action_type"] != "leave"
+    print("✅ test_greet_starts_converse passed")
     return True
 
 
@@ -414,6 +464,8 @@ def run_all_tests():
         test_fsm_wait_engage_timeout,
         test_fsm_engagement_starts_conversation,
         test_cooldown_no_engage_vs_engaged,
+        test_two_minute_budget_wraps,
+        test_greet_starts_converse,
         test_spanish_preference,
         test_command_stop,
         test_command_come_here,

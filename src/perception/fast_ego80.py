@@ -30,26 +30,34 @@ EGO80_X0 = -EGO80_RCX * EGO80_PX          # -0.81
 EGO80_X1 = EGO80_X0 + EGO80_W * EGO80_PX  #  2.39
 EGO80_Y0 = -(EGO80_H - EGO80_RCY) * EGO80_PX  # -1.21
 EGO80_Y1 = EGO80_RCY * EGO80_PX                #  1.19
-TD_FLOOR_CLIP = np.float32(0.91)
+try:  # v310 tire profile switch (src/tire_profile.py, env KEVIN_TIRE, default stock)
+    from tire_profile import RIDE_DZ_M as _TIRE_DZ
+except ImportError:
+    import importlib.util as _ilu, sys as _sys
+    _sp = _ilu.spec_from_file_location('tire_profile', str(Path(__file__).resolve().parents[2] / 'src' / 'tire_profile.py'))
+    _tp = _ilu.module_from_spec(_sp); _sys.modules.setdefault('tire_profile', _tp); _sp.loader.exec_module(_tp)
+    _TIRE_DZ = _tp.RIDE_DZ_M
+TD_FLOOR_CLIP = np.float32(0.91 + _TIRE_DZ)  # SAFETY-CRITICAL v310: follows tire ride height (stock 0.91)
 # Live TD_X_OFFSET = -75 px @ 1 cm → −18.75 @ 4 cm.
 TD_X_OFFSET80 = -19
 # RS2 down-pitch from horizontal. 25.6-90 used to feed phys_h by mistake
 # (64.4° down) and the floor became a ~20° slope → red cone wedge.
-# Bag side-view fit 2026-09-14: 27.0° down, cam_h 0.475 (floor at phys_h=0).
+# Twin-authoritative 2026-09-24: 27.0° down, cam_h 0.467863258422 (axle z + wheel_r; floor at phys_h=0).
 FW_PITCH_DOWN_DEG = 27.0
 _FW_PITCH = math.radians(FW_PITCH_DOWN_DEG)
 FW_SIN_P = math.sin(_FW_PITCH)
 FW_COS_P = math.cos(_FW_PITCH)
-FW_CAM_H = 0.475
+FW_CAM_H = 0.467863258422 + _TIRE_DZ  # SAFETY-CRITICAL v310: + tire ride height (0 stock). twin: optical z_base 0.382213258422 + wheel_r 0.08565; was 0.475
 FW_OBS_H0 = 0.05
 FW_OBS_H1 = 1.30
 FW_CAM_X = 0.15
 # Same hull as kernels.in_self_body / sim ego80.SELF_BOXES_CM.
+# Tape: front +180 mm, caster −200 mm, wheels ±227 mm.
 SELF_BOXES_CM = (
-    (2.0, 0.0, 36.0, 44.0),
+    (-1.0, 0.0, 38.0, 45.4),
 )
-SELF_LX0, SELF_LX1 = -0.16, 0.20
-SELF_LY = 0.22
+SELF_LX0, SELF_LX1 = -0.20, 0.18
+SELF_LY = 0.227
 THROT_MARK = 0.20
 
 
@@ -78,19 +86,28 @@ RS2_RANGE = 2.50
 RS2_HALF = math.radians(40.0)
 
 
+_FOV_MASK = None
+
+
 def fov_mask_80() -> np.ndarray:
     """Filled RS1 house ∪ RS2 cone. Prefer bag stencil; always keep the cone."""
-    xs = (np.arange(EGO80_W, dtype=np.float32) + 0.5) * EGO80_PX + EGO80_X0
-    ys = EGO80_Y1 - (np.arange(EGO80_H, dtype=np.float32) + 0.5) * EGO80_PX
-    xx, yy = np.meshgrid(xs, ys)
-    dist = np.sqrt(xx * xx + yy * yy)
-    ang = np.arctan2(yy, xx)
-    cone = (dist > 0.05) & (dist <= np.float32(RS2_RANGE)) & (np.abs(ang) <= np.float32(RS2_HALF))
-    st = fov_stencil_80()
-    if st is not None:
-        return (st != 0) | cone
-    house = (xx >= RS1_X0) & (xx <= RS1_X1) & (yy >= RS1_Y0) & (yy <= RS1_Y1)
-    return house | cone
+    global _FOV_MASK
+    if _FOV_MASK is None:
+        xs = (np.arange(EGO80_W, dtype=np.float32) + 0.5) * EGO80_PX + EGO80_X0
+        ys = EGO80_Y1 - (np.arange(EGO80_H, dtype=np.float32) + 0.5) * EGO80_PX
+        xx, yy = np.meshgrid(xs, ys)
+        dist = np.sqrt(xx * xx + yy * yy)
+        ang = np.arctan2(yy, xx)
+        cone = (dist > 0.05) & (dist <= np.float32(RS2_RANGE)) & (
+            np.abs(ang) <= np.float32(RS2_HALF))
+        st = fov_stencil_80()
+        if st is not None:
+            _FOV_MASK = (st != 0) | cone
+        else:
+            house = (
+                (xx >= RS1_X0) & (xx <= RS1_X1) & (yy >= RS1_Y0) & (yy <= RS1_Y1))
+            _FOV_MASK = house | cone
+    return _FOV_MASK
 
 
 def fill_fov_like_sim(labels: np.ndarray) -> np.ndarray:
@@ -242,15 +259,21 @@ def scatter_rs1_80(
 # One hull at 4 cm/px. Constants live at module top (SELF_BOXES_CM).
 
 
+_SELF_MASK = None
+
+
 def self_mask_80() -> np.ndarray:
-    m = np.zeros((EGO80_H, EGO80_W), dtype=bool)
-    for cx, cy, sx, sy in SELF_BOXES_CM:
-        x0 = int(np.floor(EGO80_RCX + (cx - 0.5 * sx) / 4.0))
-        x1 = int(np.ceil(EGO80_RCX + (cx + 0.5 * sx) / 4.0))
-        y0 = int(np.floor(EGO80_RCY - (cy + 0.5 * sy) / 4.0))
-        y1 = int(np.ceil(EGO80_RCY - (cy - 0.5 * sy) / 4.0))
-        m[max(0, y0):min(EGO80_H, y1), max(0, x0):min(EGO80_W, x1)] = True
-    return m
+    global _SELF_MASK
+    if _SELF_MASK is None:
+        m = np.zeros((EGO80_H, EGO80_W), dtype=bool)
+        for cx, cy, sx, sy in SELF_BOXES_CM:
+            x0 = int(np.floor(EGO80_RCX + (cx - 0.5 * sx) / 4.0))
+            x1 = int(np.ceil(EGO80_RCX + (cx + 0.5 * sx) / 4.0))
+            y0 = int(np.floor(EGO80_RCY - (cy + 0.5 * sy) / 4.0))
+            y1 = int(np.ceil(EGO80_RCY - (cy - 0.5 * sy) / 4.0))
+            m[max(0, y0):min(EGO80_H, y1), max(0, x0):min(EGO80_W, x1)] = True
+        _SELF_MASK = m
+    return _SELF_MASK
 
 
 def paint_self_80(labels: np.ndarray) -> np.ndarray:
@@ -279,6 +302,26 @@ def stamp_throttle_float(
     if float(throt_r) > 0.08:
         ego[hull & (yy <= -0.08)] = THROT_MARK
     return ego
+
+
+_CONE_GRID = {}
+
+
+def _cone_grid(range_m, half_rad):
+    key = (round(float(range_m), 4), round(float(half_rad), 5))
+    hit = _CONE_GRID.get(key)
+    if hit is None:
+        xs = (np.arange(EGO80_W, dtype=np.float32) + 0.5) * EGO80_PX + EGO80_X0
+        ys = EGO80_Y1 - (np.arange(EGO80_H, dtype=np.float32) + 0.5) * EGO80_PX
+        xx, yy = np.meshgrid(xs, ys)
+        dist = np.sqrt(xx * xx + yy * yy)
+        angm = np.arctan2(yy, xx)
+        cone = (dist > 0.05) & (dist <= range_m) & (np.abs(angm) <= half_rad)
+        col_i = np.clip(
+            np.rint(EGO80_RCX + xx / EGO80_PX).astype(np.int32), 0, EGO80_W - 1)
+        hit = (cone, col_i, dist)
+        _CONE_GRID[key] = hit
+    return hit
 
 
 def fuse_rs2_cone_80(
@@ -323,14 +366,7 @@ def fuse_rs2_cone_80(
             OBSTACLE,
         )
     # CLEAR along each column from axle to first hit (skip SELF / OBS).
-    xs = (np.arange(EGO80_W, dtype=np.float32) + 0.5) * EGO80_PX + EGO80_X0
-    ys = EGO80_Y1 - (np.arange(EGO80_H, dtype=np.float32) + 0.5) * EGO80_PX
-    xx, yy = np.meshgrid(xs, ys)
-    dist = np.sqrt(xx * xx + yy * yy)
-    angm = np.arctan2(yy, xx)
-    cone = (dist > 0.05) & (dist <= range_m) & (np.abs(angm) <= half_rad)
-    # Per-pixel first-hit from the column map (approx; good at 4 cm).
-    col_i = np.clip(np.rint(EGO80_RCX + xx / EGO80_PX).astype(np.int32), 0, EGO80_W - 1)
+    cone, col_i, dist = _cone_grid(range_m, half_rad)
     free = cone & (dist < hit[col_i] - 0.04)
     cur = labels
     take = free & (cur == UNKNOWN)

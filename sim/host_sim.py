@@ -43,7 +43,7 @@ except ImportError:
     FRAME_W, FRAME_H = 320, 240
     RCX, RCY = 81, 119
     EGO_PX_SIZE = 0.01
-    FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1 = 56, 97, 101, 142
+    FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1 = 61, 94, 99, 144
 
 
 class HostSimulator:

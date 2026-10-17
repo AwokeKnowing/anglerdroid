@@ -3,21 +3,18 @@
 Binary occupancy + optional height_cm map matching real ego map geometry.
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 
-FRAME_W = 320
-FRAME_H = 240
-RCX = 81
-RCY = 119
-EGO_PX_SIZE = 0.01
-
-FOOT_X0 = 56
-FOOT_Y0 = 97
-FOOT_X1 = 101
-FOOT_Y1 = 142
-FOOT_PAD_FWD = 5
-FOOT_PAD_BWD = 10
-FOOT_PAD_LAT = 2
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from robot_config import (  # noqa: E402
+    FRAME_W, FRAME_H, RCX, RCY, EGO_PX_SIZE,
+    FOOT_X0, FOOT_Y0, FOOT_X1, FOOT_Y1,
+)
 
 
 def create_scenario(name: str):

@@ -17,6 +17,7 @@ Usage:
         ts = imu.timestamp  # seconds (monotonic)
 """
 
+import threading
 import time
 import numpy as np
 
@@ -59,6 +60,12 @@ class IMUPipeline:
         self.gyro = np.zeros(3, dtype=np.float32)   # (x, y, z) rad/s
         self.accel = np.zeros(3, dtype=np.float32)  # (x, y, z) m/s²
         self.timestamp = 0.0  # seconds (monotonic)
+        self._ring_n = 512
+        self._ring_g = np.zeros((self._ring_n, 3), dtype=np.float32)
+        self._ring_a = np.zeros((self._ring_n, 3), dtype=np.float32)
+        self._ring_t = np.zeros(self._ring_n, dtype=np.float64)
+        self._ring_w = 0
+        self._ring_lock = threading.Lock()
         
         self._pipe = None
         self._profile = None
@@ -112,35 +119,42 @@ class IMUPipeline:
             return False
         
         try:
-            # Non-blocking poll
-            frames = self._pipe.poll_for_frames()
-            if not frames:
-                return False
-            
-            # Extract gyro and accel
-            gyro_frame = frames.first_or_default(rs.stream.gyro)
-            accel_frame = frames.first_or_default(rs.stream.accel)
-            
-            if gyro_frame:
-                motion = gyro_frame.as_motion_frame()
-                data = motion.get_motion_data()
-                self.gyro[0] = data.x
-                self.gyro[1] = data.y
-                self.gyro[2] = data.z
-            
-            if accel_frame:
-                motion = accel_frame.as_motion_frame()
-                data = motion.get_motion_data()
-                self.accel[0] = data.x
-                self.accel[1] = data.y
-                self.accel[2] = data.z
-            
-            # Use latest timestamp (gyro or accel, whichever is newer)
-            if gyro_frame or accel_frame:
-                self.timestamp = time.monotonic()
-                return True
-            
-            return False
+            got = False
+            for _ in range(256):                       # drain everything queued (a stalled loop = 100+ samples)
+                frames = self._pipe.poll_for_frames()
+                if not frames:
+                    break
+                gyro_frame = frames.first_or_default(rs.stream.gyro)
+                accel_frame = frames.first_or_default(rs.stream.accel)
+                if gyro_frame:
+                    motion = gyro_frame.as_motion_frame()
+                    data = motion.get_motion_data()
+                    self.gyro[0] = data.x
+                    self.gyro[1] = data.y
+                    self.gyro[2] = data.z
+                if accel_frame:
+                    motion = accel_frame.as_motion_frame()
+                    data = motion.get_motion_data()
+                    self.accel[0] = data.x
+                    self.accel[1] = data.y
+                    self.accel[2] = data.z
+                if gyro_frame or accel_frame:
+                    # sample time = the sensor's own stamp (same ms clock the depth frames use, cameras.py), not the
+                    # host poll time: a poll drains up to 100+ queued samples, which all got one identical poll stamp
+                    # (cuVSLAM dropped them as non-increasing; dt for gyro integration was wrong).  Fall back to the
+                    # host clock if the device stamps are in another time domain.
+                    now = time.monotonic(); f0 = gyro_frame or accel_frame
+                    try: ts = float(f0.get_timestamp()) * 1e-3
+                    except Exception: ts = now
+                    self.timestamp = ts if abs(ts - now) < 1.0 else now
+                    with self._ring_lock:
+                        i = self._ring_w % self._ring_n
+                        self._ring_g[i] = self.gyro
+                        self._ring_a[i] = self.accel
+                        self._ring_t[i] = self.timestamp
+                        self._ring_w += 1
+                    got = True
+            return got
             
         except Exception as e:
             # Never crash the grab loop
@@ -159,10 +173,10 @@ class IMUPipeline:
             self._pipe = None
         self.ok = False
     
-    def get_angular_velocity_body(self, camera_pitch_deg: float = 64.4) -> tuple:
+    def get_angular_velocity_body(self, camera_pitch_deg: float = 63.0) -> tuple:
         """Transform gyro from camera frame to robot body frame.
         
-        Camera is pitched down (typically 64.4° for D435i forward mount).
+        Camera is pitched down (twin: D435i forward mount 27° down = 63.0° from vertical; was 64.4 bag fit).
         Robot body frame: X-forward, Y-left, Z-up (REP-103 / standard robotics).
         
         Args:
@@ -194,3 +208,30 @@ class IMUPipeline:
         omega_body_z = -gz * s + gy * c
         
         return omega_body_x, omega_body_y, omega_body_z
+
+    def drain_ring(self, since: int, max_n: int = 16):
+        """Copy IMU samples written after ``since`` (exclusive ring count).
+
+        Returns (gyro[N,3], accel[N,3], t[N], new_since).
+        """
+        with self._ring_lock:
+            w = int(self._ring_w)
+            nring = self._ring_n
+            avail = min(max_n, max(0, w - int(since)), nring)
+            if avail <= 0:
+                return (
+                    np.zeros((0, 3), dtype=np.float32),
+                    np.zeros((0, 3), dtype=np.float32),
+                    np.zeros(0, dtype=np.float64),
+                    w,
+                )
+            start = w - avail
+            out_g = np.empty((avail, 3), dtype=np.float32)
+            out_a = np.empty((avail, 3), dtype=np.float32)
+            out_t = np.empty(avail, dtype=np.float64)
+            for k in range(avail):
+                i = (start + k) % nring
+                out_g[k] = self._ring_g[i]
+                out_a[k] = self._ring_a[i]
+                out_t[k] = self._ring_t[i]
+            return out_g, out_a, out_t, w

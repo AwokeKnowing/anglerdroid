@@ -91,10 +91,12 @@
     </figure>
     <div class="panel">
       <div class="stats" id="stats"></div>
-      <div class="chart"><h2>Cover vs crash</h2><canvas id="c-frac"></canvas></div>
-      <div class="chart"><h2>Fog tiles vs visitable ceiling</h2><canvas id="c-hits"></canvas></div>
+      <div class="chart"><h2>Time in collision</h2><canvas id="c-stuck"></canvas></div>
+      <div class="chart"><h2>Overlap fraction of episode</h2><canvas id="c-cfrac"></canvas></div>
+      <div class="chart"><h2>Rewards vs crash</h2><canvas id="c-frac"></canvas></div>
+      <div class="chart"><h2>Rewards vs packing ceiling</h2><canvas id="c-hits"></canvas></div>
       <div class="chart"><h2>PPO loss</h2><canvas id="c-loss"></canvas></div>
-      <div class="chart"><h2>Episode return vs ceiling</h2><canvas id="c-ret"></canvas></div>
+      <div class="chart"><h2>Episode return</h2><canvas id="c-ret"></canvas></div>
       <div class="chart"><h2>Entropy</h2><canvas id="c-ent"></canvas></div>
     </div>
   </div>
@@ -109,15 +111,20 @@
     let pendingM = 0;
     let packS = 89;
     const keys = [
-      ["step", "step"], ["sps", "sps"], ["cover", "cover"], ["crash", "crash"],
-      ["path", "path m"], ["hits", "hits"], ["liveh", "live hits"],
+      ["step", "step"], ["sps", "sps"], ["rewards", "rewards"], ["ceil", "ceiling"],
+      ["path", "path m"], ["hits", "rewards / ep"], ["liveh", "live rewards"],
       ["ent", "entropy"], ["loss", "ppo loss"], ["ret", "return"],
       ["stg", "stage"], ["play_s", "pack s"],
+      ["stuck_s", "collision s"], ["contact_frac", "overlap"],
     ];
     function fmt(k, v) {
       if (typeof v !== "number" || !isFinite(v)) return "—";
       if (k === "step") return v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : v.toFixed(0);
       if (k === "play_s") return v.toFixed(0) + "s";
+      if (k === "stuck_s") return v.toFixed(1) + "s";
+      if (k === "contact_frac") return (100 * v).toFixed(1) + "%";
+      if (k === "rewards") return (100 * v).toFixed(0) + "%";
+      if (k === "ceil" || k === "hits" || k === "liveh") return v.toFixed(1);
       if (Math.abs(v) >= 100) return v.toFixed(0);
       if (k === "loss" || k === "ret") return v.toFixed(3);
       return v.toFixed(3);
@@ -158,7 +165,7 @@
       subEl.textContent = "1× / 15× / 1× (5s wall, middle 15×, 5s wall). A 20 min episode packs to ~" + mx.toFixed(0)
         + "s. New clip swaps as soon as encode finishes.";
       capEl.textContent = (s.how ? (s.how + " · ") : "")
-        + "cover " + ((s.ep_cover != null) ? (100 * s.ep_cover).toFixed(0) + "%" : "?")
+        + "rewards " + ((s.ep_rewards != null) ? (100 * s.ep_rewards).toFixed(0) + "%" : ((s.ep_cover != null) ? (100 * s.ep_cover).toFixed(0) + "%" : "?"))
         + " — 1× / 15× / 1× — " + play.toFixed(0) + "s pack";
     }
     function chart(id, labels, series, opt) {
@@ -231,12 +238,18 @@
     function draw(s) {
       const ser = s.series || {};
       const lab = ser.labels || [];
+      chart("c-stuck", lab, [
+        { name: "seconds in collision / ep", data: ser.stuck_s || [], color: "#ff6b6b" },
+      ], { zero: true });
+      chart("c-cfrac", lab, [
+        { name: "fraction of steps overlapping", data: ser.contact_frac || [], color: "#f07178" },
+      ], { min: 0, max: 1 });
       chart("c-frac", lab, [
-        { name: "cover", data: ser.cover || [], color: "#6ee7a8" },
+        { name: "rewards", data: ser.rewards || ser.cover || [], color: "#6ee7a8" },
         { name: "crash", data: ser.crash || [], color: "#f07178" },
       ], { min: 0, max: 1 });
       chart("c-hits", lab, [
-        { name: "hits", data: ser.hits || [], color: "#7ab8ff" },
+        { name: "rewards / ep", data: ser.hits || [], color: "#7ab8ff" },
         { name: "ceiling", data: ser.ceil || [], color: "#8adf8a" },
       ], { zero: true });
       chart("c-loss", lab, [
@@ -244,7 +257,6 @@
       ]);
       chart("c-ret", lab, [
         { name: "return", data: ser.ret || [], color: "#82aaff" },
-        { name: "ceiling", data: ser.ret_ceil || [], color: "#8adf8a" },
       ]);
       chart("c-ent", lab, [
         { name: "entropy", data: ser.ent || [], color: "#c792ea" },

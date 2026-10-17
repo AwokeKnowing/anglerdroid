@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vectorized GPU explorer. Coverage objective; 64-byte memory is the recurrence."""
+"""Vectorized GPU explorer. WanderAround rewards; 64-byte memory is the recurrence."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -67,6 +67,8 @@ class RlNavVec:
         self.t_sim = f(N)
         self.path_m = f(N)
         self.hits = i32(N)
+        self.n_contact = i32(N)
+        self.contact = i32(N)
         self.done = i32(N)
         self.cut = i32(N)
         self.v_scale = f(N)
@@ -95,18 +97,21 @@ class RlNavVec:
         self.pool_nbox = torch.as_tensor(pn, device=d, dtype=torch.int32)
         self.pool_xy = torch.as_tensor(pxy, device=d)
         self.roll_crash = 0.0
+        self.roll_contact = 0.0
+        self.roll_contact_frac = 0.0
         self.roll_hits = 0.0
         self.roll_clear = 0.0
         self.roll_path = 0.0
         self.roll_ret = 0.0
         self.roll_cover = 0.0
-        self.roll_ceil = 80.0
+        self.pool_ceil = 0.0
         self.n_done = 0
         self.ep_ret = f(N)
         self._wp = {}
         for name in (
             "boxes", "nbox", "x", "y", "yaw", "v", "w", "mx", "my", "mvx", "mvy",
-            "n_movers", "mem", "steps", "t_sim", "path_m", "hits", "done", "cut",
+            "n_movers", "mem", "steps", "t_sim", "path_m", "hits",
+            "n_contact", "contact", "done", "cut",
             "v_scale", "a_scale", "w_scale", "delay_n", "held_v", "held_w",
             "plus_x", "throt_f", "throt_b", "throt_l", "throt_r",
             "rew", "ep", "seen", "valid", "n_free",
@@ -115,17 +120,19 @@ class RlNavVec:
             t = getattr(self, name)
             self._wp[name] = wp.from_torch(t.contiguous())
         print(
-            "rl_nav N=%d ego=%dx%d mem=%d sec=%d device=%s"
-            % (N, K.EGO_H, K.EGO_W, K.MEM_N, K.SEC_N, device),
+            "rl_nav %s N=%d ego=%dx%d mem=%d sec=%d tile_clear=%.2f delete_r=%.1f device=%s"
+            % (K.BEHAVIOR, N, K.EGO_H, K.EGO_W, K.MEM_N, K.SEC_N,
+               K.TILE_CLEAR_M, K.DELETE_R, device),
             flush=True,
         )
         self.reset_all()
+        self.pool_ceil = float(self.n_free.float().mean().item())
 
     def set_curriculum(self, stage: int):
         stage = int(max(0, min(5, stage)))
         self.stage = stage
-        # movers only. No hint bearing / shape-to-unseen: coverage paint
-        # is the whole objective (go everywhere as fast as the cap allows).
+        # movers only. No hint bearing / shape-to-unseen: open-floor
+        # waypoints (≥50 cm from obstacles, 2 m suppress) are the rewards.
         table = (0, 0, 0, 1, 2, 3)
         self.n_movers_hp = table[stage]
 
@@ -181,7 +188,7 @@ class RlNavVec:
                 w["v_scale"], w["a_scale"], w["w_scale"], w["delay_n"],
                 w["held_v"], w["held_w"], w["plus_x"], w["seen"], w["valid"],
                 w["n_free"], int(self.n_movers_hp),
-                int(self.stage),
+                int(self.stage), w["n_contact"],
             ],
         )
 
@@ -220,6 +227,7 @@ class RlNavVec:
                 w["throt_f"], w["throt_b"], w["throt_l"], w["throt_r"], w["rew"],
                 w["seen"], w["valid"], w["n_free"],
                 float(self.crash_coef), float(self.stall_coef),
+                w["n_contact"], w["contact"],
             ],
         )
         self._observe()
@@ -260,12 +268,17 @@ class RlNavVec:
                 self.roll_ret = 0.92 * self.roll_ret + 0.08 * float(
                     self.ep_ret[dead].mean().item()
                 )
-                ceil = float(self.n_free[dead].float().mean().item())
-                self.roll_ceil = 0.92 * self.roll_ceil + 0.08 * max(ceil, 1.0)
-                cover = float(
+                rewards = float(
                     (self.hits[dead].float() / self.n_free[dead].float().clamp(min=1)).mean().item()
                 )
-                self.roll_cover = 0.92 * self.roll_cover + 0.08 * cover
+                self.roll_cover = 0.92 * self.roll_cover + 0.08 * rewards
+                self.roll_contact = 0.92 * self.roll_contact + 0.08 * float(
+                    self.n_contact[dead].float().mean().item()
+                )
+                steps_d = self.steps[dead].float().clamp(min=1)
+                self.roll_contact_frac = 0.92 * self.roll_contact_frac + 0.08 * float(
+                    (self.n_contact[dead].float() / steps_d).mean().item()
+                )
                 self.ep_ret[dead] = 0.0
             self.reset_mask.copy_(done)
             self._wp["reset_mask"] = wp.from_torch(self.reset_mask.contiguous())
@@ -276,21 +289,31 @@ class RlNavVec:
         return self.ego, self.vec, rew, done
 
     def stats(self) -> dict:
-        live_cover = float(
+        live_rewards = float(
             (self.hits.float() / self.n_free.float().clamp(min=1)).mean().item()
         )
+        ceil = float(self.n_free.float().mean().item())
+        if ceil < 1.0:
+            ceil = float(self.pool_ceil or 1.0)
+        rewards = float(self.roll_cover)
         return {
             "mean_hits": float(self.roll_hits),
             "mean_path": float(self.roll_path),
             "crash_frac": float(self.roll_crash),
+            "contact": float(self.roll_contact),
+            "contact_frac": float(self.roll_contact_frac),
+            "contact_s": float(self.roll_contact) * float(K.DT_POLICY),
+            "live_contact": float(self.n_contact.float().mean().item()),
             "clear_frac": float(self.roll_clear),
             "live_hits": float(self.hits.float().mean().item()),
             "mean_plus_x": float(self.plus_x.mean().item()),
             "mean_ret": float(self.roll_ret),
-            "ceil": float(self.roll_ceil),
-            "ret_ceil": float(self.roll_ceil + 1.0),
-            "cover": float(self.roll_cover),
-            "live_cover": live_cover,
+            "ceil": ceil,
+            "ret_ceil": ceil + 1.0,
+            "rewards": rewards,
+            "cover": rewards,
+            "live_rewards": live_rewards,
+            "live_cover": live_rewards,
             "stage": int(self.stage),
             "n_ep": int(self.n_done),
             "n": self.n,
@@ -322,8 +345,11 @@ class RlNavVec:
             "throt_l": float(self.throt_l[e]),
             "throt_r": float(self.throt_r[e]),
             "hits": int(self.hits[e]),
+            "n_contact": int(self.n_contact[e]),
+            "contact": int(self.contact[e]),
             "n_free": nf,
-            "cover": float(int(self.hits[e]) / nf),
+            "rewards": min(1.0, float(int(self.hits[e]) / nf)),
+            "cover": min(1.0, float(int(self.hits[e]) / nf)),
             "path_m": float(self.path_m[e]),
             "t_sim": float(self.t_sim[e]),
             "steps": int(self.steps[e]),
