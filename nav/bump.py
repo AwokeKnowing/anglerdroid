@@ -36,11 +36,14 @@ Direction: the IMU residual is the reaction push, and the contact is opposite it
 IMU residual, the direction of travel is used, with the side taken from which wheel's current is anomalous.
 """
 from __future__ import annotations
-import json, math, os, time
+import collections, json, math, os, time
 import numpy as np
 
 Z_I, N_I, Z_STALL, T_STALL = 5.0, 3, 3.0, 0.3
 _lp = os.environ.get("KEVIN_BUMP_LOG"); LOG = open(_lp, "a", buffering=1) if _lp else None
+MAX_STEP = 0.03                     # nav.perceive: obstacles start at 3 cm above the floor; lower = drivable floor
+import twin_geometry as _TG
+D_CLIMB = math.sqrt(2 * _TG.WHEEL_R_M * MAX_STEP - MAX_STEP ** 2)     # 0.065 m: wheel travel from touching to topping the step
 ARM_N = 600                         # 20 s of moving samples
 LAM = 0.9995
 REFRACT_S = 1.5
@@ -68,7 +71,8 @@ class BumpDetector:
         self.rls = [_RLS(5), _RLS(5)]
         self.var = [1.0, 1.0]; self.var_a = [1.0, 1.0]; self.var_v = 1e-4
         self.n_moving = 0; self.prev = None; self.g_bias = None
-        self.run_I = [0, 0]; self.stall_t = [None, None]; self.t_refr = -1e9
+        self.gz_b = None; self.var_z = 1.0; self.zv_hist = collections.deque(maxlen=8)   # vertical (floor) motion
+        self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]; self.t_refr = -1e9
         self.events = []; self.last = None; self.stats = dict(ticks=0, events=0, max_zI=0.0, max_zA=0.0)
         self.cal_path = cal_path or os.path.expanduser("~/.kevin/bump_cal_%s.json" % os.environ.get("KEVIN_HAL", "real"))
         self._saved = time.monotonic(); self._load()
@@ -78,12 +82,12 @@ class BumpDetector:
         try:
             d = json.load(open(self.cal_path))
             for k in range(2): self.rls[k].th = np.array(d["th"][k]); self.rls[k].P = np.eye(5) * 1.0
-            self.var = list(d["var"]); self.var_a = list(d["var_a"]); self.var_v = d.get("var_v", self.var_v); self.n_moving = int(d["n"])
+            self.var = list(d["var"]); self.var_a = list(d["var_a"]); self.var_v = d.get("var_v", self.var_v); self.var_z = d.get("var_z", self.var_z); self.n_moving = int(d["n"])
         except Exception: pass
     def save(self):
         try:
             os.makedirs(os.path.dirname(self.cal_path), exist_ok=True)
-            json.dump(dict(th=[r.th.tolist() for r in self.rls], var=self.var, var_a=self.var_a, var_v=self.var_v, n=self.n_moving), open(self.cal_path, "w"))
+            json.dump(dict(th=[r.th.tolist() for r in self.rls], var=self.var, var_a=self.var_a, var_v=self.var_v, var_z=self.var_z, n=self.n_moving), open(self.cal_path, "w"))
         except Exception: pass
 
     @property
@@ -91,7 +95,7 @@ class BumpDetector:
 
     def reset(self, t):
         """discontinuity (relocation in sim, wheels lifted...): restart differences, refractory from t."""
-        self.prev = None; self.prev_w = None; self.t_refr = t; self.run_I = [0, 0]; self.stall_t = [None, None]
+        self.prev = None; self.prev_w = None; self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]
 
     def sig(self, k): return math.sqrt(self.var[k]) if self.armed else 1.0
     def sig_a(self, k): return math.sqrt(self.var_a[k]) if self.armed else 1.0
@@ -103,7 +107,7 @@ class BumpDetector:
         Returns an event dict (and latches it in self.last) or None."""
         self.stats["ticks"] += 1
         if LOG:                                                         # KEVIN_BUMP_LOG=path: raw per-tick rows for offline model fits
-            Am = np.asarray(accel, float)[:, :2].mean(0).tolist() if accel is not None and len(accel) else [None, None]
+            Am = (np.asarray(accel, float)[:, :2].mean(0).tolist() + [float(np.asarray(accel, float)[:, 2].mean()), float(np.ptp(np.asarray(accel, float)[:, 2]))]) if accel is not None and len(accel) else [None] * 4
             LOG.write(json.dumps([round(t, 4), cmd[0], cmd[1], wheel[0], wheel[1], gyro_z, *(list(currents) if currents is not None else [None, None])[:2], *Am]) + "\n")
         vw = np.array(wheel, float); w = gyro_z if gyro_z is not None else (vw[1] - vw[0]) / self.track
         if self.prev is None: self.prev = (t, vw); return None
@@ -125,6 +129,12 @@ class BumpDetector:
                 a_ = min(1.0, dt / 5.0); self.g_bias = (1 - a_) * self.g_bias + a_ * (A.mean(0) - exp)
                 for i in range(2): self.var_a[i] += min(1.0, dt / 10.0) * (float(ra[i] ** 2) - self.var_a[i])
             self.stats["max_zA"] = max(self.stats["max_zA"], float(np.abs(za).max()))
+            Az = np.asarray(accel, float)[:, 2]
+            if self.gz_b is None: self.gz_b = float(Az.mean())
+            vdev = float(np.abs(Az - self.gz_b).max()); zv = vdev / math.sqrt(self.var_z); self.zv_hist.append(zv)
+            if not refr and zv < 4:
+                self.gz_b += min(1.0, dt / 5.0) * (float(Az.mean()) - self.gz_b); self.var_z += min(1.0, dt / 10.0) * (vdev * vdev - self.var_z)
+        else: self.zv_hist.append(0.0)
         # ---- current residual per wheel (opposing motion => positive 'push')
         zI = np.zeros(2); push = np.zeros(2); eI = np.zeros(2)
         if currents is not None:
@@ -145,7 +155,14 @@ class BumpDetector:
         why = None
         for k in range(2):
             self.run_I[k] = self.run_I[k] + 1 if push[k] >= Z_I else 0
-        if max(self.run_I) >= N_I: why = "motor current %+.1f A over model (%.0f sigma)" % (eI[int(np.argmax(push))], push.max())
+            self.run_d[k] = self.run_d[k] + abs(u[k]) * dt if push[k] >= Z_I else 0.0
+        # A rigid obstacle and a floor step (threshold, rug edge) both load the motors.  Climbing lifts the chassis, so
+        # while the IMU shows vertical motion (zV >= 4 in the push window) the push must outlast the climb: persist
+        # over D_CLIMB of commanded wheel travel (wheel geometry over the highest step perception calls floor).
+        # Flat (no vertical motion): rigid contact, trip after N_I ticks.
+        climbing = (max(self.zv_hist) if self.zv_hist else 0.0) >= 4.0
+        hit = [self.run_I[k] >= N_I and (not climbing or self.run_d[k] >= D_CLIMB) for k in range(2)]
+        if any(hit): why = "motor current %+.1f A over model (%.0f sigma)" % (eI[int(np.argmax(push))], push.max())
         for k in range(2):
             stalled = abs(u[k]) > 3 * math.sqrt(self.var_v) + 0.03 and abs(vw[k]) < 0.3 * abs(u[k]) and push[k] >= Z_STALL
             if stalled:
@@ -163,10 +180,10 @@ class BumpDetector:
         elif abs(push[0] - push[1]) > 1.5:                            # one-sided load: contact on that side
             side = 1.0 if push[0] > push[1] else -1.0                 # left wheel loaded -> contact on the left
             ang += side * (math.pi / 4 if fwd >= 0 else -math.pi / 4)
-        ev = dict(t=t, why=why, angle=wrap(ang), dir=direction_name(ang), zI=[round(float(z), 1) for z in zI], zA=round(zam, 1),
+        ev = dict(t=t, why=why, angle=wrap(ang), dir=direction_name(ang), zI=[round(float(z), 1) for z in zI], zA=round(zam, 1), zV=round(max(self.zv_hist) if self.zv_hist else 0.0, 1),
                   v_cmd=round(float(v), 3), w_cmd=round(float(wc), 3), armed=self.armed)
         self.last = ev; self.events.append(ev); del self.events[:-20]; self.stats["events"] += 1
-        self.t_refr = t; self.run_I = [0, 0]; self.stall_t = [None, None]
+        self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]
         return ev
 
     def state(self):

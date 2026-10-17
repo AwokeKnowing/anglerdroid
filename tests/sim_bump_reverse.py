@@ -56,11 +56,11 @@ while (not det.armed or rounds < 2) and rounds < 6:
 c1 = gt.state()["collisions"]; d1 = (gt.state().get("dog") or {}).get("contacts", 0)
 print("normal driving: %d rounds, armed=%s n=%d sigma_I=%s sigma_a=%s, events=%d (real contacts %d, dog %d), max z_I %.1f max z_A %.1f"
       % (rounds, det.armed, det.n_moving, det.state()["sigma_I"], det.state()["sigma_a"], len(fp), c1 - c0, d1 - d0, det.stats["max_zI"], det.stats["max_zA"]))
-for _, ev, _c in fp: print("   FP?", ev["dir"], ev["why"])
+for _, ev, _c in fp: print("   FP?", ev["dir"], ev["why"], "zV", ev.get("zV"), "cmd", ev["v_cmd"], ev["w_cmd"])
 det.save()
 res = {}
 # ---- 2/3. scripted contacts
-for name, v, off in (("reverse", -0.15, -1), ("forward", 0.15, +1)):
+for name, v, off in (("reverse", -0.15, -1), ("forward", 0.15, +1), ("reverse_fast", -0.2, -1), ("forward_fast", 0.4, +1)):
     teleport(x0, y0, a0); settle(0.5)
     edge = -0.2737 if off < 0 else max(p[0] for p in TG.FOOTPRINT_SAFE)
     dcen = edge + off * (0.15 + 0.10)                      # box half-size 0.15, 10 cm gap
@@ -74,7 +74,8 @@ for name, v, off in (("reverse", -0.15, -1), ("forward", 0.15, +1)):
     settle(1.0); gt.ctl("clear_obstacles")
     lat = None if (t_contact is None or t_det is None) else t_det - t_contact
     res[name] = dict(detected=det_ev is not None, dir=det_ev and det_ev["dir"], why=det_ev and det_ev["why"], gt_contact=t_contact is not None,
-                     latency_s=None if lat is None else round(lat, 3), travel_after_contact_m=None if lat is None else round(abs(v) * max(lat, 0), 3))
+                     latency_s=None if lat is None else round(lat, 3), travel_after_contact_m=None if lat is None else round(abs(v) * max(lat, 0), 3),
+                     zI=det_ev and det_ev["zI"], zV=det_ev and det_ev.get("zV"))
     print(name, json.dumps(res[name]))
 settle(0.5); hw.drive(0.0, 0.0); hw.close()
 ok = len(fp) == 0 and res["reverse"]["detected"] and "rear" in (res["reverse"]["dir"] or "") and res["forward"]["detected"] and "front" in (res["forward"]["dir"] or "")

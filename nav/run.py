@@ -127,7 +127,7 @@ class Brain:
             if getattr(self, "_bo_retry", False): self._bo_fail = True; return                 # retry after a retreat: caller decides
             # wedged (e.g. in a doorway): leave along the way we came in (see _retreat), then plan again
             if self._retreat((xy, heading, label), "no local path from here"): return
-            self.mode = "idle"; self.log("unreachable: local planner found no path toward %s" % (label or "point")); return
+            self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (%s)" % (label or "point", getattr(self, "_sub_why", ""))); return
         self._backing_for = None
         note = "" if g["snap_m"] < 0.05 else " (closest reachable point, %.2f m from it)" % g["snap_m"]
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
@@ -161,6 +161,7 @@ class Brain:
         sub, final = GP.subgoal(self.gpath["xy"], pose[:2], ahead=4.0)
         tgt = self.goal if final else sub
         ok, m = self.planner.set_goal((*pose, self.v, self.w), tgt, self.goal_heading if final else None)
+        self._sub_why = None if ok else "%s; axle clearance %.2f m" % (m, self.planner.clearance(pose[:2]))
         return ok
 
     # -------------------------------------------------------------- background planner (map window refresh)
