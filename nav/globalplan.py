@@ -40,7 +40,13 @@ def _plan(grid, start, goal, inflate):
     blk, occ = coarse_blocked(grid, inflate); n = blk.shape[0]; o = grid.origin; cres = coarse_res(grid)
     def cell(p): return (min(max(int((p[1] - o[1]) / cres), 0), n - 1), min(max(int((p[0] - o[0]) / cres), 0), n - 1))
     s, g = cell(start), cell(goal)
-    free = ~blk; free[s] = True                       # robot may sit in an inflated band; let it leave
+    free = ~blk; free[s] = True
+    if blk[s] and not occ[s]:
+        # the robot sits inside an inflated band (e.g. 16 cm from a chair leg with 24 cm inflation): let it leave, but only
+        # through band cells at least as far from every obstacle as it is now -- it may never be routed closer
+        clear = cv2.distanceTransform((~occ).astype(np.uint8), cv2.DIST_L2, 5)
+        ok = (blk & (clear >= clear[s] - 1e-3)).astype(np.uint8)
+        _, lab = cv2.connectedComponents(ok, connectivity=8); free |= lab == lab[s]
     if not free[g]:                                   # nearest free cell to the requested goal
         dist = cv2.distanceTransform(blk.astype(np.uint8), cv2.DIST_L2, 3)
         ys, xs = np.nonzero(free)

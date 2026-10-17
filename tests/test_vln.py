@@ -1,4 +1,4 @@
-"""nav/vln.py against a fake LightNav: map-frame waypoints use the pose at image time, farthest -> goal, state + jsonl, stop flag.
+"""nav/vln.py against a fake LightNav: map-frame waypoints use the pose at image time, receding-horizon goal (row due at the next prediction), state + jsonl, stop flag.
 python tests/test_vln.py"""
 import glob, json, math, os, sys, tempfile, time
 sys.path[:0] = [os.path.dirname(os.path.abspath(__file__)), os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))]
@@ -18,7 +18,11 @@ print("calls", S["stats"], "active", S["active"], "sets", len(S["sets"]))
 exp = [1.0 - 0.02 * 100, 2.0 + 1.5]                    # pose (1,2,90deg): forward 1.5 -> +y, left 0.2*... -> -x
 print("first set farthest", first["wp_map"][-1], "goal", first["goal"], "expected", [round(e, 3) for e in exp], "cmd", b.cmds[0])
 assert abs(first["wp_map"][-1][0] - exp[0]) < 1e-6 and abs(first["wp_map"][-1][1] - exp[1]) < 1e-6 and len(first["wp_map"]) == 10
-assert b.cmds[0] == "go to %.3f %.3f %.1f" % (exp[0], exp[1], 90 + math.degrees(0.4))   # model heading at the goal
+# receding horizon: the goal is the row the robot should reach before the next prediction (0.1 s per row), not the far end
+k0 = VL.commit_row(10, 1.0 / VL.FPS); i = k0 + 1                                     # first call: period unknown -> 1/FPS
+assert k0 == 2 and first["commit"] == [round(1.0 - 0.02 * i * i, 3), round(2.0 + 0.15 * i, 3)], (k0, first["commit"])
+assert b.cmds[0] == "go to %.3f %.3f %.1f" % (first["commit"][0], first["commit"][1], 90 + math.degrees(0.04 * i)), b.cmds[0]   # model heading at that row
+assert [VL.commit_row(10, p) for p in (0.05, 0.1, 0.4, 0.41, 1.0, 5.0)] == [0, 0, 3, 4, 9, 9]
 assert S["sets"][1]["wp_map"][-1] == [round(5.0 + 1.5, 3), round(5.0 + 2.0, 3)]      # later calls use the moved pose
 assert S["last"]["stop"] and b.cmds[-1] == "stop" and not S["active"] and S["stats"]["calls"] == 5 and len(S["sets"]) == 5
 assert all(c.startswith("go to ") or c == "stop" for c in b.cmds)                       # VLN only proposes goals (or stop)

@@ -50,6 +50,18 @@ def test_wall_blocks_where_it_really_is():
     assert np.any(np.abs(r["xy"][:, 1]) > 3.0)                 # goes round the end of the wall, not through it
 
 
+
+def test_leave_inflated_band_never_closer():
+    """Robot parked 8 cm from a chair leg (deep inside the 24/20 cm inflation): it must get a path out, and the path must
+    never come closer to the leg than the robot already is."""
+    g = Grid(0.02); g.wall(5.0, 5.0, 5.04, 5.04)                 # 4 cm leg
+    start = (5.02, 5.0 - 0.08)
+    r = GP.plan(g, start, (5.02, 3.0))
+    assert r is not None
+    d = np.hypot(r["xy"][:, 0] - 5.02, r["xy"][:, 1] - 5.02)
+    assert d.min() >= np.hypot(start[0] - 5.02, start[1] - 5.02) - 0.05, d.min()      # within one coarse cell
+
+
 if __name__ == "__main__":
     for k, f in list(globals().items()):
         if k.startswith("test_"): f(); print("ok", k)

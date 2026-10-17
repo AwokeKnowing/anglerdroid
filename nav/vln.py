@@ -3,8 +3,13 @@
 ask <instruction> -> stream MAST RGB frames (USB16MP01 at the mast tip, pitch 0, ~0.98 m: inside LightNav-0's training
 camera range; NOT the 27-deg-pitched D435i) at a fixed FPS (4, the model's training rate: the server keeps the frame
 history, so frames must arrive at a steady clock), get its (10, 3) robot-frame waypoints [forward_m, lateral_m(+left),
-yaw_rad(+ccw)] (cumulative, relative to the pose at that frame), and hand the farthest one to the planner as a map-frame goal.  The 30 Hz loop, MPPI and the
-safety envelope are unchanged: the VLM only ever proposes goals.  'stop' (or the model's stop flag) ends it.
+yaw_rad(+ccw)] (cumulative, relative to the pose at that frame), and hand the planner the chunk pose the robot is meant
+to reach BEFORE THE NEXT PREDICTION replaces it (receding horizon).  The model replans every frame and the rest of the
+chunk is look-ahead only (LightNav docs/DEPLOYMENT.md: "execute the first waypoint ... the remaining rows are only a
+look-ahead"; robot_deploy/vln_mpc tracks the rows at 0.1 s each).  Handing over the far end instead committed the
+robot to the whole ~1 s chunk every ~0.4 s: a turn-in-place chunk is 150 deg, so the robot spun 150 deg per call and
+the model's frequent left/right flips became circling.  The 30 Hz loop, MPPI and the safety envelope are unchanged:
+the VLM only ever proposes goals.  'stop' (or the model's stop flag) ends it.
 
 state() exposes the last calls for the viewer (waypoints in the map frame, using the pose at the frame the image was
 taken); every call is appended to ~/.kevin/emu/vln_log/<session>.jsonl for offline evaluation."""
@@ -15,6 +20,12 @@ import cv2
 
 LOGDIR = os.path.expanduser(os.environ.get("KEVIN_VLN_LOG", "~/.kevin/emu/vln_log"))
 FPS = float(os.environ.get("KEVIN_VLN_FPS", "4"))
+ROW_DT = 0.1                    # s per chunk row (LightNav robot_deploy vln_mpc WAYPOINT_DT_S: 10 rows = 1 s)
+
+
+def commit_row(n_rows, period_s):
+    """Index of the chunk row the robot should reach before the next prediction (period_s from now)."""
+    return int(min(n_rows - 1, max(0, math.ceil(period_s / ROW_DT - 1e-9) - 1)))
 
 
 class MastCam:
@@ -92,7 +103,7 @@ class VLN:
                     # sends them in order.  A prediction (~300-400 ms on i777) spans >1 frame period, so queued older
                     # frames go buffer-only (instruction "") and only the newest one asks for a prediction: the model's
                     # history stays evenly spaced at FPS even though predictions run slower.
-                    q = collections.deque(maxlen=8); run = [True]
+                    q = collections.deque(maxlen=8); run = [True]; tlast = None; period = 0.0
                     def capture():
                         tick = time.monotonic(); tprev = None
                         while run[0] and self.text:
@@ -121,21 +132,24 @@ class VLN:
                         wp = np.asarray(raw, float); wp = wp.reshape(-1, wp.shape[-1]) if wp.size else np.zeros((0, 2))
                         stop = bool(d.get("stop")) or len(wp) == 0
                         wmap = to_map(pose, wp.tolist()); goal = None if stop else wmap[-1]
+                        if tlast: period = 0.8 * period + 0.2 * min(2.0, time.monotonic() - tlast) if period else min(2.0, time.monotonic() - tlast)
+                        tlast = time.monotonic(); k = commit_row(len(wp), period or 1.0 / FPS) if len(wp) else 0
                         rec = dict(t=time.time(), seq=seq, age_ms=round((time.monotonic() - tcap) * 1e3, 1), instruction=instr, ms=round(ms, 1), server_ms=d.get("latency_ms"), cam=self.cam.kind, fps=round(self.fps, 2), visible=d.get("visible"), pose=[round(v, 3) for v in pose],
-                                   wp=wp.round(3).tolist(), wp_map=wmap, goal=goal, stop=stop)
+                                   wp=wp.round(3).tolist(), wp_map=wmap, goal=goal, stop=stop, commit_row=k, period_s=round(period, 3))
                         with self._lock:
-                            self.stats["calls"] += 1; self.stats["last_ms"] = round(ms, 1)
+                            self.stats["calls"] += 1; self.stats["last_ms"] = round(ms, 1); self.stats["period_s"] = round(period, 3)
                             self.stats["mean_ms"] = round(self.stats["mean_ms"] + (ms - self.stats["mean_ms"]) / self.stats["calls"], 1)
-                            self.last = rec; self.sets.append(dict(seq=seq, t=rec["t"], wp_map=wmap, goal=goal, stop=stop))
+                            self.last = rec; self.sets.append(dict(seq=seq, t=rec["t"], wp_map=wmap, goal=goal, stop=stop, commit=None if stop else wmap[k]))
                         self._jsonl(rec)
                         if stop:
                             self.b.command("stop"); self.b.log("VLN: model says stop"); self.text = None; break
-                        # proposal only (planner + MPPI + safety unchanged).  Farthest waypoint as the goal, with the model's
-                        # heading there; a turn-in-place chunk (translation < 0.15 m) becomes 'face' so it is not lost.
-                        f, l, yw = (list(wp[-1]) + [0.0, 0.0, 0.0])[:3]; hd = math.degrees(pose[2] + yw)
+                        # proposal only (planner + MPPI + safety unchanged).  Receding horizon: the goal is the chunk pose
+                        # at the time the next prediction is due (measured prediction period), with the model's heading
+                        # there; a turn-in-place prefix (translation < 0.15 m) becomes 'face' so the turn is not lost.
+                        f, l, yw = (list(wp[k]) + [0.0, 0.0, 0.0])[:3]; hd = math.degrees(pose[2] + yw); gk = wmap[k]
                         if math.hypot(f, l) < 0.15:
                             if abs(yw) > 0.2: self.b.command("face %.1f" % hd)
-                        else: self.b.command("go to %.3f %.3f %.1f" % (goal[0], goal[1], hd))
+                        else: self.b.command("go to %.3f %.3f %.1f" % (gk[0], gk[1], hd))
                     finally: run[0] = False
             except Exception as e:
                 with self._lock: self.stats["errors"] += 1; self.error = repr(e)[:200]
