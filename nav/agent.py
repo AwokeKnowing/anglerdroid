@@ -25,14 +25,16 @@ Command strings (exact syntax, lowercase):
   face <deg>             face an absolute map heading in degrees
   label <name>           remember the current position as <name>
   forget <name>          delete a remembered place
-  where                  report position
-  places                 list known places
+  where                  report position (use for "where are you?", "what's your location?")
+  places                 list known places (use for "what places do you know?", "where can you go?")
   stop                   stop immediately
   ask <instruction>      visual navigation by the camera model, for targets that are NOT a known place and must be found by
                          looking (e.g. "go find the dog" -> "ask go to the dog", "approach the red chair" -> "ask approach the red chair")
 Rules: "a bit"/"a little" = 0.5 m; "a few steps" = 1 m. Use a known place name only if it is in the list (closest match). Several steps in
 order are allowed. If the message is not a robot instruction, is unclear, or unsafe, return "commands": [] and ask a short clarifying
-question in "reply". Never invent coordinates."""
+question in "reply". Never invent coordinates.
+Examples: "where are you?" -> {"commands": ["where"], "reply": "Here's where I am."}
+"go to the bedroom then the kitchen" -> {"commands": ["go to bedroom", "go to kitchen"], "reply": "Bedroom first, then the kitchen."}"""
 
 
 def _strip(t):
@@ -63,6 +65,7 @@ def validate(cmds, places=()):
     ok = []
     for s in (cmds or [])[:4]:
         if not isinstance(s, str): continue
+        s = s.strip().rstrip(".!?").strip()
         c = G.parse(s)
         if c["kind"] not in ALLOWED: continue
         if c["kind"] == "goto_place" and places:
@@ -77,7 +80,7 @@ def interpret(text, places=()):
     """-> dict(cmds=[(text, parsed)], reply=str, via='grammar'|'llm'|'none', ms=float). Pure apart from the LLM call."""
     t0 = time.monotonic(); t = _strip(text)
     c = exact(t)
-    if c is not None and c["kind"] == "goto_place" and places and not validate(["go to " + c["name"]], places):
+    if c is not None and c["kind"] == "goto_place" and (re.search(r"\b(and|then)\b", c["name"]) or (places and not validate(["go to " + c["name"]], places))):
         c = None                                         # 'go to the dog' / 'go find X': not a known place -> let the LLM pick (e.g. ask)
     if c is not None: return dict(cmds=[(t.lower(), c)], reply=None, via="grammar", ms=(time.monotonic() - t0) * 1e3)
     if re.fullmatch(r"(stop|halt|freeze|wait|stop it|stop now|emergency stop|whoa)( kevin)?", t, re.I):
