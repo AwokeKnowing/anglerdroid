@@ -18,7 +18,7 @@ print("calls", S["stats"], "active", S["active"], "sets", len(S["sets"]))
 exp = [1.0 - 0.02 * 100, 2.0 + 1.5]                    # pose (1,2,90deg): forward 1.5 -> +y, left 0.2*... -> -x
 print("first set farthest", first["wp_map"][-1], "goal", first["goal"], "expected", [round(e, 3) for e in exp], "cmd", b.cmds[0])
 assert abs(first["wp_map"][-1][0] - exp[0]) < 1e-6 and abs(first["wp_map"][-1][1] - exp[1]) < 1e-6 and len(first["wp_map"]) == 10
-assert b.cmds[0] == "go to %.3f %.3f" % tuple(exp)
+assert b.cmds[0] == "go to %.3f %.3f %.1f" % (exp[0], exp[1], 90 + math.degrees(0.4))   # model heading at the goal
 assert S["sets"][1]["wp_map"][-1] == [round(5.0 + 1.5, 3), round(5.0 + 2.0, 3)]      # later calls use the moved pose
 assert S["last"]["stop"] and b.cmds[-1] == "stop" and not S["active"] and S["stats"]["calls"] == 5 and len(S["sets"]) == 5
 assert all(c.startswith("go to ") or c == "stop" for c in b.cmds)                       # VLN only proposes goals (or stop)

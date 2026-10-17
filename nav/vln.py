@@ -88,20 +88,32 @@ class VLN:
                 with connect(self.url, max_size=None) as ws:
                     rq = lambda a, d: (ws.send(json.dumps(dict(action=a, data=d))), json.loads(ws.recv()))[1]["data"]
                     rq("login", dict(clientId="kevin")); rq("reset", {}); seq = 0; self.error = None
-                    tick = time.monotonic(); tprev = None
-                    while self.text:
-                        instr = self.text
-                        # fixed 4 fps frame clock: the model's history assumes evenly spaced frames
-                        dt = tick - time.monotonic()
-                        if dt > 0: time.sleep(dt)
-                        tick = max(tick + 1.0 / FPS, time.monotonic() - 0.5 / FPS)
-                        color = self.cam.grab()
-                        if color is None: time.sleep(0.05); continue
-                        pose = tuple(float(v) for v in self.b.slam.pose())              # pose at image time
-                        ok, jpg = cv2.imencode(".jpg", color[..., ::-1] if color.ndim == 3 else color, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                        tn = time.monotonic()
-                        if tprev: self.fps = 0.8 * self.fps + 0.2 / max(tn - tprev, 1e-3) if self.fps else 1.0 / max(tn - tprev, 1e-3)
-                        tprev = tn; t0 = time.monotonic(); seq += 1
+                    # frames are CAPTURED on a fixed 4 fps clock (own thread, pose at image time) and queued; the socket
+                    # sends them in order.  A prediction (~300-400 ms on i777) spans >1 frame period, so queued older
+                    # frames go buffer-only (instruction "") and only the newest one asks for a prediction: the model's
+                    # history stays evenly spaced at FPS even though predictions run slower.
+                    q = collections.deque(maxlen=8); run = [True]
+                    def capture():
+                        tick = time.monotonic(); tprev = None
+                        while run[0] and self.text:
+                            dt = tick - time.monotonic()
+                            if dt > 0: time.sleep(dt)
+                            tick = max(tick + 1.0 / FPS, time.monotonic() - 0.5 / FPS)
+                            color = self.cam.grab()
+                            if color is None: continue
+                            pose = tuple(float(v) for v in self.b.slam.pose())
+                            ok, jpg = cv2.imencode(".jpg", color[..., ::-1] if color.ndim == 3 else color, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                            tn = time.monotonic()
+                            if tprev: self.fps = (0.8 * self.fps + 0.2 / max(tn - tprev, 1e-3)) if self.fps else 1.0 / max(tn - tprev, 1e-3)
+                            tprev = tn; q.append((jpg, pose, tn))
+                    threading.Thread(target=capture, daemon=True, name="vln-cap").start()
+                    try:
+                      while self.text:
+                        if not q: time.sleep(0.01); continue
+                        jpg, pose, tcap = q.popleft(); seq += 1; instr = self.text
+                        if q:                                                     # a newer frame is waiting: buffer only
+                            rq("next", dict(seq=seq, image=base64.b64encode(jpg.tobytes()).decode(), instruction="")); self.stats["buffered"] = self.stats.get("buffered", 0) + 1; continue
+                        t0 = time.monotonic()
                         d = rq("next", dict(seq=seq, image=base64.b64encode(jpg.tobytes()).decode(), instruction=instr))
                         ms = (time.monotonic() - t0) * 1e3
                         if d.get("rc", 0) != 0: raise RuntimeError("lightnav rc=%s %s" % (d.get("rc"), d.get("msg")))
@@ -109,7 +121,7 @@ class VLN:
                         wp = np.asarray(raw, float); wp = wp.reshape(-1, wp.shape[-1]) if wp.size else np.zeros((0, 2))
                         stop = bool(d.get("stop")) or len(wp) == 0
                         wmap = to_map(pose, wp.tolist()); goal = None if stop else wmap[-1]
-                        rec = dict(t=time.time(), seq=seq, instruction=instr, ms=round(ms, 1), server_ms=d.get("latency_ms"), cam=self.cam.kind, fps=round(self.fps, 2), visible=d.get("visible"), pose=[round(v, 3) for v in pose],
+                        rec = dict(t=time.time(), seq=seq, age_ms=round((time.monotonic() - tcap) * 1e3, 1), instruction=instr, ms=round(ms, 1), server_ms=d.get("latency_ms"), cam=self.cam.kind, fps=round(self.fps, 2), visible=d.get("visible"), pose=[round(v, 3) for v in pose],
                                    wp=wp.round(3).tolist(), wp_map=wmap, goal=goal, stop=stop)
                         with self._lock:
                             self.stats["calls"] += 1; self.stats["last_ms"] = round(ms, 1)
@@ -118,7 +130,13 @@ class VLN:
                         self._jsonl(rec)
                         if stop:
                             self.b.command("stop"); self.b.log("VLN: model says stop"); self.text = None; break
-                        self.b.command("go to %.3f %.3f" % tuple(goal))       # proposal only: planner + MPPI + safety unchanged
+                        # proposal only (planner + MPPI + safety unchanged).  Farthest waypoint as the goal, with the model's
+                        # heading there; a turn-in-place chunk (translation < 0.15 m) becomes 'face' so it is not lost.
+                        f, l, yw = (list(wp[-1]) + [0.0, 0.0, 0.0])[:3]; hd = math.degrees(pose[2] + yw)
+                        if math.hypot(f, l) < 0.15:
+                            if abs(yw) > 0.2: self.b.command("face %.1f" % hd)
+                        else: self.b.command("go to %.3f %.3f %.1f" % (goal[0], goal[1], hd))
+                    finally: run[0] = False
             except Exception as e:
                 with self._lock: self.stats["errors"] += 1; self.error = repr(e)[:200]
                 self.b.log("VLN error: %r" % e); self.text = None

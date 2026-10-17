@@ -50,7 +50,7 @@ try:
     assert len(s0["wp_map"]) == 10 and len(s0["wp_env"]) == 10 and s0["goal"] == s0["wp_map"][-1]
     # nav pose (0,0,0) == env pose (2,3,90deg): map (1.5, 2.0) -> env (2-2.0, 3+1.5)
     assert abs(s0["goal_env"][0] - 0.0) < 1e-3 and abs(s0["goal_env"][1] - 4.5) < 1e-3
-    assert "vln:go to 1.500 2.000" in got
+    assert "vln:go to 1.500 2.000 22.9" in got
     cl[2].send(json.dumps(dict(type="chat", text="halt", who="c2")))                   # exact stop in send-all mode -> stop
     latest(cl[0], lambda m: not (m.get("vln") or {}).get("active"))
     print("after halt nav got:", [g for g in got if not g.startswith("vln:")])
