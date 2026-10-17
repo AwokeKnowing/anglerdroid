@@ -22,8 +22,13 @@ amperes or m/s^2:
   current:   z_k = e_k/sigma_k opposing the motion (motor pushing harder in its direction of travel) >= Z_I on
              N_I = 3 consecutive ticks (100 ms).  Z_I = 5: Gaussian per-tick tail 3e-7, cubed for 3 ticks.
   stall:     commanded wheel speed > 3 * encoder noise, measured < 30 % of it, for 0.3 s, with z_k >= 3.
-  impact:    IMU residual |r_a|/sigma_a >= Z_A = 8 within a tick and a current residual >= 2 sigma in the same sense
-             (corroboration: floor bumps shake the IMU but do not load the motors), or >= 12 alone.
+  IMU:       the residual r_a = IMU specific force - rigid-body acceleration implied by the encoders (lever arm
+             included), tick mean.  It does NOT trip on its own: the encoders decelerate with the body on a hit, so
+             r_a measures IMU/encoder disagreement (timing, slip, chassis rock), and in sim + on carpet its lateral
+             tail is heavy (caster scrub, thresholds).  Tried as a corroborated trigger (z_A>=8 with a 2-3 sigma
+             current residual): still false positives and a wrong-sign direction on a frontal hit, so it is used
+             only to set the side of the contact when it agrees with the travel direction (|z_A| >= 4 and its
+             reaction opposes travel), and it is logged in every event for real-robot validation.
 Until ARM_N moving samples have been seen, the model is not trusted: sigma is the prior (1 A, 1 m/s^2), so only
 gross events trip.  The calibration persists in ~/.kevin/bump_cal_<hal>.json.
 
@@ -34,7 +39,7 @@ from __future__ import annotations
 import json, math, os, time
 import numpy as np
 
-Z_I, N_I, Z_STALL, T_STALL, Z_A, Z_A_ALONE = 5.0, 3, 3.0, 0.3, 8.0, 12.0
+Z_I, N_I, Z_STALL, T_STALL = 5.0, 3, 3.0, 0.3
 ARM_N = 600                         # 20 s of moving samples
 LAM = 0.9995
 REFRACT_S = 1.5
@@ -51,8 +56,14 @@ class _RLS:
 
 
 class BumpDetector:
-    def __init__(self, track, cal_path=None):
+    def __init__(self, track, cal_path=None, imu_xy=None):
         self.track = float(track)
+        if imu_xy is None:
+            try:
+                import twin_geometry as TG; imu_xy = (float(TG.IMU_T[0]), float(TG.IMU_T[1]))
+            except Exception: imu_xy = (0.0, 0.0)
+        self.rx, self.ry = imu_xy                                     # IMU lever arm from the axle (rigid-body terms)
+        self.prev_w = None
         self.rls = [_RLS(5), _RLS(5)]
         self.var = [1.0, 1.0]; self.var_a = [1.0, 1.0]; self.var_v = 1e-4
         self.n_moving = 0; self.prev = None; self.g_bias = None
@@ -77,6 +88,10 @@ class BumpDetector:
     @property
     def armed(self): return self.n_moving >= ARM_N
 
+    def reset(self, t):
+        """discontinuity (relocation in sim, wheels lifted...): restart differences, refractory from t."""
+        self.prev = None; self.prev_w = None; self.t_refr = t; self.run_I = [0, 0]; self.stall_t = [None, None]
+
     def sig(self, k): return math.sqrt(self.var[k]) if self.armed else 1.0
     def sig_a(self, k): return math.sqrt(self.var_a[k]) if self.armed else 1.0
 
@@ -89,6 +104,7 @@ class BumpDetector:
         vw = np.array(wheel, float); w = gyro_z if gyro_z is not None else (vw[1] - vw[0]) / self.track
         if self.prev is None: self.prev = (t, vw); return None
         dt = max(1e-3, t - self.prev[0]); aw = (vw - self.prev[1]) / dt; self.prev = (t, vw)
+        al = 0.0 if self.prev_w is None else (w - self.prev_w) / dt; self.prev_w = w
         v, wc = cmd; u = np.array([v - wc * self.track / 2, v + wc * self.track / 2])
         moving = bool(np.abs(u).max() > 0.02 or np.abs(vw).max() > 0.02)
         refr = t - self.t_refr < REFRACT_S
@@ -97,12 +113,13 @@ class BumpDetector:
         if accel is not None and len(accel):
             A = np.asarray(accel, float)[:, :2]
             if self.g_bias is None: self.g_bias = A.mean(0)
-            exp = np.array([aw.mean(), vw.mean() * w])
-            R = A - self.g_bias - exp; j = int(np.abs(R).sum(1).argmax()); ra = R[j]
+            # rigid body at the IMU lever arm r: a = a_axle + alpha x r - w^2 r  (planar)
+            exp = np.array([aw.mean() - al * self.ry - w * w * self.rx, vw.mean() * w + al * self.rx - w * w * self.ry])
+            R = A - self.g_bias - exp; ra = R.mean(0)                      # compared at the control rate (tick mean)
             za = np.array([ra[0] / self.sig_a(0), ra[1] / self.sig_a(1)])
             if not refr and np.abs(za).max() < 4:
                 a_ = min(1.0, dt / 5.0); self.g_bias = (1 - a_) * self.g_bias + a_ * (A.mean(0) - exp)
-                for i in range(2): self.var_a[i] += min(1.0, dt / 10.0) * (float(np.mean(R[:, i] ** 2)) - self.var_a[i])
+                for i in range(2): self.var_a[i] += min(1.0, dt / 10.0) * (float(ra[i] ** 2) - self.var_a[i])
             self.stats["max_zA"] = max(self.stats["max_zA"], float(np.abs(za).max()))
         # ---- current residual per wheel (opposing motion => positive 'push')
         zI = np.zeros(2); push = np.zeros(2); eI = np.zeros(2)
@@ -132,17 +149,16 @@ class BumpDetector:
                 if t - self.stall_t[k] >= T_STALL and why is None: why = "wheel stall (%s commanded %.2f m/s, measured %.2f)" % ("LR"[k], u[k], vw[k])
             else: self.stall_t[k] = None
         zam = float(np.abs(za).max())
-        if why is None and (zam >= Z_A_ALONE or (zam >= Z_A and push.max() >= 2.0)):
-            why = "impact: IMU %.1f m/s^2 unexpected (%.0f sigma)" % (float(np.hypot(*ra)), zam)
         if why is None: return None
-        # ---- direction (robot frame): contact is opposite the reaction push felt by the IMU
-        if zam >= 4: ang = math.atan2(-ra[1], -ra[0])
-        else:
-            fwd = v if abs(v) > 0.01 else float(vw.mean())
-            ang = 0.0 if fwd >= 0 else math.pi
-            if abs(push[0] - push[1]) > 1.5:                       # one-sided load: contact on that side
-                side = 1.0 if push[0] > push[1] else -1.0             # left wheel loaded -> contact on the left
-                ang += side * (math.pi / 4 if fwd >= 0 else -math.pi / 4)
+        # ---- direction (robot frame): travel direction, side from the one-sided wheel load or a consistent IMU
+        fwd = v if abs(v) > 0.01 else float(vw.mean())
+        ang = 0.0 if fwd >= 0 else math.pi
+        sgn = 1.0 if fwd >= 0 else -1.0
+        if zam >= 4 and ra[0] * sgn < 0:                               # reaction opposes travel: take its side
+            ang = math.atan2(-ra[1], -ra[0])
+        elif abs(push[0] - push[1]) > 1.5:                            # one-sided load: contact on that side
+            side = 1.0 if push[0] > push[1] else -1.0                 # left wheel loaded -> contact on the left
+            ang += side * (math.pi / 4 if fwd >= 0 else -math.pi / 4)
         ev = dict(t=t, why=why, angle=wrap(ang), dir=direction_name(ang), zI=[round(float(z), 1) for z in zI], zA=round(zam, 1),
                   v_cmd=round(float(v), 3), w_cmd=round(float(wc), 3), armed=self.armed)
         self.last = ev; self.events.append(ev); del self.events[:-20]; self.stats["events"] += 1

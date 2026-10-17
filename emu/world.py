@@ -499,6 +499,7 @@ class World:
         for n, j, a, sg in ((self.nodes[0], self.jl, self.al, self.sg[0]), (self.nodes[1], self.jr, self.ar, self.sg[1])):
             d.ctrl[a] = sg * n.torque(sg * d.qvel[j.dofadr[0]] / TWO_PI, self.dt, now)
         self.mj.mj_step(self.m, d)
+        self._acc_sum = getattr(self, "_acc_sum", 0.0) + d.sensordata[self.acc:self.acc + 3]; self._acc_n = getattr(self, "_acc_n", 0) + 1
 
     def contact(self):
         hit = False
@@ -556,7 +557,11 @@ class World:
                     if NP["g_rw"]: self.grw += self.rng.normal(0, NP["g_rw"] * math.sqrt(0.005), 3).astype(np.float32)
                     g = (self.d.sensordata[self.gyro:self.gyro + 3].astype(np.float32) * self.gscale + self.gbias + self.grw
                          + np.float32(NP["g_drift"] * self.d.time) + self.rng.normal(0, NP["g_white"], 3).astype(np.float32))
-                    ac = self.d.sensordata[self.acc:self.acc + 3].astype(np.float32) + self.rng.normal(0, NP["a_white"], 3).astype(np.float32)
+                    # BMI055 output = its digital low-pass of the force, not an instantaneous physics sample: average the
+                    # 1 kHz steps of this 5 ms output period (anti-alias; raw samples alias contact chatter to +-40 m/s^2)
+                    am = (self._acc_sum / max(self._acc_n, 1)) if getattr(self, "_acc_n", 0) else self.d.sensordata[self.acc:self.acc + 3]
+                    self._acc_sum = 0.0; self._acc_n = 0
+                    ac = np.asarray(am, np.float32) + self.rng.normal(0, NP["a_white"], 3).astype(np.float32)
                     self.imu.push(st_ns + int(NP["imu_dt"] * 1e9), g, ac)      # IMU clock offset vs cameras
                 if self.d.time >= n_enc * 0.01:
                     n_enc += 1; self.contact()
