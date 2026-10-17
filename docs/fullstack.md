@@ -542,3 +542,32 @@ The bump detector can only add a stop.
    below the camera's view. Repeat forward and at a side corner.
 5. If step 3 shows false positives, do not lower the thresholds. Look at which feature is unmodelled (log `ev.zI`,
    v_cmd, w_cmd) and add it to the regressor.
+
+### Follow-up (2026-10-17 afternoon, after the i777 crash)
+- **Footprint clearing:** clearing map memory under the whole 4 m swept trail (067fdfb) erased real walls, because the trail
+  is in the drifting SLAM frame. Bench collisions went from about 0.2 per run to 2-7. Now only the *current* footprint is
+  cleared (8523f8c). The trail still marks traversable space, but only where the map is free.
+- **Bump false positives in live nav had physical causes:**
+  - The kitchen tile plate edge (a step of up to ~2 cm on the hfield) stopped one wheel dead for 0.2 s at 0.4 m/s (zV 350+).
+  - Rugs have higher rolling resistance.
+- **Contact detector changes:**
+  - A wheel must be *blocked*: under half of its commanded travel made during the push.
+  - With vertical motion in the push window, the push must outlast a wheel climb (D_CLIMB 0.065 m).
+  - In nav, a contact edge that the RS1 sees as clear floor is logged as "floor step" instead of stopping.
+  - A goal is re-planned around a marked contact (at most 2 per goal). LightNav is cancelled.
+- **Misses:** GT contacts the detector cannot see are mostly the envelope's hard stop from 0.5-0.75 m/s ending in a graze
+  (command already 0, so no motor push), plus low-force rear grazes while reverse-turning.
+- **Unresolved, separate from this work:** the safety envelope's stopping distance at 0.6 m/s ends in contact. This needs a
+  look at a_brake/t_react vs the measured decel (not changed here: additive-only rule).
+
+Bench (kitchen -> bedroom -> couch goals + LightNav "find the kitchen", casita, realistic noise):
+
+| runs | goals reached | reverse % | GT collisions | bumps |
+|---|---|---|---|---|
+| after2-after6 (before this task) | 5/15 | 1.0-4.1 | 1 | - |
+| turn1-3 (turn-aware, IMU anti-alias) | 4/9 | 2.5-12.9 | 1 | 4 |
+| turn4-9 (+ trail clearing: regression) | 2/18 | 0.6-11.1 | 16 | 7 |
+| turn10-11 (current clearing, floor check, re-plan) | 2/6 | 1.4-9.8 | 2 | 0 |
+
+The recurring failure is the kitchen goal next to the island. MPPI dithers there and reverses (up to 1.8 m in path mode),
+then "no progress" x3. It is not fixed.
