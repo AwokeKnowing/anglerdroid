@@ -5,8 +5,8 @@ The SLAM map is memory.  Inside the area the RS1 top-down camera sees RIGHT NOW,
   observed clear    -> free         (a drift-induced ghost wall in the map cannot block floor we can see)
   robot's own body  -> free         (the robot is standing there)
   not observed      -> map memory   (unchanged)
-It also yields the 'known traversable' mask: observed clear | own body | the footprint swept over the last ~2 m of
-driving (Nav2 obstacle layer footprint_clearing_enabled: the robot's own deck hides a band right behind it from the
+It also yields the 'known traversable' mask: observed clear | own body | the footprint swept over the last 4 m of
+driving (and clears map memory there, unless observed occupied now) (Nav2 obstacle layer footprint_clearing_enabled: the robot's own deck hides a band right behind it from the
 top-down camera, but it has just driven through that band).  Reversing is only planned into that space: the rear
 is the least-observed side, so motion backwards must stay inside what the sensors currently see as free.
 
@@ -48,10 +48,10 @@ class ObsLayer:
                 while len(tr) > 2 and L > SWEPT_M:
                     a = tr.popleft(); L -= math.hypot(tr[0][0] - a[0], tr[0][1] - a[1])
 
-    def _swept(self, org, res, shape):
-        """footprint polygons at the recent trail poses -> bool grid."""
+    def _swept(self, org, res, shape, now=None):
+        """footprint polygons at the recent trail poses (+ the current pose) -> bool grid."""
         out = np.zeros(shape, np.uint8)
-        with self.lock: tr = list(self.trail)
+        with self.lock: tr = list(self.trail) + ([tuple(now)] if now is not None else [])
         for x, y, th in tr:
             c, s = math.cos(th), math.sin(th)
             P = np.c_[x + c * self.fp[:, 0] - s * self.fp[:, 1], y + s * self.fp[:, 0] + c * self.fp[:, 1]]
@@ -80,5 +80,9 @@ class ObsLayer:
         free = cv2.erode(((src == FREE) | (src == BODY)).astype(np.uint8), ker).astype(bool) & ~obst   # cell fully clear
         body = (src == BODY)
         Wo, Wf, Wb = (self._warp(m, org, res, occ.shape) for m in (obst, free, body))
-        Ws = self._swept(org, res, occ.shape)
-        return (occ & ~Wf & ~Wb) | Wo, (Wf | Wb | (Ws & ~occ)) & ~Wo
+        Ws = self._swept(org, res, occ.shape, now=pose)
+        # Nav2 footprint clearing: map memory under the footprint swept over the trail (incl. the current pose) is
+        # cleared -- Kevin cannot have driven through a wall; such cells are SLAM pose-error ghosts (seen: a counter
+        # edge 10 cm from the axle after a fast approach -> every MPPI rollout 'dead' at t=0, "local planner found no
+        # path", stuck for good).  Same rule as the safety envelope's map memory.  What the RS1 sees now still wins.
+        return (occ & ~Wf & ~Wb & ~Ws) | Wo, (Wf | Wb | Ws) & ~Wo

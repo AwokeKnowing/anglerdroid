@@ -40,6 +40,7 @@ import json, math, os, time
 import numpy as np
 
 Z_I, N_I, Z_STALL, T_STALL = 5.0, 3, 3.0, 0.3
+_lp = os.environ.get("KEVIN_BUMP_LOG"); LOG = open(_lp, "a", buffering=1) if _lp else None
 ARM_N = 600                         # 20 s of moving samples
 LAM = 0.9995
 REFRACT_S = 1.5
@@ -101,6 +102,9 @@ class BumpDetector:
         (il, ir) A robot-forward or None; accel (N,3) base-frame specific force since last tick or None.
         Returns an event dict (and latches it in self.last) or None."""
         self.stats["ticks"] += 1
+        if LOG:                                                         # KEVIN_BUMP_LOG=path: raw per-tick rows for offline model fits
+            Am = np.asarray(accel, float)[:, :2].mean(0).tolist() if accel is not None and len(accel) else [None, None]
+            LOG.write(json.dumps([round(t, 4), cmd[0], cmd[1], wheel[0], wheel[1], gyro_z, *(list(currents) if currents is not None else [None, None])[:2], *Am]) + "\n")
         vw = np.array(wheel, float); w = gyro_z if gyro_z is not None else (vw[1] - vw[0]) / self.track
         if self.prev is None: self.prev = (t, vw); return None
         dt = max(1e-3, t - self.prev[0]); aw = (vw - self.prev[1]) / dt; self.prev = (t, vw)
