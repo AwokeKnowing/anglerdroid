@@ -16,6 +16,7 @@ from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform
 from nav.safety import Envelope
 import twin_geometry as _TG
+L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
 from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 
@@ -141,11 +142,12 @@ class Brain:
         # target: the most recent trail pose where Kevin can spin in place (axle clearance >= R_ROTATE, current map +
         # observation).  From there every direction is open again.  The whole trail is swept-footprint 'known
         # traversable' (obslayer SWEPT_M = trail length), so MPPI may reverse along it.  No such pose on the trail ->
-        # its far end.  Never less than 0.15 m (that is not a retreat).
+        # its far end.  At least one body length back (L_BODY): a retreat of a few cm changes neither the view nor
+        # the approach (seen: 3x "retreating 0.17 m" from a pose that already had room to turn, then gave up).
         d = 0.0; tgt = None; rot = False
         for i in range(len(tr) - 1, 0, -1):
             d += math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1])
-            if d >= 0.15 and self.planner.clearance(tr[i - 1]) >= _TG.R_ROTATE: tgt = tr[i - 1]; rot = True; break
+            if d >= L_BODY and self.planner.clearance(tr[i - 1]) >= _TG.R_ROTATE: tgt = tr[i - 1]; rot = True; break
         tgt = tgt or tr[0]
         if math.hypot(tgt[0] - x, tgt[1] - y) < 0.15: return False
         ok, _ = self.planner.set_goal((x, y, th, self.v, self.w), np.asarray(tgt, float), None)
