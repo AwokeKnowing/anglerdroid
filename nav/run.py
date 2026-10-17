@@ -8,7 +8,7 @@
 
 python -m nav.run [--port 8080] [--map NAME] [--no-match]     (KEVIN_HAL=sim for the emulator)"""
 from __future__ import annotations
-import argparse, collections, math, os, threading, time
+import argparse, collections, json, math, os, threading, time
 import numpy as np
 import nav  # noqa
 from nav.hw import Hardware
@@ -16,6 +16,7 @@ from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform
 from nav.safety import Envelope
 import twin_geometry as _TG
+_sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if _sl else None
 L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
 from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
@@ -328,7 +329,9 @@ class Brain:
             # inside a wall it is not touching; fresh sensors cover contact): drop them, keep the rest as memory
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
             if len(mp): pts = np.concatenate([pts, mp])
+        v_pre, w_pre = self.v, self.w
         v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
+        v_saf, w_saf = v, w
         if info["state"] != "ok": self.v, self.w = v, w
         # sensor-rate speed bound: travel at most FRAME_STEP_M (heading FRAME_STEP_RAD) per depth frame, so a
         # degraded camera rate (e.g. GPU contention: 3.7 Hz seen) cannot outrun the obstacle view.  No effect at 30 Hz.
@@ -341,6 +344,15 @@ class Brain:
         v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
         if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
         self.hw.drive(v, w)
+        if _SLOG is not None:                                   # KEVIN_SAFETY_LOG: per-tick timing/clearance (debug only)
+            def _mind(P):
+                if P is None or not len(P): return None
+                F = P[(P[:, 0] > 0) & (np.abs(P[:, 1]) < 0.25)]
+                return None if not len(F) else round(float(F[:, 0].min()), 3)
+            _SLOG.write(json.dumps([round(t0, 4), round(t_frame, 4), round(time.monotonic(), 4), round(v_pre, 3), round(w_pre, 3), round(v_saf, 3), round(w_saf, 3),
+                                    round(v, 3), round(w, 3), info.get("state"), info.get("scale"), info.get("clearance"), _mind(ego_obs),
+                                    _mind(self._rs2_obs) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else None,
+                                    round(vl, 3), round(vr, 3), round(self.slam.odom.v, 3), self.mode]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
             self.rec.put(t=t_frame, v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),

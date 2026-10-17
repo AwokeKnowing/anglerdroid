@@ -176,8 +176,11 @@ class WheelBase:
         self._read_axis_errors(self.left, "Left (node 0)")
         self._read_axis_errors(self.right, "Right (node 1)")
 
+        # vel ramp (turns/s^2) applies to braking too: 3.0 = 1.61 m/s^2 at the 85.65 mm wheel.  KEVIN_VEL_RAMP overrides
+        # (experiments only; default unchanged).  See docs: stopping-distance budget 2026-10-17.
+        ramp = float(os.environ.get("KEVIN_VEL_RAMP", "3.0"))
         for axis in (self.left, self.right):
-            axis.set_vel_ramp_rate(3.0)
+            axis.set_vel_ramp_rate(ramp)
             axis.set_vel_limit(4.0)
 
         for _ in range(20):
