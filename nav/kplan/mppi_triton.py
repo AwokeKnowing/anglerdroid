@@ -1,6 +1,9 @@
 """Fused Triton MPPI rollout for kplan.planner.MPPI (one GPU thread per sample, all H steps in registers).
 Same dynamics/costs as MPPI.plan_ref; replaces ~2000 small torch kernels per plan with 2 kernel launches."""
 import math, torch, triton, triton.language as tl
+import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
+import twin_geometry as _TG
+R_ROTATE = tl.constexpr(_TG.R_ROTATE); R_PASS = tl.constexpr(_TG.R_PASS)
 
 @triton.jit
 def _atan2(y, x):
@@ -69,7 +72,7 @@ def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
         iy = tl.minimum(tl.maximum((y*100.0).to(tl.int32), 0), Hm-1)
         ax = tl.load(edt + eoff + iy.to(tl.int64)*Wm + ix, mask=mask, other=1.0).to(tl.float32)
         cost += dead*50 + 20*tl.maximum(0.06 - clr, 0.0)
-        cost += dt*(tl.exp(-clr/0.15) + 2.0*tl.minimum(tl.maximum(0.275 - ax, 0.0)/0.075, 1.0))
+        cost += dt*(tl.exp(-clr/0.15) + 2.0*tl.minimum(tl.maximum(R_ROTATE - ax, 0.0)/(R_ROTATE - R_PASS), 1.0))
         dx = x - gx; dy = y - gy
         near = tl.exp(-tl.sqrt(dx*dx + dy*dy)/0.25)
         cr = tl.minimum(tl.maximum((clr - 0.05)/0.20, 0.0), 1.0); dg = tl.sqrt(dx*dx + dy*dy)

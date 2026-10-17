@@ -8,6 +8,8 @@ if os.environ.get('KPLAN_FAST','1')!='0':
         try:
             _mt=__import__('mppi_'+_n); KPLAN_BACKEND=_n; break
         except Exception as _e: print('kplan: backend',_n,'unavailable:',repr(_e)[:200])
+import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
+from twin_geometry import R_ROTATE, R_PASS
 from core import Limits, footprint_samples, edt_capped, cost_to_go, SIL12, v_cap_clear
 
 HARD_CLR=0.200   # axle clearance below which a coarse cell is blocked (robot half-width 0.2036 / 12-gon 0.21)
@@ -29,7 +31,7 @@ class World:
         s.cmax=F.max_pool2d(e,coarse)[0,0]; s.cmean=F.avg_pool2d(e,coarse)[0,0]
         s.cblocked=s.cmax<HARD_CLR
         x=((PREF_CLR-s.cmean)/(PREF_CLR-HARD_CLR)).clamp(0,1)
-        turn=((0.275-s.cmean)/0.075).clamp(0,1)          # can't fully turn around here (axle R275 disc)
+        turn=((R_ROTATE-s.cmean)/(R_ROTATE-R_PASS)).clamp(0,1)   # can't spin in place here (twin_geometry R_ROTATE..R_PASS)
         s.ccost=1+4*x*x+1.5*turn
         torch.cuda.synchronize()
         s.timing=dict(upload=t1-t, edt=t2-t1, coarse=time.time()-t2)
@@ -143,7 +145,7 @@ class MPPI:
             dead|=clr<0.012
             ax=edt_at(s.edt,(y*100).long().clamp(0,s.w.H-1),(x*100).long().clamp(0,s.w.W-1)).float()
             cost+=dead.float()*50+20*torch.relu(0.06-clr)
-            cost+=dt*(1.0*torch.exp(-clr/0.15)+2.0*(torch.relu(0.275-ax)/0.075).clamp(max=1))   # proximity + not-turnable
+            cost+=dt*(1.0*torch.exp(-clr/0.15)+2.0*(torch.relu(R_ROTATE-ax)/(R_ROTATE-R_PASS)).clamp(max=1))   # proximity + not-turnable
             dg=torch.hypot(x-gx,y-gy)
             near=torch.exp(-dg/0.25)
             cost+=0.1*dt*20*near*(1-torch.cos(th-gth))*2 + (0.5+4.0*near)*dt*(v<0).float()*v.abs()/0.3   # v7: reversing near a goal is expensive (arrive forward)

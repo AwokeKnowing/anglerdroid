@@ -15,6 +15,8 @@ from nav.hw import Hardware
 from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform
 from nav.safety import Envelope
+import twin_geometry as _TG
+L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
 from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 
@@ -51,6 +53,9 @@ class Brain:
             self.planner = Planner(self.slam.grid)
         from nav.obslayer import ObsLayer
         self.obs = ObsLayer()                       # current RS1 frame, authoritative over the map where it sees (planners)
+        from nav.bump import BumpDetector                # contact detector (motor current + IMU), additive safety
+        import twin_geometry as _TG
+        self.bump = BumpDetector(_TG.TRACK_M); self.bump_latched = None; self._bump_hold = 0.0
         if self.planner is not None: self.planner.obs = self.obs
         self.mode = "idle"; self.msg = ""; self.v = 0.0; self.w = 0.0; self.turn_target = None
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
@@ -72,6 +77,9 @@ class Brain:
 
     def _apply(self, c):
         k = c["kind"]; x, y, th = self.slam.pose()
+        if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
+        if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
+            self.bump_latched = None                                       # a new command acknowledges the bump latch
         if k == "stop" and self.vln: self.vln.cancel()
         if k == "stop": self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel(); self.log("stopped")
         elif k == "where": self.log("pose %.2f %.2f %.0f°" % (x, y, math.degrees(th)))
@@ -121,27 +129,34 @@ class Brain:
             if getattr(self, "_bo_retry", False): self._bo_fail = True; return                 # retry after a retreat: caller decides
             # wedged (e.g. in a doorway): leave along the way we came in (see _retreat), then plan again
             if self._retreat((xy, heading, label), "no local path from here"): return
-            self.mode = "idle"; self.log("unreachable: local planner found no path toward %s" % (label or "point")); return
+            self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (%s)" % (label or "point", getattr(self, "_sub_why", ""))); return
         self._backing_for = None
         note = "" if g["snap_m"] < 0.05 else " (closest reachable point, %.2f m from it)" % g["snap_m"]
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
 
     def _retreat(self, goal_for, why):
-        """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point ~0.6 m back is
-        an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
+        """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point (the last
+        trail pose with room to spin, below) is an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
         the RS1 currently sees as free (World.edt_rev).  Afterwards the original goal is planned again."""
         tr = list(getattr(self, "trail", [])); x, y, th = self.slam.pose()
         if len(tr) < 3 or self.planner is None: return False
-        d = 0.0; tgt = None
+        # target: the most recent trail pose where Kevin can spin in place (axle clearance >= R_ROTATE, current map +
+        # observation).  From there every direction is open again.  The whole trail is swept-footprint 'known
+        # traversable' (obslayer SWEPT_M = trail length), so MPPI may reverse along it.  No such pose on the trail ->
+        # its far end.  At least one body length back (L_BODY): a retreat of a few cm changes neither the view nor
+        # the approach (seen: 3x "retreating 0.17 m" from a pose that already had room to turn, then gave up).
+        d = 0.0; tgt = None; rot = False
         for i in range(len(tr) - 1, 0, -1):
             d += math.hypot(tr[i][0] - tr[i - 1][0], tr[i][1] - tr[i - 1][1])
-            if d >= 0.6: tgt = tr[i - 1]; break
+            if d >= L_BODY and self.planner.clearance(tr[i - 1]) >= _TG.R_ROTATE: tgt = tr[i - 1]; rot = True; break
         tgt = tgt or tr[0]
         if math.hypot(tgt[0] - x, tgt[1] - y) < 0.15: return False
         ok, _ = self.planner.set_goal((x, y, th, self.v, self.w), np.asarray(tgt, float), None)
         if not ok: return False
-        self._backing_for = goal_for; self.back_tgt = np.asarray(tgt, float); self.back_t0 = time.monotonic(); self.mode = "backout"
-        self.log("%s: retreating along the way in (%.2f m)" % (why, math.hypot(tgt[0] - x, tgt[1] - y)))
+        self._backing_for = goal_for; self.back_tgt = np.asarray(tgt, float); self.back_t0 = time.monotonic(); self.back_T = 12.0 + 2.0 * d / abs(__import__('core').Limits.v_min);   # 2x the time at full reverse speed
+        self.mode = "backout"
+        self.log("%s: retreating along the way in (%.2f m) to %s" % (why, math.hypot(tgt[0] - x, tgt[1] - y),
+                 "the last spot with room to turn around" if rot else "the start of the trail (no room to turn on it)"))
         return True
 
     def _set_sub(self, pose):
@@ -149,6 +164,7 @@ class Brain:
         sub, final = GP.subgoal(self.gpath["xy"], pose[:2], ahead=4.0)
         tgt = self.goal if final else sub
         ok, m = self.planner.set_goal((*pose, self.v, self.w), tgt, self.goal_heading if final else None)
+        self._sub_why = None if ok else "%s; axle clearance %.2f m" % (m, self.planner.clearance(pose[:2]))
         return ok
 
     # -------------------------------------------------------------- background planner (map window refresh)
@@ -186,6 +202,13 @@ class Brain:
         vl, vr = self.hw.wheel_vels(); gz = self.hw.yaw_rate()
         self.slam.odom.update(t_frame, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
         self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0)
+        try:
+            lc = getattr(self, "last", None) or {}
+            ev = self.bump.update(t_frame, (lc.get("v", 0.0), lc.get("w", 0.0)), (vl, vr), gz, self.hw.motor_currents(), getattr(self.hw, "accel_batch", None))
+            self.hw.accel_batch = None
+            if ev: self._on_bump(ev)
+        except Exception as e:
+            self.stats.add("bump_err", 1)
         lab = self.ego.update(verts)
         ego_obs = self.ego.obstacle_xy(max_n=1500); valid = self.ego.valid_fraction()
         if valid > 0: self.obs.update(self.slam.pose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
@@ -225,6 +248,10 @@ class Brain:
                              self.slam.stats.get("reloc_ms", 0), "" if ok else " -- AMBIGUOUS, pose not changed; drive a bit and 'relocalize'"))
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
+        br = getattr(self, "_bump_resume", None)
+        if br and time.monotonic() >= br[0]:
+            self._bump_resume = None
+            if self.mode == "idle": k = self._goal_bumps; self._goto(*br[1]); self._goal_bumps = k
         with self._cmd_lock: pend, self._pending = self._pending, []
         for c in pend: self._apply(c)
         x, y, th = self.slam.pose(); dt = 1.0 / HZ
@@ -258,7 +285,7 @@ class Brain:
                                 k = self._stuck; self._bo_stuck = 0; self._goto(self.goal_req, self.goal_heading, self.goal_label); self._stuck = k   # replan here (fresh observation), keep the count
                     self._prog = (tn, (x, y, th))
         elif self.mode == "backout":                                  # MPPI to the retreat point (see _retreat)
-            done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > 12.0
+            done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > getattr(self, 'back_T', 12.0)
             r = None if done else self.planner.step((x, y, th, self.v, self.w))
             if r is None:
                 self.v = self.w = 0.0; xy, hd, lb = self._backing_for; self._backing_for = None
@@ -282,7 +309,7 @@ class Brain:
                 if getattr(self, "_resume_path", False) and self.goal is not None:  # noqa
                     self._resume_path = False; self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
                 else: self._arrive()
-            elif self.planner is not None and self.planner.clearance((x, y)) < 0.275:
+            elif self.planner is not None and self.planner.clearance((x, y)) < _TG.R_ROTATE:
                 # no room to spin in place (current observation + map): never back up blind to make room.  Mid-route the
                 # path goes back to MPPI (it can make a multi-point turn, reversing only into observed-free space); a final
                 # heading at the goal is skipped honestly.
@@ -312,6 +339,7 @@ class Brain:
             if abs(v) > vc or abs(w) > wc:
                 k = min(vc / max(abs(v), 1e-6), wc / max(abs(w), 1e-6)); v, w = v * k, w * k; self.stats.add("rate_capped", 1)
         v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
+        if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
         self.hw.drive(v, w)
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
@@ -323,6 +351,39 @@ class Brain:
         self.stats.add("loop_ms", (t1 - t0) * 1e3); self.stats.add("frame_to_cmd_ms", (t1 - t_frame) * 1e3)
         if hasattr(self, "_tl"): self.stats.add("period_ms", (t0 - self._tl) * 1e3)
         self._tl = t0; self.last = dict(v=v, w=w, safety=info, valid=valid)
+
+    def _on_bump(self, ev):
+        """Contact detected (nav/bump.py).  Additive safety: it can only stop the robot.
+        1. Floor check: if the RS1 currently sees clear floor all along the contact edge (2-6 cm outside the footprint),
+           there is no obstacle >= 3 cm there, so the motor load was the floor (tile/rug step, threshold) -- logged,
+           not a stop.  An unobserved contact edge (the rear, mostly) is always treated as an obstacle.
+        2. Otherwise: instant stop + 0.5 s hold, the contact edge is marked in the map (planners and the envelope's map
+           memory keep away from it), the event is latched (viewer HUD, chat relay).  LightNav is cancelled; a goal is
+           planned again around the marked obstacle (at most twice per goal, then it gives up honestly)."""
+        from nav.bump import contact_points
+        from nav.obslayer import FREE, OBST
+        from twin_geometry import FOOTPRINT_SAFE
+        P = contact_points(FOOTPRINT_SAFE, ev["angle"])
+        if self.obs is not None:
+            lab = np.concatenate([self.obs.observed(contact_points(FOOTPRINT_SAFE, ev["angle"], out=o)) for o in (0.02, 0.04, 0.06)])
+            if len(lab) and (lab == FREE).all():
+                self.bump.dismiss(ev); self.stats.add("bump_floor", 1)
+                if time.monotonic() - getattr(self, "_floor_log_t", 0) > 3.0:
+                    self._floor_log_t = time.monotonic(); self.log("floor step (camera sees clear floor %s): %s -- not a contact" % (ev["dir"], ev["why"]))
+                return
+        self.v = self.w = 0.0; self._bump_hold = time.monotonic() + 0.5; self.hw.drive(0.0, 0.0)
+        pose = self.slam.pose()
+        for _ in range(2): self.slam.grid.integrate(pose, P, np.zeros((0, 2), np.float32))     # 2 hits = confident cell
+        x, y, th = pose; ev = dict(ev, x=round(x, 2), y=round(y, 2)); self.bump_latched = ev; self.bump.last = ev
+        resume = None
+        vln_on = self.vln is not None and getattr(self.vln, "text", None) is not None
+        if vln_on: self.vln.cancel()
+        elif self.mode in ("path", "backout", "turn") and getattr(self, "goal_req", None) is not None:
+            self._goal_bumps = getattr(self, "_goal_bumps", 0) + 1
+            if self._goal_bumps <= 2: resume = (self.goal_req, self.goal_heading, self.goal_label)
+        self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
+        self.log("BUMP %s: %s -- stopped, obstacle marked in the map%s" % (ev["dir"], ev["why"], "; planning around it" if resume else ""))
+        if resume: self._bump_resume = (time.monotonic() + 0.6, resume)
 
     def _map_points(self, x, y, th, r=0.7):
         """Mapped obstacles within r m, robot frame: memory of what is beside/behind the robot (outside RS1/RS2 view)."""
@@ -353,6 +414,7 @@ class Brain:
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks),
                     timing=self.stats.summary(), plan_timing=None if p is None else p.timing,
+                    bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])
 
     def run(self):

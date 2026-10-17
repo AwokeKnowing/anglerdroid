@@ -5,8 +5,8 @@ The SLAM map is memory.  Inside the area the RS1 top-down camera sees RIGHT NOW,
   observed clear    -> free         (a drift-induced ghost wall in the map cannot block floor we can see)
   robot's own body  -> free         (the robot is standing there)
   not observed      -> map memory   (unchanged)
-It also yields the 'known traversable' mask: observed clear | own body | the footprint swept over the last ~2 m of
-driving (Nav2 obstacle layer footprint_clearing_enabled: the robot's own deck hides a band right behind it from the
+It also yields the 'known traversable' mask: observed clear | own body | the footprint swept over the last 4 m of
+driving where the map is free (map memory is cleared only under the current footprint) (Nav2 obstacle layer footprint_clearing_enabled: the robot's own deck hides a band right behind it from the
 top-down camera, but it has just driven through that band).  Reversing is only planned into that space: the rear
 is the least-observed side, so motion backwards must stay inside what the sensors currently see as free.
 
@@ -22,7 +22,8 @@ from robot_config import RCX, RCY, EGO_PX_SIZE
 from perception.labels import CLEAR
 from twin_geometry import FOOTPRINT_SAFE
 
-SWEPT_M = 2.0          # trail length whose footprint counts as known traversable
+SWEPT_M = 4.0          # trail length whose footprint counts as known traversable (= nav.run trail, 80 x 5 cm: the
+                       # retreat to the last rotation-feasible pose may reverse along all of it)
 
 NONE, FREE, OBST, BODY = 0, 1, 2, 3
 
@@ -47,10 +48,10 @@ class ObsLayer:
                 while len(tr) > 2 and L > SWEPT_M:
                     a = tr.popleft(); L -= math.hypot(tr[0][0] - a[0], tr[0][1] - a[1])
 
-    def _swept(self, org, res, shape):
-        """footprint polygons at the recent trail poses -> bool grid."""
+    def _swept(self, org, res, shape, only=None):
+        """footprint polygons at the recent trail poses (or only at pose `only`) -> bool grid."""
         out = np.zeros(shape, np.uint8)
-        with self.lock: tr = list(self.trail)
+        with self.lock: tr = [tuple(only)] if only is not None else list(self.trail)
         for x, y, th in tr:
             c, s = math.cos(th), math.sin(th)
             P = np.c_[x + c * self.fp[:, 0] - s * self.fp[:, 1], y + s * self.fp[:, 0] + c * self.fp[:, 1]]
@@ -69,6 +70,16 @@ class ObsLayer:
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         return out.astype(bool)
 
+    def observed(self, P):
+        """Current-frame label (NONE/FREE/OBST/BODY) at robot-frame points P (N,2) m (x forward, y left)."""
+        with self.lock: src = self.src
+        if src is None: return np.zeros(len(P), np.uint8)
+        P = np.asarray(P, float)
+        col = np.round(RCX + P[:, 0] / EGO_PX_SIZE).astype(int); row = np.round(RCY - P[:, 1] / EGO_PX_SIZE).astype(int)
+        ok = (col >= 0) & (col < src.shape[1]) & (row >= 0) & (row < src.shape[0])
+        out = np.zeros(len(P), np.uint8); out[ok] = src[row[ok], col[ok]]
+        return out
+
     def apply(self, occ, org, res):
         """occ: bool grid (rows = +y) with corner org (map m), cell res (m).  Returns (occ', traversable_observed)."""
         with self.lock: src, pose = self.src, self.pose
@@ -80,4 +91,12 @@ class ObsLayer:
         body = (src == BODY)
         Wo, Wf, Wb = (self._warp(m, org, res, occ.shape) for m in (obst, free, body))
         Ws = self._swept(org, res, occ.shape)
-        return (occ & ~Wf & ~Wb) | Wo, (Wf | Wb | (Ws & ~occ)) & ~Wo
+        # Map memory under the CURRENT footprint is cleared: Kevin cannot stand inside a wall, such cells are SLAM
+        # pose-error ghosts (seen: a counter edge 10 cm from the axle after a fast approach -> every MPPI rollout 'dead'
+        # at t=0, "local planner found no path", stuck for good).  Same rule as the safety envelope's map memory.
+        # NOT the whole swept trail (Nav2 footprint_clearing): the trail is in the drifting SLAM frame, and clearing
+        # 4 m of it erased real walls -- collisions went from ~0.2 to 2-7 per bench run.  The trail only marks
+        # traversable where the map is free.  What the RS1 sees now still wins.
+        Wn = self._swept(org, res, occ.shape, only=pose)
+        occ2 = (occ & ~Wf & ~Wb & ~Wn) | Wo
+        return occ2, (Wf | Wb | Wn | (Ws & ~occ2)) & ~Wo
