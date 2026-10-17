@@ -72,7 +72,7 @@ class BumpDetector:
         self.var = [1.0, 1.0]; self.var_a = [1.0, 1.0]; self.var_v = 1e-4
         self.n_moving = 0; self.prev = None; self.g_bias = None
         self.gz_b = None; self.var_z = 1.0; self.zv_hist = collections.deque(maxlen=8)   # vertical (floor) motion
-        self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]; self.t_refr = -1e9
+        self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.run_m = [0.0, 0.0]; self.stall_t = [None, None]; self.t_refr = -1e9
         self.events = []; self.last = None; self.stats = dict(ticks=0, events=0, max_zI=0.0, max_zA=0.0)
         self.cal_path = cal_path or os.path.expanduser("~/.kevin/bump_cal_%s.json" % os.environ.get("KEVIN_HAL", "real"))
         self._saved = time.monotonic(); self._load()
@@ -95,7 +95,7 @@ class BumpDetector:
 
     def reset(self, t):
         """discontinuity (relocation in sim, wheels lifted...): restart differences, refractory from t."""
-        self.prev = None; self.prev_w = None; self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]
+        self.prev = None; self.prev_w = None; self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.run_m = [0.0, 0.0]; self.stall_t = [None, None]
 
     def sig(self, k): return math.sqrt(self.var[k]) if self.armed else 1.0
     def sig_a(self, k): return math.sqrt(self.var_a[k]) if self.armed else 1.0
@@ -156,12 +156,17 @@ class BumpDetector:
         for k in range(2):
             self.run_I[k] = self.run_I[k] + 1 if push[k] >= Z_I else 0
             self.run_d[k] = self.run_d[k] + abs(u[k]) * dt if push[k] >= Z_I else 0.0
+            self.run_m[k] = self.run_m[k] + max(0.0, math.copysign(1.0, u[k]) * vw[k]) * dt if push[k] >= Z_I else 0.0
         # A rigid obstacle and a floor step (threshold, rug edge) both load the motors.  Climbing lifts the chassis, so
         # while the IMU shows vertical motion (zV >= 4 in the push window) the push must outlast the climb: persist
         # over D_CLIMB of commanded wheel travel (wheel geometry over the highest step perception calls floor).
         # Flat (no vertical motion): rigid contact, trip after N_I ticks.
         climbing = (max(self.zv_hist) if self.zv_hist else 0.0) >= 4.0
-        hit = [self.run_I[k] >= N_I and (not climbing or self.run_d[k] >= D_CLIMB) for k in range(2)]
+        # Blocked: an obstacle stops the wheel; a new floor (rug, carpet: higher rolling resistance) loads the motor just
+        # as much but the velocity loop keeps the wheel at the commanded speed.  So the wheel must have made less than
+        # half of its commanded travel during the push (seen in sim: rug edge at 0.41 m/s, 17 sigma, wheel tracking).
+        blocked = [self.run_m[k] < 0.5 * self.run_d[k] for k in range(2)]
+        hit = [self.run_I[k] >= N_I and blocked[k] and (not climbing or self.run_d[k] >= D_CLIMB) for k in range(2)]
         if any(hit): why = "motor current %+.1f A over model (%.0f sigma)" % (eI[int(np.argmax(push))], push.max())
         for k in range(2):
             stalled = abs(u[k]) > 3 * math.sqrt(self.var_v) + 0.03 and abs(vw[k]) < 0.3 * abs(u[k]) and push[k] >= Z_STALL
@@ -183,8 +188,15 @@ class BumpDetector:
         ev = dict(t=t, why=why, angle=wrap(ang), dir=direction_name(ang), zI=[round(float(z), 1) for z in zI], zA=round(zam, 1), zV=round(max(self.zv_hist) if self.zv_hist else 0.0, 1),
                   v_cmd=round(float(v), 3), w_cmd=round(float(wc), 3), armed=self.armed)
         self.last = ev; self.events.append(ev); del self.events[:-20]; self.stats["events"] += 1
-        self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.stall_t = [None, None]
+        self.t_refr = t; self.run_I = [0, 0]; self.run_d = [0.0, 0.0]; self.run_m = [0.0, 0.0]; self.stall_t = [None, None]
         return ev
+
+    def dismiss(self, ev):
+        """The caller found no obstacle at the contact (e.g. clear floor in view): do not count it, no refractory
+        (a real contact right after must still trip); the push runs restart from zero."""
+        self.t_refr = -1e9; self.stats["events"] -= 1; self.stats["dismissed"] = self.stats.get("dismissed", 0) + 1
+        if self.events and self.events[-1] is ev: self.events.pop()
+        self.last = self.events[-1] if self.events else None
 
     def state(self):
         return dict(armed=self.armed, n=self.n_moving, sigma_I=[round(math.sqrt(v), 3) for v in self.var], sigma_a=[round(math.sqrt(v), 3) for v in self.var_a],

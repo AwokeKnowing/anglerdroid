@@ -77,6 +77,7 @@ class Brain:
 
     def _apply(self, c):
         k = c["kind"]; x, y, th = self.slam.pose()
+        if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
         if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
             self.bump_latched = None                                       # a new command acknowledges the bump latch
         if k == "stop" and self.vln: self.vln.cancel()
@@ -247,6 +248,10 @@ class Brain:
                              self.slam.stats.get("reloc_ms", 0), "" if ok else " -- AMBIGUOUS, pose not changed; drive a bit and 'relocalize'"))
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
+        br = getattr(self, "_bump_resume", None)
+        if br and time.monotonic() >= br[0]:
+            self._bump_resume = None
+            if self.mode == "idle": k = self._goal_bumps; self._goto(*br[1]); self._goal_bumps = k
         with self._cmd_lock: pend, self._pending = self._pending, []
         for c in pend: self._apply(c)
         x, y, th = self.slam.pose(); dt = 1.0 / HZ
@@ -348,19 +353,37 @@ class Brain:
         self._tl = t0; self.last = dict(v=v, w=w, safety=info, valid=valid)
 
     def _on_bump(self, ev):
-        """Contact detected (nav/bump.py): instant stop, cancel the goal / LightNav, latch the event, and put the
-        obstacle into the map where the footprint touched it (the planners and the safety envelope's map memory then
-        keep away from it).  Additive: it can only stop the robot."""
+        """Contact detected (nav/bump.py).  Additive safety: it can only stop the robot.
+        1. Floor check: if the RS1 currently sees clear floor all along the contact edge (2-6 cm outside the footprint),
+           there is no obstacle >= 3 cm there, so the motor load was the floor (tile/rug step, threshold) -- logged,
+           not a stop.  An unobserved contact edge (the rear, mostly) is always treated as an obstacle.
+        2. Otherwise: instant stop + 0.5 s hold, the contact edge is marked in the map (planners and the envelope's map
+           memory keep away from it), the event is latched (viewer HUD, chat relay).  LightNav is cancelled; a goal is
+           planned again around the marked obstacle (at most twice per goal, then it gives up honestly)."""
         from nav.bump import contact_points
+        from nav.obslayer import FREE, OBST
         from twin_geometry import FOOTPRINT_SAFE
-        self.v = self.w = 0.0; self._bump_hold = time.monotonic() + 0.5; self.hw.drive(0.0, 0.0)
-        if self.vln: self.vln.cancel()
-        self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
         P = contact_points(FOOTPRINT_SAFE, ev["angle"])
+        if self.obs is not None:
+            lab = np.concatenate([self.obs.observed(contact_points(FOOTPRINT_SAFE, ev["angle"], out=o)) for o in (0.02, 0.04, 0.06)])
+            if len(lab) and (lab == FREE).all():
+                self.bump.dismiss(ev); self.stats.add("bump_floor", 1)
+                if time.monotonic() - getattr(self, "_floor_log_t", 0) > 3.0:
+                    self._floor_log_t = time.monotonic(); self.log("floor step (camera sees clear floor %s): %s -- not a contact" % (ev["dir"], ev["why"]))
+                return
+        self.v = self.w = 0.0; self._bump_hold = time.monotonic() + 0.5; self.hw.drive(0.0, 0.0)
         pose = self.slam.pose()
         for _ in range(2): self.slam.grid.integrate(pose, P, np.zeros((0, 2), np.float32))     # 2 hits = confident cell
         x, y, th = pose; ev = dict(ev, x=round(x, 2), y=round(y, 2)); self.bump_latched = ev; self.bump.last = ev
-        self.log("BUMP %s: %s -- stopped, obstacle marked in the map" % (ev["dir"], ev["why"]))
+        resume = None
+        vln_on = self.vln is not None and getattr(self.vln, "text", None) is not None
+        if vln_on: self.vln.cancel()
+        elif self.mode in ("path", "backout", "turn") and getattr(self, "goal_req", None) is not None:
+            self._goal_bumps = getattr(self, "_goal_bumps", 0) + 1
+            if self._goal_bumps <= 2: resume = (self.goal_req, self.goal_heading, self.goal_label)
+        self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
+        self.log("BUMP %s: %s -- stopped, obstacle marked in the map%s" % (ev["dir"], ev["why"], "; planning around it" if resume else ""))
+        if resume: self._bump_resume = (time.monotonic() + 0.6, resume)
 
     def _map_points(self, x, y, th, r=0.7):
         """Mapped obstacles within r m, robot frame: memory of what is beside/behind the robot (outside RS1/RS2 view)."""

@@ -70,6 +70,16 @@ class ObsLayer:
                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         return out.astype(bool)
 
+    def observed(self, P):
+        """Current-frame label (NONE/FREE/OBST/BODY) at robot-frame points P (N,2) m (x forward, y left)."""
+        with self.lock: src = self.src
+        if src is None: return np.zeros(len(P), np.uint8)
+        P = np.asarray(P, float)
+        col = np.round(RCX + P[:, 0] / EGO_PX_SIZE).astype(int); row = np.round(RCY - P[:, 1] / EGO_PX_SIZE).astype(int)
+        ok = (col >= 0) & (col < src.shape[1]) & (row >= 0) & (row < src.shape[0])
+        out = np.zeros(len(P), np.uint8); out[ok] = src[row[ok], col[ok]]
+        return out
+
     def apply(self, occ, org, res):
         """occ: bool grid (rows = +y) with corner org (map m), cell res (m).  Returns (occ', traversable_observed)."""
         with self.lock: src, pose = self.src, self.pose
