@@ -76,15 +76,22 @@ class Hardware:
         # mean of ALL gyro samples since the last call (200 Hz ring), not just the latest: a stalled loop
         # (CUDA warm-up, GC) during a spin otherwise lost the rotation (maze: 0.5 rad lost on the first turn,
         # 39 deg yaw error for the whole tour -> SLAM built a rotated map and never recovered)
-        G = None
+        G = None; A = None
         if hasattr(self.imu, "drain_ring"):
             try:
-                gs, _, ts, self._ring_since = self.imu.drain_ring(getattr(self, "_ring_since", 0), max_n=400)
-                if len(gs): G = gs.astype(float)
+                gs, acs, ts, self._ring_since = self.imu.drain_ring(getattr(self, "_ring_since", 0), max_n=400)
+                if len(gs): G = gs.astype(float); A = acs.astype(float)
             except Exception: G = None
         if G is None: G = np.asarray(self.imu.gyro, float)[None]
+        if A is not None and len(A): self.accel_batch = (TG.IMU_R @ A.T).T      # base-frame specific force (bump detector)
         g = (G.mean(0) - TG.GYRO_BIAS) * TG.GYRO_SCALE
         return float((TG.IMU_R @ g)[2])                    # gyro (optical) -> base z via the twin IMU frame
+
+    def motor_currents(self):
+        """(i_left, i_right) A, robot-forward sense, or None (no drive / not streamed)."""
+        f = getattr(self.wb, "get_motor_currents", None) if self.wb else None
+        r = f() if f else None
+        return None if r is None else (r[0], r[1])
 
     HB_HZ = 20.0; HB_FRESH_S = 0.3
 

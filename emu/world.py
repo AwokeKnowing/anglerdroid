@@ -258,12 +258,13 @@ def compose(env: envs.Env, tire: str) -> str:
 
 
 # ------------------------------------------------------------------ ODrive S1 emulation
+CURRENT_SOFT_MAX = 10.0      # A: odrv.axis0.config.motor.current_soft_max (Kt 0.9506 Nm/A in the twin model)
 class ODriveNode:
     IDLE, CLOSED = 1, 8
 
     def __init__(self, node_id, axis_dir, AxisCls, eps):
         self.id, self.dir, self.eps = node_id, axis_dir, eps
-        self.ax = AxisCls(3.0, 4.0)
+        self.ax = AxisCls(3.0, 4.0, i_lim=CURRENT_SOFT_MAX)   # src/s1-odrive-config.py current_soft_max
         self.state = self.IDLE; self.wd_en = False; self.wd_to = 2.5; self.t_feed = time.monotonic()
         self.pos = 0.0; self.vel = 0.0; self.disarm = 0
 

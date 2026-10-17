@@ -570,6 +570,15 @@ class WheelBase:
                 'native_fails': self._enc_native_fails,
             }
 
+    def get_motor_currents(self):
+        """(i_left, i_right, age_s): measured motor currents (A) in the robot-forward sense (positive = pushing the
+        robot forward), from the S1's cyclic Get_Iq frames.  None if not streamed / stale (> 0.3 s)."""
+        l, r = self._iq.get(0), self._iq.get(1)
+        if l is None or r is None: return None
+        age = time.monotonic() - min(l[1], r[1])
+        if age > 0.3: return None
+        return (-l[0] if self.invert_left else l[0]), r[0], age
+
     def get_encoder_snapshot(self):
         """Latest encoder + command snapshot for raw bags (no extra I/O)."""
         vl, vr = self.get_wheel_velocities_mps()
@@ -600,6 +609,7 @@ class WheelBase:
         self._enc_consec_fails = 0     # consecutive read failures (any mode)
         self._enc_last_good = 0.0      # time.monotonic() of last successful read
         self._batt_pct = -1            # unknown until first read
+        self._iq = {}                  # node -> (Iq_measured A, monotonic) from cyclic 0x14 (read-only, see get_motor_currents)
         self._batt_next = 0.0          # read immediately on first loop
         t = threading.Thread(target=self._encoder_reader_loop, daemon=True)
         t.start()
@@ -615,7 +625,7 @@ class WheelBase:
                 if self._enc_native:
                     with self.bus_lock:
                         got = ODriveAxisCAN.poll_encoder_vels(
-                            self.bus, (0, 1), timeout=0.04)
+                            self.bus, (0, 1), timeout=0.04, iq_out=self._iq)
                     vl, vr = got.get(0), got.get(1)
                     if vl is None or vr is None:
                         self._enc_native_fails += 1

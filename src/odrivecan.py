@@ -200,12 +200,15 @@ class ODriveAxisCAN:
             return None
 
     @staticmethod
-    def poll_encoder_vels(bus, node_ids=(0, 1), timeout=0.04):
+    def poll_encoder_vels(bus, node_ids=(0, 1), timeout=0.04, iq_out=None):
         """One recv window for cyclic Get_Encoder_Estimates on several nodes.
 
         Sequential per-axis waits drop the other wheel's 100 Hz frames and
         look like encoder failure. Returns dict node_id -> vel (missing=None).
+        iq_out: optional dict; cyclic Get_Iq (0x14, s1-odrive-config iq_msg_rate_ms=10) frames seen in the same
+        window store iq_out[node_id] = (Iq_measured A, time.monotonic()).  Read-only: nothing is sent.
         """
+        iq_ids = {(int(n) << 5 | 0x14): int(n) for n in node_ids} if iq_out is not None else {}
         want = {int(n): None for n in node_ids}
         ids = {(int(n) << 5 | ODriveAxisCAN.CMD_GET_ENCODER_ESTIMATES): int(n)
                for n in node_ids}
@@ -220,6 +223,8 @@ class ODriveAxisCAN:
                     break
                 if (not msg.is_remote_frame and len(msg.data) >= 8 and msg.arbitration_id in ids):
                     want[ids[msg.arbitration_id]] = struct.unpack_from('<ff', msg.data)[1]
+                elif iq_ids and not msg.is_remote_frame and len(msg.data) >= 8 and msg.arbitration_id in iq_ids:
+                    iq_out[iq_ids[msg.arbitration_id]] = (struct.unpack_from('<ff', msg.data)[1], time.monotonic())
             while time.time() < deadline and any(v is None for v in want.values()):
                 msg = bus.recv(timeout=0.015)
                 if (not msg or msg.is_remote_frame or len(msg.data) < 8

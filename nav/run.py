@@ -51,6 +51,9 @@ class Brain:
             self.planner = Planner(self.slam.grid)
         from nav.obslayer import ObsLayer
         self.obs = ObsLayer()                       # current RS1 frame, authoritative over the map where it sees (planners)
+        from nav.bump import BumpDetector                # contact detector (motor current + IMU), additive safety
+        import twin_geometry as _TG
+        self.bump = BumpDetector(_TG.TRACK_M); self.bump_latched = None; self._bump_hold = 0.0
         if self.planner is not None: self.planner.obs = self.obs
         self.mode = "idle"; self.msg = ""; self.v = 0.0; self.w = 0.0; self.turn_target = None
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
@@ -72,6 +75,8 @@ class Brain:
 
     def _apply(self, c):
         k = c["kind"]; x, y, th = self.slam.pose()
+        if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
+            self.bump_latched = None                                       # a new command acknowledges the bump latch
         if k == "stop" and self.vln: self.vln.cancel()
         if k == "stop": self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel(); self.log("stopped")
         elif k == "where": self.log("pose %.2f %.2f %.0f°" % (x, y, math.degrees(th)))
@@ -186,6 +191,13 @@ class Brain:
         vl, vr = self.hw.wheel_vels(); gz = self.hw.yaw_rate()
         self.slam.odom.update(t_frame, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
         self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0)
+        try:
+            lc = getattr(self, "last", None) or {}
+            ev = self.bump.update(t_frame, (lc.get("v", 0.0), lc.get("w", 0.0)), (vl, vr), gz, self.hw.motor_currents(), getattr(self.hw, "accel_batch", None))
+            self.hw.accel_batch = None
+            if ev: self._on_bump(ev)
+        except Exception as e:
+            self.stats.add("bump_err", 1)
         lab = self.ego.update(verts)
         ego_obs = self.ego.obstacle_xy(max_n=1500); valid = self.ego.valid_fraction()
         if valid > 0: self.obs.update(self.slam.pose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
@@ -312,6 +324,7 @@ class Brain:
             if abs(v) > vc or abs(w) > wc:
                 k = min(vc / max(abs(v), 1e-6), wc / max(abs(w), 1e-6)); v, w = v * k, w * k; self.stats.add("rate_capped", 1)
         v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
+        if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
         self.hw.drive(v, w)
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
@@ -323,6 +336,21 @@ class Brain:
         self.stats.add("loop_ms", (t1 - t0) * 1e3); self.stats.add("frame_to_cmd_ms", (t1 - t_frame) * 1e3)
         if hasattr(self, "_tl"): self.stats.add("period_ms", (t0 - self._tl) * 1e3)
         self._tl = t0; self.last = dict(v=v, w=w, safety=info, valid=valid)
+
+    def _on_bump(self, ev):
+        """Contact detected (nav/bump.py): instant stop, cancel the goal / LightNav, latch the event, and put the
+        obstacle into the map where the footprint touched it (the planners and the safety envelope's map memory then
+        keep away from it).  Additive: it can only stop the robot."""
+        from nav.bump import contact_points
+        from twin_geometry import FOOTPRINT_SAFE
+        self.v = self.w = 0.0; self._bump_hold = time.monotonic() + 0.5; self.hw.drive(0.0, 0.0)
+        if self.vln: self.vln.cancel()
+        self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
+        P = contact_points(FOOTPRINT_SAFE, ev["angle"])
+        pose = self.slam.pose()
+        for _ in range(2): self.slam.grid.integrate(pose, P, np.zeros((0, 2), np.float32))     # 2 hits = confident cell
+        x, y, th = pose; ev = dict(ev, x=round(x, 2), y=round(y, 2)); self.bump_latched = ev; self.bump.last = ev
+        self.log("BUMP %s: %s -- stopped, obstacle marked in the map" % (ev["dir"], ev["why"]))
 
     def _map_points(self, x, y, th, r=0.7):
         """Mapped obstacles within r m, robot frame: memory of what is beside/behind the robot (outside RS1/RS2 view)."""
@@ -353,6 +381,7 @@ class Brain:
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks),
                     timing=self.stats.summary(), plan_timing=None if p is None else p.timing,
+                    bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])
 
     def run(self):
