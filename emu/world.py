@@ -199,7 +199,7 @@ def compose(env: envs.Env, tire: str) -> str:
             if hasattr(env, "wall_occ"): a.update(contype="0", conaffinity="0")   # MuJoCo meshes collide as convex hulls
             ET.SubElement(wb, "geom", type="mesh", mesh="envmesh%d" % i, **a)
     if hasattr(env, "wall_occ"):                     # wall collision = run-length boxes of the wall section raster
-        (ox, oy), r = env.gt_origin, envs.GT_RES; nb = 0
+        (ox, oy), r = env.gt_origin, getattr(env, "wall_res", envs.GT_RES); nb = 0
         zs = [z for z, _ in env.wall_levels]; edges = [0.0] + [(a + b) / 2 for a, b in zip(zs[:-1], zs[1:])] + [2.3]
         for li, (zc, occ) in enumerate(env.wall_levels):
             za, zb = edges[li], edges[li + 1]; open_ = {}; boxes = []

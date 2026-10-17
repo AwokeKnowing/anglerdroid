@@ -571,3 +571,67 @@ Bench (kitchen -> bedroom -> couch goals + LightNav "find the kitchen", casita, 
 
 The recurring failure is the kitchen goal next to the island. MPPI dithers there and reverses (up to 1.8 m in path mode),
 then "no progress" x3. It is not fixed.
+
+### Stopping-distance budget (2026-10-17, 16:00-17:00 PT): measured, sim casita, realistic noise
+Scripted approaches (`emu/tools/stoptest/stoptest.py`): Kevin is teleported, nav is restarted, a 0.3 x 0.3 x 0.7 m box is
+placed 2.2 m ahead (straight or on a w=-0.4 arc, offset 0 / +-0.2 m), then `drive v w`. GT is polled at ~200 Hz (drives
+input_vel / vel_setpoint / wheel vel). nav logs every tick with `KEVIN_SAFETY_LOG` (debug logging only). gap = GT distance
+from the SIL12 hull to the box. Times are relative to (c), when the stop was sent.
+
+| run (v / w) | frame capture of deciding frame | (b) decision tick | (c) stop sent | (d) sim input_vel = 0 | (e) wheel vel = 0 | travel after (c) | min gap | contact |
+|---|---|---|---|---|---|---|---|---|
+| 0.30 / 0 | -119 ms, gap 0.118 | -38 ms, 0.094 | 0, 0.082 | +4 ms | +272 ms, 0.034 | 0.048 m | 0.033 | 0 |
+| 0.45 / 0 | -123 ms, 0.143 | -48 ms, 0.110 | 0, 0.089 | +3 ms | +318 ms, 0.000 | 0.089 m | 0.000 | 0 |
+| 0.60 / 0 | -152 ms, 0.260 | -52 ms, 0.199 | 0, 0.169 | +0 ms | +386 ms, 0.029 | 0.139 m | 0.020 | 0 |
+| 0.60 / -0.4, dl 0 | -127 ms, 0.195 | -34 ms, 0.144 | 0, 0.124 | +4 ms | +352 ms, 0.001 | 0.136 m | 0.000 | 0 |
+| 0.60 / -0.4, dl +0.2 | -120 ms, 0.204 | -36 ms, 0.152 | 0, 0.128 | +6 ms | +287 ms, 0.003 | 0.126 m | 0.000 | **1** |
+| 0.60 / -0.4, dl -0.2 | -115 ms, 0.193 | -40 ms, 0.154 | 0, 0.133 | +7 ms | +349 ms, 0.019 | 0.137 m | 0.019 | 0 |
+| 0.60 / 0, ramp 6 | -150 ms, 0.244 | -33 ms, 0.175 | 0, 0.156 | +1 ms | +240 ms, 0.066 | 0.097 m | 0.013* | 0 |
+| 0.60 / -0.4 dl +0.2, ramp 6 | -121 ms, 0.217 | -36 ms, 0.163 | 0, 0.138 | +6 ms | +220 ms, 0.040 | 0.098 m | 0.018* | 0 |
+| 0.60 / -0.4 dl +0.2, ramp 10 | -149 ms, 0.248 | -50 ms, 0.184 | 0, 0.154 | +1 ms | +177 ms, 0.079 | 0.090 m | 0.015* | 0 |
+
+\* After the stop, drive mode keeps asking for v. The envelope lets Kevin creep in until the clearance reaches the margin,
+so the min gap with a faster ramp comes from that creep, not from braking overshoot. The gap at (e) is the braking result.
+
+- **Visibility is not the problem.** The RS1 top-down camera (0.862 m high, 87 deg along x) first sees the box 0.65-0.71 m
+  ahead of the bumper. That is 3-5x the stopping distance at 0.6 m/s. The ego forward distance matches GT at t_frame to
+  within 5 mm.
+- **Latency is ~150 ms, not ~33 ms.**
+  - The nav loop ran at p50 61 ms / p95 82 ms / max 585 ms (16 Hz), because the realistic-render emu.world publishes RS1 at
+    15.7 Hz (it was 30 Hz before the 15:36 restart). The loop's own compute is 26 ms.
+  - Frame age at decision: p50 109 ms, p95 150 ms.
+  - Command to sim wheel input: 0-7 ms. Nav does no command smoothing on the stop: the filter's 0 goes out in the same tick.
+- **Braking is ramp-limited at 1.61 m/s².** `src/wheelbase.py` overrides the config's `vel_ramp_rate = 20` with
+  `set_vel_ramp_rate(3.0)` turns/s², which is 1.61 m/s² at the 85.65 mm wheel. The twin applies the ramp to braking too
+  (VEL_RAMP). The current limit is not what binds: 10 A x Kt 0.9506 = 9.5 N m per wheel, about 17 m/s² for 13.1 kg, so
+  traction-limited. Add a ~30-40 ms PI lag (kp 3, ki 25). From 0.6 m/s that gives 0.139 m and 386 ms to stop.
+  - Ramp 6 (3.2 m/s²): 0.097 m, 240 ms.
+  - Ramp 10: 0.090 m, 177 ms.
+  - Front caster plus CoM (x -0.048, z 0.185): no forward tip-over risk at these decels.
+- **The envelope budget has no slack.** It assumes t_react 0.10 s and a_brake 1.5 m/s², so it stops at clearance
+  0.18 + 0.035 m at 0.6 m/s.
+  - Actual: 0.09 m of motion in latency, plus 0.14 m braking, = 0.23 m. All runs end 0-3 cm from the box; 1/6 at 0.6
+    touched.
+  - Also, `Envelope.filter(..., now=t_frame)` makes the 0.25 s staleness check compare the frame with itself, so it never
+    fires. That is why the 585 ms stall was not caught. Not changed here: safety logic.
+- **The earlier "collisions" were mostly a sim collision-skin bug.**
+  - Every casita wall contact in the world log was on chassis_frame_low, chassis_dustpan or a tire, at z 0.07-0.19 m, at
+    0-0.29 m/s.
+  - All were **2.5-3.7 cm in front of the rendered wall** the cameras see. The mesh-wall collision boxes were a 2 cm raster
+    plus a 1-cell dilation, so they stood 2-4.3 cm proud of the visual wall (p50 2.0 cm). That is an invisible skin as thick
+    as the 3.5 cm safety margin.
+  - The bench GT contacts (turn4-10) were the same kind: front face/corner (body x 0.10-0.24) at door jambs and the
+    living/kitchen wall, approached at ~0.6 m/s and touching at ~0 m/s at the end of the stop, often turning 0.4-0.9 rad/s.
+    A few were wheel tires resting on a wall during a spin.
+  - None were counter overhangs or thin objects missed by depth.
+  - Fix (emu/envs.py, emu/world.py): the wall collision raster is now 1 cm (WALL_RES) and not dilated. Skin: p50 0.5 cm,
+    max 1.4 cm. Boxes: 3108 (was 2184). MuJoCo step: 0.097 ms (was 0.100).
+
+**Proposed fixes (not implemented: real-robot drive config / safety logic)**
+1. Braking ramp: raise `set_vel_ramp_rate` from 3 to about 6 turns/s² (3.2 m/s², James's 2-3 m/s² range). Better: keep 3
+   for speeding up and use a higher ramp (or passthrough) only for commands toward zero. That cuts 4-5 cm at 0.6 m/s. Try it
+   now with `KEVIN_VEL_RAMP=6` (default unchanged). Check on the real robot with the mast first.
+2. Make the envelope's t_react the measured frame-capture -> wheel latency, or extend the sweep by v * (now - t_frame), and
+   pass `now=time.monotonic()` so staleness works. Safety logic: James's call.
+3. Sim: render/publish RS1 depth first, at 30 Hz like the real D435, before the colour/IR/CamFX work (emu.world render loop,
+   slambench branch).

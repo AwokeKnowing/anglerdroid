@@ -14,6 +14,7 @@ import numpy as np
 
 TEX_DIR = os.path.join(os.environ.get("KEVIN_EMU_CACHE", os.path.expanduser("~/.cache/kevin_emu")), "tex")
 GT_RES = 0.02
+WALL_RES = 0.01        # mesh-wall collision raster (emu.world boxes); finer than GT_RES so the skin hugs the visual wall
 BAND = (0.03, 0.95)
 
 
@@ -431,23 +432,29 @@ def build(name: str, seed: int = 0) -> Env:
     for (hx0, hy0, hx1, hy1) in getattr(e, "hazard_line", []):      # curb edge = negative obstacle in GT
         _raster_box(Geom("box", ((hx0 + hx1) / 2, (hy0 + hy1) / 2, 0.3), ((hx1 - hx0) / 2, 0.05, 0.3)), occ, org)
     if hasattr(e, "_mesh"):
-        m, s, off = e._mesh; occ0 = occ.copy(); e.wall_levels = []
+        m, s, off = e._mesh; occ0 = occ.copy(); e.wall_levels = []; wr = e.wall_res = WALL_RES
+        wshape = (int(math.ceil((y1 - y0) / wr)), int(math.ceil((x1 - x0) / wr)))
         for zc in np.linspace(BAND[0] + 0.05, BAND[1] - 0.05, 4):
-            lv = np.zeros_like(occ); e.wall_levels.append((float(zc), lv))
+            lv = np.zeros(wshape, bool); e.wall_levels.append((float(zc), lv))
             # raw triangle/plane segments (Path3D.discrete chains open segments and drew phantom diagonals)
             import trimesh
             segs = trimesh.intersections.mesh_plane(m, plane_normal=[0, 0, 1], plane_origin=[0, 0, (zc - off[2]) / s])
             for seg in segs:
                 P = seg[:, :2] * s + off[:2]
                 for a, bb in zip(P[:-1], P[1:]):
-                    n = int(np.hypot(*(bb - a)) / (GT_RES / 2)) + 2
+                    n = int(np.hypot(*(bb - a)) / (wr / 2)) + 2
                     q = a + (bb - a) * np.linspace(0, 1, n)[:, None]
                     c = ((q - org) / GT_RES).astype(int); ok = (c[:, 0] >= 0) & (c[:, 1] >= 0) & (c[:, 0] < occ.shape[1]) & (c[:, 1] < occ.shape[0])
-                    occ[c[ok, 1], c[ok, 0]] = True; lv[c[ok, 1], c[ok, 0]] = True
+                    occ[c[ok, 1], c[ok, 0]] = True
+                    c = ((q - org) / wr).astype(int); ok = (c[:, 0] >= 0) & (c[:, 1] >= 0) & (c[:, 0] < wshape[1]) & (c[:, 1] < wshape[0])
+                    lv[c[ok, 1], c[ok, 0]] = True
         from scipy import ndimage
         e.wall_occ = ndimage.binary_dilation(occ & ~occ0, iterations=1)   # mesh walls only (all heights)
         # per-height slabs -> collision boxes (world.py): a counter overhang at 0.9 m must not become a floor-level wall
-        e.wall_levels = [(z, ndimage.binary_dilation(lv, iterations=1)) for z, lv in e.wall_levels]
+        # at WALL_RES and NOT dilated: the cells already contain the wall surface, so the box skin stands at most one cell
+        # diagonal (1.4 cm) proud of the rendered wall.  The old 2 cm raster + 1-cell dilation stood 2-4.3 cm proud: an
+        # invisible skin that ate the 3.5 cm safety margin (the casita wall "contacts" 2026-10-14..17 were all 2.5-3.7 cm
+        # in front of the wall surface the cameras see).
         occ = ndimage.binary_dilation(occ, iterations=2)
         if not e.places: _auto_places(e, occ, org)
     e.gt, e.gt_origin = occ, org
