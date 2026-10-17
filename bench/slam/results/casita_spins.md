@@ -5,6 +5,7 @@ seq casita_spins  path 9.31 m, turned 3013.0 deg
 | cuvslam_rgbd | 1.0 | 0.02 | 0.007 | 9.16 | 0.42 | 1.09 | 0.006 | 0.019 | None | 11.1 ms/frame (p99 21.1), lost 0 |
 | cuvslam_stereo | 1.0 | 0.025 | 0.024 | 5.42 | 0.06 | 0.65 | 0.006 | 0.023 | None | 7.0 ms/frame (p99 13.9), lost 0 |
 | cuvslam_stereo_imu | 1.0 | 0.019 | 0.012 | 1.01 | 0.72 | 0.12 | 0.012 | 0.017 | None | 8.8 ms/frame (p99 17.5), lost 0 |
+| kslam | 1.0 | 0.045 | 0.051 | 2.21 | 0.29 | 0.26 | 0.012 | 0.021 | None | 44.97 ms/frame CPU (python, 1615 frames) |
 | odom_wheel | 1.0 | 0.19 | 0.395 | 6.95 | 6.94 | 0.83 | 0.02 | 0.128 | None |  |
 | odom_wheel_gyro | 1.0 | 0.092 | 0.191 | 5.07 | 0.65 | 0.61 | 0.019 | 0.067 | None |  |
 | orbslam3_stereo | 1.0 | 0.005 | 0.001 | 0.39 | 0.07 | 0.05 | 0.004 | 0.004 | None | 180.1 ms/frame wall incl. png decode (1615 frames, CPU) |

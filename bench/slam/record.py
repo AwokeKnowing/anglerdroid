@@ -69,7 +69,8 @@ def main():
     ap.add_argument("--v", type=float, default=0.30); ap.add_argument("--w", type=float, default=0.8)
     ap.add_argument("--max-s", type=float, default=600.0)
     a = ap.parse_args()
-    if shutil.disk_usage(os.path.expanduser("~")).free / 2**30 < 40: sys.exit("record: <40 GB free, refusing")
+    mf = float(os.environ.get("KEVIN_REC_MIN_FREE_GB", "20"))
+    if shutil.disk_usage(os.path.expanduser("~")).free / 2**30 < mf: sys.exit("record: <%g GB free, refusing" % mf)
     os.environ.setdefault("MUJOCO_GL", "egl"); os.environ["KEVIN_EMU_NOISE"] = a.noise; os.environ["KEVIN_EMU_DOG"] = "0"
     os.environ["KEVIN_EMU_RS2_PITCH"] = str(a.rs2_pitch)
     import cv2, mujoco

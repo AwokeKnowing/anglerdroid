@@ -5,6 +5,9 @@ seq casita_tour  path 31.31 m, turned 3289.0 deg
 | cuvslam_rgbd | 1.0 | 2.492 | 3.838 | 43.84 | 38.41 | 4.8 | 0.005 | 1.129 | None | 13.0 ms/frame (p99 26.8), lost 0 |
 | cuvslam_stereo | 1.0 | 2.08 | 2.451 | 47.44 | 41.16 | 5.19 | 0.008 | 0.924 | None | 7.8 ms/frame (p99 18.9), lost 0 |
 | cuvslam_stereo_imu | 1.0 | 0.386 | 0.636 | 29.71 | 28.56 | 3.25 | 0.016 | 0.386 | None | 9.8 ms/frame (p99 21.7), lost 0 |
+| cuvslam_stereo_imu_selfmask | 1.0 | 1.307 | 2.462 | 37.46 | 33.36 | 4.1 | 0.021 | 0.635 | None | 12.3 ms/frame (p99 33.4), lost 0 |
+| cuvslam_stereo_selfmask | 1.0 | 1.723 | 3.068 | 35.59 | 26.49 | 3.9 | 0.008 | 1.294 | None | 6.6 ms/frame (p99 13.1), lost 0 |
+| kslam | 1.0 | 0.211 | 0.344 | 2.83 | 1.04 | 0.31 | 0.008 | 0.127 | None | 48.76 ms/frame CPU (python, 2495 frames) |
 | odom_wheel | 1.0 | 2.355 | 3.963 | 53.07 | 42.7 | 5.81 | 0.012 | 1.142 | None |  |
 | odom_wheel_gyro | 1.0 | 0.586 | 0.998 | 14.17 | 13.53 | 1.55 | 0.012 | 0.361 | None |  |
 | orbslam3_stereo | 0.998 | 0.138 | 0.001 | 6.59 | 0.01 | 0.74 | 0.005 | 0.114 | None | 304.4 ms/frame wall incl. png decode (2495 frames, CPU) |
