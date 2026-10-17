@@ -5,8 +5,6 @@ Map: nav SLAM map + Kevin footprint (safety-state color) + trajectory + goal + p
 Chat: text -> small parser -> nav POST /api/command (same interface as the nav page)."""
 import sys, os, json, math, re, time, threading, urllib.request, struct, hashlib, numpy as np, cv2
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from emu import shm
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8095; NAV = "http://localhost:%d" % (int(sys.argv[2]) if len(sys.argv) > 2 else 8090)
 FP = [(0.33, 0.27), (0.33, -0.27), (-0.33, -0.27), (-0.33, 0.27)]    # display footprint only
 COL = {"ok": (80, 200, 80), "limited": (0, 200, 255), "blocked": (40, 40, 255), "no_depth": (200, 0, 200)}
@@ -16,6 +14,33 @@ def nav(path, body=None):
 def sim():
     try: return json.load(open("/dev/shm/kevin_sim.json"))
     except Exception: return None
+
+CAMS = {"rs1_depth": ("kevin_rs1", "depth"), "rs1_color": ("kevin_rs1", "color"), "rs2_depth": ("kevin_rs2", "depth"), "rs2_color": ("kevin_rs2", "color")}
+_BLK = {}
+def cam_jpeg(name):
+    """live JPEG of one sim RealSense stream straight from /dev/shm (depth colorized 0.2..4 m). Returns (bytes, err)."""
+    if name not in CAMS: return None, "unknown camera %s (use %s)" % (name, ", ".join(CAMS))
+    sh, key = CAMS[name]
+    try:
+        from emu import shm
+        info = json.load(open(shm.INFO_PATH)); pid = info.get("pid")
+        b = _BLK.get(sh)
+        if b is None or b[1] != pid:
+            dev = [d for d in info["devices"].values() if d.get("shm") == sh][0]
+            b = _BLK[sh] = (shm.Block(sh, dev["layout"]), pid)
+        blk = b[0]
+        for _ in range(5):
+            s0 = int(blk.hdr[0])
+            if s0 & 1: time.sleep(0.002); continue
+            a = blk.arr[key].copy()
+            if int(blk.hdr[0]) == s0: break
+        if key == "depth":
+            d = a.astype(np.float32) / 1000.0
+            v = np.clip((d - 0.2) / 3.8, 0, 1); im = cv2.applyColorMap((255 * (1 - v)).astype(np.uint8), cv2.COLORMAP_JET); im[a == 0] = 0
+        else: im = cv2.cvtColor(a, cv2.COLOR_RGB2BGR)
+        ok, jp = cv2.imencode(".jpg", im, [cv2.IMWRITE_JPEG_QUALITY, 70]); return jp.tobytes(), None
+    except Exception as e:
+        _BLK.pop(sh, None); return None, "shm %s unavailable: %s" % (sh, e)
 NAVPOSE = [None]
 def env2nav(S, x, y):
     """env (GT) -> nav map frame via the current GT pose and nav pose (like emu.eval's gt.to_map); falls back to the
@@ -143,73 +168,6 @@ def mapper():
             pass
         time.sleep(max(0.05, 0.25 - (time.time() - t0)))
 
-class CameraShm:
-    """Read camera frames from sim shared memory (kevin_rs1, kevin_rs2) and serve as JPEGs."""
-    def __init__(self):
-        self.info = None
-        self.rs1 = None
-        self.rs2 = None
-        self.last_info_check = 0
-        self.lock = threading.Lock()
-    
-    def _refresh(self):
-        """Reconnect to shm blocks if world restarted."""
-        try:
-            info = shm.read_info(wait_s=0.1)
-            if info != self.info:
-                self.info = info
-                try:
-                    if self.rs1: self.rs1.close()
-                    if self.rs2: self.rs2.close()
-                except: pass
-                # Find rs1 and rs2 from camera dict - order may vary
-                cams = info["cameras"]
-                self.rs1 = shm.Block(cams[list(cams.keys())[0]]["shm"], cams[list(cams.keys())[0]]["layout"])
-                self.rs2 = shm.Block(cams[list(cams.keys())[1]]["shm"], cams[list(cams.keys())[1]]["layout"])
-                print(f"[viewer] camera shm connected: {list(cams.keys())}", flush=True)
-        except Exception as e:
-            print(f"[viewer] camera shm refresh failed: {e}", flush=True)
-            self.rs1 = None
-            self.rs2 = None
-    
-    def get_jpeg(self, name):
-        """Return (JPEG bytes, None) or (None, error_reason)."""
-        now = time.time()
-        with self.lock:
-            if now - self.last_info_check > 2.0:
-                self._refresh()
-                self.last_info_check = now
-            
-            if name not in ("rs1_depth", "rs1_color", "rs2_depth", "rs2_color"):
-                return None, f"unknown camera: {name}"
-            
-            block = self.rs1 if name.startswith("rs1") else self.rs2
-            if block is None:
-                return None, "emulator not running"
-            
-            try:
-                _, _, arrays = block.read()
-                if "depth" in name:
-                    z = arrays["depth"]  # uint16 mm
-                    z_m = z.astype(np.float32) * 0.001
-                    # Colormap 0.2-4.0m
-                    z_norm = np.clip((z_m - 0.2) / (4.0 - 0.2), 0, 1)
-                    z_col = cv2.applyColorMap((z_norm * 255).astype(np.uint8), cv2.COLORMAP_JET)
-                    ok, jp = cv2.imencode(".jpg", z_col, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                else:  # color
-                    rgb = arrays["color"]  # uint8 HxWx3
-                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                    ok, jp = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                
-                if ok:
-                    return jp.tobytes(), None
-                else:
-                    return None, "encode failed"
-            except Exception as e:
-                return None, str(e)
-
-CAMSHM = CameraShm()
-
 PAGE = r"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Kevin sim</title>
 <style>body{margin:0;background:#111;color:#ddd;font:14px system-ui;display:flex;height:100vh}#v{flex:1;position:relative;overflow:hidden}
 #v img{width:100%;height:100%;object-fit:contain;cursor:grab;user-select:none}#r{width:560px;display:flex;flex-direction:column;border-left:1px solid #333}
@@ -244,22 +202,11 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split("?")[0]
         if p == "/": return self._send(open(os.path.join(os.path.dirname(__file__), "live.html")).read().encode(), "text/html; charset=utf-8")
+        if p == "/assets/kevin_lite.glb": return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
         if p == "/jpeg": return self._send(PAGE.encode(), "text/html; charset=utf-8")
-        if p == "/assets/kevin_lite.glb":
-            try: return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
-            except Exception: return self._send(b"", code=404)
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)
-        if p.startswith("/cam/"):
-            cam_name = p[5:-4] if p.endswith(".jpg") else None
-            if cam_name:
-                jpg, err = CAMSHM.get_jpeg(cam_name)
-                if jpg:
-                    return self._send(jpg, "image/jpeg")
-                else:
-                    return self._send(json.dumps({"error": err}).encode(), "application/json", 503)
-            return self._send(json.dumps({"error": "bad request"}).encode(), "application/json", 400)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
             with lock: return self._send(json.dumps(LOG).encode())
@@ -274,9 +221,6 @@ class H(BaseHTTPRequestHandler):
                     env = ENVS.get(S["env"], lambda _: None)(0)
                     if env:
                         geoms = []
-                        extent = env.extent if hasattr(env, 'extent') else (-5, -5, 5, 5)
-                        print(f"[viewer] exporting scene: env={S['env']}, extent={extent}, geoms={len(env.geoms)}", flush=True)
-                        
                         for g in env.geoms:
                             color = {"plaster": 0xdcd8cc, "plaster2": 0xc8d0d8, "wood": 0x8c6138, "fabric": 0x4c5c78,
                                    "metal": 0x9ea2a8, "white": 0xededed, "dark": 0x262629}.get(g.mat, 0x888888)
@@ -285,30 +229,20 @@ class H(BaseHTTPRequestHandler):
                                 # Export mesh vertices/faces for walls (trimesh)
                                 try:
                                     import trimesh
-                                    print(f"[viewer] loading mesh: {g.mesh}", flush=True)
                                     m = trimesh.load(g.mesh)
                                     scale = g.size[0] if isinstance(g.size, (list, tuple)) else 1.0
-                                    print(f"[viewer] mesh loaded: {len(m.vertices)} verts, {len(m.faces)} faces, scale={scale}", flush=True)
                                     # Transform vertices: scale + translate by pos (pos is offset from origin)
                                     verts = (m.vertices * scale + np.array(g.pos)).tolist()
                                     faces = m.faces.tolist()
                                     gd["vertices"] = verts
                                     gd["faces"] = faces
-                                    print(f"[viewer] mesh exported: {len(verts)} verts, {len(faces)} faces", flush=True)
                                 except Exception as e:
                                     print(f"[viewer] mesh export failed for {g.mesh}: {e}", flush=True)
-                                    import traceback
-                                    traceback.print_exc()
                             geoms.append(gd)
-                        
-                        result = {"geoms": geoms, "extent": list(extent)}
-                        print(f"[viewer] scene.json ready: {len(geoms)} geoms", flush=True)
-                        return self._send(json.dumps(result).encode())
+                        return self._send(json.dumps({"geoms": geoms}).encode())
                 except Exception as e:
                     print(f"[viewer] scene.json export failed: {e}", flush=True)
-                    import traceback
-                    traceback.print_exc()
-            return self._send(json.dumps({"geoms": [], "extent": [-5, -5, 5, 5]}).encode())
+            return self._send(json.dumps({"geoms": []}).encode())
         if p == "/state.json":
             # Polled state (tunnel-friendly, prefer this over SSE)
             S = sim()
@@ -346,6 +280,9 @@ class H(BaseHTTPRequestHandler):
                     time.sleep(0.05)
             except: pass
             return
+        if p.startswith("/cam/") and p.endswith(".jpg"):
+            b, err = cam_jpeg(p[5:-4])
+            return self._send(b, "image/jpeg") if b else self._send(json.dumps({"error": err}).encode(), code=503)
         if p == "/favicon.ico": return self._send(b"", "image/x-icon")
         self._send(b"{}", code=404)
     def do_POST(self):

@@ -8,42 +8,36 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:100vh}
 #c{display:block;width:100%;height:100%}
-#hud{position:fixed;top:8px;left:8px;background:#0008;padding:6px 10px;border-radius:4px;font-size:12px;pointer-events:none}
-#chat{position:fixed;bottom:0;left:0;right:0;background:#111;border-top:1px solid #333;display:flex;padding:8px;gap:8px}
+#hud{position:fixed;top:8px;left:8px;background:#000a;padding:6px 10px;border-radius:4px;font-size:12px;pointer-events:none;z-index:2}
+#chat{position:fixed;bottom:0;left:0;right:0;background:#111;border-top:1px solid #333;display:flex;padding:8px;gap:8px;z-index:2}
 #chat input{flex:1;background:#222;border:1px solid #444;color:#fff;padding:8px;font:14px system-ui}
 #chat button{background:#0a5;border:none;color:#fff;padding:8px 20px;cursor:pointer;font:14px system-ui}
 #chat button:hover{background:#0b6}
-#log{position:fixed;bottom:60px;left:8px;right:8px;max-height:200px;overflow:auto;background:#0008;padding:6px;font:11px monospace;white-space:pre-wrap;display:none}
+#log{position:fixed;bottom:60px;left:8px;right:8px;max-height:200px;overflow:auto;background:#0008;padding:6px;font:11px monospace;white-space:pre-wrap;display:none;z-index:2}
 #log.show{display:block}
-#controls{position:fixed;top:8px;right:8px;background:#0008;padding:6px;border-radius:4px;display:flex;flex-direction:column;gap:4px}
+#controls{position:fixed;top:8px;right:8px;background:#000a;padding:6px;border-radius:4px;display:flex;flex-direction:column;gap:4px;z-index:2}
 #controls label{font-size:11px;display:flex;align-items:center;cursor:pointer}
 #controls input[type=checkbox]{margin-right:6px}
-.cam-panel{position:fixed;background:#000;border:1px solid #666;display:none;pointer-events:none}
-.cam-panel.show{display:block}
-.cam-panel img{display:block;width:100%;height:100%}
-#rs1d-panel{top:60px;left:8px;width:320px;height:240px}
-#rs1c-panel{top:310px;left:8px;width:320px;height:240px}
-#rs2d-panel{top:60px;right:348px;width:320px;height:240px}
-#rs2c-panel{top:310px;right:348px;width:320px;height:240px}
+#controls button{font-size:11px;padding:4px 8px;cursor:pointer;background:#234;color:#fff;border:1px solid #456;border-radius:3px}
+#campanels{position:fixed;left:8px;top:40px;display:flex;flex-direction:column;gap:6px;z-index:2}
+.cp{background:#000c;border:1px solid #444;border-radius:4px;padding:3px;font-size:11px}
+.cp img{display:block;width:280px;height:auto;min-height:40px}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud">Kevin Live Sim · Drag to orbit · Scroll to zoom</div>
+<div id="hud">Kevin Live Sim · Drag orbit · Scroll zoom · loading…</div>
 <div id="controls">
 <label><input type="checkbox" id="camvis" checked> Camera frustums</label>
-<label><input type="checkbox" id="showdog" checked> Show dog</label>
+<label><input type="checkbox" id="showdog" checked> Show yorkie</label>
+<label><input type="checkbox" class="campanel" data-cam="rs1_depth"> RS1 depth (top)</label>
+<label><input type="checkbox" class="campanel" data-cam="rs1_color"> RS1 color (top)</label>
+<label><input type="checkbox" class="campanel" data-cam="rs2_depth"> RS2 depth (fwd)</label>
+<label><input type="checkbox" class="campanel" data-cam="rs2_color"> RS2 color (fwd)</label>
 <label><input type="checkbox" id="showlog"> Show log</label>
-<label><input type="checkbox" id="rs1d"> RS1 depth</label>
-<label><input type="checkbox" id="rs1c"> RS1 color</label>
-<label><input type="checkbox" id="rs2d"> RS2 depth</label>
-<label><input type="checkbox" id="rs2c"> RS2 color</label>
-<button id="framehouse" style="background:#0008;border:1px solid #666;color:#ddd;padding:4px 8px;cursor:pointer;font-size:11px;margin-top:4px">Frame house</button>
+<button type="button" id="framebtn">Frame house</button>
 </div>
-<div id="rs1d-panel" class="cam-panel"><img id="rs1d-img" src="" alt="RS1 depth"></div>
-<div id="rs1c-panel" class="cam-panel"><img id="rs1c-img" src="" alt="RS1 color"></div>
-<div id="rs2d-panel" class="cam-panel"><img id="rs2d-img" src="" alt="RS2 depth"></div>
-<div id="rs2c-panel" class="cam-panel"><img id="rs2c-img" src="" alt="RS2 color"></div>
+<div id="campanels"></div>
 <div id="log"></div>
 <div id="chat">
 <input id="q" placeholder="go to couch | forward 2 | turn left | stop" autocomplete="off">
@@ -57,432 +51,256 @@ import * as THREE from 'three';
 import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 
-const canvas=document.getElementById('c');
-const scene=new THREE.Scene();
-scene.background=new THREE.Color(0x87ceeb);  // sky blue
+// MuJoCo Z-up (x,y,z) → Three Y-up with correct handedness: (x, z, -y)
+function mjToThree(x,y,z){return new THREE.Vector3(x,z,-y)}
 
-const camera=new THREE.PerspectiveCamera(50,window.innerWidth/window.innerHeight,0.1,200);
-camera.position.set(-3,2.5,4);
+const canvas=document.getElementById('c');
+const hud=document.getElementById('hud');
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x87a0b4);
+
+const camera=new THREE.PerspectiveCamera(55,window.innerWidth/window.innerHeight,0.05,200);
+camera.position.set(8,12,18);
 
 const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
 renderer.setSize(window.innerWidth,window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
 renderer.shadowMap.enabled=true;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 
 const controls=new OrbitControls(camera,canvas);
-controls.target.set(0,0,0);
+controls.target.set(3.5,0.5,-7);
 controls.enableDamping=true;
-controls.dampingFactor=0.05;
+controls.dampingFactor=0.08;
+controls.maxPolarAngle=Math.PI*0.49;
 controls.update();
 
-// Lights - bright outdoor lighting
-const hemi=new THREE.HemisphereLight(0xffffff,0x666666,0.8);
+scene.add(new THREE.AmbientLight(0xffffff,0.85));
+const hemi=new THREE.HemisphereLight(0xddeeff,0x443322,0.55);
 scene.add(hemi);
-const ambient=new THREE.AmbientLight(0xffffff,0.6);
-scene.add(ambient);
-const dir=new THREE.DirectionalLight(0xffffff,1.0);
-dir.position.set(5,10,7);
+const dir=new THREE.DirectionalLight(0xffffff,0.9);
+dir.position.set(6,14,4);
 dir.castShadow=true;
-dir.shadow.camera.left=-20;dir.shadow.camera.right=20;
-dir.shadow.camera.top=20;dir.shadow.camera.bottom=-20;
+dir.shadow.camera.left=-12;dir.shadow.camera.right=12;
+dir.shadow.camera.top=16;dir.shadow.camera.bottom=-4;
+dir.shadow.camera.near=1;dir.shadow.camera.far=40;
 dir.shadow.mapSize.width=2048;dir.shadow.mapSize.height=2048;
 scene.add(dir);
 
-// Ground - will be resized based on scene extent
-let ground=new THREE.Mesh(
-  new THREE.PlaneGeometry(30,30),
-  new THREE.MeshStandardMaterial({color:0x4a4a4a,roughness:0.8})
+const ground=new THREE.Mesh(
+  new THREE.PlaneGeometry(40,40),
+  new THREE.MeshStandardMaterial({color:0x3a4a3a,roughness:0.95})
 );
 ground.rotation.x=-Math.PI/2;
+ground.position.y=-0.01;
 ground.receiveShadow=true;
 scene.add(ground);
-
-// Grid helper for reference
-let grid=new THREE.GridHelper(30,30,0x666666,0x444444);
-grid.position.y=0.01;
+const grid=new THREE.GridHelper(40,40,0x668866,0x334433);
+grid.position.y=0.001;
 scene.add(grid);
 
-// State
 let sceneLoaded=false;
-let sceneExtent=null;
+let framed=false;
 let robot=null,frustums=[];
 const camvisEl=document.getElementById('camvis');
 const showdogEl=document.getElementById('showdog');
+const worldBox=new THREE.Box3();
 
-// Camera panel controls
-const rs1dEl=document.getElementById('rs1d');
-const rs1cEl=document.getElementById('rs1c');
-const rs2dEl=document.getElementById('rs2d');
-const rs2cEl=document.getElementById('rs2c');
-
-rs1dEl.onchange=()=>{document.getElementById('rs1d-panel').classList.toggle('show',rs1dEl.checked)};
-rs1cEl.onchange=()=>{document.getElementById('rs1c-panel').classList.toggle('show',rs1cEl.checked)};
-rs2dEl.onchange=()=>{document.getElementById('rs2d-panel').classList.toggle('show',rs2dEl.checked)};
-rs2cEl.onchange=()=>{document.getElementById('rs2c-panel').classList.toggle('show',rs2cEl.checked)};
-
-// MuJoCo Z-up to Three.js Y-up coordinate transform
-function mjToThree(x,y,z){return[x,z,-y]}
-
-// Robot - load GLB mesh, fallback to box placeholder
+// Kevin footprint: dark chassis + mast stub + heading arrow (not a neon toy)
 const robotGroup=new THREE.Group();
-let robotMesh=null;
-let placeholder=null;
-
-// Placeholder (dark box + mast) - shown until GLB loads
-const placeholderGroup=new THREE.Group();
-const chassisGeom=new THREE.BoxGeometry(0.5,0.15,0.4);
-const chassisMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
-const chassis=new THREE.Mesh(chassisGeom,chassisMat);
-chassis.position.y=0.075;
-chassis.castShadow=true;
-placeholderGroup.add(chassis);
-const mastGeom=new THREE.CylinderGeometry(0.03,0.03,0.15,8);
-const mastMat=new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.7});
-const mast=new THREE.Mesh(mastGeom,mastMat);
-mast.position.set(0,0.15+0.075,0);
-mast.castShadow=true;
-placeholderGroup.add(mast);
-placeholder=placeholderGroup;
-robotGroup.add(placeholder);
-
-// Yellow heading arrow (always visible)
-const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.1,0),0.5,0xffff00,0.15,0.1);
-robotGroup.add(arrowHelper);
-
-robot=robotGroup;
-scene.add(robot);
-
-// Load GLB mesh
-const loader=new GLTFLoader();
-loader.load('/assets/kevin_lite.glb',
-  (gltf)=>{
-    console.log('GLB loaded successfully');
-    robotMesh=gltf.scene;
-    // Real mesh is Y-up in metres; lift so wheels sit on floor (wheels at Y ≈ -0.086)
-    robotMesh.position.y=0.086;
-    robotMesh.traverse((child)=>{
-      if(child.isMesh){
-        child.castShadow=true;
-        child.receiveShadow=true;
-      }
-    });
-    robotGroup.add(robotMesh);
-    // Hide placeholder
-    if(placeholder){
-      robotGroup.remove(placeholder);
-      placeholder=null;
-    }
-  },
-  (progress)=>{
-    console.log('Loading GLB:',Math.round(progress.loaded/progress.total*100)+'%');
-  },
-  (error)=>{
-    console.error('Failed to load GLB:',error);
-    // Keep placeholder visible on error
-  }
+const robotBody=new THREE.Mesh(
+  new THREE.BoxGeometry(0.45,0.18,0.36),
+  new THREE.MeshStandardMaterial({color:0x2a2e33,roughness:0.55,metalness:0.25})
 );
+robotBody.position.y=0.11;
+robotBody.castShadow=true;
+robotGroup.add(robotBody);
+const robotTop=new THREE.Mesh(
+  new THREE.BoxGeometry(0.16,0.22,0.12),
+  new THREE.MeshStandardMaterial({color:0x1a1d22,roughness:0.5})
+);
+robotTop.position.set(0.05,0.28,0);
+robotGroup.add(robotTop);
+const arrowHelper=new THREE.ArrowHelper(new THREE.Vector3(1,0,0),new THREE.Vector3(0,0.2,0),0.5,0xffcc33,0.12,0.08);
+robotGroup.add(arrowHelper);
+scene.add(robotGroup);
+robot=robotGroup;
+// Real Kevin mesh (kevin_lite.glb, Y-up, +X forward); hide box placeholder once loaded
+new GLTFLoader().load('/assets/kevin_lite.glb',g=>{
+  const k=g.scene; k.position.y=0.0856; // lift wheels (min y=-0.0856) onto floor
+  k.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true}});
+  robotGroup.add(k); robotBody.visible=false; robotTop.visible=false;
+},undefined,e=>console.warn('kevin glb load failed, keeping placeholder',e));
 
-// Dog (yorkie) - matching MuJoCo sim geometry from world.py lines 197-206
-// Materials: fur-like brown colors
-const furMat=new THREE.MeshStandardMaterial({color:0x8c6540,roughness:0.9});
-const fur2Mat=new THREE.MeshStandardMaterial({color:0x7a5530,roughness:0.9});
-
-const dogGroup=new THREE.Group();
-dogGroup.visible=false;
-
-// Body: capsule from (-0.07,0,0.13) to (0.06,0,0.135), radius 0.055
-const bodyGeom=new THREE.CapsuleGeometry(0.055,0.13,8,16);
-const bodyMesh=new THREE.Mesh(bodyGeom,fur2Mat);
-bodyMesh.position.set(-0.005,0.1325,0);
-bodyMesh.rotation.z=Math.PI/2;
-bodyMesh.castShadow=true;
-dogGroup.add(bodyMesh);
-
-// Head: sphere at (0.11,0,0.175), radius 0.048
-const headGeom=new THREE.SphereGeometry(0.048,16,16);
-const headMesh=new THREE.Mesh(headGeom,furMat);
-headMesh.position.set(0.11,0.175,0);
-headMesh.castShadow=true;
-dogGroup.add(headMesh);
-
-// Snout: capsule from (0.14,0,0.165) to (0.17,0,0.16), radius 0.018
-const snoutGeom=new THREE.CapsuleGeometry(0.018,0.03,6,8);
-const snoutMesh=new THREE.Mesh(snoutGeom,furMat);
-snoutMesh.position.set(0.155,0.1625,0);
-snoutMesh.rotation.z=Math.PI/2;
-snoutMesh.castShadow=true;
-dogGroup.add(snoutMesh);
-
-// Ears: boxes at (0.105,±0.028,0.225), size (0.012,0.008,0.022)
-for(let ex of[-1,1]){
-  const earGeom=new THREE.BoxGeometry(0.024,0.044,0.016);
-  const earMesh=new THREE.Mesh(earGeom,fur2Mat);
-  earMesh.position.set(0.105,0.225,0.028*ex);
-  earMesh.castShadow=true;
-  dogGroup.add(earMesh);
+// Yorkie built from emu/world.py dog_* geoms (body frame: x fwd, y left, z up; mocap at floor)
+const dog=new THREE.Group();
+{
+  const fur=new THREE.MeshStandardMaterial({color:0x8a6a3a,roughness:0.85});   // m_fur  (tan)
+  const fur2=new THREE.MeshStandardMaterial({color:0x3a3d44,roughness:0.85});  // m_fur2 (steel/black saddle)
+  const cap=(r,a,b,m)=>{const A=mjToThree(...a),B=mjToThree(...b),d=B.clone().sub(A),L=d.length();
+    const g=new THREE.Mesh(new THREE.CapsuleGeometry(r,L,6,12),m);g.position.copy(A).add(B).multiplyScalar(0.5);
+    g.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.normalize());g.castShadow=true;dog.add(g)};
+  cap(0.055,[-0.07,0,0.13],[0.06,0,0.135],fur2);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(0.048,16,12),fur);head.position.copy(mjToThree(0.11,0,0.175));head.castShadow=true;dog.add(head);
+  cap(0.018,[0.14,0,0.165],[0.17,0,0.16],fur);
+  for(const ex of [-1,1]){const e=new THREE.Mesh(new THREE.BoxGeometry(0.024,0.044,0.016),fur2);e.position.copy(mjToThree(0.105,0.028*ex,0.225));dog.add(e)}
+  for(const lx of [-0.06,0.06])for(const ly of [-0.03,0.03])cap(0.013,[lx,ly,0.11],[lx,ly,0.012],fur);
+  cap(0.01,[-0.11,0,0.15],[-0.15,0,0.2],fur2);
 }
+dog.visible=false;
+scene.add(dog);
 
-// Legs: 4 capsules at corners (±0.07,±0.03), from z=0.11 to z=0.012, radius 0.013
-for(let lx of[-0.07,0.07]){
-  for(let ly of[-0.03,0.03]){
-    const legGeom=new THREE.CapsuleGeometry(0.013,0.098,6,8);
-    const legMesh=new THREE.Mesh(legGeom,furMat);
-    legMesh.position.set(lx,0.061,ly);
-    legMesh.castShadow=true;
-    dogGroup.add(legMesh);
-  }
-}
-
-// Tail: capsule from (-0.11,0,0.15) to (-0.15,0,0.2), radius 0.01
-const tailGeom=new THREE.CapsuleGeometry(0.01,0.064,6,8);
-const tailMesh=new THREE.Mesh(tailGeom,fur2Mat);
-tailMesh.position.set(-0.13,0.175,0);
-tailMesh.rotation.z=-Math.atan2(0.05,0.04);
-tailMesh.castShadow=true;
-dogGroup.add(tailMesh);
-
-scene.add(dogGroup);
-showdogEl.onchange=()=>{if(!dogGroup.userData.present)dogGroup.visible=false;else dogGroup.visible=showdogEl.checked};
-
-// Goal marker
-const goalGeom=new THREE.ConeGeometry(0.08,0.25,8);
-const goalMat=new THREE.MeshStandardMaterial({color:0xf00,emissive:0x800});
-const goal=new THREE.Mesh(goalGeom,goalMat);
-goal.position.y=0.125;
+const goal=new THREE.Mesh(
+  new THREE.ConeGeometry(0.12,0.35,8),
+  new THREE.MeshStandardMaterial({color:0xff2244,emissive:0xaa0000,emissiveIntensity:0.6})
+);
+goal.position.y=0.18;
 goal.visible=false;
 scene.add(goal);
 
-// Path line
-const pathMat=new THREE.LineBasicMaterial({color:0xfa0,linewidth:2});
-const path=new THREE.Line(new THREE.BufferGeometry(),pathMat);
+const path=new THREE.Line(new THREE.BufferGeometry(),new THREE.LineBasicMaterial({color:0xffaa00}));
 scene.add(path);
 
-// Camera frustums with real geometry from twin
-// RS1 (top-down D435): pos (-0.007, 0.0, 0.8619), fovy 58°, optical axes: x=-base_x, y=-base_z, z=-base_y
-// RS2 (forward D435i): pos (-0.1301, 0.0, 0.3822), pitch ~30° down, fovy 58°
-const RS1_POS=[-0.007,0.8619,0];  // MuJoCo (x,z,-y)
-const RS2_POS=[-0.1301,0.3822,0];
-const FOVY_D=58.0;  // depth FOV degrees
-const FOVY_C=42.0;  // color FOV degrees
-
-function makeFrustum(name,pos,fovy,color,pitch){
-  const group=new THREE.Group();
-  const aspect=848/480;  // D435 resolution
-  const depth=0.1;  // small frustum ~10cm deep
-  const halfY=Math.tan(fovy*Math.PI/180/2)*depth;
-  const halfX=halfY*aspect;
-  
-  // Wireframe pyramid
-  const mat=new THREE.LineBasicMaterial({color,transparent:true,opacity:0.5});
-  const points=[
-    new THREE.Vector3(0,0,0),new THREE.Vector3(-halfX,-halfY,-depth),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(halfX,-halfY,-depth),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(halfX,halfY,-depth),
-    new THREE.Vector3(0,0,0),new THREE.Vector3(-halfX,halfY,-depth),
-    new THREE.Vector3(-halfX,-halfY,-depth),new THREE.Vector3(halfX,-halfY,-depth),
-    new THREE.Vector3(halfX,-halfY,-depth),new THREE.Vector3(halfX,halfY,-depth),
-    new THREE.Vector3(halfX,halfY,-depth),new THREE.Vector3(-halfX,halfY,-depth),
-    new THREE.Vector3(-halfX,halfY,-depth),new THREE.Vector3(-halfX,-halfY,-depth)
-  ];
-  const geom=new THREE.BufferGeometry().setFromPoints(points);
-  const line=new THREE.LineSegments(geom,mat);
-  group.add(line);
-  
-  // Cross-section plane for live image (near the tip)
-  const planeGeom=new THREE.PlaneGeometry(halfX*2*0.9,halfY*2*0.9);
-  const planeMat=new THREE.MeshBasicMaterial({color:0x444444,side:THREE.DoubleSide,transparent:true,opacity:0.3});
-  const plane=new THREE.Mesh(planeGeom,planeMat);
-  plane.position.z=-depth*0.9;
-  group.add(plane);
-  
-  group.position.set(...pos);
-  // RS1 looks down (optical -z = base -y): rotate -90° around x
-  // RS2 looks forward with pitch down: rotate pitch around local x
-  if(pitch!==0){
-    group.rotation.x=-pitch*Math.PI/180;
-  }else{
-    group.rotation.x=-Math.PI/2;  // RS1 down
-  }
-  group.visible=false;
-  return group;
+// Camera FOV frustums from emu/world.py mounts (twin URDF optical frames), in Kevin body frame (mj: x fwd, y left, z up).
+// Solid ~10 cm pyramid + faint FOV lines to 1.2 m (VIEW_CLIP). Cyan = depth (58 deg fovy, 848x480), yellow = RGB (42 deg, 640x480).
+function makeFrustum(pos,fwd,up,fovy,aspect,color){
+  const g=new THREE.Group();
+  const P=mjToThree(...pos),F=mjToThree(...fwd).normalize(),U=mjToThree(...up).normalize(),Rt=new THREE.Vector3().crossVectors(F,U).normalize();
+  const ty=Math.tan(fovy*Math.PI/360),tx=ty*aspect;
+  const corners=d=>[[-1,-1],[1,-1],[1,1],[-1,1]].map(([a,b])=>P.clone().addScaledVector(F,d).addScaledVector(Rt,a*tx*d).addScaledVector(U,b*ty*d));
+  const seg=(c,inner)=>{const v=[];c.forEach((q,k)=>{v.push(inner?inner[k]:P,q,q,c[(k+1)%4])});return v};
+  const near=corners(0.10);
+  g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg(near)),new THREE.LineBasicMaterial({color})));
+  const far=corners(1.2);
+  g.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(seg(far,near)),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.22})));
+  return g;
 }
+{
+  const p=27*Math.PI/180,c=Math.cos(p),s=Math.sin(p);
+  const RS2F=[c,0,-s],RS2U=[s,0,c];
+  const defs=[  // RS1 top D435 looks straight down; image width along robot x
+    [[-0.007,0,0.8619],[0,0,-1],[0,1,0],58,848/480,0x19e6ff],
+    [[0.008,0,0.8619],[0,0,-1],[0,1,0],42,640/480,0xffd91a],
+    [[-0.1301,0,0.3822],RS2F,RS2U,58,848/480,0x19e6ff],  // RS2 forward D435i pitched 27 deg down
+    [[-0.1301,0.015,0.3822],RS2F,RS2U,42,640/480,0xffd91a]];
+  defs.forEach(d=>{const f=makeFrustum(...d);f.visible=camvisEl.checked;robotGroup.add(f);frustums.push(f)});
+}
+camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked)};
+// Per-camera live panels (viewer.py /cam/<name>.jpg straight from /dev/shm kevin_rs1/kevin_rs2)
+const panelsEl=document.getElementById('campanels');const panels={};
+function pumpPanel(name){const pn=panels[name];if(!pn)return;const t=Date.now();
+  const img=new Image();img.onload=()=>{if(panels[name]===pn){pn.img.src=img.src;pn.msg.textContent=name+' · '+(Date.now()-t)+' ms';setTimeout(()=>pumpPanel(name),150)}};
+  img.onerror=async()=>{if(panels[name]!==pn)return;let m='unavailable';try{m=(await (await fetch('/cam/'+name+'.jpg')).json()).error}catch(e){}pn.msg.textContent=name+': '+m;setTimeout(()=>pumpPanel(name),2000)};
+  img.src='/cam/'+name+'.jpg?t='+t;}
+document.querySelectorAll('.campanel').forEach(cb=>{cb.onchange=()=>{const n=cb.dataset.cam;
+  if(cb.checked){const d=document.createElement('div');d.className='cp';const msg=document.createElement('div');msg.textContent=n;const im=document.createElement('img');d.append(msg,im);panelsEl.append(d);panels[n]={el:d,img:im,msg};pumpPanel(n)}
+  else if(panels[n]){panels[n].el.remove();delete panels[n]}}});
 
-// Create frustums for RS1 depth, RS1 color, RS2 depth, RS2 color
-const rs1dFrustum=makeFrustum('rs1_depth',RS1_POS,FOVY_D,0x00ffff,0);
-const rs1cFrustum=makeFrustum('rs1_color',[0.008,0.8619,0],FOVY_C,0x00ff00,0);
-const rs2dFrustum=makeFrustum('rs2_depth',RS2_POS,FOVY_D,0xffff00,30);
-const rs2cFrustum=makeFrustum('rs2_color',[-0.1301,0.3822,0.015],FOVY_C,0xff00ff,30);
-
-// Add to robot group so they move with the robot
-robotGroup.add(rs1dFrustum);
-robotGroup.add(rs1cFrustum);
-robotGroup.add(rs2dFrustum);
-robotGroup.add(rs2cFrustum);
-
-// Populate frustums array (FIX: this was empty, breaking the toggle)
-frustums=[rs1dFrustum,rs1cFrustum,rs2dFrustum,rs2cFrustum];
-
-camvisEl.onchange=()=>{frustums.forEach(f=>f.visible=camvisEl.checked&&sceneLoaded)};
-showdogEl.onchange();
-
-// Frame house button
 function frameHouse(){
-  if(!sceneExtent)return;
-  const[xmin,ymin,xmax,ymax]=sceneExtent;
-  const w=xmax-xmin,h=ymax-ymin;
-  const cx=(xmin+xmax)/2,cy=(ymin+ymax)/2;
-  const dist=Math.max(w,h)*0.8;
-  camera.position.set(cx-dist*0.6,dist*0.5,cy+dist*0.6);
-  controls.target.set(cx,0,cy);
+  if(worldBox.isEmpty()){
+    controls.target.set(3.5,0.5,-7);
+    camera.position.set(10,11,-20);
+  }else{
+    const c=new THREE.Vector3();
+    const s=new THREE.Vector3();
+    worldBox.getCenter(c);
+    worldBox.getSize(s);
+    const radius=Math.max(s.x,s.y,s.z)*0.75+2;
+    controls.target.copy(c);
+    camera.position.set(c.x+radius*0.7, c.y+radius*0.85, c.z+radius*0.95);
+  }
   controls.update();
+  framed=true;
+  hud.textContent='Kevin Live Sim · Drag orbit · Scroll zoom · framed';
 }
-document.getElementById('framehouse').onclick=frameHouse;
 
-// Load scene geometry
+document.getElementById('framebtn').onclick=frameHouse;
+
 async function loadScene(){
   try{
     const res=await fetch('/scene.json');
     const data=await res.json();
-    console.log('Scene data:',data);
-    
-    // Update floor and grid based on extent
-    if(data.extent){
-      sceneExtent=data.extent;
-      const[xmin,ymin,xmax,ymax]=data.extent;
-      const w=xmax-xmin,h=ymax-ymin;
-      const cx=(xmin+xmax)/2,cy=(ymin+ymax)/2;
-      console.log(`Scene extent: ${w.toFixed(1)}m x ${h.toFixed(1)}m @ (${cx.toFixed(1)}, ${cy.toFixed(1)})`);
-      
-      // Resize ground - larger than scene
-      scene.remove(ground);
-      const groundSize=Math.max(w,h)+8;
-      ground=new THREE.Mesh(
-        new THREE.PlaneGeometry(groundSize,groundSize),
-        new THREE.MeshStandardMaterial({color:0x4a4a4a,roughness:0.8})
-      );
-      ground.rotation.x=-Math.PI/2;
-      ground.position.set(cx,0,cy);
-      ground.receiveShadow=true;
-      scene.add(ground);
-      
-      // Resize grid
-      scene.remove(grid);
-      grid=new THREE.GridHelper(groundSize,Math.ceil(groundSize),0x666666,0x444444);
-      grid.position.set(cx,0.01,cy);
-      scene.add(grid);
-      
-      // Auto-frame on load
-      frameHouse();
-    }
-    
-    // Add geometry from scene
-    let meshCount=0,boxCount=0,cylCount=0;
-    data.geoms.forEach(g=>{
+    const geoms=data.geoms||[];
+    let nBox=0,nMesh=0,nOther=0;
+    worldBox.makeEmpty();
+
+    geoms.forEach(g=>{
+      let mesh=null;
       if(g.kind==='box'){
-        boxCount++;
+        // half-extents (sx,sy,sz) in MuJoCo → full size in Three after (x,z,-y)
         const geom=new THREE.BoxGeometry(g.size[0]*2,g.size[2]*2,g.size[1]*2);
-        const color=g.color||0x888888;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7});
-        const mesh=new THREE.Mesh(geom,mat);
-        const[x,y,z]=mjToThree(g.pos[0],g.pos[1],g.pos[2]);
-        mesh.position.set(x,y,z);
-        mesh.rotation.y=-g.yaw;
-        mesh.castShadow=true;
-        mesh.receiveShadow=true;
-        scene.add(mesh);
+        const color=(typeof g.color==='number')?g.color:0x888888;
+        const mat=new THREE.MeshStandardMaterial({color,roughness:0.65,metalness:0.05});
+        mesh=new THREE.Mesh(geom,mat);
+        mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
+        mesh.rotation.y=g.yaw||0; // with -y map, keep +yaw
+        nBox++;
       }else if(g.kind==='cyl'){
-        cylCount++;
         const geom=new THREE.CylinderGeometry(g.size[0],g.size[0],g.size[1]*2,16);
-        const color=g.color||0x888888;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.6});
-        const mesh=new THREE.Mesh(geom,mat);
-        const[x,y,z]=mjToThree(g.pos[0],g.pos[1],g.pos[2]);
-        mesh.position.set(x,y,z);
-        mesh.castShadow=true;
-        mesh.receiveShadow=true;
-        scene.add(mesh);
+        const color=(typeof g.color==='number')?g.color:0x888888;
+        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({color,roughness:0.6}));
+        mesh.position.copy(mjToThree(g.pos[0],g.pos[1],g.pos[2]));
+        nOther++;
       }else if(g.kind==='mesh'&&g.vertices&&g.faces){
-        // Mesh (e.g. walls from trimesh)
-        meshCount++;
-        console.log(`Loading mesh: ${g.vertices.length} verts, ${g.faces.length} faces`);
         const geom=new THREE.BufferGeometry();
         const verts=[];const norms=[];
         g.faces.forEach(f=>{
           const v0=g.vertices[f[0]],v1=g.vertices[f[1]],v2=g.vertices[f[2]];
-          const[x0,y0,z0]=mjToThree(v0[0],v0[1],v0[2]);
-          const[x1,y1,z1]=mjToThree(v1[0],v1[1],v1[2]);
-          const[x2,y2,z2]=mjToThree(v2[0],v2[1],v2[2]);
-          verts.push(x0,y0,z0,x1,y1,z1,x2,y2,z2);
-          // Compute normal
-          const a=new THREE.Vector3(x1-x0,y1-y0,z1-z0);
-          const b=new THREE.Vector3(x2-x0,y2-y0,z2-z0);
+          // (x,y,z)_mj → (x,z,-y)_three
+          verts.push(v0[0],v0[2],-v0[1], v1[0],v1[2],-v1[1], v2[0],v2[2],-v2[1]);
+          const a=new THREE.Vector3(v1[0]-v0[0],v1[2]-v0[2],-(v1[1]-v0[1]));
+          const b=new THREE.Vector3(v2[0]-v0[0],v2[2]-v0[2],-(v2[1]-v0[1]));
           const n=new THREE.Vector3().crossVectors(a,b).normalize();
-          norms.push(n.x,n.y,n.z,n.x,n.y,n.z,n.x,n.y,n.z);
+          norms.push(n.x,n.y,n.z, n.x,n.y,n.z, n.x,n.y,n.z);
         });
         geom.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
         geom.setAttribute('normal',new THREE.Float32BufferAttribute(norms,3));
-        const color=g.color||0xdcd8cc;
-        const mat=new THREE.MeshStandardMaterial({color,roughness:0.7,side:THREE.DoubleSide,transparent:true,opacity:0.88});
-        const mesh=new THREE.Mesh(geom,mat);
+        const color=(typeof g.color==='number')?g.color:0xdcd8cc;
+        mesh=new THREE.Mesh(geom,new THREE.MeshStandardMaterial({
+          color,roughness:0.85,metalness:0.0,side:THREE.DoubleSide,
+          transparent:true,opacity:0.88,depthWrite:true
+        }));
+        nMesh++;
+      }
+      if(mesh){
         mesh.castShadow=true;
         mesh.receiveShadow=true;
         scene.add(mesh);
+        worldBox.expandByObject(mesh);
       }
     });
-    console.log(`Scene loaded: ${meshCount} meshes, ${boxCount} boxes, ${cylCount} cylinders`);
-    
+
     sceneLoaded=true;
+    hud.textContent=`Kevin Live Sim · ${nBox} boxes · ${nMesh} wall mesh · Drag orbit`;
+    frameHouse();
   }catch(e){
     console.error('Failed to load scene:',e);
+    hud.textContent='Scene load failed: '+e.message;
   }
 }
 
-// Polled state (tunnel-friendly)
 function updateState(st){
   try{
-    // Update robot
     if(st.kevin){
-      const[x,y,z]=mjToThree(st.kevin[0],st.kevin[1],0);
-      robot.position.set(x,y,z);
+      robot.position.copy(mjToThree(st.kevin[0],st.kevin[1],0));
       robot.rotation.y=st.kevin[2];
     }
-    
-    // Update dog
-    if(st.dog&&st.dog.length>=3){
-      const[x,y,th]=st.dog;
-      const[dx,dy,dz]=mjToThree(x,y,0);
-      dogGroup.position.set(dx,dy,dz);
-      dogGroup.rotation.y=th;
-      dogGroup.userData.present=true;
-      dogGroup.visible=showdogEl.checked;
-    }else{
-      dogGroup.userData.present=false;
-      dogGroup.visible=false;
-    }
-    
-    // Update goal
+    if(st.dog&&showdogEl.checked){
+      dog.position.copy(mjToThree(st.dog[0],st.dog[1],0));
+      if(st.dog.length>2)dog.rotation.y=st.dog[2];
+      dog.visible=true;
+    }else dog.visible=false;
     if(st.goal){
-      const[x,y,z]=mjToThree(st.goal[0],st.goal[1],0);
-      goal.position.set(x,0.125,z);
+      goal.position.copy(mjToThree(st.goal[0],st.goal[1],0));
+      goal.position.y=0.18;
       goal.visible=true;
-    }else{
-      goal.visible=false;
-    }
-    
-    // Update path
+    }else goal.visible=false;
     if(st.path&&st.path.length>0){
-      const points=st.path.map(p=>{
-        const[x,y,z]=mjToThree(p[0],p[1],0);
-        return new THREE.Vector3(x,0.02,z);
-      });
+      const points=st.path.map(p=>mjToThree(p[0],p[1],0.05));
       path.geometry.dispose();
       path.geometry=new THREE.BufferGeometry().setFromPoints(points);
       path.visible=true;
-    }else{
-      path.visible=false;
-    }
-    
+    }else path.visible=false;
   }catch(e){console.error('State update error:',e)}
 }
 
@@ -492,15 +310,13 @@ async function pollState(){
     const st=await res.json();
     updateState(st);
   }catch(e){console.error('Poll error:',e)}
-  setTimeout(pollState,50);
+  setTimeout(pollState,100);
 }
 
-// Chat
 const qEl=document.getElementById('q');
 const sendBtn=document.getElementById('send');
 const logEl=document.getElementById('log');
 const showlogEl=document.getElementById('showlog');
-
 showlogEl.onchange=()=>{logEl.classList.toggle('show',showlogEl.checked)};
 
 async function sendChat(text){
@@ -509,50 +325,22 @@ async function sendChat(text){
     const r=await res.json();
     logEl.textContent=(logEl.textContent.split('\n').slice(-20).join('\n')+'\n> '+text+'\n'+r.reply).trim();
     logEl.scrollTop=1e9;
-  }catch(e){
-    logEl.textContent+='\nError: '+e.message;
-  }
+  }catch(e){logEl.textContent+='\nError: '+e.message}
 }
-
 sendBtn.onclick=()=>{const t=qEl.value.trim();if(t){sendChat(t);qEl.value=''}};
 qEl.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();sendBtn.click()}};
 
-// Resize
 window.addEventListener('resize',()=>{
   camera.aspect=window.innerWidth/window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth,window.innerHeight);
 });
 
-// Animate
 function animate(){
   requestAnimationFrame(animate);
   controls.update();
   renderer.render(scene,camera);
 }
-
-// Update camera panels (if enabled)
-function updateCameraPanels(){
-  if(rs1dEl.checked){
-    const img=document.getElementById('rs1d-img');
-    img.src='/cam/rs1_depth.jpg?t='+Date.now();
-  }
-  if(rs1cEl.checked){
-    const img=document.getElementById('rs1c-img');
-    img.src='/cam/rs1_color.jpg?t='+Date.now();
-  }
-  if(rs2dEl.checked){
-    const img=document.getElementById('rs2d-img');
-    img.src='/cam/rs2_depth.jpg?t='+Date.now();
-  }
-  if(rs2cEl.checked){
-    const img=document.getElementById('rs2c-img');
-    img.src='/cam/rs2_color.jpg?t='+Date.now();
-  }
-}
-
-setInterval(updateCameraPanels,200);  // 5 Hz camera panel updates
-
 loadScene();
 pollState();
 animate();
