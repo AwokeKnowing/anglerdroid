@@ -12,6 +12,16 @@ from scipy.spatial.transform import Rotation as Rot
 
 seq, res, mode = sys.argv[1], sys.argv[2], sys.argv[3]; os.makedirs(res, exist_ok=True)
 meta = json.load(open(os.path.join(seq, "meta.json"))); I = meta["intr"]["rs2_ir"]; W_, H_ = I["w"], I["h"]
+F = np.genfromtxt(os.path.join(seq, "frames.csv"), delimiter=",", names=True)
+SELFMASK = os.environ.get("CUVSLAM_SELFMASK", "0") == "1"   # auto-detect the robot's own body (static image rows) and crop it
+H_full = H_
+if SELFMASK:
+    idx = np.linspace(0, len(F["t"]) - 1, 40).astype(int)
+    S = np.stack([cv2.imread(os.path.join(seq, "rs2_ir1", "%06d.png" % int(F["i"][j])), cv2.IMREAD_GRAYSCALE).astype(np.float32) for j in idx])
+    rs = S.std(0).mean(1); thr = 0.35 * np.median(rs[:H_ // 2]); r = H_
+    while r > H_ // 2 and rs[r - 1] < thr: r -= 1
+    H_ = int(r) - (int(r) % 2) - 4 if r < H_ else H_
+    print("selfmask: static rows >= %d of %d -> crop to %d" % (r, H_full, H_))
 cams = []
 for k in (1, 2):
     c = cuvslam.Camera(size=[W_, H_], principal=[I["ppx"], I["ppy"]], focal=[I["fx"], I["fy"]])
@@ -29,10 +39,10 @@ elif mode == "rgbd":
 else:
     oc = cuvslam.Tracker.OdometryConfig(rectified_stereo_camera=True)
 tr = cuvslam.Tracker(rig, oc, cuvslam.Tracker.SlamConfig())
-F = np.genfromtxt(os.path.join(seq, "frames.csv"), delimiter=",", names=True)
 IMU = np.genfromtxt(os.path.join(seq, "imu.csv"), delimiter=",", names=True); ki = 0
 T_rig_base = np.eye(4); T_rig_base[:3, :3] = _R_RIG_BASE; T_rig_base[:3, 3] = _R_RIG_BASE @ np.array([0, 0, TG.AXLE_H_M])
-out = open(os.path.join(res, "cuvslam_%s.tum" % mode), "w"); ms = []; lost = 0
+name = "cuvslam_%s%s" % (mode, "_selfmask" if SELFMASK else "")
+out = open(os.path.join(res, name + ".tum"), "w"); ms = []; lost = 0
 for i, tf in enumerate(F["t"]):
     ts = int(tf * 1e9)
     if mode == "stereo_imu":
@@ -41,12 +51,12 @@ for i, tf in enumerate(F["t"]):
             m.linear_accelerations = [float(IMU["ax"][ki]), float(IMU["ay"][ki]), float(IMU["az"][ki])]
             m.angular_velocities = [float(IMU["gx"][ki]), float(IMU["gy"][ki]), float(IMU["gz"][ki])]
             tr.register_imu_measurement(0, m); ki += 1
-    l = cv2.imread(os.path.join(seq, "rs2_ir1", "%06d.png" % i), cv2.IMREAD_GRAYSCALE)
+    l = np.ascontiguousarray(cv2.imread(os.path.join(seq, "rs2_ir1", "%06d.png" % i), cv2.IMREAD_GRAYSCALE)[:H_])
     t0 = time.perf_counter()
     if mode == "rgbd":
-        d = cv2.imread(os.path.join(seq, "rs2_depth", "%06d.png" % i), cv2.IMREAD_UNCHANGED); pe, sp = tr.track(ts, [l], depths=[d])
+        d = np.ascontiguousarray(cv2.imread(os.path.join(seq, "rs2_depth", "%06d.png" % i), cv2.IMREAD_UNCHANGED)[:H_]); pe, sp = tr.track(ts, [l], depths=[d])
     else:
-        r = cv2.imread(os.path.join(seq, "rs2_ir2", "%06d.png" % i), cv2.IMREAD_GRAYSCALE); pe, sp = tr.track(ts, [l, r])
+        r = np.ascontiguousarray(cv2.imread(os.path.join(seq, "rs2_ir2", "%06d.png" % i), cv2.IMREAD_GRAYSCALE)[:H_]); pe, sp = tr.track(ts, [l, r])
     ms.append((time.perf_counter() - t0) * 1e3)
     p = sp if (sp is not None and getattr(sp, "translation", None) is not None) else (pe.world_from_rig.pose if pe.world_from_rig is not None else None)
     if p is None: lost += 1; continue
@@ -54,6 +64,6 @@ for i, tf in enumerate(F["t"]):
     Twb = Twr @ T_rig_base; q = Rot.from_matrix(Twb[:3, :3]).as_quat()
     out.write("%.4f %.5f %.5f %.5f %.6f %.6f %.6f %.6f\n" % (tf, *Twb[:3, 3], *q))
 out.close()
-json.dump(dict(frame="base", note="PyCuVSLAM %s, twin calibration, SLAM on" % mode, runtime="%.1f ms/frame (p99 %.1f), lost %d" % (np.mean(ms), np.percentile(ms, 99), lost)),
-          open(os.path.join(res, "cuvslam_%s.json" % mode), "w"))
-print("cuvslam", mode, "frames", len(F["t"]), "lost", lost, "ms", round(float(np.mean(ms)), 1))
+json.dump(dict(frame="base", note="PyCuVSLAM %s, twin calibration, SLAM on%s" % (mode, ", self-mask crop to %d/%d rows" % (H_, H_full) if SELFMASK else ""), runtime="%.1f ms/frame (p99 %.1f), lost %d" % (np.mean(ms), np.percentile(ms, 99), lost)),
+          open(os.path.join(res, name + ".json"), "w"))
+print(name, "frames", len(F["t"]), "lost", lost, "ms", round(float(np.mean(ms)), 1))

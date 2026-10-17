@@ -44,6 +44,53 @@ Self-calibration check, VGGT-SLAM median focal estimate vs withheld twin truth (
 
 VGGT used submap 8 because submap 16 ran out of GPU memory with LightNav using 14.5 GB.
 
+
+## 2b. Measured: casita_tour (31.31 m, 3289° turned, 2495 frames, 166 s; one rug-edge bump at t≈47 s: pitch 11.8°, roll −5.7°, GT yaw-rate spike 1.68 rad/s vs wheel 0.51)
+
+| method | coverage | ate_xy | final_xy | yaw_max | yaw_final | yaw/360 | rpe1m_med | ate_aligned | runtime |
+|---|---|---|---|---|---|---|---|---|---|
+| odom_wheel | 1.0 | 2.355 | 3.963 | 53.07 | 42.7 | 5.81 | 0.012 | 1.142 | – |
+| odom_wheel_gyro | 1.0 | 0.586 | 0.998 | 14.17 | 13.53 | 1.55 | 0.012 | 0.361 | – |
+| slam2 | 1.0 | 0.184 | 0.352 | 11.48 | 7.63 | 1.26 | 0.020 | 0.126 | 96.2 ms/scan |
+| cuvslam_stereo | 1.0 | 2.08 | 2.451 | 47.44 | 41.16 | 5.19 | 0.008 | 0.924 | 7.8 ms/frame |
+| cuvslam_stereo_imu | 1.0 | 0.386 | 0.636 | 29.71 | 28.56 | 3.25 | 0.016 | 0.386 | 9.8 ms/frame |
+| cuvslam_rgbd | 1.0 | 2.492 | 3.838 | 43.84 | 38.41 | 4.8 | 0.005 | 1.129 | 13.0 ms/frame |
+| orbslam3_stereo | 0.998 | 0.138 | 0.001 | 6.59 | 0.01 | 0.74 | 0.005 | 0.114 | 304 ms/frame CPU offline (contended) |
+| vggtslam_mast | kf | 0.852 | 0.328 | 64.52 | 22.86 | 7.84 | 0.454 | 0.782 (Sim3) | 95 s / 2495 fr |
+| vggtslam_rs2_color | kf | 4.051 | 2.76 | 177.73 | 149.23 | 20.41 | 0.85 | 2.856 (Sim3) | 140 s / 2495 fr |
+
+## 2c. Measured: casita_long (45.21 m, 3190° turned, 9001 frames, 600 s cap; route not finished, robot stalled after ~300 s)
+
+| method | coverage | ate_xy | final_xy | yaw_max | yaw_final | yaw/360 | rpe1m_med | ate_aligned | runtime |
+|---|---|---|---|---|---|---|---|---|---|
+| odom_wheel | 1.0 | 1.776 | 2.2 | 20.33 | 10.8 | 2.29 | 0.010 | 0.504 | – |
+| odom_wheel_gyro | 1.0 | 0.991 | 1.22 | 8.23 | 1.31 | 0.93 | 0.006 | 0.465 | – |
+| slam2 | 1.0 | 0.592 | 0.796 | 5.21 | 3.32 | 0.59 | 0.019 | 0.353 | 99.6 ms/scan |
+| cuvslam_stereo | 1.0 | 6.924 | 7.998 | 58.43 | 47.05 | 6.59 | 0.011 | 2.216 | 7.8 ms/frame |
+| cuvslam_stereo_imu | 1.0 | 10.421 | 12.147 | 132.31 | 122.67 | 14.93 | 0.022 | 2.632 | 8.5 ms/frame |
+| cuvslam_rgbd | 1.0 | 7.948 | 9.189 | 60.2 | 56.7 | 6.79 | 0.006 | 2.528 | 12.3 ms/frame |
+| orbslam3_stereo | 0.128 | 2.077 | 4.508 | 82.73 | 81.73 | 23.84 | 0.003 | 1.812 | CRASHED at t≈80 s (Sophus SO3::exp NaN) |
+| vggtslam_mast | kf | 7.555 | 7.367 | 154.82 | 76.22 | 20.5 | 0.768 | 2.555 (Sim3) | 112 s / 9001 fr |
+| vggtslam_rs2_color | kf | 5.748 | 2.525 | 179.9 | 1.13 | 22.17 | 1.066 | 3.102 (Sim3) | 196 s / 9001 fr |
+
+VGGT-SLAM focal self-calibration, median estimate vs truth:
+
+| sequence | rs2_color (truth 625.2) | mast (truth 240.3) |
+|---|---|---|
+| spins | 646.6 | 325.8 |
+| tour | 620.7 | 327.7 |
+| long | 661.6 | 333.3 |
+
+The rs2_color estimate is within −1% to +6%. The mast estimate is consistently about 36–39% too long, which means the 106° lens is read as about 88–90°.
+
+### Diagnosis of the visual failures on tour/long
+- **Self-occlusion.** The 27°-pitched RS2 sees Kevin's own deck in the bottom of the frame: IR rows 365 and below (24% of the image) and colour rows about 400 and below never change. Static features on the robot body pull VO toward "no motion", especially during turns.
+  - A per-sequence auto self-mask (temporal row variance) was added to run_cuvslam.py (CUVSLAM_SELFMASK=1). Its tour runs finished, but the results were not yet evaluated when i777 went offline.
+- **Close-range, low-texture views** (pressed against the bed, blank walls) at 120–140 s in long.
+- **Bump jolts** (rug edge) hurt stereo-inertial cuVSLAM most: +72° at the 43 s bump in long.
+- **Monocular feed-forward SLAM** (VGGT-SLAM) on floor-heavy, rotation-dominant views with sparse keyframes (165–334 kf over 9001 frames) is not usable as an odometry source. Treat it as a global mapper only.
+- **slam2** (the current stack, wheel+gyro+scan matching) was the most robust over the long run. ORB-SLAM3 was the most accurate while it lived, but crashed.
+
 ## 3. Architecture (proposal)
 - **Robot (Orin): local pose and local map, always autonomous.**
   - EKF on SE(2)+z: wheel odometry is the prior; the gyro covers short windows; ZUPT from cmd.
