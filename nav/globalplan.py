@@ -1,4 +1,4 @@
-"""Global coarse path on the full SLAM map (10 cm grid, Dijkstra over free cells, C via scipy.csgraph).
+"""Global coarse path on the full SLAM map (~5 cm grid, Dijkstra over free cells, C via scipy.csgraph).
 The 1 cm local window + MPPI tracks a subgoal taken from this path, so goals anywhere in the map are reachable.
 Unknown space counts as free (optimistic exploration); walls are inflated by the robot half-width."""
 from __future__ import annotations
@@ -8,14 +8,20 @@ import cv2
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import dijkstra
 
-RES = 0.05
+RES = 0.05                     # target coarse cell size; the real one is an integer multiple of the SLAM grid res
+
+
+def coarse_res(grid):
+    """Actual coarse cell size: f whole SLAM cells per side. Everything that maps metres <-> coarse cells must use this,
+    never RES itself (2 cm grid -> f=2 -> 4 cm cells; using 5 cm there stretched the map 1.25x about the grid origin)."""
+    return max(1, int(round(RES / grid.res))) * grid.res
 
 
 def coarse_blocked(grid, inflate=0.20):
-    f = int(round(RES / grid.res)); n = grid.n // f
+    cres = coarse_res(grid); f = int(round(cres / grid.res)); n = grid.n // f
     L = grid.L[:n * f, :n * f].reshape(n, f, n, f)
     occ = ((L > 1.5).sum((1, 3)) >= 1).astype(np.uint8)        # confident hits only (single noisy hits don't close doors)
-    r = int(math.ceil(inflate / RES))
+    r = max(1, int(round(inflate / cres)))                       # nearest whole cell (0.24 -> 6x4 cm, 0.21 -> 5x4 cm)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
     return cv2.dilate(occ, k).astype(bool), occ.astype(bool)
 
@@ -31,8 +37,8 @@ def plan(grid, start, goal):
 def _plan(grid, start, goal, inflate):
     """-> dict(xy=(N,2) map-frame path, goal=reachable goal, snap_m=distance requested->reachable, ms) or None."""
     t = time.perf_counter()
-    blk, occ = coarse_blocked(grid, inflate); n = blk.shape[0]; o = grid.origin
-    def cell(p): return (min(max(int((p[1] - o[1]) / RES), 0), n - 1), min(max(int((p[0] - o[0]) / RES), 0), n - 1))
+    blk, occ = coarse_blocked(grid, inflate); n = blk.shape[0]; o = grid.origin; cres = coarse_res(grid)
+    def cell(p): return (min(max(int((p[1] - o[1]) / cres), 0), n - 1), min(max(int((p[0] - o[0]) / cres), 0), n - 1))
     s, g = cell(start), cell(goal)
     free = ~blk; free[s] = True                       # robot may sit in an inflated band; let it leave
     if not free[g]:                                   # nearest free cell to the requested goal
@@ -41,7 +47,7 @@ def _plan(grid, start, goal, inflate):
         if not len(ys): return None
         j = np.argmin((ys - g[0]) ** 2 + (xs - g[1]) ** 2); g = (int(ys[j]), int(xs[j]))
     # sub-window bounding box (start/goal + 3 m margin) keeps the graph small
-    m = int(4.0 / RES)
+    m = int(4.0 / cres)
     r0, r1 = max(min(s[0], g[0]) - m, 0), min(max(s[0], g[0]) + m + 1, n)
     c0, c1 = max(min(s[1], g[1]) - m, 0), min(max(s[1], g[1]) + m + 1, n)
     F = free[r0:r1, c0:c1]; H, W = F.shape; idx = np.arange(H * W).reshape(H, W)
@@ -66,9 +72,9 @@ def _plan(grid, start, goal, inflate):
     path = [gi]
     while path[-1] != si: path.append(P[path[-1]])
     path = np.array(path[::-1]); yy, xx = np.divmod(path, W)
-    xy = np.stack([o[0] + (xx + c0 + 0.5) * RES, o[1] + (yy + r0 + 0.5) * RES], 1)
+    xy = np.stack([o[0] + (xx + c0 + 0.5) * cres, o[1] + (yy + r0 + 0.5) * cres], 1)
     gq = xy[-1]
-    if blk[cell(goal)] == 0 and math.hypot(gq[0] - goal[0], gq[1] - goal[1]) < 2 * RES: xy[-1] = goal; gq = np.asarray(goal, float)
+    if blk[cell(goal)] == 0 and math.hypot(gq[0] - goal[0], gq[1] - goal[1]) < 2 * cres: xy[-1] = goal; gq = np.asarray(goal, float)
     return dict(xy=xy, goal=gq, snap_m=float(math.hypot(gq[0] - goal[0], gq[1] - goal[1])), ms=(time.perf_counter() - t) * 1e3)
 
 

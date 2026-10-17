@@ -102,6 +102,23 @@ def chat(text, who="you"):
 def set_mode(on, who="?"):
     if MODE["send_all_vln"] != on: MODE["send_all_vln"] = on; log(who, "Send all to LightNav: %s" % ("ON" if on else "OFF"))
 
+NAVEV = {"t": None}
+def relay_nav_events(events):
+    """nav runs commands asynchronously (POST /api/command only queues them), so its outcome - 'unreachable ...',
+    'arrived ...', 'VLN: model says stop', 'gave up ...' - arrives later as an event.  Put each new one in the shared
+    chat log so a command never looks silently ignored.  Events already there when the viewer starts are not replayed."""
+    if not events: return
+    if NAVEV["t"] is None: NAVEV["t"] = max(e[0] for e in events); return
+    new = [e for e in events if e[0] > NAVEV["t"]]
+    for t, s in new:
+        shape = re.sub(r"-?\d+(\.\d+)?", "#", s)               # same message up to its numbers (LightNav re-goals ~3/s)
+        with lock:
+            if LOG and LOG[-1][1] == "nav" and LOG[-1][3:4] == [shape]:   # update that line in place, with a count
+                n = LOG[-1][4] + 1; LOG[-1][:] = [time.strftime("%H:%M:%S"), "nav", "%s  (x%d)" % (s, n), shape, n]
+            else: LOG.append([time.strftime("%H:%M:%S"), "nav", s, shape, 1]); del LOG[:-60]
+            LOGN[0] += 1
+    if new: NAVEV["t"] = new[-1][0]
+
 def hub():   # authoritative merged state for every client (WS broadcast + /state.json polling), ~15 Hz
     while True:
         t0 = time.time(); S = sim(); st = {"t": t0}
@@ -110,6 +127,7 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
             n = json.loads(nav("/api/state"))
             st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
                       safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"))
+            relay_nav_events(n.get("events"))
             V = n.get("vln")
             if V and S:                                          # env-frame copies for the 3-D view
                 for k in V.get("sets") or []:
@@ -119,7 +137,7 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
             if S and n.get("path"): st["path_env"] = [nav2env(S, *p[:2]) for p in n["path"]]
         except Exception as e: st["nav_error"] = str(e)[:80]
         st["send_all_vln"] = MODE["send_all_vln"]
-        with lock: st["log"] = LOG[-30:]; st["log_n"] = LOGN[0]
+        with lock: st["log"] = [r[:3] for r in LOG[-30:]]; st["log_n"] = LOGN[0]
         with CL_LOCK: st["clients"] = len(CLIENTS)
         HUB["seq"] += 1; st["seq"] = HUB["seq"]; HUB["st"] = st
         msg = json.dumps(dict(type="state", **st), default=float)
@@ -311,7 +329,7 @@ class H(BaseHTTPRequestHandler):
             return self._send(json.dumps({"error": "bad request"}).encode(), "application/json", 400)
         if p == "/map.jpg": return self._send(MAPJPG[0], "image/jpeg") if MAPJPG[0] else self._send(b"", code=404)
         if p == "/log":
-            with lock: return self._send(json.dumps(LOG).encode())
+            with lock: return self._send(json.dumps([r[:3] for r in LOG]).encode())
         if p == "/sim.json": return self._send(json.dumps(sim()).encode())
         if p == "/scene.json":
             # Export current env geometry - try to load from sim state or use a default
