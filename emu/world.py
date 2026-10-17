@@ -279,7 +279,7 @@ def compose(env: envs.Env, tire: str) -> str:
         hl.set("ambient", "0.26 0.26 0.27"); hl.set("diffuse", "0.06 0.06 0.06"); hl.set("specular", "0 0 0")
         q = vis.find("quality")
         if q is None: q = ET.SubElement(vis, "quality")
-        q.set("shadowsize", "4096")
+        q.set("shadowsize", str(max(256, realism.SHADOW)))          # KEVIN_EMU_SHADOW (0 = sun shadows off)
     # near clip: MuJoCo's default znear is 0.01*extent (0.20 m in the office) -> desk tops 0.18-0.20 m below the
     # RS1 lens were clipped away and the camera saw *through* them to the floor.  A real D435 returns 0 (invalid)
     # inside min-Z instead; keep the clip at 1 cm and let --min-z produce the invalid band.

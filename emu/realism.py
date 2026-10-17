@@ -24,6 +24,7 @@ import numpy as np
 CACHE = os.path.join(os.environ.get("KEVIN_EMU_CACHE", os.path.expanduser("~/.cache/kevin_emu")))
 SRC = os.path.join(CACHE, "pbr_src"); OUT = os.path.join(CACHE, "tex_real")
 REAL = os.environ.get("KEVIN_EMU_REAL", "1") == "1"
+SHADOW = int(os.environ.get("KEVIN_EMU_SHADOW", "4096"))      # sun shadow-map size; 0 disables shadows (live-rate knob)
 #  material: (ambientCG id, tint rgb (None = as scanned), texrepeat per metre, specular, shininess)
 PBR = {
     "plaster":  ("PaintedPlaster017", (0.93, 0.91, 0.86), 0.7, 0.05, 0.1),   # warm white
@@ -199,7 +200,7 @@ def casita_decor(env):
 
 def casita_lights(env):
     """[(attrs)] MuJoCo <light> attributes: sun + ceiling lamps per room."""
-    L = [dict(name="sun", directional="true", castshadow="true", pos="-6 -4 8", dir="0.55 0.35 -0.76", diffuse="0.75 0.70 0.62", specular="0.2 0.2 0.2")]
+    L = [dict(name="sun", directional="true", castshadow="true" if SHADOW > 0 else "false", pos="-6 -4 8", dir="0.55 0.35 -0.76", diffuse="0.75 0.70 0.62", specular="0.2 0.2 0.2")]
     for nm, (x, y) in (("lamp_living", (2.8, 2.2)), ("lamp_kitchen", (5.3, 5.2)), ("lamp_hall", (2.0, 7.2)), ("lamp_bed1", (1.8, 11.8)), ("lamp_bed2", (5.4, 11.8)), ("lamp_laundry", (5.6, 7.9))):
         L.append(dict(name=nm, pos="%g %g 2.15" % (x, y), dir="0 0 -1", diffuse="0.42 0.38 0.30", specular="0.05 0.05 0.05",
                       attenuation="0.6 0.25 0.08", cutoff="80", exponent="2", castshadow="false"))   # sun-only shadows: 30 Hz budget

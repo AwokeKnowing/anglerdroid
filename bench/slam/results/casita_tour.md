@@ -9,6 +9,8 @@ seq casita_tour  path 31.31 m, turned 3289.0 deg
 | cuvslam_stereo_selfmask | 1.0 | 1.723 | 3.068 | 35.59 | 26.49 | 3.9 | 0.008 | 1.294 | None | 6.6 ms/frame (p99 13.1), lost 0 |
 | kslam | 1.0 | 0.211 | 0.344 | 2.83 | 1.04 | 0.31 | 0.008 | 0.127 | None | 48.76 ms/frame CPU (python, 2495 frames) |
 | kslam_vo | 1.0 | 0.693 | 0.826 | 2.83 | 1.04 | 0.31 | 0.012 | 0.376 | None | post-process; slip-flagged steps 28, VO steps used 2484 of 2494 |
+| lingbot_mast | None | 0.934 | 0.967 | 178.34 | 14.82 | 19.61 | 0.443 | 0.68 | 2.6163 | 179.9 s for 1248 frames = 6.9 FPS, 5.19 GB peak torch |
+| lingbot_rs2_color | None | 2.375 | 0.186 | 179.01 | 22.42 | 19.68 | 0.653 | 1.804 | 2.312 | 178.3 s for 1248 frames = 7.0 FPS, 5.19 GB peak torch |
 | odom_wheel | 1.0 | 2.355 | 3.963 | 53.07 | 42.7 | 5.81 | 0.012 | 1.142 | None |  |
 | odom_wheel_gyro | 1.0 | 0.586 | 0.998 | 14.17 | 13.53 | 1.55 | 0.012 | 0.361 | None |  |
 | orbslam3_stereo | 0.998 | 0.138 | 0.001 | 6.59 | 0.01 | 0.74 | 0.005 | 0.114 | None | 304.4 ms/frame wall incl. png decode (2495 frames, CPU) |
