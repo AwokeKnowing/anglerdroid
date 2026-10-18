@@ -85,16 +85,25 @@ class Odom:
         if not self.ekf or n < 150: return None
         Rl = abs(z4); th_c = self.at(t_cap)[2]; phi = (math.atan2(z4.imag, z4.real) / 4) + th_c   # world wall angle
         if _WLOG: _WLOG.write("%.4f %.4f %.5f %.5f %.3f %d %.4f %s\n" % (t_cap, self.t or 0, th_c, phi, Rl, n, self.w, self.psi0)); _WLOG.flush()
-        if abs(self.w) > 1.2: self.n_wall_rej += 1; return None   # fast turn: wall directions unreliable (measured live:
+        if abs(self.w) > 0.8: self.n_wall_rej += 1; return None   # turning: wall directions unreliable (measured live:
         # |w| < 0.8 rad/s within 0.7 deg of GT p95, |w| > 1.2 rad/s ~39 deg off) -> neither learn psi0 nor correct
         if self.psi0 is None:
-            if Rl > 0.5 and n > 400: self._psi_acc.append(np.exp(4j * phi))
-            if len(self._psi_acc) >= 5: self.psi0 = float(np.angle(np.mean(self._psi_acc)) / 4)
+            # the house's wall direction in the map frame: learn it only while the yaw itself is still well known
+            # (sigma < 2 deg) and barely turning, from 5 mutually consistent frames (|mean exp(4i phi)| > 0.9).
+            # Learning it mid-tour (live 07:30: yaw sigma tens of degrees after LightNav's +-2.5 rad/s turns) gave a
+            # wrong psi0 and the first correction then rotated the pose 34 deg.
+            if Rl > 0.5 and n > 400 and abs(self.w) < 0.3 and self.P[0, 0] < math.radians(2) ** 2:
+                self._psi_acc.append(np.exp(4j * phi)); del self._psi_acc[:-5]
+                m = np.mean(self._psi_acc)
+                if len(self._psi_acc) == 5 and abs(m) > 0.9: self.psi0 = float(np.angle(m) / 4)
             return None
         if Rl <= 0.45: self.n_wall_rej += 1; return None
         q = math.pi / 2; r = -(((phi - self.psi0) + q / 2) % q - q / 2)
         sig = math.radians(1.5) / math.sqrt(min(n, 4000) / 500.0) / Rl
-        if r * r / (self.P[0, 0] + sig ** 2) >= 25.0: self.n_wall_rej += 1; return None
+        S = self.P[0, 0] + sig ** 2
+        # a mod-90 deg measurement is only usable while the prior picks the branch unambiguously: the 5-sigma gate
+        # (r^2/S < 25) must lie inside +-45 deg, i.e. sqrt(S) < 9 deg.  Beyond that, any wall frame "fits" some branch.
+        if S > math.radians(9) ** 2 or r * r / S >= 25.0: self.n_wall_rej += 1; return None
         self.n_wall += 1; return self._upd(np.array([1.0, 0.0, 0.0]), r, sig ** 2)
 
     def at(self, t):
