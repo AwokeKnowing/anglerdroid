@@ -162,14 +162,9 @@ class BumpDetector:
         # ---- tests
         why = None
         for k in range(2):
-            # travel is integrated over the OBSERVED push only: from the first tick that shows it to the latest.  The
-            # interval before the first push tick is not evidence of a push (counting it let one 230 ms loop stall add
-            # 0.124 m of 'commanded travel during the push' on the first tick, > D_CLIMB: a 0.1 s rug-edge wheel stall
-            # at 0.55 m/s tripped as a contact, 2026-10-18 couch leg; the wheel was back at speed 70 ms later).
-            on = push[k] >= Z_I; first = on and self.run_I[k] == 0
-            self.run_I[k] = self.run_I[k] + 1 if on else 0
-            self.run_d[k] = (0.0 if first else self.run_d[k] + abs(u[k]) * dt) if on else 0.0
-            self.run_m[k] = (0.0 if first else self.run_m[k] + max(0.0, math.copysign(1.0, u[k]) * vw[k]) * dt) if on else 0.0
+            self.run_I[k] = self.run_I[k] + 1 if push[k] >= Z_I else 0
+            self.run_d[k] = self.run_d[k] + abs(u[k]) * dt if push[k] >= Z_I else 0.0
+            self.run_m[k] = self.run_m[k] + max(0.0, math.copysign(1.0, u[k]) * vw[k]) * dt if push[k] >= Z_I else 0.0
         # A rigid obstacle and a floor step (threshold, rug edge) both load the motors.  Climbing lifts the chassis, so
         # while the IMU shows vertical motion (zV >= 4 in the push window) the push must outlast the climb: persist
         # over D_CLIMB of commanded wheel travel (wheel geometry over the highest step perception calls floor).
