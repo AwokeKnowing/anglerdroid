@@ -15,7 +15,20 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 #chat button:hover{background:#0b6}
 #log{position:fixed;bottom:60px;left:8px;right:8px;max-height:200px;overflow:auto;background:#0008;padding:6px;font:11px monospace;white-space:pre-wrap;display:none;z-index:2}
 #log.show{display:block}
-#controls{position:fixed;top:8px;right:8px;background:#000a;padding:6px;border-radius:4px;display:flex;flex-direction:column;gap:4px;z-index:2}
+#menubtn{position:fixed;top:8px;right:8px;z-index:4;background:#234e;color:#fff;border:1px solid #456;border-radius:6px;font:14px system-ui;padding:8px 12px;cursor:pointer;min-height:40px}
+#menubtn.unread::after{content:" \2022";color:#fc4}
+#controls{position:fixed;top:54px;right:8px;background:#000d;padding:8px;border-radius:6px;display:flex;flex-direction:column;gap:4px;z-index:3;
+  max-height:calc(100vh - 130px);overflow-y:auto;max-width:calc(100vw - 16px);border:1px solid #333}
+#controls.hidden{display:none}
+@media (pointer:coarse),(max-width:600px){
+  #controls label{font-size:15px!important;min-height:36px}
+  #controls input[type=checkbox]{width:20px;height:20px}
+  #controls button{font-size:15px!important;padding:8px 10px!important}
+  #controls select{font-size:15px!important}
+  .cp img{width:42vw!important}
+  #safimg{width:44vw!important}
+  #hud{font-size:11px;max-width:calc(100vw - 110px)}
+}
 #controls label{font-size:11px;display:flex;align-items:center;cursor:pointer}
 #controls input[type=checkbox]{margin-right:6px}
 #controls button{font-size:11px;padding:4px 8px;cursor:pointer;background:#234;color:#fff;border:1px solid #456;border-radius:3px}
@@ -27,7 +40,8 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <body>
 <canvas id="c"></canvas>
 <div id="hud">Kevin Live Sim · Drag orbit · Scroll zoom · loading…</div>
-<div id="controls">
+<button type="button" id="menubtn" aria-expanded="false" aria-controls="controls" title="view options">&#9776; View</button>
+<div id="controls" class="hidden">
 <label title="Kevin, map, path, goals, places and LightNav are drawn where SLAM thinks they are"><input type="checkbox" id="showslam" checked> SLAM map (Kevin's world)</label>
 <label><input type="checkbox" id="showplaces" checked> Places</label>
 <label title="simulator ground truth: true house + true Kevin (ghost). Drift shows as the two separating">Sim truth&nbsp;<select id="gtmode" style="font-size:11px"><option value="off">off</option><option value="faint" selected>faint</option><option value="full">full</option></select></label>
@@ -44,6 +58,7 @@ body{background:#0a0a0a;color:#ddd;font:14px system-ui;overflow:hidden;height:10
 <label><input type="checkbox" id="showlog"> Show log</label>
 <button type="button" id="framebtn">Frame house</button>
 <button type="button" id="kevbtn">Close-up on Kevin</button>
+<label><input type="checkbox" id="safvis" checked> Safety frame</label>
 </div>
 <div id="campanels"></div>
 <div id="log"></div>
@@ -423,13 +438,21 @@ function updateVLN(st){
   vlnGoal.visible=!!vlnGoal.userData.has&&showVlnEl.checked;
 }
 function renderLog(L){if(!L)return;const txt=L.map(r=>r[0]+' '+r[1]+': '+r[2]).join('\n');if(txt===logEl.textContent)return;
-  logEl.textContent=txt;logEl.scrollTop=1e9;if(!showlogEl.checked&&L.length){showlogEl.checked=true;logEl.classList.add('show')}}
+  // never re-enables the log by itself (it used to: any new line turned 'Show log' back on); mark the menu instead
+  logEl.textContent=txt;logEl.scrollTop=1e9;if(!showlogEl.checked&&L.length)menuBtn.classList.add('unread')}
 
 const qEl=document.getElementById('q');
 const sendBtn=document.getElementById('send');
 const logEl=document.getElementById('log');
 const showlogEl=document.getElementById('showlog');
-showlogEl.onchange=()=>{logEl.classList.toggle('show',showlogEl.checked)};
+// view menu + log visibility: per-client choices in localStorage (kv_menu, kv_showlog); menu collapsed by default on
+// narrow or touch screens, open on wide desktop screens
+const menuBtn=document.getElementById('menubtn'),ctlEl=document.getElementById('controls');
+function setMenu(open,save){ctlEl.classList.toggle('hidden',!open);menuBtn.setAttribute('aria-expanded',String(open));if(save)localStorage.setItem('kv_menu',open?'1':'0')}
+{const m=localStorage.getItem('kv_menu');setMenu(m===null?window.matchMedia('(min-width:900px) and (pointer:fine)').matches:m==='1',false)}
+menuBtn.onclick=()=>setMenu(ctlEl.classList.contains('hidden'),true);
+showlogEl.checked=localStorage.getItem('kv_showlog')==='1';logEl.classList.toggle('show',showlogEl.checked);
+showlogEl.onchange=()=>{logEl.classList.toggle('show',showlogEl.checked);localStorage.setItem('kv_showlog',showlogEl.checked?'1':'0');if(showlogEl.checked)menuBtn.classList.remove('unread')};
 
 async function sendChat(text){
   if(wsOK&&ws){ws.send(JSON.stringify({type:'chat',text,who:myName}));return}
@@ -453,9 +476,10 @@ loadScene();
 connectWS();setTimeout(()=>{if(!wsOK)startPoll()},1500);
 animate();
 </script>
-<div id=safety style="position:fixed;right:8px;bottom:8px;z-index:50;background:#111c;border:1px solid #444;padding:3px;font:11px sans-serif;color:#ccc">
-<label><input type=checkbox id=safvis checked> safety frame</label><br><img id=safimg style="width:325px;display:block" alt="safety frame"></div>
-<script>(function(){const im=document.getElementById('safimg'),cb=document.getElementById('safvis');
-setInterval(()=>{if(cb.checked){const n=new Image();n.onload=()=>{im.src=n.src};n.src='/safety.png?'+Date.now()}im.style.display=cb.checked?'block':'none'},250)})();</script>
+<div id=safety style="position:fixed;right:8px;bottom:60px;z-index:2;background:#111c;border:1px solid #444;padding:3px;font:11px sans-serif;color:#ccc">
+<img id=safimg style="width:325px;display:block" alt="safety frame"></div>
+<script>(function(){const im=document.getElementById('safimg'),cb=document.getElementById('safvis'),box=document.getElementById('safety');
+cb.checked=localStorage.getItem('kv_safvis')!=='0';cb.addEventListener('change',()=>localStorage.setItem('kv_safvis',cb.checked?'1':'0'));
+setInterval(()=>{if(cb.checked){const n=new Image();n.onload=()=>{im.src=n.src};n.src='/safety.png?'+Date.now()}box.style.display=cb.checked?'block':'none'},250)})();</script>
 </body>
 </html>
