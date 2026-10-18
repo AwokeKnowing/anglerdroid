@@ -324,6 +324,7 @@ class Brain:
         # safety envelope: fresh RS1 ego + RS2 obstacles (robot frame), stamped
         pts = np.concatenate([ego_obs, self._rs2_obs]) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else ego_obs
         if self.tick % 3 == 0 or not hasattr(self, "_mpts"): self._mpts = self._map_points(x, y, th)
+        mp = self._mpts
         if len(self._mpts):
             # remembered map cells that land inside/at the footprint are pose-error artifacts (the robot cannot be
             # inside a wall it is not touching; fresh sensors cover contact): drop them, keep the rest as memory
@@ -345,6 +346,10 @@ class Brain:
         if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
         self.hw.drive(v, w)
         if _SLOG is not None:                                   # KEVIN_SAFETY_LOG: per-tick timing/clearance (debug only)
+            def _near(P, n=4):                                  # closest n points: (x, y, signed dist to footprint), robot frame
+                if P is None or not len(P): return None
+                d = self.env._sd(P[:, :2]); k = np.argsort(d)[:n]
+                return [[round(float(P[i, 0]), 3), round(float(P[i, 1]), 3), round(float(d[i]), 3)] for i in k]
             def _mind(P):
                 if P is None or not len(P): return None
                 F = P[(P[:, 0] > 0) & (np.abs(P[:, 1]) < 0.25)]
@@ -352,7 +357,9 @@ class Brain:
             _SLOG.write(json.dumps([round(t0, 4), round(t_frame, 4), round(time.monotonic(), 4), round(v_pre, 3), round(w_pre, 3), round(v_saf, 3), round(w_saf, 3),
                                     round(v, 3), round(w, 3), info.get("state"), info.get("scale"), info.get("clearance"), _mind(ego_obs),
                                     _mind(self._rs2_obs) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else None,
-                                    round(vl, 3), round(vr, 3), round(self.slam.odom.v, 3), self.mode]) + "\n")
+                                    round(vl, 3), round(vr, 3), round(self.slam.odom.v, 3), self.mode, _near(ego_obs),
+                                    _near(self._rs2_obs) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else None,
+                                    _near(mp) if len(self._mpts) and len(mp) else None]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
             self.rec.put(t=t_frame, v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
