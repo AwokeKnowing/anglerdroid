@@ -368,9 +368,13 @@ class Brain:
             self._feed_core(); fw = None
             if getattr(self.hw, "core", False): vl_f, vr_f = self.hw.wheel_vels(); fw = (self.hw.wheel_t(), vl_f, vr_f)
             pr = self.pred.predict(t_eff, fresh=fw)
-            if pr is not None and self.mode in ("path", "backout"):
+            if pr is not None and self.mode in ("path", "backout") and os.environ.get("KEVIN_PRED_POSE", "1") == "1":   # =0: diagnosis
                 from nav.slam import compose
-                (x, y, th) = compose(self.slam.T, pr[0]) if hasattr(self.slam, "T") else pr[0]; vs, ws = pr[1], pr[2]
+                # pose = the prediction at effect time.  The control base stays the last ISSUED command (vs, ws =
+                # self.v, self.w): MPPI's u is the command (its accel limits are on the command, which is what the
+                # ODrive ramp chases).  Integrating u from the predicted ACTUAL speed (d5d6fe3 and before) made each
+                # command = actual + a*dt: it could never lead the plant's lag -> 0.08 m/s crawl, 0/9 goals.
+                (x, y, th) = compose(self.slam.T, pr[0]) if hasattr(self.slam, "T") else pr[0]
         tr = self.__dict__.setdefault("trail", [])                    # breadcrumbs of where Kevin actually drove
         if not tr or math.hypot(tr[-1][0] - x, tr[-1][1] - y) > 0.05: tr.append((x, y)); del tr[:-80]
         L = self.planner and __import__("core").Limits; integrate_v = __import__("core").integrate_v
