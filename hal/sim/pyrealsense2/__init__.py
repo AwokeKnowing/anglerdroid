@@ -293,9 +293,12 @@ class decimation_filter(_block):
         if m <= 1: return f
         H, W = (z.shape[0] // m) * m, (z.shape[1] // m) * m
         b = z[:H, :W].reshape(H // m, m, W // m, m).transpose(0, 2, 1, 3).reshape(H // m, W // m, m * m)
-        if m <= 3:
-            bb = b.astype(np.float32); bb[bb == 0] = np.nan
-            out = np.nan_to_num(np.nanmedian(bb, axis=2), nan=0.0).astype(np.uint16)
+        if m <= 3:      # median of the valid (non-zero) samples; = np.nanmedian, ~10x faster (sort of <= 9 values)
+            bb = np.sort(np.where(b == 0, np.float32(np.inf), b.astype(np.float32)), axis=2)
+            cnt = (b > 0).sum(2); lo = np.maximum(cnt - 1, 0) // 2; hi = cnt // 2
+            hi = np.minimum(hi, m * m - 1)
+            med = 0.5 * (np.take_along_axis(bb, lo[..., None], 2)[..., 0] + np.take_along_axis(bb, hi[..., None], 2)[..., 0])
+            out = np.where(cnt > 0, med, 0.0).astype(np.uint16)
         else:
             v = b > 0; cnt = v.sum(2); out = np.where(cnt > 0, b.sum(2, dtype=np.uint32) / np.maximum(cnt, 1), 0).astype(np.uint16)
         p = f._prof; i = p._intr
