@@ -26,7 +26,9 @@ CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
 # command starts the next plan; goals / global replans are latched and taken at the next cycle start; each plan starts
 # from the latency-compensated predicted state (nav/predict.py).  KEVIN_CTL=frame: the previous loop (one plan per RS1
 # frame, from the latest measured pose and the last commanded v, w).
-CTL_MODE = os.environ.get("KEVIN_CTL", "cmd")
+# Default frame until the cmd loop has beaten the old loop on the bench (2026-10-18: v1 starved perception with a busy
+# plan loop and predicted from brain commands, not what the safety core sent; v2 fixes both).
+CTL_MODE = os.environ.get("KEVIN_CTL", "frame")
 GOAL_SAME_M = 0.20     # a re-sent goal within the xy goal tolerance (0.20 m, below) is the same goal
 GYRO_INC = os.environ.get("KEVIN_GYRO_INC", "1") != "0"     # 0: mean gyro rate x frame dt (previous behaviour)
 from nav.hw import AXLE_H
@@ -75,7 +77,7 @@ class Brain:
         self._cmd_lock = threading.Lock(); self._pending = []
         from nav.predict import CmdPredictor
         self.pred = CmdPredictor(float(os.environ.get("KEVIN_VEL_RAMP", "3.0")))
-        self._ctl_cv = threading.Condition(); self._snap = None; self._snap_n = 0; self._latched_g = None
+        self._ctl_cv = threading.Condition(); self._t_iss = 0.0; self._snap = None; self._snap_n = 0; self._latched_g = None
         self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
         self.running = True
@@ -301,6 +303,7 @@ class Brain:
                              self.slam.stats.get("reloc_ms", 0), "" if ok else " -- AMBIGUOUS, pose not changed; drive a bit and 'relocalize'"))
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
+        self._feed_core()
         self.pred.measured(t_frame, vl, vr, self.slam.odom.pose, t_w)  # odom pose at the frame stamp, wheel speeds at their read time
         with self._ctl_cv:
             self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._ctl_cv.notify_all()
@@ -316,9 +319,18 @@ class Brain:
             try: tf = time.perf_counter(); self.pred.fit_latency(); self.stats.add("latfit_ms", (time.perf_counter() - tf) * 1e3)
             except Exception as e: self.stats.add("latfit_err", 1)
 
+    def _feed_core(self):
+        """the safety core's last tick (what it SENT the wheels) into the predictor's command history."""
+        cs = self.hw.core_state() if getattr(self.hw, "core", False) else None
+        if cs: self.pred.core(cs.get("t_sent"), cs.get("v_out"), cs.get("w_out"), cs.get("ramp"), cs.get("period"))
+        return cs
+
     def _ctl_loop(self):
-        """command-triggered: the next plan starts as soon as the previous command is issued (path/backout).  Other
-        modes have no plan to run: they wait for new information (frame / command), as the frame loop did."""
+        """command-triggered (path/backout): the next plan starts when the previous plan's command is issued to the
+        wheels -- the safety core forwards brain commands at its own ticks, so 'issued' = the core's t_sent passing the
+        brain's hand-over time.  (v1 started the next plan at the hand-over: plans faster than the core can forward
+        them are never executed, and the busy loop starved perception of the GIL: RS1 period 45 -> 100 ms.)
+        Other modes have no plan to run: they wait for new information (frame / command), as the frame loop did."""
         last = -1
         while self.running:
             with self._ctl_cv:
@@ -328,7 +340,14 @@ class Brain:
                 last = self._snap_n
             try: self._control()
             except Exception as e:
-                self.stats.add("ctl_err", 1); self.log("control error: %r" % e); time.sleep(0.05)
+                self.stats.add("ctl_err", 1); self.log("control error: %r" % e); time.sleep(0.05); continue
+            if busy and getattr(self.hw, "core", False):
+                t_h = self._t_iss; t_end = t_h + 3 * self.pred.core_period
+                while self.running and time.monotonic() < t_end and not self._pending:
+                    cs = self._feed_core()
+                    if cs and (cs.get("t_sent") or 0) > t_h: break
+                    time.sleep(0.001)
+                self.stats.add("ctl_wait_ms", (time.monotonic() - t_h) * 1e3)
 
     def _control(self):
         t_frame, ego_obs, valid, vl, vr, gz = self._snap
@@ -347,12 +366,14 @@ class Brain:
         with self._cmd_lock: pend, self._pending = self._pending, []
         for c in pend: self._apply(c)
         x, y, th = self.slam.pose(); dt = 1.0 / HZ; vs, ws = self.v, self.w        # plan start state (frame mode)
+        t_eff = self.pred.effect_time(t0)
         xm, ym = x, y; pr = None
         if CTL_MODE == "cmd":
             # latency-compensated start: measured state forward through the issued commands to when THIS command acts
-            dt = self.pred.period
-            cs = self.hw.core_state() if hasattr(self.hw, "core_state") else None
-            pr = self.pred.predict(t0 + self.pred.t_plan + self.pred.lat, ramp_tps=(cs or {}).get("ramp"))
+            dt = self.pred.core_period                                # a command holds for one core tick
+            self._feed_core(); fw = None
+            if getattr(self.hw, "core", False): vl_f, vr_f = self.hw.wheel_vels(); fw = (self.hw.wheel_t(), vl_f, vr_f)
+            pr = self.pred.predict(t_eff, fresh=fw)
             if pr is not None and self.mode in ("path", "backout"):
                 from nav.slam import compose
                 (x, y, th) = compose(self.slam.T, pr[0]) if hasattr(self.slam, "T") else pr[0]; vs, ws = pr[1], pr[2]
@@ -476,12 +497,13 @@ class Brain:
                 k = min(vc / max(abs(v), 1e-6), wc / max(abs(w), 1e-6)); v, w = v * k, w * k; self.stats.add("rate_capped", 1)
         v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
         if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
-        self.hw.drive(v, w); t_iss = time.monotonic(); self.pred.issued(t_iss, v, w)
+        self.hw.drive(v, w); t_iss = self._t_iss = time.monotonic(); self.pred.issued(t_iss, v, w)
         if self.mode in ("path", "backout"):             # score plan cycles: predicted start vs the raw measurement, both
-            if pr is not None: self.pred.remember(t_iss + self.pred.lat, (pr[0], pr[1], pr[2]), pr[3])   # against the state measured at effect
-            elif self.pred.meas: self.pred.remember(t_iss + self.pred.lat, None, self.pred.meas[-1])
+            if pr is not None: self.pred.remember(t_eff, (pr[0], pr[1], pr[2]), pr[3])   # against the state measured at effect
+            elif self.pred.meas: self.pred.remember(t_eff, None, self.pred.meas[-1])
         tc = getattr(self, "_tc0", None); self._tc0 = t0; self.pred.cycle(t_iss - t0, None if tc is None else t0 - tc)
-        self.stats.add("ctl_compute_ms", (t_iss - t0) * 1e3)
+        self.stats.add("ctl_compute_ms", (t_iss - t0) * 1e3); self.stats.add("frame_to_iss_ms", (t_iss - t_frame) * 1e3)
+        if self.mode in ("path", "backout"): self.stats.add("sample_to_effect_ms", (t_eff - t_frame) * 1e3)
         if tc is not None: self.stats.add("ctl_period_ms", (t0 - tc) * 1e3)
         if _SLOG is not None:                                   # KEVIN_SAFETY_LOG: per-tick timing/clearance (debug only)
             def _near(P, n=4):                                  # closest n points: (x, y, signed dist to footprint), robot frame
