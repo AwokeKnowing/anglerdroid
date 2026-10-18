@@ -290,6 +290,11 @@ class Slam2:
             self.grid.integrate(pm, obs, free, obs_h, carve); self._last_int = podom
             self._carve = carve; self.stats["carve_ms"] = round((time.perf_counter() - tc) * 1e3, 1)
             self.stats["carved"] = self.grid.n_carved; self.stats["carved_tot"] = self.stats.get("carved_tot", 0) + self.grid.n_carved
+        elif rays:      # standing still: no new evidence weight (a parked scan would saturate), but what the cameras see
+            # through NOW is free -> carve (this frame's hits only shield their cells)
+            tc = time.perf_counter(); self.grid.integrate(pm, obs, np.zeros((0, 2), np.float32), obs_h, carve_rays(rays, self.grid.res), w_hit=0.0)
+            self.stats["carve_ms"] = round((time.perf_counter() - tc) * 1e3, 1)
+            self.stats["carved"] = self.grid.n_carved; self.stats["carved_tot"] = self.stats.get("carved_tot", 0) + self.grid.n_carved
         last = self.kfs[-1] if self.kfs else None
         if last is None or math.hypot(podom[0] - last.odom[0], podom[1] - last.odom[1]) > KF_D or abs(wrap(podom[2] - last.odom[2])) > KF_A:
             self._insert(podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free,

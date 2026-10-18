@@ -154,12 +154,12 @@ class GridMap:
         ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < self.n) & (ij[:, 1] < self.n)
         return ij[ok, 1], ij[ok, 0]
 
-    def integrate(self, pose, obs_r, free_r, obs_h=None, carve=None):
+    def integrate(self, pose, obs_r, free_r, obs_h=None, carve=None, w_hit=0.9):
         """obs_r/free_r: robot-frame points (obs_h: their heights above floor, NaN = unknown).
         carve = carve_rays(...) of THIS frame: cells crossed by depth rays with no return there.  A cell is carved only
         where this frame's rays pass through the whole height band in which the cell's obstacle evidence was seen
         (a removed box clears; a wall is never crossed; a table top clears only if rays pass at table height);
-        cells hit in this frame and cells out of view are untouched."""
+        cells hit in this frame and cells out of view are untouched.  w_hit=0: carve only (stationary frames)."""
         with self.lock:
             Lr, Lo, Hi = self.L.ravel(), self.Hlo.ravel(), self.Hhi.ravel()
             if len(free_r):
@@ -168,8 +168,8 @@ class GridMap:
             if len(obs_r):
                 k, ok = self._keys(transform(obs_r, pose))
                 hit = np.unique(k)                                   # one hit per cell per scan
-                Lr[hit] += 0.9; self.seen.ravel()[hit] = True
-                if obs_h is not None:
+                if w_hit: Lr[hit] += w_hit; self.seen.ravel()[hit] = True
+                if obs_h is not None and w_hit:
                     h = np.asarray(obs_h, np.float32)[ok]; m = np.isfinite(h)
                     np.minimum.at(Lo, k[m], h[m].astype(np.float16)); np.maximum.at(Hi, k[m], h[m].astype(np.float16))
             if carve is not None and len(carve[0]):
