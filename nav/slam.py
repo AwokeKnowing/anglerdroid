@@ -70,8 +70,11 @@ class Odom:
                 if self._still > 15:                         # ZUPT: true yaw rate 0 -> observes bias (and scale x rate)
                     # 5-sigma gate: wheels stopped but the gyro still sees rotation (body settling / sliding after a
                     # fast turn) is not a standstill; accepting it pulled the scale estimate -1.2 % in one LightNav run
-                    H = np.array([0.0, gyro_w, -1.0]); Sz = float(H @ self.P @ H) + self.QG * 10
-                    if w * w / Sz < 25.0: self._upd(H, 0.0 - w, self.QG * 10); self.n_zupt += 1; w = 0.0
+                    # 'still' allows wheels up to 1 cm/s, i.e. a real yaw rate up to 2*0.01/track ~ 0.07 rad/s: the
+                    # measurement is the wheel yaw rate wd (no slip at these speeds), not 0 -- with 0, a slow creep was
+                    # read as gyro scale error (live: scale -4.8 % in one LightNav run -> 29 deg yaw error)
+                    H = np.array([0.0, gyro_w, -1.0]); Rz = self.QG * 10; r = wd - w; Sz = float(H @ self.P @ H) + Rz
+                    if r * r / Sz < 25.0: self._upd(H, r, Rz); self.n_zupt += 1; w = wd
                     else: self.n_zupt_rej = getattr(self, "n_zupt_rej", 0) + 1        # really rotating: keep the gyro
         else: w = wd
         if self.t is not None:
