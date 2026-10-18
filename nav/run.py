@@ -28,7 +28,7 @@ CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
 # frame, from the latest measured pose and the last commanded v, w).
 # Default frame until the cmd loop has beaten the old loop on the bench (2026-10-18: v1 starved perception with a busy
 # plan loop and predicted from brain commands, not what the safety core sent; v2 fixes both).
-CTL_MODE = os.environ.get("KEVIN_CTL", "frame")
+CTL_MODE = "cmd" if os.environ.get("KEVIN_CMD_CYCLE") == "1" or os.environ.get("KEVIN_CTL") == "cmd" else "frame"   # opt-in: KEVIN_CMD_CYCLE=1
 GOAL_SAME_M = 0.20     # a re-sent goal within the xy goal tolerance (0.20 m, below) is the same goal
 GYRO_INC = os.environ.get("KEVIN_GYRO_INC", "1") != "0"     # 0: mean gyro rate x frame dt (previous behaviour)
 from nav.hw import AXLE_H
@@ -82,8 +82,9 @@ class Brain:
         self.vln = None
         self.running = True
         if self.planner: threading.Thread(target=self._plan_loop, daemon=True, name="plan").start()
-        threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
-        if CTL_MODE == "cmd": threading.Thread(target=self._ctl_loop, daemon=True, name="ctl").start()
+        if CTL_MODE == "cmd":                      # frame (default) = the previous loop; only the predictor's scoring runs
+            threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
+            threading.Thread(target=self._ctl_loop, daemon=True, name="ctl").start()
 
     # -------------------------------------------------------------- commands (any thread)
     def command(self, text):
