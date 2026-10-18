@@ -119,7 +119,8 @@ class Ego:
         z = v[:, 2]; fl = ok & (np.abs(z - self.CLIFF_Z0) < 0.06)
         coef = np.array([0.0, 0.0, self.CLIFF_Z0], np.float32)
         if fl.sum() > 500:
-            A = np.c_[v[fl, 0], v[fl, 1], np.ones(fl.sum(), np.float32)]; zf = z[fl]
+            fi = np.flatnonzero(fl); fi = fi[::max(1, len(fi) // 3000)]      # plane fit on <= ~3000 floor px (safety core budget)
+            A = np.c_[v[fi, 0], v[fi, 1], np.ones(len(fi), np.float32)]; zf = z[fi]
             for _ in range(2):
                 coef = np.linalg.lstsq(A, zf, rcond=None)[0]; r = np.abs(A @ coef - zf); k = r < max(0.01, np.percentile(r, 70))
                 A, zf = A[k], zf[k]

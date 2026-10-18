@@ -29,6 +29,7 @@ class Hardware:
         # it over nav.bus from dedicated pump threads and sends desired (v, w).  KEVIN_SAFETY_CORE=0: old in-process path.
         self.core = drive and os.environ.get("KEVIN_SAFETY_CORE", "1") == "1"
         self.rs1_intr = self.rs1.depth_intrinsics() if hasattr(self.rs1, "depth_intrinsics") else None
+        self._run = True
         if self.core:
             from nav import bus
             self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
@@ -39,7 +40,12 @@ class Hardware:
             ctx = mp.get_context("spawn")
             self.core_proc = ctx.Process(target=core_main, name="safety_core", daemon=True,
                                          args=(self.rs1_intr, self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG")))
-            self.core_proc.start(); drive = False                    # the core creates WheelBase
+            env0 = {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}
+            os.environ.update({k: "1" for k in env0})                 # single-threaded BLAS in the core (one pinned CPU)
+            self.core_proc.start(); drive = False
+            for k, v in env0.items():
+                if v is None: os.environ.pop(k, None)
+                else: os.environ[k] = v                    # the core creates WheelBase
         if drive:
             import wheelbase
             cwd = os.getcwd(); os.chdir(nav.SRC)          # WheelBase reads flat_endpoints.json relative to src/

@@ -272,11 +272,11 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
         if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
         else: code_c = None
         if new1:
-            s1, r1 = B["rs1"].read(out=r1); n = int(r1["n"][0]); cap1 = clk1.capture(float(r1["stamp"][0]), float(r1["t_recv"][0]))
+            s1, n, r1 = _read_rs1(B["rs1"], r1); tA = time.monotonic(); cap1 = clk1.capture(float(r1["stamp"][0]), float(r1["t_recv"][0]))
             per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
-            ego.update(r1["verts"][:n]); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab)
+            ego.update(r1["verts"][:n]); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
         else:
-            per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0
+            per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
         if B["rs2"].seq != s2:
             s2, r2 = B["rs2"].read(out=r2); cap2 = clk2.capture(float(r2["stamp"][0]), float(r2["t_recv"][0]))
             per2 = None if cap2p is None else cap2 - cap2p; cap2p = cap2
@@ -284,7 +284,8 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
             if int(sp["set"][0]): rs2.set_pose(sp["T"], sp["R"].reshape(3, 3))
             P2, _ = rs2.points(r2["depth"], h_max=H_MAX)
         else: per2 = None
-        age1 = (t_dec - cap1p) if cap1p is not None else np.inf; age2 = (t_dec - cap2) if cap2 is not None else np.inf
+        tC = time.monotonic()                                          # frame age AT DECISION (after the transform)
+        age1 = (tC - cap1p) if cap1p is not None else np.inf; age2 = (tC - cap2) if cap2 is not None else np.inf
         if not new1 or age1 > AGE_MAX_S or age2 > AGE_MAX_S:
             code = "inop_age"
         elif (per is not None and per > CADENCE_MAX_S) or (per2 is not None and per2 > CADENCE_MAX_S):
@@ -304,7 +305,7 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
                 for ax in (wb.left, wb.right): ax.write_property_nowait('axis0.controller.config.vel_ramp_rate', float(ramp))
             ramp_now = ramp
         if code in ("brake", "band_front", "band_rear", "inop_age", "inop_cadence", "no_depth") and (abs(v_c) > 1e-3 or abs(w_c) > 1e-3): brakes += 1
-        wb.twist(v_o, w_o); t_sent = time.monotonic()
+        tD = time.monotonic(); wb.twist(v_o, w_o); t_sent = time.monotonic()
         period = None if t_prev is None else t_dec - t_prev; t_prev = t_dec
         f = [t_dec, period if period is not None else np.nan, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, CODES.index(code) if code in CODES else -1,
              ramp, free, need, sd0, bf, br, npts, 0, cpu, t_sent, cap1p or np.nan, cap2 or np.nan, brakes]
@@ -314,9 +315,21 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
             viz_t = t_dec
         if LOG is not None:
             LOG.write(json.dumps([round(x, 4) if isinstance(x, float) and math.isfinite(x) else (None if isinstance(x, float) else x) for x in
-                                  [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid]]) + "\n")
+                                  [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, tA - t_dec, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
             ps += 1
             if ps % 30 == 0: LOG.flush()
+
+
+def _read_rs1(blk, out):
+    """seqlock read of only the n valid verts (the block holds MAX_VERTS)."""
+    for _ in range(200):
+        s0 = int(blk.hdr[0])
+        if s0 & 1: time.sleep(0.0001); continue
+        n = int(blk.arr["n"][0])
+        if "verts" not in out or len(out["verts"]) != n: out["verts"] = np.empty((n, 3), np.float32)
+        np.copyto(out["verts"], blk.arr["verts"][:n]); out["stamp"] = blk.arr["stamp"].copy(); out["t_recv"] = blk.arr["t_recv"].copy()
+        if int(blk.hdr[0]) == s0: return s0, n, out
+    raise TimeoutError("bus rs1: writer stuck")
 
 
 def _wait(blk, last, timeout):
