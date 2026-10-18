@@ -3,7 +3,7 @@ anglerdroid stack uses (cameras.py, imu.py, cuvslam_tracker.py, vision.py, main.
 emulator world over shared memory (emu/shm.py) at the camera's real rate; wait_for_frames blocks on the
 camera clock exactly like the SDK.  Active only when hal/sim is on PYTHONPATH (KEVIN_HAL=sim)."""
 from __future__ import annotations
-import enum, sys, time, math
+import enum, os, sys, time, math
 from pathlib import Path
 import numpy as np
 
@@ -11,6 +11,7 @@ _REPO = Path(__file__).resolve().parents[3]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
 from emu import shm as _shm  # noqa: E402
+_SHIMLOG = open(os.environ["KEVIN_SHIM_LOG"], "a", buffering=1 << 14) if os.environ.get("KEVIN_SHIM_LOG") else None   # latency trace
 
 __version__ = "2.55.1-kevin-emu"
 EMULATED = True
@@ -261,7 +262,9 @@ class pipeline:
             raise error("Frame didn't arrive within %d" % timeout_ms)
         if not self._cam.wait_new(self._seen, timeout_ms * 1e-3):
             raise error("Frame didn't arrive within %d" % timeout_ms)
-        return self._video_frames()
+        if _SHIMLOG is None: return self._video_frames()
+        t_w = time.monotonic_ns(); fs = self._video_frames(); t_r = time.monotonic_ns()
+        _SHIMLOG.write("%s %d %d %d %d\n" % (self._dev.get("shm", "?"), int(round(fs._t * 1e6)), t_w, t_r, os.getpid())); return fs
 
     def poll_for_frames(self):
         if self._cam is None:
