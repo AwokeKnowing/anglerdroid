@@ -316,6 +316,11 @@ def env_casita(seed):
     # floor: old lumpy carpet everywhere except these hard-floor zones (x0, y0, x1, y1); ~1 cm step at the edges
     b.e.hard_zones = [(3.4, 3.0, 7.0, 7.3), (4.6, 7.3, 7.0, 8.4), (0.0, 3.0, 1.3, 4.9)]
     b.e.dog = True                                          # wandering yorkie (emu.world)
+    from emu import realism
+    if realism.REAL:   # household decor (emu/realism.py): wall items/tops visual-only; pots + lamp base are real obstacles
+        b.e.decor = realism.casita_decor(b.e)
+        for kind, pos, size, yaw, mat, col in b.e.decor:
+            if col is True and kind == "cylinder": b.e.geoms.append(Geom("cyl", pos, size, 0.0, mat))
     return b.e
 
 

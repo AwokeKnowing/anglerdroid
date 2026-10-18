@@ -19,7 +19,7 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
-from emu import shm, envs  # noqa: E402
+from emu import shm, envs, realism  # noqa: E402
 
 TWIN = os.environ.get("KEVIN_TWIN", os.path.expanduser("~/kevin-urdf-twin-serve/kevin-urdf-twin/simready"))
 CAN_PORT = int(os.environ.get("KEVIN_CAN_PORT", "47800")); CTL_PORT = CAN_PORT + 1
@@ -36,6 +36,8 @@ VIEW_CAMS = {"rs1_depth": (0.10, 212, 120, FOVY_D, DW / DH, (0.1, 0.9, 1.0)),   
              "rs2_color": (0.09, 160, 120, FOVY_C, CW / CH, (1.0, 0.85, 0.1))}  # forward D435i RGB
 VIEW_CLIP = (0.2, 1.2)   # drawn FOV range (m): D435 minimum depth ~0.2 m .. 1.2 m to keep the scene readable
 FPS = 30
+DEPTHPROC = os.environ.get("KEVIN_EMU_DEPTHPROC", "1") == "1"   # depth cameras in their own process (emu/depthcam.py)
+CAMLOG = open(os.environ["KEVIN_EMU_CAMLOG"], "a", buffering=1 << 16) if os.environ.get("KEVIN_EMU_CAMLOG") else None
 # Mounts = twin URDF optical frames (urdf/kevin.urdf, base_link = axle centre, x fwd, y left, z up):
 #   realsense_d435_depth_optical  (-0.007, 0, 0.8619)  looking straight down, x_opt = robot-backward
 #   realsense_d435_color_optical  (+0.008, 0, 0.8619)
@@ -46,7 +48,13 @@ RS1_POS = (-0.007, 0.0, 0.8619); RS1C_POS = (0.008, 0.0, 0.8619)
 # mast RGB (USB16MP01 board camera at the tip of beam_mast_top; twin frames.rgb, optical z = base +x, pitch 0).  Rendered
 # at MAST_HZ into shm kevin_mast for the VLN (LightNav-0).  The twin has no lens FOV: KEVIN_MAST_HFOV (deg) until measured.
 MAST_POS = (0.0291, 0.0, 0.8905); MW, MH = 640, 480; MAST_HFOV = float(os.environ.get("KEVIN_MAST_HFOV", "100"))
-MAST_FOVY = math.degrees(2 * math.atan(math.tan(math.radians(MAST_HFOV) / 2) * MH / MW)); MAST_HZ = float(os.environ.get("KEVIN_MAST_HZ", "10"))
+MAST_FOVY = math.degrees(2 * math.atan(math.tan(math.radians(MAST_HFOV) / 2) * MH / MW))   # robot's BELIEF (info)
+# realism: the mast is rendered with the twin TRUTH lens (realism.mast_truth: DFOV 118 spec, residual barrel) -> a wider
+# pinhole render remapped through the distortion; robot code keeps believing KEVIN_MAST_HFOV (written to info as before)
+MAST_TRUE = realism.mast_truth(MW, MH) if realism.REAL else None
+MAST_RK = realism.CamFX.render_K_for(MW, MH, [[MAST_TRUE["fx"], 0, MAST_TRUE["cx"]], [0, MAST_TRUE["fy"], MAST_TRUE["cy"]], [0, 0, 1]], (MAST_TRUE["k1"], MAST_TRUE["k2"])) if MAST_TRUE else None
+MAST_RENDER_FOVY = math.degrees(2 * math.atan((MH / 2) / MAST_RK[1][1])) if MAST_RK else MAST_FOVY
+MAST_HZ = float(os.environ.get("KEVIN_MAST_HZ", "10"))
 RS2_POS = (-0.1301, 0.0, 0.3822); RS2C_DY = 0.015; RS2_IMU = (-0.1382, -0.0055, 0.3921)
 RS2_PITCH = math.radians(27.0); BASELINE = 0.050
 # true (as-mounted) forward D435i pose: nominal unless KEVIN_EMU_RS2_RAND=1 (per seed: pitch U(24,30) deg, base roll
@@ -181,14 +189,26 @@ def compose(env: envs.Env, tire: str) -> str:
     comp.set("meshdir", os.path.join(TWIN, comp.get("meshdir", "assets"))); comp.set("texturedir", os.path.join(TWIN, comp.get("texturedir", "assets")))
     asset = root.find("asset"); wb = root.find("worldbody")
     tdir = envs.ensure_textures()
-    for m in envs.MATS:
-        ET.SubElement(asset, "texture", name="t_" + m, type="2d", file=os.path.join(tdir, m + ".png"))
-        ET.SubElement(asset, "material", name="m_" + m, texture="t_" + m, texrepeat="2 2", texuniform="true", specular="0.1", shininess="0.1")
+    if realism.REAL:      # CC0 photo textures (ambientCG) + per-material repeat/specular; procedural fallback per material
+        tp = realism.prepare_textures(tdir)
+        for m in list(envs.MATS) + realism.EXTRA_MATS:
+            if m not in tp: continue
+            ET.SubElement(asset, "texture", name="t_" + m, type="2d", file=tp[m])
+            ET.SubElement(asset, "material", name="m_" + m, texture="t_" + m, **realism.mat_attrs(m))
+    else:
+        for m in envs.MATS:
+            ET.SubElement(asset, "texture", name="t_" + m, type="2d", file=os.path.join(tdir, m + ".png"))
+            ET.SubElement(asset, "material", name="m_" + m, texture="t_" + m, texrepeat="2 2", texuniform="true", specular="0.1", shininess="0.1")
     for i, g in enumerate(env.geoms):
         q = "%g 0 0 %g" % (math.cos(g.yaw / 2), math.sin(g.yaw / 2))
         a = dict(name="env%d" % i, pos="%g %g %g" % g.pos, quat=q, material="m_" + g.mat, contype="1", conaffinity="2", group="0", friction="0.6 0.005 0.0001")
         if g.kind == "box": ET.SubElement(wb, "geom", type="box", size="%g %g %g" % g.size, **a)
         elif g.kind == "cyl": ET.SubElement(wb, "geom", type="cylinder", size="%g %g" % g.size, **a)
+        elif g.kind == "mesh" and realism.REAL and hasattr(env, "_mesh") and g.mesh.endswith(".stl"):
+            # visual walls: per-room OBJ with planar UVs (already in world coords); collision = wall_occ boxes below
+            for k, (obj, wm) in enumerate(realism.casita_wall_objs(g.mesh, g.size[0], np.array(g.pos))):
+                ET.SubElement(asset, "mesh", name="envmesh%d_%d" % (i, k), file=obj)
+                ET.SubElement(wb, "geom", type="mesh", mesh="envmesh%d_%d" % (i, k), name="env%d_%d" % (i, k), material="m_" + wm, contype="0", conaffinity="0", group="0")
         elif g.kind == "mesh":
             ET.SubElement(asset, "mesh", name="envmesh%d" % i, file=g.mesh, scale="%g %g %g" % g.size)
             if hasattr(env, "wall_occ"): a.update(contype="0", conaffinity="0")   # MuJoCo meshes collide as convex hulls
@@ -234,9 +254,17 @@ def compose(env: envs.Env, tire: str) -> str:
     for k in range(N_OBS):          # mocap obstacles for adversarial tests (parked below the floor)
         b = ET.SubElement(wb, "body", name="obs%d" % k, mocap="true", pos="0 0 -5")
         ET.SubElement(b, "geom", type="box", size="0.15 0.15 0.35", pos="0 0 0.35", material="m_dark", contype="1", conaffinity="2")
-    for lx, ly in ((0.25, 0.25), (0.75, 0.75), (0.25, 0.75), (0.75, 0.25)):
-        x0, y0, x1, y1 = env.extent
-        ET.SubElement(wb, "light", pos="%g %g 2.3" % (x0 + lx * (x1 - x0), y0 + ly * (y1 - y0)), dir="0 0 -1", diffuse="0.18 0.18 0.17", castshadow="false")
+    if realism.REAL and hasattr(env, "decor"):
+        for k, (kind, pos, size, yaw, mat, col) in enumerate(env.decor):     # decor: visual geoms (colliders are env geoms)
+            if col is True: continue
+            ET.SubElement(wb, "geom", name="decor%d" % k, type=kind, size=" ".join("%g" % v for v in size), pos="%g %g %g" % pos,
+                          quat="%g 0 0 %g" % (math.cos(yaw / 2), math.sin(yaw / 2)), material="m_" + mat, contype="0", conaffinity="0",
+                          group="1" if col == "ceiling" else "0")
+        for L in realism.casita_lights(env): ET.SubElement(wb, "light", **L)
+    else:
+        for lx, ly in ((0.25, 0.25), (0.75, 0.75), (0.25, 0.75), (0.75, 0.25)):
+            x0, y0, x1, y1 = env.extent
+            ET.SubElement(wb, "light", pos="%g %g 2.3" % (x0 + lx * (x1 - x0), y0 + ly * (y1 - y0)), dir="0 0 -1", diffuse="0.18 0.18 0.17", castshadow="false")
     base = wb.find("body[@name='base_link']")
     # cameras: MuJoCo looks along -z with +y up; RS optical is z fwd, y down -> xyaxes = (x_opt, -y_opt)
     ET.SubElement(base, "camera", name="rs1_depth", pos="%g %g %g" % RS1_POS, xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_D))
@@ -244,7 +272,7 @@ def compose(env: envs.Env, tire: str) -> str:
     ET.SubElement(base, "camera", name="rs1_ir1", pos="%g %g %g" % RS1_POS, xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_D))
     ET.SubElement(base, "camera", name="rs1_ir2", pos="%g %g %g" % (RS1_POS[0] - BASELINE, RS1_POS[1], RS1_POS[2]), xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_D))
     ET.SubElement(base, "camera", name="rs1_color", pos="%g %g %g" % RS1C_POS, xyaxes="-1 0 0 0 -1 0", fovy=str(FOVY_C))
-    ET.SubElement(base, "camera", name="mast_rgb", pos="%g %g %g" % MAST_POS, xyaxes="0 -1 0 0 0 1", fovy="%.3f" % MAST_FOVY)
+    ET.SubElement(base, "camera", name="mast_rgb", pos="%g %g %g" % MAST_POS, xyaxes="0 -1 0 0 0 1", fovy="%.3f" % MAST_RENDER_FOVY)
     pr = math.radians(RS2_TRUE["pitch_deg"]); s, c = math.sin(pr), math.cos(pr); dz = RS2_TRUE["dz"]
     for nm, dy in (("rs2_ir1", 0.0), ("rs2_ir2", -BASELINE), ("rs2_color", RS2C_DY)):
         ET.SubElement(base, "camera", name=nm, pos="%g %g %g" % (RS2_POS[0], RS2_POS[1] + dy, RS2_POS[2] + dz), xyaxes=_rs2_axes((0, -1, 0), (s, 0, c)), fovy=str(FOVY_D if "ir" in nm else FOVY_C))
@@ -270,6 +298,13 @@ def compose(env: envs.Env, tire: str) -> str:
                 g0.set("friction", " ".join("%g" % v for v in f))
     vis = root.find("visual"); g = vis.find("global") if vis is not None else None
     if g is not None: g.set("offwidth", "1280"); g.set("offheight", "960")
+    if realism.REAL and vis is not None:      # headlight = weak ambient/indirect term only (no camera-mounted flash look)
+        hl = vis.find("headlight")
+        if hl is None: hl = ET.SubElement(vis, "headlight")
+        hl.set("ambient", "0.26 0.26 0.27"); hl.set("diffuse", "0.06 0.06 0.06"); hl.set("specular", "0 0 0")
+        q = vis.find("quality")
+        if q is None: q = ET.SubElement(vis, "quality")
+        q.set("shadowsize", str(max(256, realism.SHADOW)))          # KEVIN_EMU_SHADOW (0 = sun shadows off)
     # near clip: MuJoCo's default znear is 0.01*extent (0.20 m in the office) -> desk tops 0.18-0.20 m below the
     # RS1 lens were clipped away and the camera saw *through* them to the floor.  A real D435 returns 0 (invalid)
     # inside min-Z instead; keep the clip at 1 cm and let --min-z produce the invalid band.
@@ -450,6 +485,9 @@ class World:
         self.dog = Dog(self.env, np.random.default_rng(a.seed + 11)) if getattr(self.env, "dog", False) and os.environ.get("KEVIN_EMU_DOG", "1") == "1" else None
         self.dog_mid = self.m.body("dog").mocapid[0] if self.dog else -1
         self.dog_geoms = set(i for i in range(self.m.ngeom) if (self.m.geom(i).name or "").startswith("dog_"))
+        if self.dog is None and self.dog_geoms:                       # dog disabled (KEVIN_EMU_DOG=0): no parked ghost obstacle
+            for g in self.dog_geoms: self.m.geom_contype[g] = 0; self.m.geom_conaffinity[g] = 0; self.m.geom_rgba[g, 3] = 0.0
+            self.dog_geoms = set()
         self.dog_contacts = 0; self._dog_in = False; self.dog_on = self.dog is not None
         if self.dog and float(os.environ.get("KEVIN_EMU_DOG_KEEPOUT", "0") or 0) > 0:
             self.dog.keep_out = [(float(self.env.start[0]), float(self.env.start[1]), float(os.environ["KEVIN_EMU_DOG_KEEPOUT"]))]
@@ -479,6 +517,7 @@ class World:
         L2 = L1 + IRL; L1 = L1 + IRL                     # both RealSenses stream IR1/IR2 (cuVSLAM dual rig)
         self.b1 = shm.Block("kevin_rs1", L1, create=True); self.b2 = shm.Block("kevin_rs2", L2, create=True)
         self.imu = shm.ImuRing("kevin_imu", create=True)
+        if DEPTHPROC: self._start_depthcam(L1, L2)
         self.gt = shm.Block("kevin_gt", [("pose", (12,), "f8")], create=True)
         self.bm = shm.Block("kevin_mast", [("color", (MH, MW, 3), "u1")], create=True)
         di, ci = _intr(DW, DH, FOVY_D), _intr(CW, CH, FOVY_C)
@@ -496,9 +535,25 @@ class World:
             "mounts": dict(rs1=RS1_POS, rs2=RS2_POS, rs2_imu=RS2_IMU, rs2_pitch_deg=math.degrees(RS2_PITCH), rs2_true=RS2_TRUE), "pid": os.getpid(), "t0": time.monotonic()}
         np.savez_compressed("/dev/shm/kevin_gt_map.npz", occ=self.env.gt, origin=np.array(self.env.gt_origin), res=envs.GT_RES)
         shm.write_info(info)
+        if MAST_TRUE:   # twin truth for eval tools only (robot code reads info, i.e. its own beliefs)
+            json.dump(dict(mast=dict(MAST_TRUE, render_fovy_deg=MAST_RENDER_FOVY), rs2_mount=RS2_TRUE), open(os.environ.get("KEVIN_EMU_TRUTH", "/dev/shm/kevin_emu_truth.json"), "w"))
         self.can = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.can.bind(("127.0.0.1", CAN_PORT)); self.can.setblocking(False)
         self.ctl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.ctl.bind(("127.0.0.1", CTL_PORT)); self.ctl.setblocking(False)
         self.clients = set(); self.FMT = struct.Struct("<dIB??8s")
+
+    def _start_depthcam(self, L1, L2):
+        """RS1/RS2 depth in their own process (emu/depthcam.py): model binary + config in /dev/shm, pose block written by
+        the physics loop every camera tick, colour/IR side blocks written by the slow lane."""
+        import subprocess
+        from emu import depthcam
+        self.campose = shm.Block("kevin_campose", depthcam.pose_layout(self.m), create=True)
+        p = dict(DH=DH, DW=DW, CH=CH, CW=CW, ir=bool(self.a.ir), fpx=_intr(DW, DH, FOVY_D)["fx"], baseline=BASELINE, subpix=self.a.subpix,
+                 holes=self.a.holes, min_z=self.a.min_z, band=bool(self.a.band), cam_jit=NP["cam_jit"], world_pid=os.getpid(),
+                 layout1=[[n, list(s_), d] for n, s_, d in L1], layout2=[[n, list(s_), d] for n, s_, d in L2], model="/dev/shm/kevin_emu_model.mjb")
+        self.side1 = shm.Block("kevin_rs1_side", depthcam.side_layout(p), create=True); self.side2 = shm.Block("kevin_rs2_side", depthcam.side_layout(p), create=True)
+        self.mj.mj_saveModel(self.m, p["model"], None)
+        json.dump(p, open("/dev/shm/kevin_depthcam.json", "w"))
+        self.depthcam = subprocess.Popen([sys.executable, "-m", "emu.depthcam", "/dev/shm/kevin_depthcam.json"], cwd=REPO)
 
     def _send(self, aid, data):
         pkt = self.FMT.pack(time.time(), aid, len(data), False, False, bytes(data).ljust(8, b"\0"))
@@ -577,7 +632,8 @@ class World:
             if dh and not self._dog_in:
                 self.dog_contacts += 1; vb = float(np.hypot(*self.d.qvel[:2]))
                 self.last_dog_contact = dict(t=round(float(self.d.time), 2), kevin_speed=round(vb, 3), kevin_w=round(float(self.d.qvel[5]), 3),
-                                             dog_mode=self.dog.mode, dog_v=self.dog.v, kevin=[round(float(v), 2) for v in self.d.qpos[:2]], dog=[round(self.dog.x, 2), round(self.dog.y, 2)])
+                                             dog_mode=getattr(self.dog, 'mode', 'parked'), dog_v=getattr(self.dog, 'v', 0.0), kevin=[round(float(v), 2) for v in self.d.qpos[:2]],
+                                             dog=[round(self.dog.x, 2), round(self.dog.y, 2)] if self.dog is not None else None)
                 print("emu.world: DOG CONTACT %s" % self.last_dog_contact, flush=True)
             self._dog_in = dh
         hz = getattr(self.env, "hazard", None)
@@ -651,16 +707,20 @@ class World:
                                                         self.nodes[0].vel, self.nodes[1].vel, self.nodes[0].ax.input_vel, self.nodes[1].ax.input_vel]))
                 if self.d.time >= n_cam / FPS:
                     n_cam += 1
+                    if DEPTHPROC:          # depth process renders from this pose (capture stamp = physics time)
+                        self.campose.write(st_ns, qpos=self.d.qpos, mpos=self.d.mocap_pos, mquat=self.d.mocap_quat,
+                                           blind=np.array(["rs1" in self.blind, "rs2" in self.blind], np.uint8))
                     with cv:
-                        rq["job"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy()); cv.notify()
+                        rq["job"] = rq["slow"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5]), time.monotonic_ns()); cv.notify_all()
             if now - last_report > 10:
                 s = self.state()
-                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz" % (
-                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / (now - last_report), self._ncam / (now - last_report)), flush=True)
-                steps = 0; self._ncam = 0; last_report = now
+                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz" % (
+                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / (now - last_report), self._ncam / (now - last_report), self._ncol / (now - last_report)), flush=True)
+                steps = 0; self._ncam = 0; self._ncol = 0; last_report = now
             time.sleep(0.0008)
 
     _ncam = 0
+    _ncol = 0
 
     def _view(self, dr, imgs):
         """Third-person chase view (KEVIN_EMU_VIEW=1, ~10 Hz): own model copy with a brighter headlight + extra lights,
@@ -700,7 +760,7 @@ class World:
         hit = mj.mj_ray(vm, dr, np.array(cam.lookat, float), back, self._rgrp, 1, -1, self._rid)
         if 0 <= hit < cam.distance + 0.15:
             cam.distance = max(0.5, hit - 0.15); cam.elevation = min(cam.elevation, -70.0) if hit < 1.2 else cam.elevation
-        if not hasattr(self, "_vopt"): self._vopt = mj.MjvOption(); self._vopt.geomgroup[5] = 1
+        if not hasattr(self, "_vopt"): self._vopt = mj.MjvOption(); self._vopt.geomgroup[5] = 1; self._vopt.geomgroup[1] = 0   # group 1 = ceiling
         self._vopt.geomgroup[4] = 1 if camvis else 0  # group 4 = image-slice geometry
         R.update_scene(dr, cam, self._vopt); sc = R.scene
         near, far = VIEW_CLIP
@@ -734,16 +794,19 @@ class World:
         self._vn += 1
 
     def _render_loop(self, rq, cv):
+        """Two render lanes so the expensive colour cameras can never starve depth (safety latency):
+          FAST (this thread): every camera tick (FPS = 30 Hz) render RS1 (top-down) depth first, then RS2 depth
+                 (KEVIN_EMU_FAST_RS2=1, default), depth-only passes with the D4xx noise model.  It is the ONLY writer
+                 of kevin_rs1/kevin_rs2; colour/IR produced by the slow lane ride along with the next depth write.
+          SLOW (own thread + own GL contexts): RS1/RS2 colour, IR pairs, mast, viewer -- runs as fast as it can on the
+                 newest pose (adaptive rate), never blocks the fast lane."""
+        import cv2
         mj = self.mj; m = self.m; dr = mj.MjData(m)
         Rd = mj.Renderer(m, DH, DW); Rd.enable_depth_rendering()
-        Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
-        Rc = mj.Renderer(m, CH, CW)
-        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
         rng = np.random.default_rng(7)
         NB = 8   # pre-generated noise banks (generating 400k normals per frame costs more than the render)
         zn = [rng.standard_normal((DH, DW), dtype=np.float32) for _ in range(NB)]
         drop = [rng.random((DH, DW), dtype=np.float32) < self.a.holes for _ in range(NB)]
-        irn = [rng.normal(0, 2.0, (DH, DW)).astype(np.float32) for _ in range(NB)]
         k = [0]
         # D4xx stereo depth model (Intel D400 datasheet 337029; "Tuning depth cameras for best performance" whitepaper):
         #   depth origin = LEFT IR imager; RMS error = Z^2 * subpixel / (f_px * B), subpixel ~0.08, B = 50 mm;
@@ -758,48 +821,114 @@ class World:
             sub = sub * 2.0
             sunm = [envs._smooth(rng, (DH, DW), 40) > rng.uniform(0.25, 0.45) for _ in range(NB)]
         def depth(cam):
-            Rd.update_scene(dr, cam); z = Rd.render(); i = k[0] = (k[0] + 1) % NB
-            zz = z + (z * z) * (sub / (fpx * BASELINE)) * zn[i]
+            Rd.update_scene(dr, cam); Rd.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0   # depth needs no shading passes
+            z = Rd.render(); i = k[0] = (k[0] + 1) % NB
+            disp = np.float32(fpx * BASELINE) / np.maximum(z, np.float32(1e-3))        # disparity (px), reused below
+            zz = z * z; zz *= np.float32(sub / (fpx * BASELINE)); zz *= zn[i]; zz += z
             bad = (z < self.a.min_z) | (z > 8.0) | (drop[i] if self.a.holes > 0 else False)
             if SUN: bad |= sunm[i] | (rng.random(z.shape) < 0.03)
-            if self.a.band: bad |= cols < fpx * BASELINE / np.maximum(z, 1e-3)       # left invalid band
+            if self.a.band: bad |= cols < disp                                         # left invalid band
             # stereo occlusion shadow (left-imager origin): pixel c is unseen by the right imager if a nearer pixel
             # c+s to its right has disparity >= d(c)+s.  Geometric, one-sided, width f*B*(1/zn-1/zf) px.  (Old rule
             # |dz|>8 % on both sides of every edge blanked thin grass blades twice -> >50 % invalid -> no_depth stop.)
-            xr = cols - (fpx * BASELINE) / np.maximum(z, 1e-3)                      # right-image column
+            xr = cols - disp                                                           # right-image column
             smin = np.minimum.accumulate(xr[:, ::-1], axis=1)[:, ::-1]                 # min over c' >= c
             bad[:, :-1] |= smin[:, 1:] <= xr[:, :-1] - 0.5                             # something to the right lands left of us
             zz *= 1000.0; zz[bad] = 0
             return zz.astype(np.uint16)
-        def rgb(R, cam):
-            R.update_scene(dr, cam); return R.render()
-        W3 = np.array([0.299 * 0.9, 0.587 * 0.9, 0.114 * 0.9], np.float32)
+        FAST_RS2 = os.environ.get("KEVIN_EMU_FAST_RS2", "1") == "1"
+        lane = {"pend1": {}, "pend2": {}, "d1": None, "d2": None, "lock": threading.Lock()}
+        if DEPTHPROC:                  # depth lives in emu/depthcam.py; this thread only runs the colour/IR/mast/viewer lane
+            with cv: rq["job"] = None
+            return self._slow_lane(rq, cv, lane, True)
+        st = threading.Thread(target=self._slow_lane, args=(rq, cv, lane, FAST_RS2), daemon=True); st.start()
+        jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
         while True:
             with cv:
                 while rq["job"] is None: cv.wait()
-                st_ns, qpos, mocap, mquat = rq["job"]; rq["job"] = None
+                st_ns, qpos, mocap, mquat, wz, t_job = rq["job"]; rq["job"] = None
+            t_pick = time.monotonic_ns()
             dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
-            d1 = depth("rs1_depth")
+            d1 = depth("rs1_depth")                                # top-down (safety) first, every tick
             if "rs1" in self.blind: d1[:] = 0
-            out1 = dict(depth=d1, color=rgb(Rc, "rs1_color"))
-            out = dict(depth=depth("rs2_ir1"), color=rgb(Rc, "rs2_color"))
-            if "rs2" in self.blind: out["depth"][:] = 0
+            with lane["lock"]:
+                p1 = lane["pend1"]; lane["pend1"] = {}
+            t_r1 = time.monotonic_ns(); s1 = st_ns + jt(); self.b1.write(s1, depth=d1, **p1); t_w1 = time.monotonic_ns()
+            s2 = t_r2 = t_w2 = 0
+            if FAST_RS2:
+                d2 = depth("rs2_ir1")
+                if "rs2" in self.blind: d2[:] = 0
+                with lane["lock"]:
+                    p2 = lane["pend2"]; lane["pend2"] = {}
+                t_r2 = time.monotonic_ns(); s2 = st_ns + jt(); self.b2.write(s2, depth=d2, **p2); lane["d2"] = d2; t_w2 = time.monotonic_ns()
+            else:
+                with lane["lock"]:
+                    p2 = lane["pend2"]; lane["pend2"] = {}
+                if p2: self.b2.write(p2.pop("_st"), **p2)
+            lane["d1"] = d1; self._ncam += 1
+            if CAMLOG is not None:   # KEVIN_EMU_CAMLOG: per-frame stage stamps (monotonic ns) for the latency trace
+                CAMLOG.write("%d %d %d %d %d %d %d %d %d %d\n" % (st_ns, t_job, t_pick, t_r1, t_w1, t_r2, t_w2, s1, s2, int(bool(p1))))
+
+    def _slow_lane(self, rq, cv, lane, fast_rs2):
+        import cv2
+        mj = self.mj; m = self.m; dr = mj.MjData(m)
+        Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
+        Rc = mj.Renderer(m, CH, CW)
+        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
+        Rd2 = None
+        if not fast_rs2: Rd2 = mj.Renderer(m, DH, DW); Rd2.enable_depth_rendering()
+        rng = np.random.default_rng(8); NB = 8
+        irn = [rng.normal(0, 2.0, (DH, DW)).astype(np.float32) for _ in range(NB)]
+        irn2 = [np.tile(b, (2, 2)) for b in irn]   # 2x banks: random window per frame instead of np.roll copies
+        fpx = _intr(DW, DH, FOVY_D)["fx"]
+        def rgb(R, cam):
+            R.update_scene(dr, cam); return R.render()
+        fx = {}
+        if realism.REAL:      # camera pipeline: AE, vignetting, yaw motion blur, shot/read noise; mast also lens distortion
+            ci, mt = _intr(CW, CH, FOVY_C), MAST_TRUE
+            Kc = [[ci["fx"], 0, ci["ppx"]], [0, ci["fy"], ci["ppy"]], [0, 0, 1]]
+            fx["rs1_color"] = realism.CamFX(CW, CH, Kc, exposure_s=0.010, seed=1); fx["rs2_color"] = realism.CamFX(CW, CH, Kc, exposure_s=0.010, seed=2)
+            fx["mast"] = realism.CamFX(MW, MH, [[mt["fx"], 0, mt["cx"]], [0, mt["fy"], mt["cy"]], [0, 0, 1]], dist=(mt["k1"], mt["k2"]), render_K=MAST_RK, exposure_s=0.015, vignette=0.35, seed=3)
+        def fxa(name, img, w):
+            return fx[name](img, w) if name in fx else img
+        from concurrent.futures import ThreadPoolExecutor
+        pool = ThreadPoolExecutor(2)       # CamFX (cv2, GIL released) overlaps with the next renders
+        cv2.setNumThreads(1)               # the sim is CPU-bound: no cv2 worker oversubscription
+        last = None
+        while True:
+            with cv:
+                while rq.get("slow") is None or rq["slow"] is last: cv.wait()
+                last = job = rq["slow"]
+            st_ns, qpos, mocap, mquat, wz, _ = job
+            dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
+            f1 = pool.submit(fxa, "rs1_color", rgb(Rc, "rs1_color"), wz); f2 = pool.submit(fxa, "rs2_color", rgb(Rc, "rs2_color"), wz)
+            o1, o2 = {}, {}
             if Rc8 is not None:
-                for dev, o in (("rs1", out1), ("rs2", out)):
+                for dev, o in (("rs1", o1), ("rs2", o2)):
                     for nm in ("ir1", "ir2"):
-                        g = rgb(Rc8, dev + "_" + nm).astype(np.float32) @ W3
-                        # read noise is temporally independent on a real imager: a fixed 8-frame bank added at the same
-                        # pixel positions acts like body-fixed texture and pulls visual odometry toward zero motion.
-                        # Random 2-D shift of a bank pattern per frame -> no static pattern, ~1 ms.
-                        g += np.roll(irn[int(rng.integers(NB))], (int(rng.integers(DH)), int(rng.integers(DW))), axis=(0, 1))
+                        g = cv2.cvtColor(rgb(Rc8, dev + "_" + nm), cv2.COLOR_RGB2GRAY).astype(np.float32) * np.float32(0.9)
+                        # read noise is temporally independent on a real imager: random 2-D shift of a bank pattern
+                        if realism.REAL:
+                            L = abs(wz) * 0.004 * fpx
+                            if L >= 1.0: g = cv2.blur(g, (int(round(L)) | 1, 1))
+                        oy, ox = int(rng.integers(DH)), int(rng.integers(DW))
+                        g += irn2[int(rng.integers(NB))][oy:oy + DH, ox:ox + DW]
                         o[nm] = np.clip(g, 0, 255).astype(np.uint8)
-            jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
-            self.b1.write(st_ns + jt(), **out1)
-            self.b2.write(st_ns + jt(), **out); self._ncam += 1
+            o1["color"] = f1.result(); o2["color"] = f2.result()
+            if Rd2 is not None:                                    # RS2 depth in the slow lane only if not fast
+                Rd2.update_scene(dr, "rs2_ir1"); Rd2.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
+                o2["depth"] = (Rd2.render() * 1000.0).astype(np.uint16); o2["_st"] = st_ns
+            if DEPTHPROC:
+                self.side1.write(st_ns, **o1); self.side2.write(st_ns, **o2)
+                lane["d1"] = self.b1.arr["depth"].copy(); lane["d2"] = self.b2.arr["depth"].copy()   # viewer only (torn frame harmless)
+            else:
+                with lane["lock"]:
+                    lane["pend1"] = o1; lane["pend2"] = o2
+            self._ncol += 1
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
-                t_mast[0] = st_ns; self.bm.write(st_ns, color=rgb(Rm, "mast_rgb"))
-            if VIEW and self._ncam % 3 == 0:
-                self._view(dr, {"rs1_depth": out1["depth"], "rs1_color": out1["color"], "rs2_ir1": out["depth"], "rs2_color": out["color"]})
+                t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
+            if VIEW and self._ncol % 2 == 0 and lane["d1"] is not None:
+                self._view(dr, {"rs1_depth": lane["d1"], "rs1_color": o1["color"], "rs2_ir1": lane["d2"] if lane["d2"] is not None else o2.get("depth"), "rs2_color": o2["color"]})
 
 
 def main():

@@ -1,0 +1,30 @@
+{
+ "frame": "base",
+ "scale_free": false,
+ "per_frame": true,
+ "note": "kslam: wheel + gyro EKF (scale/bias) + online Manhattan heading + floor self-cal",
+ "runtime": "53.66 ms/frame CPU (python, 2495 frames)",
+ "selfcal": {
+  "rs2_pitch_corr_deg": -3.35,
+  "rs2_roll_corr_deg": -0.02,
+  "cam_height_m": 0.4662,
+  "rs2_pitch_est_deg": 23.65,
+  "rs2_pitch_belief_deg": 27.0,
+  "rs2_pitch_true_deg": 24.0,
+  "gyro_scale_err_est": -0.00646,
+  "gyro_bias_est": -0.00274,
+  "gyro_scale_err_true_z_imu": [
+   -0.013031601905822754,
+   0.009053587913513184,
+   0.004463791847229004
+  ]
+ },
+ "stats": {
+  "manhattan_used": 278,
+  "manhattan_rejected": 17,
+  "floor_updates": 238,
+  "zupt": 136,
+  "selfmask_frac": 0.291,
+  "psi0_deg": -0.47
+ }
+}
