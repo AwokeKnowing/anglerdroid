@@ -119,6 +119,19 @@ def _floor_model(root, asset, wb, env, level):
     # wheel/caster starts inside a lawn bump (stock tire on lawn was ejected 1.4 m at spawn and lodged: 0 m driven)
     k = int(0.35 / res); sub = h[max(sr - k, 0):sr + k + 1, max(sc - k, 0):sc + k + 1]
     h -= float(sub.max()) if sub.size else h[np.clip(sr, 0, nr - 1), np.clip(sc, 0, nc - 1)]
+    # hard-floor zones (tile plates): the hfield under each plate is flattened to the zone's max (plate top 0.5 mm
+    # above it) so the carpet ramps down (one 5 cm hfield cell, the 12 mm pile) straight onto the plate top.  Before
+    # 2026-10-17 the plate top was the max over an index window one row/column wider than the zone (= the adjacent,
+    # 12 mm higher carpet) while the hfield inside stayed at hard-floor level: every plate stood ~flush with the carpet
+    # (exposed edge face up to 14-15 mm on all 3 casita plates, emu.tools.floor_steps) and left a 12 mm-deep one-cell
+    # notch where the hfield ramped down; Kevin's casters dropped in and the plate edge kicked him (casita x 3.4-3.85,
+    # y 2.99, measured live 1.2-1.9 m/s, 4.3-5.4 rad/s at 0.34 m/s; offline up to 1.6 m/s, 6.3 rad/s, 26 deg tilt).
+    # Rugs on tile were also buried inside the too-high plate; they now sit on it (6-10 mm edge as intended).
+    plates = []
+    for (a0, b0, a1, b1) in getattr(env, "hard_zones", []):
+        inz = (xx >= a0) & (xx <= a1) & (yy >= b0) & (yy <= b1)
+        if not inz.any(): continue
+        top = float(h[inz].max()) + 0.0005; h[inz] = top - 0.0005; plates.append(((a0, b0, a1, b1), top))
     lo = float(h.min()); span = max(float(h.max()) - lo, 1e-4)
     hf = ET.SubElement(asset, "hfield", name="floor_hf", nrow=str(nr), ncol=str(nc),
                        size="%g %g %g %g" % ((x1 - x0) / 2, (y1 - y0) / 2, span, 0.05))
@@ -126,9 +139,7 @@ def _floor_model(root, asset, wb, env, level):
     ET.SubElement(wb, "geom", name="floor_uneven", type="hfield", hfield="floor_hf",
                   material=("m_" + mat) if mat else "floor", pos="%g %g %g" % ((x0 + x1) / 2, (y0 + y1) / 2, lo),
                   contype="1", conaffinity="3", condim=str(condim), friction="%g 0.005 %g" % (mu, roll))
-    for i, (a0, b0, a1, b1) in enumerate(getattr(env, "hard_zones", [])):     # hard floor plates (tile), flat
-        r0, r1 = int((b0 - y0) / res), int((b1 - y0) / res) + 1; c0, c1 = int((a0 - x0) / res), int((a1 - x0) / res) + 1
-        top = float(h[max(r0, 0):r1, max(c0, 0):c1].max()) + 0.0005
+    for i, ((a0, b0, a1, b1), top) in enumerate(plates):                       # hard floor plates (tile), flat
         ET.SubElement(wb, "geom", name="floor_hard%d" % i, type="box", size="%g %g 0.01" % ((a1 - a0) / 2, (b1 - b0) / 2),
                       pos="%g %g %g" % ((a0 + a1) / 2, (b0 + b1) / 2, top - 0.01), material="m_tile",
                       contype="1", conaffinity="3", condim="3", friction="0.7 0.005 0.002")
