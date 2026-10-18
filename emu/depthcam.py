@@ -74,9 +74,11 @@ def side_layout(p):
 
 def main(cfg_path):
     p = json.load(open(cfg_path))
-    cpus = os.environ.get("KEVIN_EMU_DEPTH_CPUS")
+    # KEVIN_EMU_DEPTH_CPUS="a,b": the process may use a and b; lane RS1 is pinned to a, lane RS2 to b (one CPU each:
+    # a lane needs ~8 ms noise + 7-10 ms render per 33 ms frame, two lanes on one CPU queue behind each other)
+    cpus = [int(c) for c in os.environ.get("KEVIN_EMU_DEPTH_CPUS", "").split(",") if c.strip()]
     if cpus:
-        try: os.sched_setaffinity(0, {int(c) for c in cpus.split(",")})
+        try: os.sched_setaffinity(0, set(cpus))
         except Exception as e: print("emu.depthcam: affinity %s failed: %s" % (cpus, e), flush=True)
     import mujoco as mj
     m = mj.MjModel.from_binary_path(p["model"])
@@ -85,9 +87,12 @@ def main(cfg_path):
     jit = float(p.get("cam_jit", 0.0)); world_pid = p["world_pid"]
     log = open(os.environ["KEVIN_EMU_CAMLOG"] + ".depthcam", "a", buffering=1 << 16) if os.environ.get("KEVIN_EMU_CAMLOG") else None
     llock = threading.Lock(); ready = threading.Barrier(3)
-    print("emu.depthcam: pid %d cpus %s latency %.1f ms, parallel RS1/RS2 depth" % (os.getpid(), sorted(os.sched_getaffinity(0)), lat_ns * 1e-6), flush=True)
+    print("emu.depthcam: pid %d cpus %s (lane RS1 -> first, RS2 -> second) latency %.1f ms, parallel RS1/RS2 depth" % (os.getpid(), sorted(os.sched_getaffinity(0)), lat_ns * 1e-6), flush=True)
 
     def lane(idx, cam, blk_name, side_name, seed):
+        if cpus:
+            try: os.sched_setaffinity(0, {cpus[(idx - 1) % len(cpus)]})      # Linux: pid 0 = this thread
+            except Exception: pass
         blk = shm.Block(blk_name, [(n, tuple(s), d) for n, s, d in p["layout%d" % idx]])
         side = shm.Block(side_name, side_layout(p)); side_seq = side.seq; sd = None
         dr = mj.MjData(m); Rd = mj.Renderer(m, p["DH"], p["DW"]); Rd.enable_depth_rendering()
