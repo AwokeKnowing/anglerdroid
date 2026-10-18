@@ -453,5 +453,9 @@ loadScene();
 connectWS();setTimeout(()=>{if(!wsOK)startPoll()},1500);
 animate();
 </script>
+<div id=safety style="position:fixed;right:8px;bottom:8px;z-index:50;background:#111c;border:1px solid #444;padding:3px;font:11px sans-serif;color:#ccc">
+<label><input type=checkbox id=safvis checked> safety frame</label><br><img id=safimg style="width:325px;display:block" alt="safety frame"></div>
+<script>(function(){const im=document.getElementById('safimg'),cb=document.getElementById('safvis');
+setInterval(()=>{if(cb.checked){const n=new Image();n.onload=()=>{im.src=n.src};n.src='/safety.png?'+Date.now()}im.style.display=cb.checked?'block':'none'},250)})();</script>
 </body>
 </html>

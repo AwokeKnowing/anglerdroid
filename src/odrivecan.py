@@ -91,6 +91,13 @@ class ODriveAxisCAN:
         ))
         time.sleep(0.005)
 
+    def write_property_nowait(self, property: str, value):
+        """write_property without the 5 ms settle sleep (safety core: brake ramp change in the same tick)."""
+        if property not in self.endpoints: return
+        ep_id = self.endpoints[property]['id']; fmt = self.format_lookup[self.endpoints[property]['type']]
+        self._safe_send(can.Message(arbitration_id=(self.node_id << 5 | self.CMD_RX_SDO),
+                                    data=struct.pack('<BHB' + fmt, 0x01, ep_id, 0, value), is_extended_id=False))
+
     def read_property(self, property: str) -> Optional[Union[int, float, bool]]:
         if property not in self.endpoints:
             return None

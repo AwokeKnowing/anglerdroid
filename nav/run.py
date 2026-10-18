@@ -223,7 +223,9 @@ class Brain:
                 acc = getattr(getattr(self.hw, 'imu', None), 'accel', None)
                 nw = self.autocal.n_win
                 self.autocal.update(still, None if acc is None else np.array(acc, float), depth if still else None)
-                if self.autocal.n_win != nw: self.rs2.set_pose(*self.autocal.pose())
+                if self.autocal.n_win != nw:
+                    self.rs2.set_pose(*self.autocal.pose())
+                    if hasattr(self.hw, "set_rs2_pose"): self.hw.set_rs2_pose(*self.autocal.pose())
             self._rs2_obs, self._rs2_floor = self.rs2.points(depth)
         if self.tick % 6 == 0 and abs(self.slam.odom.w) < 0.6:   # 5 Hz map/match update (skip fast spins: RS1/RS2/odom time skew)
             # RS2 points are ~1 frame old: express them at the RS1 stamp using odom (tiny correction, keeps scans rigid)
@@ -331,7 +333,21 @@ class Brain:
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
             if len(mp): pts = np.concatenate([pts, mp])
         v_pre, w_pre = self.v, self.w
-        v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
+        if getattr(self.hw, "core", False):
+            # safety lives in the safety core process (nav/safety_core.py, last resort, owns the wheels).  Here: the
+            # PLANNER keeps 2x the core's speed-relative threshold clear (governor), so the core rarely has to fire.
+            from nav.safety_core import governor
+            if valid < 0.05: v, w, sc, need2 = 0.0, 0.0, 0.0, 0.0
+            elif os.environ.get("KEVIN_SC_GOVERNOR", "1") == "0": v, w, sc, need2 = self.v, self.w, 1.0, 0.0   # test: core brake alone
+            else: v, w, sc, need2 = governor(pts, self.v, self.w, v_meas=self.slam.odom.v)
+            info = dict(state="ok" if sc == 1.0 else "governed", scale=sc, need2=need2, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
+            if len(pts):
+                _d = self.env._sd(pts); _i = int(np.argmin(_d)); _near = [round(float(pts[_i, 0]), 3), round(float(pts[_i, 1]), 3), round(float(_d[_i]), 3)]
+            else: _near = None
+            self._gov = (self.v, self.w, v, w, need2, sc, _near, len(pts), len(self._mpts))
+            if sc < 1.0: self.stats.add("governed", 1)
+        else:
+            v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
         v_saf, w_saf = v, w
         if info["state"] != "ok": self.v, self.w = v, w
         # sensor-rate speed bound: travel at most FRAME_STEP_M (heading FRAME_STEP_RAD) per depth frame, so a
@@ -431,7 +447,8 @@ class Brain:
                     goal=None if self.goal is None else list(self.goal), label=self.goal_label,
                     path=None if (p is None or p.path is None) else p.path[::5].round(3).tolist(),
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
-                    safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks),
+                    safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks,
+                                core=self.hw.core_state() if hasattr(self.hw, "core_state") else None, governor=getattr(self, "_gov", None)),
                     timing=self.stats.summary(), plan_timing=None if p is None else p.timing,
                     bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])

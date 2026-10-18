@@ -68,6 +68,9 @@ def serve(brain, port=8080):
             if p == "/api/state": return self._send(json.dumps(brain.state(), default=float).encode())
             if p == "/api/map.json":
                 cache["png"], cache["meta"] = map_png(brain); return self._send(json.dumps(cache["meta"]).encode())
+            if p == "/api/safety.png":                                   # safety-core 2-D frame + bands + envelopes
+                from nav.safety_viz import png as safety_png
+                return self._send(safety_png(brain), "image/png")
             if p == "/api/map.png":
                 if "png" not in cache: cache["png"], cache["meta"] = map_png(brain)
                 return self._send(cache["png"], "image/png")
