@@ -9,7 +9,7 @@ def nav(): return json.load(urllib.request.urlopen("http://localhost:8090/api/st
 def chat(t):
     r = urllib.request.Request("http://localhost:8095/chat", data=json.dumps({"text": t, "who": "drift"}).encode(), method="POST", headers={"Content-Type": "application/json"})
     return json.load(urllib.request.urlopen(r, timeout=60)).get("reply")
-st = json.load(open(os.path.expanduser("~/m1_backup/dbg/v2/start.json"))); c0 = gt.state()["collisions"]
+st = json.load(open(os.path.expanduser("~/m1_backup/dbg/v2/start.json"))); _s0 = gt.state(); c0 = _s0["collisions"]; _w0 = time.monotonic()
 out = open(os.path.expanduser("~/m1_backup/dbg/drift_%s.jsonl" % tag), "w")
 print(text, "->", chat(text), flush=True); t0 = time.time(); E = []; path = 0.0; last = None; active_seen = False
 while time.time() - t0 < T:
@@ -28,4 +28,4 @@ s = gt.state(); n = nav()
 ae = [abs(e[0]) for e in E]; xe = [e[1] for e in E]
 print("drift %s: %.0f s, GT path %.1f m, |yaw err| max %.1f deg final %.1f deg, xy err max %.2f m final %.2f m, collisions %d, last msg: %s" % (
     tag, time.time() - t0, path, max(ae), ae[-1], max(xe), xe[-1], s["collisions"] - c0, n["msg"][:100]))
-json.dump(dict(ctl=n.get('ctl'), timing=n.get('timing'), collisions=s["collisions"] - c0, msg=n["msg"]), open(os.path.expanduser("~/m1_backup/dbg/drift_%s_ctl.json" % tag), "w"))
+json.dump(dict(ctl=n.get('ctl'), timing=n.get('timing'), collisions=s["collisions"] - c0, msg=n["msg"], rtf=round((s["t"] - _s0["t"]) / max(time.monotonic() - _w0, 1e-6), 3)), open(os.path.expanduser("~/m1_backup/dbg/drift_%s_ctl.json" % tag), "w"))

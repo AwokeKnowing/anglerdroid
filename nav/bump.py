@@ -142,9 +142,17 @@ class BumpDetector:
                 s = math.copysign(1.0, u[k] if abs(u[k]) > 0.01 else (vw[k] if abs(vw[k]) > 0.01 else 0.0)) if (abs(u[k]) > 0.01 or abs(vw[k]) > 0.01) else 0.0
                 phi = np.array([1.0, s, vw[k], aw[k], s * abs(w)])
                 e = currents[k] - self.rls[k].predict(phi); eI[k] = e; zI[k] = e / self.sig(k); push[k] = zI[k] * s
-                if moving and not refr and abs(zI[k]) < 4:
-                    self.rls[k].update(phi, currents[k])
-                    self.var[k] += min(1.0, dt / 10.0) * (max(e * e, 0.05 ** 2) - self.var[k])     # 0.05 A: current-sense resolution floor
+                if moving and not refr:
+                    # model (theta) learns from in-model samples only (|z| < 4: a push is never learned into the model).
+                    # The noise scale is a robust (Huber-clipped) RMS over ALL moving samples: an outlier counts as
+                    # (4 sigma)^2.  A contact trips in 3 ticks (+0.15 % on var per tick: no effect), but if the model
+                    # no longer fits the plant -- calibration persisted from another plant state (2026-10-18: learned
+                    # while the sim ran at 0.65x real time), new floor, worn tyres -- sigma grows until the samples are
+                    # in-model again and theta re-converges, instead of every sample being rejected forever (the old
+                    # |z|<4 gate on BOTH theta and sigma froze a stale model: false 'motor current' bumps every run).
+                    if abs(zI[k]) < 4: self.rls[k].update(phi, currents[k])
+                    e2 = min(e * e, 16.0 * self.var[k]) if self.armed else e * e
+                    self.var[k] += min(1.0, dt / 10.0) * (max(e2, 0.05 ** 2) - self.var[k])     # 0.05 A: current-sense resolution floor
             self.stats["max_zI"] = max(self.stats["max_zI"], float(np.abs(zI).max()))
         if moving and not refr: self.n_moving += 1
         if np.abs(u).max() == 0.0 and not refr:                         # commanded still: encoder noise level

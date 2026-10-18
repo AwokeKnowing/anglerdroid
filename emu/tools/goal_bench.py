@@ -31,7 +31,7 @@ def reset():
     gt.ctl("teleport", x=x, y=y, yaw=a); time.sleep(2)
     subprocess.run([os.path.expanduser('~/m1_backup/dbg/restart_nav.sh')], stdout=subprocess.DEVNULL); time.sleep(3)
 def run(cmd, place, T, vln=False):
-    s0 = gt.state(); c0 = s0['collisions']
+    s0 = gt.state(); c0 = s0['collisions']; w0 = time.monotonic()      # + real-time factor of the sim over this run
     try: b0 = (nav().get('bump') or {}).get('stats', {}).get('events', 0)
     except Exception: b0 = 0
     rev = fwd = trev = 0.0; t0 = time.time(); t0m = time.monotonic(); tl = t0; modes = {}
@@ -55,6 +55,8 @@ def run(cmd, place, T, vln=False):
         open(sn + '.png', 'wb').write(urllib.request.urlopen("http://localhost:8090/api/map.png", timeout=5).read())
         open(sn + '.json', 'wb').write(urllib.request.urlopen("http://localhost:8090/api/map.json", timeout=5).read())
         r['map'] = sn
+    try: s1 = gt.state(); r['rtf'] = round((s1['t'] - s0['t']) / max(time.monotonic() - w0, 1e-6), 3)   # robot code assumes 1.0
+    except Exception: pass
     print(json.dumps(r), flush=True); return r
 R = []; GTL = []
 reset()
