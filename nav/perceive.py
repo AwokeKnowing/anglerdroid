@@ -228,11 +228,12 @@ class Rs2Cloud:
 
     def rays(self, depth_u16, sub=2):
         """RS2 returns for free-space carving (every sub-th stride pixel): rays from the lens, z = height above floor.
-        No-return / out-of-range pixels are unknown and carve nothing."""
+        No-return pixels are unknown and carve nothing; returns beyond max_range still prove the ray free up to there
+        (carve_rays caps the carved length and scales the noise margin with the true range)."""
         hh, ww = depth_u16[::self.s, ::self.s].shape
         z = depth_u16[::self.s, ::self.s][::sub, ::sub].ravel().astype(np.float32) * 1e-3
         rx = self.rx.reshape(hh, ww)[::sub, ::sub].ravel(); ry = self.ry.reshape(hh, ww)[::sub, ::sub].ravel()
-        ok = (z > 0.2) & (z < self.max_range); z = z[ok]
+        ok = (z > 0.2) & (z < 12.0); z = z[ok]
         P = np.stack([rx[ok] * z, ry[ok] * z, z], 1) @ self.R.T + self.T
         P[:, 2] += AXLE_H; o = self.T.copy(); o[2] += AXLE_H
         return (o, P, np.abs(P[:, 2]) < 0.02)

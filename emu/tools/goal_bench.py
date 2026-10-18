@@ -1,4 +1,5 @@
-"""Reverse-driving / success benchmark in the live sim.  python bench.py <tag>
+"""BENCH_MAPSNAP=1: also save the planning map after each goal (<out>_map<i>.png/.json).
+Reverse-driving / success benchmark in the live sim.  python bench.py <tag>
 (Copy of ~/m1_backup/dbg/bench.py, the r3 goal bench; writes ~/m1_backup/dbg/bench_<tag>.json.)
 Teleports Kevin to the env start, restarts nav (fresh SLAM), runs goals kitchen -> bedroom -> couch, then teleports
 back, restarts nav and runs LightNav 'find the kitchen' (90 s).  Ground truth from emu.world (body-frame v).
@@ -42,6 +43,11 @@ def run(cmd, place, T, vln=False):
     r = dict(t0m=t0m, t1m=time.monotonic(), cmd=cmd, secs=round(time.time() - t0, 1), fwd_m=round(fwd, 2), rev_m=round(rev, 2), rev_pct=round(100 * rev / max(rev + fwd, 1e-6), 1), rev_s=round(trev, 1),
              rev_by_mode={k: round(v, 2) for k, v in modes.items()}, gt_dist=round(math.hypot(s['x'] - p[0], s['y'] - p[1]), 2), collisions=s['collisions'] - c0, result=nav()['msg'])
     nb = nav().get('bump') or {}; r.update(bumps=(nb.get('stats') or {}).get('events', 0) - b0, bump_last=nb.get('last'), bump_armed=nb.get('armed'), max_zI=(nb.get('stats') or {}).get('max_zI'))
+    if os.environ.get("BENCH_MAPSNAP"):     # planning-map snapshot after each goal (map.png: 20 = occupied, 200 = seen free)
+        sn = OUT.replace('.json', '_map%d' % len(R))
+        open(sn + '.png', 'wb').write(urllib.request.urlopen("http://localhost:8090/api/map.png", timeout=5).read())
+        open(sn + '.json', 'wb').write(urllib.request.urlopen("http://localhost:8090/api/map.json", timeout=5).read())
+        r['map'] = sn
     print(json.dumps(r), flush=True); return r
 R = []; GTL = []
 reset()
