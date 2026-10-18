@@ -313,7 +313,7 @@ class Brain:
     def _fit_loop(self):
         while self.running:
             time.sleep(1.0)
-            try: self.pred.fit_latency()
+            try: tf = time.perf_counter(); self.pred.fit_latency(); self.stats.add("latfit_ms", (time.perf_counter() - tf) * 1e3)
             except Exception as e: self.stats.add("latfit_err", 1)
 
     def _ctl_loop(self):
