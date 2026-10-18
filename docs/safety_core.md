@@ -8,7 +8,7 @@ frame where an issue is seen; operability = fresh frames on cadence; last-resort
 | | brain (nav.run) | safety core (nav/safety_core.py) |
 |---|---|---|
 | process | main | `multiprocessing` spawn child, exits (after zeroing the wheels) if the parent dies |
-| cameras | RS1 + RS2 pipelines; dedicated pump threads publish every frame to `nav.bus` at once | reads RS1 verts + RS2 depth from `nav.bus` |
+| cameras | RS2 pipeline (SLAM needs color/IR/IMU); pump thread publishes RS2 depth to `nav.bus`; reads RS1 back from `nav.bus` (`_Rs1Bus`) | owns the RS1 pipeline (v2); reads RS2 depth from `nav.bus` |
 | wheels | none (sends desired v, w over `nav.bus`) | owns `WheelBase` (only writer to the ODrives), publishes wheel vel / currents back |
 | per tick | SLAM, map, MPPI, **governor** (2x threshold) | operability, transform, bands, last-resort brake |
 
@@ -31,4 +31,28 @@ frame where an issue is seen; operability = fresh frames on cadence; last-resort
 | priority | `SCHED_FIFO` denied (RLIMIT_RTPRIO 0, no CAP_SYS_NICE); nice -10 denied | `/etc/security/limits.d` rtprio 60 for the robot user (or CAP_SYS_NICE on the binary); JetPack kernel is PREEMPT (PREEMPT_RT optional) |
 | GC | `gc.freeze(); gc.disable()` in the core | same |
 | BLAS | single-threaded in the core | same |
-| RS1 ingest | sim shim in Python (decimation 11 ms after the sort fix, was 37 ms) in a brain-process thread | librealsense C; better: move RS1 ownership into the core process (RS1 is a separate device from RS2/IMU) |
+| RS1 ingest | sim shim in Python, in the core process (v2): ingest 11 ms p50, Ego 13 ms p50 | librealsense C in the core process |
+
+## Results (sim, i777, 2026-10-17; n=3 goal benches, same goals/world/dog keep-out; cur = PR #62 in-brain envelope)
+Measured = from logs/GT in this sim; assumed = constants not measured here.
+
+| quantity | value | measured / assumed |
+|---|---|---|
+| core loop period (goals) p50/p95/max | 33.2 / 40.3 / 560 ms (cur brain loop 40.8 / 59.4 / 644) | measured |
+| frame age at decision (goals) p50/p95/max | 46 / 74 / 157 ms; >100 ms on 1.4 % of ticks (cur 69 / 93 / 698, 2.4 %) | measured |
+| frame age at decision (VLN running) | 164 / 285 / 379 ms, >100 ms on 83 % of ticks (cur 97 / 169 / 648, 45 %) | measured: sim delivers frames late (RTF ~1.0) |
+| core processing per tick (moving) | 27 ms p50, 53 ms p95 (ingest 11, Ego 13, RS2 1.4, decide 1) | measured |
+| frames missing cadence while moving | RS1 6.6 %, RS2 10.3 % of ticks (0 % idle) | measured |
+| T_TICK | 1/30 s | assumed (design) |
+| T_CMD (CAN command latency) | 10 ms | assumed |
+| braking, ramp 5 turns/s^2 | d = 0.0926 v + v^2/(2*4.26) | measured offline (brake_test) |
+| margin | 3.5 cm | assumed (design) |
+| bands | front x 0.145-0.195 m, rear x -0.345..-0.295 m | front fixed; rear learned from RS1 visibility |
+
+Stop tests (box, GT gap at rest; 0 contacts in all): see the report; post-obstacle-stop creep <= 2 mm except when an
+operability stop (frame age > 100 ms) paused the approach and the drive resumed once frames were fresh again.
+
+Known sim limitation: under load (VLN + GPU) the sim's camera frames reach the core 100-280 ms after capture and RS1/RS2
+miss the 30 Hz cadence while driving, so the strict operability rule stops Kevin repeatedly (stop-go; goals 2/12 vs
+cur 5/12).  One diagnostic run with KEVIN_SC_CADENCE_MAX=0.083 (one dropped frame tolerated; age rule unchanged) got
+3/4 goals.  This needs a real-time host (isolated core, SCHED_FIFO) or real-robot latency data, not a looser rule.

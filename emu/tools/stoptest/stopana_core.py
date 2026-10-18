@@ -4,6 +4,7 @@ first rest = first GT sample after the robot had moved >= 0.2 m with |v| < 0.01 
 creep = GT travel after first rest (path length) and gap lost after first rest (gap at rest - min gap afterwards)."""
 import glob, json, math, os, sys
 import numpy as np
+GMAX = float(os.environ.get('STOP_GAP_MAX', 'inf'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "src"))
 from twin_geometry import FOOTPRINT_SAFE as F
 
@@ -26,16 +27,21 @@ for pre in sys.argv[1:]:
         xy = np.array([[g[2], g[3]] for g in G]); tg = np.array([g[0] for g in G]); v = np.array([g[5] for g in G]); w = np.array([g[6] for g in G])
         moved = np.r_[0, np.cumsum(np.hypot(*np.diff(xy, axis=0).T))]
         still = (np.abs(v) < 0.01) & (np.abs(w) < 0.02)
-        k0 = None
+        k0 = None; pauses = 0; kp = -99
         for k in range(len(G)):
             if moved[k] >= 0.2 and still[k]:
                 j = np.searchsorted(tg, tg[k] + 0.3)
-                if j < len(G) and still[k:j].all(): k0 = k; break
+                if j < len(G) and still[k:j].all():
+                    # STOP_GAP_MAX (m): only a rest this close to the box counts as the obstacle stop; earlier rests
+                    # (e.g. an operability stop mid-approach that later resumes) are counted as pauses, not as creep
+                    if gap(G[k]) < GMAX: k0 = k; break
+                    if k - kp > 10: pauses += 1
+                    kp = k
         vmax = float(np.abs(v).max())
         if k0 is None:
             rows.append(dict(run=os.path.basename(fn)[:-5], v=d['v'], vmax=vmax, rest=False, g_min=min(gap(g) for g in G[::5]), contact=G[-1][7] - G[0][7])); continue
         g_rest = gap(G[k0]); after = G[k0::3]; g_after = min(gap(g) for g in after)
         rows.append(dict(run=os.path.basename(fn)[:-5], v=d['v'], vmax=round(vmax, 3), rest=True, g_rest=round(g_rest, 3), g_min=round(min(g_rest, g_after), 3),
-                         creep_path=round(float(moved[-1] - moved[k0]), 3), creep_gap=round(g_rest - g_after, 3), t_after=round(float(tg[-1] - tg[k0]), 1),
+                         creep_path=round(float(moved[-1] - moved[k0]), 3), pauses=pauses, creep_gap=round(g_rest - g_after, 3), t_after=round(float(tg[-1] - tg[k0]), 1),
                          contact=G[-1][7] - G[0][7]))
 for r in rows: print(json.dumps(r))
