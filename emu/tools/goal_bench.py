@@ -16,7 +16,11 @@ def post(t):
     return json.load(urllib.request.urlopen(r, timeout=60))["reply"]
 def nav(): return json.load(urllib.request.urlopen("http://localhost:8090/api/state", timeout=5))
 NRES = [0]
+def snap_ctl(lbl):     # control-loop stats of the nav run that is about to end (ctl summary + timing)
+    try: n = nav(); json.dump(dict(ctl=n.get('ctl'), timing=n.get('timing')), open(OUT.replace('.json', '_ctl_%s.json' % lbl), 'w'))
+    except Exception: pass
 def reset():
+    snap_ctl("pre%d" % (NRES[0] + 1))
     NRES[0] += 1; subprocess.run('cp ~/.kevin/emu/live_nav.log ~/m1_backup/dbg/nav_%s_pre%d.log' % (TAG, NRES[0]), shell=True)
     S = json.load(open('/dev/shm/kevin_sim.json')); x, y, a = S['start']
     # dog option (BENCH_DOG): keepout (default) = dog wanders but never within BENCH_DOG_R (1.5 m) of the start pose;
@@ -56,6 +60,6 @@ R = []; GTL = []
 reset()
 for pl in ('kitchen', 'bedroom', 'couch'): R.append(run('go to the ' + pl, pl, 150))
 reset(); R.append(run('ask find the kitchen', 'kitchen', 90, vln=True))
-post('stop'); json.dump(R, open(OUT, 'w'), indent=1); json.dump(GTL, open(OUT.replace('.json', '_gt.json'), 'w'))
+snap_ctl("end"); post('stop'); json.dump(R, open(OUT, 'w'), indent=1); json.dump(GTL, open(OUT.replace('.json', '_gt.json'), 'w'))
 tf = sum(r['fwd_m'] for r in R); tr = sum(r['rev_m'] for r in R)
 print('TOTAL fwd %.2f m rev %.2f m (%.1f %%), reverse time %.1f s, collisions %d, bumps %d' % (tf, tr, 100 * tr / max(tf + tr, 1e-6), sum(r['rev_s'] for r in R), sum(r['collisions'] for r in R), sum(r.get('bumps', 0) for r in R)))

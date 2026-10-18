@@ -21,10 +21,11 @@ while time.time() - t0 < T:
     if last: path += math.hypot(g[0] - last[0], g[1] - last[1])
     last = g; E.append((ey, exy))
     sl = n.get("slam") or {}; a = (n.get("vln") or {}).get("active")
-    out.write(json.dumps(dict(t=round(time.time() - t0, 2), pose=p, gt=g, ey=ey, exy=exy, path=path, mode=n["mode"], msg=n["msg"], vln=a, walls=sl.get("walls"), scale=sl.get("gyro_scale"), bias=sl.get("gyro_bias"), w=s.get("w"))) + "\n"); out.flush()
+    out.write(json.dumps(dict(t=round(time.time() - t0, 2), pose=p, gt=g, ey=ey, exy=exy, path=path, mode=n["mode"], msg=n["msg"], vln=a, walls=sl.get("walls"), scale=sl.get("gyro_scale"), bias=sl.get("gyro_bias"), w=s.get("w"), v=s.get("v"), tm=time.monotonic())) + "\n"); out.flush()
     active_seen |= bool(a)
     if active_seen and not a and n["mode"] == "idle": break
 s = gt.state(); n = nav()
 ae = [abs(e[0]) for e in E]; xe = [e[1] for e in E]
 print("drift %s: %.0f s, GT path %.1f m, |yaw err| max %.1f deg final %.1f deg, xy err max %.2f m final %.2f m, collisions %d, last msg: %s" % (
     tag, time.time() - t0, path, max(ae), ae[-1], max(xe), xe[-1], s["collisions"] - c0, n["msg"][:100]))
+json.dump(dict(ctl=n.get('ctl'), timing=n.get('timing'), collisions=s["collisions"] - c0, msg=n["msg"]), open(os.path.expanduser("~/m1_backup/dbg/drift_%s_ctl.json" % tag), "w"))
