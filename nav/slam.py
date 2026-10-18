@@ -3,7 +3,7 @@ against the map's likelihood field (async, ~5 Hz) -> map-frame pose.  No ROS, nu
 
   pose_map = T_map_odom o pose_odom ;  the matcher only ever nudges T_map_odom (bounded, smoothed)."""
 from __future__ import annotations
-import math, threading, time
+import math, os, threading, time
 from collections import deque
 import numpy as np
 import cv2
@@ -27,32 +27,75 @@ def transform(P, pose):
     return np.stack([pose[0] + c * P[:, 0] - s * P[:, 1], pose[1] + s * P[:, 0] + c * P[:, 1]], 1)
 
 
+_WLOG = open(os.environ["KEVIN_WALL_LOG"], "a") if os.environ.get("KEVIN_WALL_LOG") else None
+
+
 class Odom:
-    """Dead reckoning: v from wheel encoders, yaw rate from the D435i gyro (wheel difference as fallback)."""
+    """Dead reckoning: v from wheel encoders, yaw from the D435i gyro with online self-calibration (bench/slam/kslam):
+    a 3-state EKF [yaw, gyro scale error, gyro bias].  ZUPT (wheels stopped, nothing commanded) observes the bias;
+    wall directions in RS2 depth (Manhattan frame of the house, learned online, observe_walls) observe yaw, which makes
+    the scale observable.  Noise values are kslam's (D435i gyro / wheel), not tuned here.  No gyro -> wheel difference.
+    KEVIN_ODOM_EKF=0: the previous gyro-minus-EMA-bias integration (fixed scale)."""
+    QG, QS, QB = 0.004 ** 2, 1e-6 ** 2, 2e-5 ** 2           # per second: yaw-rate noise, scale-error / bias random walk
     def __init__(self, track=None):
         self.pose = (0.0, 0.0, 0.0); self.v = 0.0; self.w = 0.0; self.t = None
         import twin_geometry as TG; self.track = track or TG.TRACK_M
         self.hist = deque(maxlen=300); self.bias = 0.0; self._still = 0
+        self.ekf = os.environ.get("KEVIN_ODOM_EKF", "1") == "1"
+        self.scale = 0.0; self.P = np.diag([1e-6, 0.02 ** 2, 0.003 ** 2]); self._gz = 0.0
+        self.psi0 = None; self._psi_acc = []; self.n_wall = 0; self.n_wall_rej = 0; self.n_zupt = 0
+
+    def _upd(self, H, r, R):
+        S = float(H @ self.P @ H) + R; K = self.P @ H / S
+        x, y, th = self.pose; d = K * r
+        self.pose = (x, y, wrap(th + d[0])); self.scale += d[1]; self.bias += d[2]
+        self.P = self.P - np.outer(K, H) @ self.P
+        return d[0]
 
     def update(self, t, vl, vr, gyro_w=None, commanded_zero=False):
         v = 0.5 * (vl + vr); wd = (vr - vl) / self.track
+        dt = 0.0 if self.t is None else min(max(t - self.t, 0.0), 0.6)
         if gyro_w is not None:
-            # zero-velocity update: wheels stopped and nothing commanded -> learn gyro bias (EMA, ~2 s)
-            # standstill = nothing commanded and wheels below 1 cm/s.  (Was 2 mm/s: under the realistic encoder model the
-            # velocity jitter alone exceeds that, so the bias was never learned -> gyro heading drifted at the raw bias,
-            # 0.17 deg/s in the hall A/B.)
-            if commanded_zero and abs(vl) < 0.01 and abs(vr) < 0.01:
-                self._still += 1
-                if self._still > 15: self.bias += 0.05 * (gyro_w - self.bias); self.n_zupt = getattr(self, 'n_zupt', 0) + 1
-            else: self._still = 0
-            w = 0.0 if self._still > 15 else gyro_w - self.bias
+            # standstill = nothing commanded and wheels below 1 cm/s (realistic encoder jitter exceeds 2 mm/s)
+            still = commanded_zero and abs(vl) < 0.01 and abs(vr) < 0.01
+            self._still = self._still + 1 if still else 0
+            if not self.ekf:
+                if self._still > 15: self.bias += 0.05 * (gyro_w - self.bias); self.n_zupt += 1
+                w = 0.0 if self._still > 15 else gyro_w - self.bias
+            else:
+                w = gyro_w * (1.0 + self.scale) - self.bias; self._gz = gyro_w
+                if dt > 0:
+                    F = np.array([[1.0, gyro_w * dt, -dt], [0, 1, 0], [0, 0, 1]])
+                    self.P = F @ self.P @ F.T + np.diag([self.QG * dt, self.QS * dt, self.QB * dt])
+                if self._still > 15:                         # ZUPT: true yaw rate 0 -> observes bias (and scale x rate)
+                    self._upd(np.array([0.0, gyro_w, -1.0]), 0.0 - w, self.QG * 10); self.n_zupt += 1
+                    w = 0.0
         else: w = wd
         if self.t is not None:
-            dt = min(max(t - self.t, 0.0), 0.6); x, y, th = self.pose; thm = th + 0.5 * w * dt   # gyro rate = mean over the gap (hw.yaw_rate)
+            x, y, th = self.pose; thm = th + 0.5 * w * dt   # gyro rate = mean over the gap (hw.yaw_rate)
             self.pose = (x + v * dt * math.cos(thm), y + v * dt * math.sin(thm), wrap(th + w * dt))
         self.t, self.v, self.w = t, v, w
         self.hist.append((t, self.pose))
         return self.pose
+
+    def observe_walls(self, t_cap, z4, n):
+        """Manhattan heading (kslam): z4 = mean exp(4i*a) of wall-normal angles a in the BASE frame of a depth frame
+        captured at t_cap, from n wall pixels.  Learns the house's wall direction psi0 in the first frames, then
+        corrects yaw (mod 90 deg) with a 3-sigma gate; skipped while turning fast (blur / latency)."""
+        if not self.ekf or n < 150: return None
+        Rl = abs(z4); th_c = self.at(t_cap)[2]; phi = (math.atan2(z4.imag, z4.real) / 4) + th_c   # world wall angle
+        if _WLOG: _WLOG.write("%.4f %.4f %.5f %.5f %.3f %d %.4f %s\n" % (t_cap, self.t or 0, th_c, phi, Rl, n, self.w, self.psi0)); _WLOG.flush()
+        if abs(self.w) > 1.2: self.n_wall_rej += 1; return None   # fast turn: wall directions unreliable (measured live:
+        # |w| < 0.8 rad/s within 0.7 deg of GT p95, |w| > 1.2 rad/s ~39 deg off) -> neither learn psi0 nor correct
+        if self.psi0 is None:
+            if Rl > 0.5 and n > 400: self._psi_acc.append(np.exp(4j * phi))
+            if len(self._psi_acc) >= 5: self.psi0 = float(np.angle(np.mean(self._psi_acc)) / 4)
+            return None
+        if Rl <= 0.45: self.n_wall_rej += 1; return None
+        q = math.pi / 2; r = -(((phi - self.psi0) + q / 2) % q - q / 2)
+        sig = math.radians(1.5) / math.sqrt(min(n, 4000) / 500.0) / Rl
+        if r * r / (self.P[0, 0] + sig ** 2) >= 25.0: self.n_wall_rej += 1; return None
+        self.n_wall += 1; return self._upd(np.array([1.0, 0.0, 0.0]), r, sig ** 2)
 
     def at(self, t):
         for tt, p in reversed(self.hist):

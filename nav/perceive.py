@@ -213,3 +213,19 @@ class Rs2Cloud:
         obs = P[(hgt > hmin) & (hgt < h_max), :2]          # safety core: h_max 1.0 (all below Kevin's top -> 2-D)
         flo = P[np.abs(hgt) < 0.02, :2]
         return obs, flo
+
+    def wall_z4(self, depth_u16):
+        """Wall directions for the Manhattan heading (bench/slam/kslam): surface normals from neighbouring depth
+        pixels (stride grid), rotated to the base frame; vertical surfaces 12 cm..2.2 m above the floor.  Returns
+        (z4, n): z4 = mean exp(4i * normal angle) in the base frame, n = wall pixels used."""
+        z = depth_u16[::self.s, ::self.s].astype(np.float32) * 1e-3; hh, ww = z.shape
+        Pc = np.stack([self.rx.reshape(hh, ww) * z, self.ry.reshape(hh, ww) * z, z], -1)
+        valid = (z > 0.3) & (z < 4.0)
+        dx = Pc[1:-1, 2:] - Pc[1:-1, :-2]; dy = Pc[2:, 1:-1] - Pc[:-2, 1:-1]; n = np.cross(dx, dy); nn = np.linalg.norm(n, axis=-1)
+        ok = valid[1:-1, 1:-1] & valid[1:-1, 2:] & valid[1:-1, :-2] & valid[2:, 1:-1] & valid[:-2, 1:-1] & (nn > 1e-9)
+        ok &= (np.linalg.norm(dx, axis=-1) < 0.15) & (np.linalg.norm(dy, axis=-1) < 0.15)
+        nb = (n[ok] / nn[ok][:, None]) @ self.R.T; hgt = (Pc[1:-1, 1:-1][ok] @ self.R.T + self.T)[:, 2] + AXLE_H
+        sel = (np.abs(nb[:, 2]) < 0.15) & (hgt > 0.12) & (hgt < 2.2)
+        k = int(sel.sum())
+        if k == 0: return 0j, 0
+        return complex(np.exp(4j * np.arctan2(nb[sel, 1], nb[sel, 0])).mean()), k
