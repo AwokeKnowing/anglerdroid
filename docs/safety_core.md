@@ -56,3 +56,23 @@ Known sim limitation: under load (VLN + GPU) the sim's camera frames reach the c
 miss the 30 Hz cadence while driving, so the strict operability rule stops Kevin repeatedly (stop-go; goals 2/12 vs
 cur 5/12).  One diagnostic run with KEVIN_SC_CADENCE_MAX=0.083 (one dropped frame tolerated; age rule unchanged) got
 3/4 goals.  This needs a real-time host (isolated core, SCHED_FIFO) or real-robot latency data, not a looser rule.
+
+## Sim frame latency fix (2026-10-17, i777)
+
+Update to the limitation above: it was the sim's frame path, not missing RT priority.  Rules are unchanged
+(age > 100 ms or frame interval > 1.5/30 s -> inoperable).  Bench: goal_bench (kitchen/bedroom/couch + LightNav
+'find the kitchen'), n = 3 each.  Before = r6 (old world, in-brain RS2 pump, no pinning).  After = lat4.
+
+Root causes (traced with KEVIN_EMU_CAMLOG / KEVIN_SHIM_LOG / core log stage columns):
+1. emu.world rendered RS1+RS2 depth and noise in a single thread, sharing the GIL with physics, the colour/IR/viewer
+   renders and the CAN/ctl servers.  Under VLN the render queue reached 28 ms p95 and RS2 age at write 67 ms p95.
+   Fix (slambench): emu.depthcam process, one thread per camera with its own renderer and its own CPU.
+2. The core got RS2 depth from a brain thread that shared the GIL with SLAM/MPPI/VLN, so 15-20 % of RS2 frames
+   missed the beat.  Fix: nav/camproc.py owns RS2 (video + IMU, the same single-owner layout RSUSB needs on the
+   Orin) and writes depth to the core first.
+3. The core sampled "newest RS2" once per RS1 tick, which aliased into skipped frames (rs2cam got 100 % of frames
+   but the core saw 6 % gaps).  Fix: the core pairs each RS1 frame with the nearest RS2 capture, using a 2-deep ring
+   and a <= 10 ms wait only when the paired frame is due.
+4. The core needs about 24-31 ms of CPU per frame.  On a hyperthread shared with a render lane it overran 33 ms.
+   Fix: simpin.sh gives the core physical core 3 (only the light rs2cam on sibling 7).  Depth lanes run on 6/2.
+   Everything else runs on 0,1,4,5, with LightNav/ollama at nice +10 and the viewer at +5 (user-level, no root).
