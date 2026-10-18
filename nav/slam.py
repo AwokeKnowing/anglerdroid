@@ -63,9 +63,14 @@ class Odom:
                 if self._still > 15: self.bias += 0.05 * (gyro_w - self.bias); self.n_zupt += 1
                 w = 0.0 if self._still > 15 else gyro_w - self.bias
             else:
-                w = gyro_w * (1.0 + self.scale) - self.bias; self._gz = gyro_w
+                # the scale error multiplies the bias-corrected rate, not the raw reading: w = (g - b)(1 + s).  The old
+                # w = g(1 + s) - b made the scale multiply the bias too, so at standstill (g ~ b) every ZUPT saw
+                # H_s = g ~ b != 0 and the (s, b) pair drifted along the unobservable line g(1+s) = b: an idle nav
+                # absorbed gyro-bias wander into the SCALE (live 15:06-16:42, 1.6 h idle: scale -0.503, the next
+                # LightNav spins integrated at half rate -> 'SLAM vs truth 2.28 m 89 deg').  Now H_s = g - b ~ 0 at rest.
+                gc = gyro_w - self.bias; w = gc * (1.0 + self.scale); self._gz = gyro_w
                 if dt > 0:
-                    F = np.array([[1.0, gyro_w * dt, -dt], [0, 1, 0], [0, 0, 1]])
+                    F = np.array([[1.0, gc * dt, -(1.0 + self.scale) * dt], [0, 1, 0], [0, 0, 1]])
                     self.P = F @ self.P @ F.T + np.diag([self.QG * dt, self.QS * dt, self.QB * dt])
                 if self._still > 15:                         # ZUPT: true yaw rate 0 -> observes bias (and scale x rate)
                     # 5-sigma gate: wheels stopped but the gyro still sees rotation (body settling / sliding after a
@@ -73,7 +78,12 @@ class Odom:
                     # 'still' allows wheels up to 1 cm/s, i.e. a real yaw rate up to 2*0.01/track ~ 0.07 rad/s: the
                     # measurement is the wheel yaw rate wd (no slip at these speeds), not 0 -- with 0, a slow creep was
                     # read as gyro scale error (live: scale -4.8 % in one LightNav run -> 29 deg yaw error)
-                    H = np.array([0.0, gyro_w, -1.0]); Rz = self.QG * 10; r = wd - w; Sz = float(H @ self.P @ H) + Rz
+                    # measurement = the gyro reading itself, predicted from the wheel rate: g = wd / (1 + s) + b.  The
+                    # noisy reading is z, not part of H: writing it as 'wd = (g - b)(1 + s)' puts the gyro noise into H
+                    # (errors-in-variables) and pulls (1 + s) toward 0 on every standstill tick (offline: -0.37 after
+                    # 1.6 h idle with either scale form).  At rest wd ~ 0, so ZUPT observes the bias and not the scale.
+                    H = np.array([0.0, -wd / (1.0 + self.scale) ** 2, 1.0]); Rz = self.QG * 10
+                    r = gyro_w - (wd / (1.0 + self.scale) + self.bias); Sz = float(H @ self.P @ H) + Rz
                     if r * r / Sz < 25.0: self._upd(H, r, Rz); self.n_zupt += 1; w = wd
                     else: self.n_zupt_rej = getattr(self, "n_zupt_rej", 0) + 1        # really rotating: keep the gyro
         else: w = wd
