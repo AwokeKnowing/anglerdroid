@@ -9,6 +9,7 @@ time.monotonic() seconds (CLOCK_MONOTONIC is system-wide, so both processes read
   sc_wheel  core -> brain       : vl, vr, t, i_l, i_r, i_age (nan = none), battery
   sc_state  core -> brain       : last decision (see safety_core.STATE_FIELDS)
   sc_viz    core -> brain/viewer: 5 Hz snapshot of the core's 2-D obstacle points (robot frame, now) + band rects
+  sc_rs2img / sc_rs2info / sc_imu  RS2 camera process -> brain: full RS2 frame (depth, colour, IR pair), intrinsics, IMU ring
 """
 from __future__ import annotations
 import os, time
@@ -18,6 +19,7 @@ from multiprocessing import shared_memory, resource_tracker
 HDR = 64
 PREFIX = os.environ.get("KEVIN_SC_PREFIX", "kevin_sc")
 MAX_VERTS = 480 * 848
+IMU_RING = 1024
 
 
 def _untrack(shm):
@@ -84,6 +86,11 @@ def layouts(depth_shape):
         state=[("f", (24,), "f8")],
         rs1info=[("f", (6,), "f8"), ("set", (1,), "i8")],
         viz=[("pts", (2000, 2), "f4"), ("n", (1,), "i8"), ("bands", (8,), "f8"), ("t", (1,), "f8")],
+        # RS2 camera process (nav/camproc.py) -> brain: the full RS2 frame for SLAM/VLN, its intrinsics, and the IMU ring
+        rs2img=[("depth", (H, W), "u2"), ("color", (480, 640, 3), "u1"), ("ir1", (H, W), "u1"), ("ir2", (H, W), "u1"), ("has_ir", (1,), "i8"),
+                ("stamp", (1,), "f8"), ("t_recv", (1,), "f8"), ("n", (1,), "i8")],
+        rs2info=[("f", (6,), "f8"), ("set", (1,), "i8")],
+        imu=[("t", (IMU_RING,), "f8"), ("g", (IMU_RING, 3), "f4"), ("a", (IMU_RING, 3), "f4"), ("w", (1,), "i8"), ("ok", (1,), "i8")],
     )
 
 

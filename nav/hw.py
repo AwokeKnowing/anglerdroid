@@ -42,13 +42,29 @@ class Hardware:
         # the wheels; it publishes RS1 frames to this process over nav.bus, this process publishes RS2 depth to it and
         # sends desired (v, w).  KEVIN_SAFETY_CORE=0: old in-process path.
         self.core = drive and os.environ.get("KEVIN_SAFETY_CORE", "1") == "1"
-        self.rs2 = RSCamera(ser[1], compute_pointcloud=False, capture_ir=stereo, emitter=not stereo)
-        self.imu = IMUPipeline(ser[1])
-        self.rs2_intr = self.rs2.depth_intrinsics()
+        # RS2 camera process (nav/camproc.py): owns the D435i (video + IMU) outside this process's GIL; the brain and
+        # the safety core read it over nav.bus.  KEVIN_RS2_PROC=0: RS2 pumped by a thread of this process (old path).
+        self.rs2proc = self.core and os.environ.get("KEVIN_RS2_PROC", "1") == "1"
         self.wb = None; self._run = True
+        if self.rs2proc:
+            import multiprocessing as mp
+            from nav import bus, camproc
+            from cameras import RS_DEPTH_H, RS_DEPTH_W
+            self.bus = bus.open_all((RS_DEPTH_H, RS_DEPTH_W), create=True)
+            self.cam_proc = mp.get_context("spawn").Process(target=camproc.cam_main, name="rs2cam", daemon=True,
+                                                             args=(ser[1], stereo, os.getpid(), os.environ.get("KEVIN_RS2CAM_CPUS")))
+            self.cam_proc.start(); t_end = time.monotonic() + 60
+            while not int(self.bus["rs2info"].arr["set"][0]):
+                if time.monotonic() > t_end or not self.cam_proc.is_alive(): raise RuntimeError("RS2 camera process did not start")
+                time.sleep(0.05)
+            self.rs2 = camproc.Rs2Bus(self.bus); self.imu = camproc.ImuBus(self.bus)
+        else:
+            self.rs2 = RSCamera(ser[1], compute_pointcloud=False, capture_ir=stereo, emitter=not stereo)
+            self.imu = IMUPipeline(ser[1])
+        self.rs2_intr = self.rs2.depth_intrinsics()
         if self.core:
             from nav import bus
-            self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
+            if not self.rs2proc: self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
             import multiprocessing as mp
             from nav.safety_core import core_main
             ctx = mp.get_context("spawn")
@@ -87,6 +103,11 @@ class Hardware:
             threading.Thread(target=self._hb_loop, daemon=True, name="cmd-heartbeat").start()
 
     def _rs2_pump(self):
+        if self.rs2proc:                                  # frames come from the RS2 camera process (nav/camproc.py)
+            while self._run:
+                if self.rs2.wait(0.2):
+                    with self._rs2_lock: self.rs2_seq += 1; self.rs2_stamp = self.rs2.depth_stamp
+            return
         while self._run:
             fs = self.rs2.wait_frameset(200)
             if fs is None: continue
@@ -192,6 +213,9 @@ class Hardware:
         if getattr(self, "core", False):
             self.bus["cmd"].write(v=0.0, w=0.0, t=0.0); time.sleep(0.2)          # stale -> core zeroes
             try: self.core_proc.terminate(); self.core_proc.join(2.0)
+            except Exception: pass
+        if getattr(self, "rs2proc", False):
+            try: self.cam_proc.terminate(); self.cam_proc.join(2.0)
             except Exception: pass
         if self.wb:
             try:
