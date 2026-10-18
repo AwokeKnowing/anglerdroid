@@ -163,7 +163,11 @@ class Brain:
         self._backing_for = None
         note = "" if g["snap_m"] < 0.05 else " (closest reachable point, %.2f m from it)" % g["snap_m"]
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
-        self._face_path(pose)
+        # only for a goal started from rest: a goal UPDATED mid-route (LightNav's receding-horizon waypoint every ~1 s,
+        # computed from a 0.3-1 s old pose) must not stop the robot to spin -- MPPI blends it, and the no-progress
+        # watchdog still turns to face the path if MPPI actually stalls (fix3 fridge runs: 4 'turning 97-166 deg' per
+        # run on stale waypoints, 4 m covered vs 6-8 m before).
+        if keep is None: self._face_path(pose)
 
     def _face_path(self, pose):
         """The path leaves BEHIND (carrot one body length ahead on the global path is > 90 deg off the heading, i.e.
