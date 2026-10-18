@@ -25,6 +25,21 @@ class Hardware:
         self.imu = IMUPipeline(ser[1])
         self.rs2_intr = self.rs2.depth_intrinsics()
         self.wb = None
+        # safety core (nav/safety_core.py): separate process, owns the wheels; this process publishes camera frames to
+        # it over nav.bus from dedicated pump threads and sends desired (v, w).  KEVIN_SAFETY_CORE=0: old in-process path.
+        self.core = drive and os.environ.get("KEVIN_SAFETY_CORE", "1") == "1"
+        self.rs1_intr = self.rs1.depth_intrinsics() if hasattr(self.rs1, "depth_intrinsics") else None
+        if self.core:
+            from nav import bus
+            self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
+            self._rs1_cv = threading.Condition(); self._rs1_seq = 0; self._rs1_got = 0
+            threading.Thread(target=self._rs1_pump, daemon=True, name="rs1").start()
+            import multiprocessing as mp
+            from nav.safety_core import core_main
+            ctx = mp.get_context("spawn")
+            self.core_proc = ctx.Process(target=core_main, name="safety_core", daemon=True,
+                                         args=(self.rs1_intr, self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG")))
+            self.core_proc.start(); drive = False                    # the core creates WheelBase
         if drive:
             import wheelbase
             cwd = os.getcwd(); os.chdir(nav.SRC)          # WheelBase reads flat_endpoints.json relative to src/
@@ -47,9 +62,23 @@ class Hardware:
         while self._run:
             fs = self.rs2.wait_frameset(200)
             if fs is None: continue
+            t_recv = time.monotonic()
             with self._rs2_lock:
                 if self.rs2.ingest(fs):
                     self.rs2.publish(); self.rs2_seq += 1; self.rs2_stamp = self.rs2.depth_stamp
+                    if getattr(self, "core", False): self.bus["rs2"].write(depth=self.rs2.depth, stamp=self.rs2_stamp, t_recv=t_recv)
+
+    def _rs1_pump(self):
+        """core mode: every RS1 frame goes to the safety core at once, independent of the brain loop's timing."""
+        while self._run:
+            fs = self.rs1.wait_frameset(200)
+            if fs is None: continue
+            t_recv = time.monotonic()
+            with self._rs1_cv:
+                if not self.rs1.ingest(fs): continue
+                self.rs1.publish(); v = self.rs1.verts
+                self.bus["rs1"].write(verts=v, n=len(v), stamp=self.rs1.depth_stamp, t_recv=t_recv)
+                self._rs1_seq += 1; self._rs1_cv.notify_all()
 
     def rs2_snapshot(self):
         """(seq, stamp_s, depth u16, color rgb, ir_left, ir_right) — copies, safe across threads."""
@@ -60,6 +89,12 @@ class Hardware:
 
     def wait_rs1(self, timeout_ms=200):
         """Block on the RS1 camera clock (30 Hz). Returns (stamp_s, verts) or (None, None) on timeout."""
+        if getattr(self, "core", False):                 # latest frame from the pump (skips frames if the brain is slow)
+            with self._rs1_cv:
+                if self._rs1_seq == self._rs1_got and not self._rs1_cv.wait_for(lambda: self._rs1_seq != self._rs1_got, timeout_ms * 1e-3):
+                    return None, None
+                self._rs1_got = self._rs1_seq
+                return self.rs1.depth_stamp, self.rs1.verts.copy()
         fs = self.rs1.wait_frameset(timeout_ms)
         if fs is None or not self.rs1.ingest(fs):
             return None, None
@@ -67,7 +102,24 @@ class Hardware:
         return self.rs1.depth_stamp, self.rs1.verts
 
     def wheel_vels(self):
+        if getattr(self, "core", False):
+            _, r = self.bus["wheel"].read(["vl", "vr"]); return float(r["vl"][0]), float(r["vr"][0])
         return self.wb.get_wheel_velocities_mps() if self.wb else (0.0, 0.0)
+
+    def core_state(self):
+        """last safety-core decision as a dict (nav.safety_core.STATE_FIELDS), or None (no core)."""
+        if not getattr(self, "core", False): return None
+        from nav.safety_core import STATE_FIELDS, CODES
+        f = self.bus["state"].read()[1]["f"]; d = dict(zip(STATE_FIELDS, [float(x) if math.isfinite(x) else None for x in f]))
+        d["code"] = CODES[int(d["code"])] if d["code"] is not None and 0 <= d["code"] < len(CODES) else "?"; d["alive"] = self.core_proc.is_alive()
+        return d
+
+    def core_viz(self):
+        if not getattr(self, "core", False): return None
+        r = self.bus["viz"].read()[1]; n = int(r["n"][0]); return r["pts"][:n].copy(), r["bands"].reshape(2, 4).copy(), float(r["t"][0])
+
+    def set_rs2_pose(self, T, R):
+        if getattr(self, "core", False): self.bus["rs2pose"].write(T=np.asarray(T, float), R=np.asarray(R, float).ravel(), set=1)
 
     def yaw_rate(self):
         """Robot yaw rate (rad/s, CCW+) from the D435i gyro (optical frame) — up axis in optical = (0,-c,-s)."""
@@ -89,6 +141,9 @@ class Hardware:
 
     def motor_currents(self):
         """(i_left, i_right) A, robot-forward sense, or None (no drive / not streamed)."""
+        if getattr(self, "core", False):
+            _, r = self.bus["wheel"].read(["il", "ir"]); l, rr = float(r["il"][0]), float(r["ir"][0])
+            return None if (math.isnan(l) or math.isnan(rr)) else (l, rr)
         f = getattr(self.wb, "get_motor_currents", None) if self.wb else None
         r = f() if f else None
         return None if r is None else (r[0], r[1])
@@ -96,6 +151,8 @@ class Hardware:
     HB_HZ = 20.0; HB_FRESH_S = 0.3
 
     def drive(self, v, w):
+        if getattr(self, "core", False):
+            self.bus["cmd"].write(v=float(v), w=float(w), t=time.monotonic()); return
         if not self.wb: return
         with self._drv_lock:
             self._cmd = (float(v), float(w), time.monotonic()); self._hb_zeroed = False
@@ -118,6 +175,10 @@ class Hardware:
 
     def close(self):
         self._run = False
+        if getattr(self, "core", False):
+            self.bus["cmd"].write(v=0.0, w=0.0, t=0.0); time.sleep(0.2)          # stale -> core zeroes
+            try: self.core_proc.terminate(); self.core_proc.join(2.0)
+            except Exception: pass
         if self.wb:
             try:
                 with self._drv_lock: self._cmd = (0.0, 0.0, 0.0); self.wb.twist(0.0, 0.0)

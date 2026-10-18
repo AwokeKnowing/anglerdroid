@@ -356,6 +356,9 @@ class H(BaseHTTPRequestHandler):
         if p == "/assets/kevin_lite.glb":
             try: return self._send(open(os.path.join(os.path.dirname(__file__), "assets", "kevin_lite.glb"), "rb").read(), "model/gltf-binary")
             except Exception: return self._send(b"", code=404)
+        if p == "/safety.png":                                       # safety-core 2-D frame overlay (nav /api/safety.png)
+            try: return self._send(nav("/api/safety.png"), "image/png")
+            except Exception: return self._send(b"", code=404)
         if p == "/view.jpg":
             try: return self._send(open("/dev/shm/kevin_view.jpg", "rb").read(), "image/jpeg")
             except Exception: return self._send(b"", code=404)

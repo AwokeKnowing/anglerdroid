@@ -202,13 +202,13 @@ class Rs2Cloud:
     def set_pose(self, T, R):
         self.T, self.R = np.asarray(T, np.float32), np.asarray(R, np.float32)
 
-    def points(self, depth_u16):
+    def points(self, depth_u16, h_max=0.95):
         z = depth_u16[::self.s, ::self.s].ravel().astype(np.float32) * 1e-3
         ok = (z > 0.2) & (z < self.max_range)
         z = z[ok]
         P = np.stack([self.rx[ok] * z, self.ry[ok] * z, z], 1) @ self.R.T + self.T
         hgt = P[:, 2] + AXLE_H                       # height above floor
         hmin = 0.03 + 0.012 * z * z                  # D435 depth error grows ~z^2: keep noisy far floor out of 'obstacle'
-        obs = P[(hgt > hmin) & (hgt < 0.95), :2]
+        obs = P[(hgt > hmin) & (hgt < h_max), :2]          # safety core: h_max 1.0 (all below Kevin's top -> 2-D)
         flo = P[np.abs(hgt) < 0.02, :2]
         return obs, flo
