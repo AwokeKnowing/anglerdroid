@@ -352,6 +352,10 @@ class Brain:
                 # the current time, age added to the reaction time, > 0.5 s immobilised.  Default OFF (the safety core owns this).
                 t_cap = self._fclk.capture(t_frame, t0)
                 v, w, info = self.env.filter(self.v, self.w, pts, t_cap, valid, now=time.monotonic(), v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
+            elif self.env.measured:
+                # superseded proposal (safety-measured-model-on-pr62-2026-10-17), legacy in-brain envelope only, behind
+                # KEVIN_SAFETY_MEASURED=1 (default OFF): staleness against the wall clock, measured stop model (nav.safety)
+                v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=time.monotonic(), v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
             else:
                 v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
         v_saf, w_saf = v, w
