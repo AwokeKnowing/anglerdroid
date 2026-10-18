@@ -338,6 +338,7 @@ class Brain:
             # PLANNER keeps 2x the core's speed-relative threshold clear (governor), so the core rarely has to fire.
             from nav.safety_core import governor
             if valid < 0.05: v, w, sc, need2 = 0.0, 0.0, 0.0, 0.0
+            elif os.environ.get("KEVIN_SC_GOVERNOR", "1") == "0": v, w, sc, need2 = self.v, self.w, 1.0, 0.0   # test: core brake alone
             else: v, w, sc, need2 = governor(pts, self.v, self.w, v_meas=self.slam.odom.v)
             info = dict(state="ok" if sc == 1.0 else "governed", scale=sc, need2=need2, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
             self._gov = (self.v, self.w, v, w, need2)
