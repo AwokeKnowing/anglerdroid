@@ -114,6 +114,9 @@ class Planner:
             u, info = self.G.plan(st)
             a, al = u[0].tolist()
         self.timing["plan_ms"] = (time.perf_counter() - t) * 1e3
+        mc = info.get("mincost") if isinstance(info, dict) else None
+        if mc is not None: self.timing["mincost"] = round(float(mc.reshape(-1)[0]), 2)   # >= 1e4: every rollout infeasible
+        self.timing["u"] = [round(a, 3), round(al, 3)]
         return a, al
 
 
