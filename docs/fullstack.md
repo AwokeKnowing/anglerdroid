@@ -593,9 +593,25 @@ from the SIL12 hull to the box. Times are relative to (c), when the stop was sen
 \* After the stop, drive mode keeps asking for v. The envelope lets Kevin creep in until the clearance reaches the margin,
 so the min gap with a faster ramp comes from that creep, not from braking overshoot. The gap at (e) is the braking result.
 
-- **Visibility is not the problem.** The RS1 top-down camera (0.862 m high, 87 deg along x) first sees the box 0.65-0.71 m
-  ahead of the bumper. That is 3-5x the stopping distance at 0.6 m/s. The ego forward distance matches GT at t_frame to
-  within 5 mm.
+- **Visibility is not the problem.** The safety frame is the RS1 top-down ego points merged with the RS2 forward-camera
+  obstacle points, which is the original RS1 rectangle + RS2 cone design. The merge is at `nav/run.py:325`, RS2 included
+  when its frame is < 0.3 s old.
+  - In every stop-test tick the RS2 points were fresh. RS2 saw the box from the start, 2.0 m ahead of the axle, which is
+    the envelope's `reach`. RS1 alone first saw it only 0.65-0.71 m ahead of the bumper.
+  - Both are far beyond the 0.14-0.23 m stopping budget. The envelope acts on the stopping-distance sweep, so the extra
+    range does not change when the stop happens.
+  - Ego/RS2 forward distance matches GT at t_frame to within 5 mm. Near the box, RS2 reads 1-3 cm closer than RS1.
+  - Original design: `src/vision.py:1076-1116` (`_build_obs_mask`: RS1 rectangle ∪ RS2 80° cone, 2.5 m),
+    `src/vision.py:1937-1958` (combine), `src/vision.py:2405-2428` (`SafetyGuard.update(self._persistent_obs ...)`). PPO:
+    `sim/rl_nav/kernels.py:4,133-134,1412` and `sim/rl_nav/ego80.py:191-206,241-296`.
+  - Since c7d22f2 (2026-10-14), nav keeps the cone as RS2 points: all of RS2's FOV, 0.2-4 m, obstacle heights only
+    (`nav/perceive.py:205-214`). So it can only add obstacles. It is cropped at the envelope's 2.0 m reach.
+  - Gaps (safety logic, not changed):
+    - RS2 points are not shifted for motion between the RS2 and RS1 stamps. In sim the two are rendered from the same
+      state, so the offset is 0. On the robot they run free, up to 0.3 s apart.
+    - RS2 staleness is measured against t_frame, not now.
+    - The original guard assumed LATENCY_S 0.15 and the 1.61 m/s² ramp decel (`src/safety.py:15-16,28`). `nav/safety.py`
+      assumes t_react 0.10 and a_brake 1.5.
 - **Latency is ~150 ms, not ~33 ms.**
   - The nav loop ran at p50 61 ms / p95 82 ms / max 585 ms (16 Hz), because the realistic-render emu.world publishes RS1 at
     15.7 Hz (it was 30 Hz before the 15:36 restart). The loop's own compute is 26 ms.

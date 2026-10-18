@@ -200,19 +200,29 @@ def compose(env: envs.Env, tire: str) -> str:
             ET.SubElement(wb, "geom", type="mesh", mesh="envmesh%d" % i, **a)
     if hasattr(env, "wall_occ"):                     # wall collision = run-length boxes of the wall section raster
         (ox, oy), r = env.gt_origin, getattr(env, "wall_res", envs.GT_RES); nb = 0
-        zs = [z for z, _ in env.wall_levels]; edges = [0.0] + [(a + b) / 2 for a, b in zip(zs[:-1], zs[1:])] + [2.3]
-        for li, (zc, occ) in enumerate(env.wall_levels):
-            za, zb = edges[li], edges[li + 1]; open_ = {}; boxes = []
+        zs = [z for z, _ in env.wall_levels]; dz = getattr(envs, "SLICE_DZ", 0.02)
+        edges = [0.0] + [(a + b) / 2 for a, b in zip(zs[:-1], zs[1:])] + [zs[-1] + dz / 2]   # top = Kevin's height (envs.BAND)
+        def runs2d(occ):                             # run-length rectangles of one slab raster: {(c0, c1, j0, j1)}
+            open_ = {}; out = set()
             for j in range(occ.shape[0] + 1):
                 row = occ[j] if j < occ.shape[0] else np.zeros(occ.shape[1], bool)
                 d = np.diff(np.r_[0, row.astype(np.int8), 0]); runs = set(zip(np.where(d == 1)[0], np.where(d == -1)[0]))
                 for k in list(open_):
-                    if k not in runs: boxes.append((k, open_.pop(k), j))
+                    if k not in runs: out.add((k[0], k[1], open_.pop(k), j))
                 for k in runs: open_.setdefault(k, j)
-            for (c0, c1), j0, j1 in boxes:
-                ET.SubElement(wb, "geom", name="envwall%d" % nb, type="box", size="%g %g %g" % ((c1 - c0) * r / 2, (j1 - j0) * r / 2, (zb - za) / 2),
-                              pos="%g %g %g" % (ox + (c0 + c1) * r / 2, oy + (j0 + j1) * r / 2, (za + zb) / 2), rgba="0 0 0 0", group="3",
-                              contype="1", conaffinity="2", friction="0.6 0.005 0.0001"); nb += 1
+            return out
+        # identical rectangles in consecutive slabs merge into one taller box (vertical walls = one box per run)
+        live = {}; boxes = []
+        for li, (zc, occ) in enumerate(env.wall_levels):
+            cur = runs2d(occ)
+            for k in list(live):
+                if k not in cur: boxes.append((k, live.pop(k), edges[li]))
+            for k in cur: live.setdefault(k, edges[li])
+        boxes += [(k, za, edges[-1]) for k, za in live.items()]
+        for (c0, c1, j0, j1), za, zb in boxes:
+            ET.SubElement(wb, "geom", name="envwall%d" % nb, type="box", size="%g %g %g" % ((c1 - c0) * r / 2, (j1 - j0) * r / 2, (zb - za) / 2),
+                          pos="%g %g %g" % (ox + (c0 + c1) * r / 2, oy + (j0 + j1) * r / 2, (za + zb) / 2), rgba="0 0 0 0", group="3",
+                          contype="1", conaffinity="2", friction="0.6 0.005 0.0001"); nb += 1
         print("emu.world: %d wall collision boxes (%d height slabs)" % (nb, len(zs)))
     if NP["floor"] or os.environ.get("KEVIN_EMU_FLOOR") or hasattr(env, "terrain") or hasattr(env, "hard_zones"):
         _floor_model(root, asset, wb, env, int(os.environ.get("KEVIN_EMU_FLOOR", NP["floor"])))
