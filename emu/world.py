@@ -6,7 +6,9 @@ robot's *hardware* to unmodified robot code via the HAL shims (hal/sim):
   ODrive S1 x2         CANSimple over UDP (node 0 left, node 1 right): set_input_vel, axis state, SDO
                        read/write (flat_endpoints.json ids), watchdog, cyclic 0x09 encoder estimates @100 Hz
   ground truth         shm kevin_gt (pose, twist, collisions) + /dev/shm/kevin_gt_map.npz  (eval tools only)
-  control              UDP JSON on :47801  {"cmd": "teleport"|"obstacle"|"clear_obstacles"|"pause"|"resume"}
+  control              UDP JSON on :47801  {"cmd": "teleport"|"obstacle"|"clear_obstacles"|"pause"|"resume"|"dog"}
+                       dog: {"enabled": bool, "keep_out": [[x, y, r], ...]} (bench option: park the dog / keep it out of
+                       discs, e.g. the start pose; KEVIN_EMU_DOG_KEEPOUT=<r m> keeps it r from env.start from boot)
 
   python -m emu.world --env apartment [--seed 0] [--tire stock|soft_v3_2] [--ir 1] [--rt 1.0]
 """
@@ -343,9 +345,26 @@ class Dog:
         self.e, self.r = env, rng; self.clr = env.clearance
         x, y = env.places.get("hallway", env.start[:2]); self.x, self.y, self.th = float(x), float(y), 0.0
         self.mode, self.tl, self.tg, self.v, self.t = "pause", 2.0, None, 0.0, 0.0
+        self.keep_out = []                                  # [(x, y, r)]: discs the dog treats as occupied (bench option)
     def c(self, x, y):
         r, k = self.e.gt_world_to_rc(x, y)
-        return float(self.clr[r, k]) if 0 <= r < self.clr.shape[0] and 0 <= k < self.clr.shape[1] else 0.0
+        c = float(self.clr[r, k]) if 0 <= r < self.clr.shape[0] and 0 <= k < self.clr.shape[1] else 0.0
+        for (ox, oy, orr) in self.keep_out: c = min(c, max(math.hypot(x - ox, y - oy) - orr, 0.0))
+        return c
+    def clear_of(self, discs, rng_tries=400):
+        """If the dog stands inside any (x, y, r) disc, put it (paused) at the nearest-found free spot >= 0.25 m GT
+        clearance outside all of them - a dog that was in the way has moved off before Kevin is placed there."""
+        if not any(math.hypot(self.x - ox, self.y - oy) < orr for (ox, oy, orr) in discs): return False
+        best = None
+        for _ in range(rng_tries):
+            ox, oy, orr = discs[0]; a = self.r.uniform(-math.pi, math.pi); d = orr + self.r.uniform(0.3, 3.0)
+            tx, ty = ox + d * math.cos(a), oy + d * math.sin(a)
+            if self.c(tx, ty) < 0.25 or any(math.hypot(tx - px, ty - py) < pr + 0.2 for (px, py, pr) in discs): continue
+            dd = math.hypot(tx - self.x, ty - self.y)
+            if best is None or dd < best[0]: best = (dd, tx, ty)
+        if best is None: return False
+        self.x, self.y = best[1], best[2]; self.mode, self.tl, self.tg, self.v = "pause", self.r.uniform(0.5, 2.0), None, 0.0
+        return True
     def pick(self, kx, ky, away=False):
         for _ in range(60):
             if away: a = math.atan2(self.y - ky, self.x - kx) + self.r.uniform(-0.8, 0.8); d = self.r.uniform(0.6, 1.5)
@@ -431,7 +450,10 @@ class World:
         self.dog = Dog(self.env, np.random.default_rng(a.seed + 11)) if getattr(self.env, "dog", False) and os.environ.get("KEVIN_EMU_DOG", "1") == "1" else None
         self.dog_mid = self.m.body("dog").mocapid[0] if self.dog else -1
         self.dog_geoms = set(i for i in range(self.m.ngeom) if (self.m.geom(i).name or "").startswith("dog_"))
-        self.dog_contacts = 0; self._dog_in = False
+        self.dog_contacts = 0; self._dog_in = False; self.dog_on = self.dog is not None
+        if self.dog and float(os.environ.get("KEVIN_EMU_DOG_KEEPOUT", "0") or 0) > 0:
+            self.dog.keep_out = [(float(self.env.start[0]), float(self.env.start[1]), float(os.environ["KEVIN_EMU_DOG_KEEPOUT"]))]
+            self.dog.clear_of(self.dog.keep_out)
         self._setup_io()
 
     def _under(self, b, root):
@@ -442,7 +464,13 @@ class World:
 
     def teleport(self, x, y, yaw):
         q = self.d.qpos; q[0], q[1] = x, y; q[3:7] = (math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))
-        self.d.qvel[:] = 0; self.mj.mj_forward(self.m, self.d)
+        self.d.qvel[:] = 0
+        # never drop Kevin onto the dog (2026-10-17 bench ta1: teleport into the dog -> 5.3 m/s contact, Kevin left
+        # at z 0.20): a dog within its keep-distance of the target moves off first
+        if self.dog and self.dog.clear_of([(float(x), float(y), self.dog.KEEP)] + list(self.dog.keep_out)):
+            p_, q_ = self.dog.pose(); self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_
+            print("emu.world: dog moved off teleport target -> (%.2f, %.2f)" % (self.dog.x, self.dog.y), flush=True)
+        self.mj.mj_forward(self.m, self.d)
 
     # ---------------- io
     def _setup_io(self):
@@ -500,6 +528,16 @@ class World:
                     b = self.m.body("obs%d" % int(c.get("i", 0))).mocapid[0]; self.d.mocap_pos[b] = (c["x"], c["y"], 0.0)
                 elif k == "clear_obstacles":
                     for i in range(N_OBS): self.d.mocap_pos[self.m.body("obs%d" % i).mocapid[0]] = (0, 0, -5)
+                elif k == "dog":
+                    if not self.dog: raise ValueError("no dog in this world (env without dog or KEVIN_EMU_DOG=0)")
+                    if "keep_out" in c:
+                        self.dog.keep_out = [tuple(float(v) for v in z) for z in (c["keep_out"] or [])]
+                        kx, ky = float(self.d.qpos[0]), float(self.d.qpos[1])
+                        if self.dog.keep_out: self.dog.clear_of(self.dog.keep_out + [(kx, ky, self.dog.KEEP)])
+                    if "enabled" in c: self.dog_on = bool(c["enabled"])
+                    if not self.dog_on: self.d.mocap_pos[self.dog_mid] = (0, 0, -5)     # parked below the floor: no contact, not rendered
+                    else: p_, q_ = self.dog.pose(); self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_
+                    r.update(dog=dict(enabled=self.dog_on, keep_out=self.dog.keep_out, x=self.dog.x, y=self.dog.y))
                 elif k == "blind": self.blind = set(c.get("cams", []))          # sensor-failure injection: zero depth
                 elif k == "pause": self.paused = True
                 elif k == "resume": self.paused = False
@@ -512,7 +550,7 @@ class World:
         q = self.d.qpos; yaw = math.atan2(2 * (q[3] * q[6] + q[4] * q[5]), 1 - 2 * (q[5] ** 2 + q[6] ** 2))
         R = self.d.xmat[self.base].reshape(3, 3); vb = R.T @ self.d.qvel[:3]
         return dict(t=self.d.time, x=float(q[0]), y=float(q[1]), yaw=yaw, v=float(vb[0]), w=float(self.d.qvel[5]), collisions=self.collisions, last_contact=getattr(self, "last_contact", None), drives=[[n.state, round(n.ax.input_vel, 4), round(n.ax.vel_setpoint, 4), round(n.vel, 4), round(float(n.ax.integrator), 4)] for n in self.nodes[:2]],
-                    dog=None if not self.dog else dict(x=self.dog.x, y=self.dog.y, th=self.dog.th, mode=self.dog.mode, contacts=self.dog_contacts, last=getattr(self, "last_dog_contact", None)))
+                    dog=None if not self.dog else dict(x=self.dog.x, y=self.dog.y, th=self.dog.th, mode=self.dog.mode if self.dog_on else "off", keep_out=self.dog.keep_out, contacts=self.dog_contacts, last=getattr(self, "last_dog_contact", None)))
 
     # ---------------- physics
     def step(self, now):
@@ -586,7 +624,7 @@ class World:
                     self.imu.push(st_ns + int(NP["imu_dt"] * 1e9), g, ac)      # IMU clock offset vs cameras
                 if self.d.time >= n_enc * 0.01:
                     n_enc += 1; self.contact()
-                    if self.dog:
+                    if self.dog and self.dog_on:
                         self.dog.step(0.01, float(self.d.qpos[0]), float(self.d.qpos[1])); p_, q_ = self.dog.pose()
                         self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_
                     # reported wheel speeds: per-wheel radius error, then the differential part scaled by the
@@ -684,7 +722,7 @@ class World:
             tmp = "/dev/shm/kevin_view.tmp.jpg"; open(tmp, "wb").write(jp.tobytes()); os.replace(tmp, "/dev/shm/kevin_view.jpg")
             if VIEW_DIR: open(os.path.join(VIEW_DIR, "f%06d.jpg" % self._vn), "wb").write(jp.tobytes())
         dg = getattr(self, "dog", None)
-        if dg is not None:
+        if dg is not None and getattr(self, "dog_on", True):
             dog_x, dog_y = float(dr.mocap_pos[self.dog_mid][0]), float(dr.mocap_pos[self.dog_mid][1])
             qw, qx, qy, qz = [float(v) for v in dr.mocap_quat[self.dog_mid]]
             dog_yaw = math.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
