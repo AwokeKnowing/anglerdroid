@@ -148,8 +148,8 @@ class MPPI:
         for t in range(H):
             x,y,th,v,w=s.step_dyn(x,y,th,v,w,U[:,:,t,0],U[:,:,t,1],dt,L,v_cap_clear(clr))
             TX[:,:,t,0]=x;TX[:,:,t,1]=y;TX[:,:,t,2]=th
-            clr=torch.where(v<0,s.clearance(x,y,th,s.w.edt_rev),s.clearance(x,y,th))
-            dead|=clr<0.012
+            clr=s.clearance(x,y,th)                                            # obstacles (metric); reversing: containment
+            dead|=(clr<0.012)|((v<0)&(s.clearance(x,y,th,s.w.edt_rev)<0.005))     # in known-traversable space (mppi_cuda REV_IN)
             ax=edt_at(s.edt,(y*100).long().clamp(0,s.w.H-1),(x*100).long().clamp(0,s.w.W-1)).float()
             cost+=dead.float()*50+20*torch.relu(0.06-clr)
             cost+=dt*(1.0*torch.exp(-clr/0.15)+2.0*(torch.relu(R_ROTATE-ax)/(R_ROTATE-R_PASS)).clamp(max=1))   # proximity + not-turnable

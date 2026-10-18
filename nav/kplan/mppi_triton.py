@@ -66,8 +66,10 @@ def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
         tl.store(txb + t*TXC, x, mask=mask); tl.store(txb + t*TXC + 1, y, mask=mask); tl.store(txb + t*TXC + 2, th, mask=mask)
         if TXC == 6:
             tl.store(txb + t*TXC + 3, v, mask=mask); tl.store(txb + t*TXC + 4, w, mask=mask); tl.store(txb + t*TXC + 5, vc, mask=mask)
-        clr = tl.where(v < 0, _clear(x, y, th, fp, P, erev, eoff, Hm, Wm, mask), _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask))
-        dead = tl.where(clr < 0.012, 1.0, dead)
+        # obstacle clearance (metric) vs reverse containment in known-traversable space (see mppi_cuda REV_IN)
+        clr = _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask)
+        crv = tl.where(v < 0, _clear(x, y, th, fp, P, erev, eoff, Hm, Wm, mask), 1.0)
+        dead = tl.where((clr < 0.012) | (crv < 0.005), 1.0, dead)
         ix = tl.minimum(tl.maximum((x*100.0).to(tl.int32), 0), Wm-1)
         iy = tl.minimum(tl.maximum((y*100.0).to(tl.int32), 0), Hm-1)
         ax = tl.load(edt + eoff + iy.to(tl.int64)*Wm + ix, mask=mask, other=1.0).to(tl.float32)

@@ -36,6 +36,7 @@ __device__ __forceinline__ float stopclear(float x,float y,float th,float v,floa
 #define R_ROTATE @R_ROTATE@f
 #define R_PASS @R_PASS@f
 #define APPROACH_VMIN 0.08f
+#define REV_IN 0.005f   // half a 1 cm planning cell: the sample lies in a known-traversable cell
 __global__ void k_roll(const float* U,const float* st,const float* goal,const float* fp,int P,const __half* edt,const __half* erv,long long es,int Hm,int Wm,
   float* co,float* deo,float* tx,int K,int H,int TXC,float dt,LP L){
   int b=blockIdx.y, k=blockIdx.x*blockDim.x+threadIdx.x; if(k>=K) return;
@@ -78,8 +79,15 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
       // Starting inside it (escape), only motions that do not get closer than the start (-5 mm, 1/2 cell) are allowed.
       if(crv<0.012f || clr<fminf(L.d_safe,clr0-0.005f)) dead=1.f;
     } else {                                                // PR #62 default
-      clr=clearf(x,y,th,fp,P,v<0.f?er:e,Hm,Wm); crv=clr;
-      if(clr<0.012f) dead=1.f; }
+      // Two different questions (2026-10-18 stuck diagnosis): obstacle CLEARANCE is metric (margin, speed cap, costs);
+      // 'known traversable' for reversing is CONTAINMENT: every footprint sample inside a cell observed free or swept
+      // by the hull (nav/obslayer).  The swept trail is exactly the footprint, so its clearance field is ~0 along the
+      // robot's own boundary: with the margin test (and vcap on that field) every reverse step was dead / speed 0 and
+      // 'retreat along the way in' never moved (stuck1 dumps: footprint edt_rev 0.000 at 9/10 trail poses).
+      clr=clearf(x,y,th,fp,P,e,Hm,Wm);
+      crv=v<0.f?clearf(x,y,th,fp,P,er,Hm,Wm):1.f;
+      if(clr<0.012f || crv<REV_IN) dead=1.f;
+      crv=clr; }
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
     cost+=dead*50+20*fmaxf(0.06f-crv,0.f);   // cost terms unchanged (clearance in the field the step uses)

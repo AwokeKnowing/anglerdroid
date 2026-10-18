@@ -48,8 +48,11 @@ class ObsLayer:
                 while len(tr) > 2 and L > SWEPT_M:
                     a = tr.popleft(); L -= math.hypot(tr[0][0] - a[0], tr[0][1] - a[1])
 
-    def _swept(self, org, res, shape, only=None):
-        """footprint polygons at the recent trail poses (or only at pose `only`) -> bool grid."""
+    def _swept(self, org, res, shape, only=None, touched=False):
+        """footprint polygons at the recent trail poses (or only at pose `only`) -> bool grid.  Default: whole cells only
+        (for CLEARING map memory).  touched=True: every cell the hull overlapped (for 'known traversable': a reverse
+        rollout retracing the trail puts its footprint samples exactly on the swept boundary, which the whole-cell
+        raster drops -> nothing behind the robot was ever enterable; tolerance = 1 map cell (2 cm) < SAFETY_MARGIN)."""
         out = np.zeros(shape, np.uint8)
         with self.lock: tr = [tuple(only)] if only is not None else list(self.trail)
         for x, y, th in tr:
@@ -57,6 +60,7 @@ class ObsLayer:
             P = np.c_[x + c * self.fp[:, 0] - s * self.fp[:, 1], y + s * self.fp[:, 0] + c * self.fp[:, 1]]
             q = np.round((P - np.asarray(org)) / res - 0.5).astype(np.int32)
             cv2.fillPoly(out, [q], 1)
+        if touched: return cv2.dilate(out, np.ones((3, 3), np.uint8)).astype(bool)
         return cv2.erode(out, np.ones((2, 2), np.uint8)).astype(bool)      # whole cells only
 
     def _warp(self, mask, org, res, shape):
@@ -90,7 +94,7 @@ class ObsLayer:
         free = cv2.erode(((src == FREE) | (src == BODY)).astype(np.uint8), ker).astype(bool) & ~obst   # cell fully clear
         body = (src == BODY)
         Wo, Wf, Wb = (self._warp(m, org, res, occ.shape) for m in (obst, free, body))
-        Ws = self._swept(org, res, occ.shape)
+        Ws = self._swept(org, res, occ.shape, touched=True)
         # Map memory under the CURRENT footprint is cleared: Kevin cannot stand inside a wall, such cells are SLAM
         # pose-error ghosts (seen: a counter edge 10 cm from the axle after a fast approach -> every MPPI rollout 'dead'
         # at t=0, "local planner found no path", stuck for good).  Same rule as the safety envelope's map memory.
@@ -99,4 +103,5 @@ class ObsLayer:
         # traversable where the map is free.  What the RS1 sees now still wins.
         Wn = self._swept(org, res, occ.shape, only=pose)
         occ2 = (occ & ~Wf & ~Wb & ~Wn) | Wo
-        return occ2, (Wf | Wb | Wn | (Ws & ~occ2)) & ~Wo
+        Wt = self._swept(org, res, occ.shape, only=pose, touched=True)      # the cells the robot stands on now
+        return occ2, (Wf | Wb | Wt | (Ws & ~occ2)) & ~Wo
