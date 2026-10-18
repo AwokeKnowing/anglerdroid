@@ -22,12 +22,10 @@ from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
-# control cycle (James 2026-10-18).  KEVIN_CTL=cmd: command-triggered plan cycle in its own thread -- issuing a plan's
-# command starts the next plan; goals / global replans are latched and taken at the next cycle start; each plan starts
-# from the latency-compensated predicted state (nav/predict.py).  KEVIN_CTL=frame: the previous loop (one plan per RS1
-# frame, from the latest measured pose and the last commanded v, w).
-# Default frame until the cmd loop has beaten the old loop on the bench (2026-10-18: v1 starved perception with a busy
-# plan loop and predicted from brain commands, not what the safety core sent; v2 fixes both).
+# control cycle (James 2026-10-18).  KEVIN_CMD_CYCLE=1 (opt-in): goals / global replans are latched and taken at the
+# next cycle start (a new goal never interrupts a plan before its command is issued) and each plan starts from the
+# latency-compensated predicted state (nav/predict.py) at the time its command takes effect.  Default: the previous
+# loop (plan from the latest measured pose and the last commanded v, w).  Both run inline after perception.
 CTL_MODE = "cmd" if os.environ.get("KEVIN_CMD_CYCLE") == "1" or os.environ.get("KEVIN_CTL") == "cmd" else "frame"   # opt-in: KEVIN_CMD_CYCLE=1
 GOAL_SAME_M = 0.20     # a re-sent goal within the xy goal tolerance (0.20 m, below) is the same goal
 GYRO_INC = os.environ.get("KEVIN_GYRO_INC", "1") != "0"     # 0: mean gyro rate x frame dt (previous behaviour)
@@ -84,7 +82,6 @@ class Brain:
         if self.planner: threading.Thread(target=self._plan_loop, daemon=True, name="plan").start()
         if CTL_MODE == "cmd":                      # frame (default) = the previous loop; only the predictor's scoring runs
             threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
-            threading.Thread(target=self._ctl_loop, daemon=True, name="ctl").start()
 
     # -------------------------------------------------------------- commands (any thread)
     def command(self, text):
@@ -307,11 +304,12 @@ class Brain:
         self._feed_core()
         self.pred.measured(t_frame, vl, vr, self.slam.odom.pose, t_w)  # odom pose at the frame stamp, wheel speeds at their read time
         with self._ctl_cv:
-            self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._ctl_cv.notify_all()
+            self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._snap_t = time.monotonic(); self._ctl_cv.notify_all()
+        self.stats.add("rx_age_ms", (t0 - t_frame) * 1e3)            # frame stamp -> brain picks it up
         tp = getattr(self, "_tpl", None); self._tpl = t0
         self.stats.add("percep_ms", (time.monotonic() - t0) * 1e3)
         if tp is not None: self.stats.add("percep_period_ms", (t0 - tp) * 1e3)
-        if CTL_MODE == "frame": self._control()
+        self._control()       # inline in both modes (see _control: a separate plan thread added ~60 ms, measured)
 
     # -------------------------------------------------------------- control cycle
     def _fit_loop(self):
@@ -326,37 +324,28 @@ class Brain:
         if cs: self.pred.core(cs.get("t_sent"), cs.get("v_out"), cs.get("w_out"), cs.get("ramp"), cs.get("period"))
         return cs
 
-    def _ctl_loop(self):
-        """command-triggered (path/backout): the next plan starts when the previous plan's command is issued to the
-        wheels -- the safety core forwards brain commands at its own ticks, so 'issued' = the core's t_sent passing the
-        brain's hand-over time.  (v1 started the next plan at the hand-over: plans faster than the core can forward
-        them are never executed, and the busy loop starved perception of the GIL: RS1 period 45 -> 100 ms.)
-        Other modes have no plan to run: they wait for new information (frame / command), as the frame loop did."""
-        last = -1
-        while self.running:
-            with self._ctl_cv:
-                busy = self.mode in ("path", "backout")
-                if self._snap is None or (not busy and self._snap_n == last and not self._pending):
-                    self._ctl_cv.wait(0.05); continue
-                last = self._snap_n
-            try: self._control()
-            except Exception as e:
-                self.stats.add("ctl_err", 1); self.log("control error: %r" % e); time.sleep(0.05); continue
-            if busy and getattr(self.hw, "core", False):
-                # sleep (GIL released) until the core's predicted forwarding tick, then confirm; no busy polling
-                # (polling at 1 kHz made the perception thread hand over the GIL constantly: RS1 period 45 -> 80 ms)
-                t_h = self._t_iss; t_end = t_h + 3 * self.pred.core_period
-                while self.running and not self._pending:
-                    cs = self._feed_core(); now = time.monotonic()
-                    if (cs and (cs.get("t_sent") or 0) > t_h) or now >= t_end: break
-                    ts = (cs or {}).get("t_sent") or now; P = self.pred.core_period
-                    nxt = ts + max(1, math.ceil((t_h - ts) / P)) * P          # first core tick after the hand-over
-                    time.sleep(min(max(nxt - now, 0.0) + 0.002, t_end - now))
-                self.stats.add("ctl_wait_ms", (time.monotonic() - t_h) * 1e3)
+    # The command-triggered cycle ran in its own thread in v1/v2 (2026-10-18).  Measured (lat_probe, same goals):
+    # frame->command p50 226 -> 287 ms, RS1 handling 28 -> 42 ms, plan compute 4.5 -> 15 ms (two threads contending
+    # for the GIL and the 4 shared CPUs), and the snapshot waited ~21 ms for the cycle.  The safety core forwards
+    # brain commands only at its RS1-frame ticks, so a plan started at hand-over cannot act sooner than the next tick
+    # anyway.  The cycle therefore runs inline right after perception: issuing its command ends the cycle and the next
+    # one starts with the next observation; goals stay latched to the cycle start, and the start state is the
+    # prediction at the core's forwarding tick + transport latency.  Added latency vs the old loop: the prediction only.
 
     def _control(self):
+        pf = getattr(self, "_prof", None)
+        if pf is None and os.environ.get("KEVIN_CTL_PROF"):
+            import cProfile; pf = self._prof = cProfile.Profile(); self._prof_n = 0
+        if pf is None: return self._control1()
+        pf.enable()
+        try: return self._control1()
+        finally:
+            pf.disable(); self._prof_n += 1
+            if self._prof_n % 300 == 0: pf.dump_stats(os.environ["KEVIN_CTL_PROF"])
+
+    def _control1(self):
         t_frame, ego_obs, valid, vl, vr, gz = self._snap
-        t0 = time.monotonic()
+        t0 = time.monotonic(); self.stats.add("snap_age_ms", (t0 - getattr(self, "_snap_t", t0)) * 1e3)
         lg = self._latched_g
         if lg is not None and CTL_MODE == "cmd":                    # global replan latched by _plan_loop
             self._latched_g = None
