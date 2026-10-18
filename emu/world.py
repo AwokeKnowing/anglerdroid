@@ -654,18 +654,18 @@ class World:
         rq = {"job": None}; cv = threading.Condition()
         rt = threading.Thread(target=self._render_loop, args=(rq, cv), daemon=True); rt.start()
         t0 = time.monotonic(); sim0 = self.d.time; k = 0; n_cam = 0; n_imu = 0; n_enc = 0
-        last_report = t0; steps = 0
+        last_report = t0; steps = 0; TM = dict(io_in=0.0, mj_step=0.0, contact=0.0, dog=0.0)
         print("emu.world: %s seed=%d tire=%s start=%s  CAN udp:%d  ctl udp:%d" % (self.env.name, a.seed, a.tire, self.env.start, CAN_PORT, CTL_PORT), flush=True)
         while True:
-            now = time.monotonic()
-            self._poll_can(now); self._poll_ctl()
+            now = time.monotonic(); _pc = time.perf_counter
+            _a = _pc(); self._poll_can(now); self._poll_ctl(); TM["io_in"] += _pc() - _a
             if self.paused:
                 t0 = now - (self.d.time - sim0) / a.rt; time.sleep(0.005); continue
             target = sim0 + (now - t0) * a.rt
             if target - self.d.time > 0.25:           # fell far behind (debugger / overload): drop time, never fast-forward
                 t0 = now - (self.d.time - sim0) / a.rt; target = self.d.time
             while self.d.time < target:
-                self.step(now); steps += 1
+                _a = _pc(); self.step(now); TM["mj_step"] += _pc() - _a; steps += 1
                 st_ns = int((t0 + (self.d.time - sim0) / a.rt) * 1e9)
                 if self.d.time >= n_imu * 0.005:
                     n_imu += 1
@@ -679,10 +679,10 @@ class World:
                     ac = np.asarray(am, np.float32) + self.rng.normal(0, NP["a_white"], 3).astype(np.float32)
                     self.imu.push(st_ns + int(NP["imu_dt"] * 1e9), g, ac)      # IMU clock offset vs cameras
                 if self.d.time >= n_enc * 0.01:
-                    n_enc += 1; self.contact()
+                    n_enc += 1; _a = _pc(); self.contact(); TM["contact"] += _pc() - _a
                     if self.dog and self.dog_on:
-                        self.dog.step(0.01, float(self.d.qpos[0]), float(self.d.qpos[1])); p_, q_ = self.dog.pose()
-                        self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_
+                        _a = _pc(); self.dog.step(0.01, float(self.d.qpos[0]), float(self.d.qpos[1])); p_, q_ = self.dog.pose()
+                        self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_; TM["dog"] += _pc() - _a
                     # reported wheel speeds: per-wheel radius error, then the differential part scaled by the
                     # effective-track error (pivot skid / tire compliance), encoder quantisation on position
                     f = [nd.dir * nd.vel * self.rerr[k] for k, nd in enumerate(self.nodes[:2])]
@@ -714,9 +714,15 @@ class World:
                         rq["job"] = rq["slow"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5]), time.monotonic_ns()); cv.notify_all()
             if now - last_report > 10:
                 s = self.state()
-                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz" % (
-                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / (now - last_report), self._ncam / (now - last_report), self._ncol / (now - last_report)), flush=True)
+                el = now - last_report
+                # rtf = physics steps / (wall * 1/dt): robot code assumes 1.0.  Per-part loop time (ms per wall s) so
+                # a slowdown can be located (2026-10-18: 1000 -> 640 Hz over ~3.5 h, restart restored it, cause unknown)
+                print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz  rtf %.3f  ms/s %s ncon %d" % (
+                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / el, self._ncam / el, self._ncol / el, steps * self.dt / el,
+                    " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in TM.items()), int(self.d.ncon)), flush=True)
+                if steps * self.dt / el < 0.95: print("emu.world: WARNING sim slower than real time (rtf %.2f): robot timing assumes 1.0" % (steps * self.dt / el), flush=True)
                 steps = 0; self._ncam = 0; self._ncol = 0; last_report = now
+                for k_ in TM: TM[k_] = 0.0
             time.sleep(0.0008)
 
     _ncam = 0
