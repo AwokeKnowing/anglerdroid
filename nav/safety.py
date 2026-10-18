@@ -10,7 +10,17 @@ import math, time
 import numpy as np
 
 import nav  # noqa (src on path)
-from twin_geometry import SIL12, FOOTPRINT_SAFE, SAFETY_MARGIN                    # twin footprint polygon (+ sim deck corners)
+from twin_geometry import SIL12, FOOTPRINT_SAFE, SAFETY_MARGIN, WHEEL_R_M         # twin footprint polygon (+ sim deck corners)
+import os
+
+# MEASURED stopping model (2026-10-17 sim stop test, emu/tools/stoptest; PROPOSAL branch, not merged):
+#   braking: ODrive vel_ramp 3 turns/s^2 (src/wheelbase.py) -> 3 * 2 pi * 0.08565 = 1.614 m/s^2 at the wheel
+#   T_ACT 0.04 s: stop command -> wheel decel, = CAN/UDP 0-7 ms + velocity-loop lag (wheel trails the ramped setpoint
+#     by ~0.05 m/s at 1.61 m/s^2 = 31 ms)
+#   reaction is no longer a constant: per tick it is (now - frame capture) [measured frame age] + one frame interval
+#     [the next chance to stop, if this tick lets the motion through] + T_ACT
+A_BRAKE_MEAS = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")) * 2 * math.pi * WHEEL_R_M
+T_ACT = 0.04
 
 
 def _edges(poly):
@@ -22,8 +32,9 @@ def _edges(poly):
 
 
 class Envelope:
-    def __init__(self, margin=SAFETY_MARGIN, a_brake=1.5, t_react=0.10, stale_s=0.25, min_valid=0.05, reach=2.0):
-        self.n, self.c = _edges(FOOTPRINT_SAFE); self.margin = margin; self.a = a_brake; self.tr = t_react
+    def __init__(self, margin=SAFETY_MARGIN, a_brake=A_BRAKE_MEAS, t_act=T_ACT, stale_s=0.25, min_valid=0.05, reach=2.0):
+        self.n, self.c = _edges(FOOTPRINT_SAFE); self.margin = margin; self.a = a_brake; self.t_act = t_act; self.tr = t_act
+        self._t_prev = None; self.frame_dt = 1 / 30
         self.stale = stale_s; self.min_valid = min_valid; self.reach = reach
         self.interventions = 0; self.immobilised = 0; self.ticks = 0; self._was = False
         self.last = dict(state="ok", scale=1.0)
@@ -54,6 +65,10 @@ class Envelope:
         velocity loop lags/overshoots (emulated ODrive: ~0.6 s to start, 20 % overshoot), so what matters is how fast
         the robot is actually going.  Returns (v, w, info)."""
         now = time.monotonic() if now is None else now; self.ticks += 1
+        if depth_t is not None:
+            if self._t_prev is not None and depth_t > self._t_prev: self.frame_dt = min(depth_t - self._t_prev, self.stale)
+            self._t_prev = depth_t
+            self.tr = max(now - depth_t, 0.0) + self.frame_dt + self.t_act        # measured reaction for this tick
         if depth_t is None or now - depth_t > self.stale or valid_frac < self.min_valid:
             self.immobilised += 1; self.last = dict(state="no_depth", scale=0.0)
             return 0.0, 0.0, self.last

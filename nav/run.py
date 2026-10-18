@@ -330,7 +330,7 @@ class Brain:
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
             if len(mp): pts = np.concatenate([pts, mp])
         v_pre, w_pre = self.v, self.w
-        v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
+        v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=time.monotonic(), v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)   # now = wall clock: staleness + frame age are real
         v_saf, w_saf = v, w
         if info["state"] != "ok": self.v, self.w = v, w
         # sensor-rate speed bound: travel at most FRAME_STEP_M (heading FRAME_STEP_RAD) per depth frame, so a
