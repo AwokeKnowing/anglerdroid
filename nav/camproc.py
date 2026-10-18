@@ -37,7 +37,7 @@ def cam_main(serial, stereo, parent_pid, cpus):
                 B["imu"].write(t=t, g=g, a=a, w=w, ok=1)
             time.sleep(0.002)
     threading.Thread(target=imu_loop, daemon=True, name="rs2cam-imu").start()
-    n = 0
+    n = 0; ring = bus.Rs2Ring(B["rs2"])
     while True:
         if os.getppid() != parent_pid: return
         fs = cam.wait_frameset(200)
@@ -45,7 +45,7 @@ def cam_main(serial, stereo, parent_pid, cpus):
         t_recv = time.monotonic()
         if not cam.ingest(fs): continue
         cam.publish(); n += 1
-        B["rs2"].write(depth=cam.depth, stamp=cam.depth_stamp, t_recv=t_recv)            # safety core first
+        ring.push(cam.depth, cam.depth_stamp, t_recv)                                   # safety core first
         has_ir = cam.ir_left is not None and cam.ir_right is not None
         B["rs2img"].write(depth=cam.depth, color=cam.color, stamp=cam.depth_stamp, t_recv=t_recv, n=n, has_ir=int(has_ir),
                           **(dict(ir1=cam.ir_left, ir2=cam.ir_right) if has_ir else {}))

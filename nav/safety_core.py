@@ -32,6 +32,7 @@ from twin_geometry import FOOTPRINT_SAFE, SAFETY_MARGIN, WHEEL_R_M, TRACK_M
 HZ = 30.0; T_TICK = 1.0 / HZ
 AGE_MAX_S = float(os.environ.get("KEVIN_SC_AGE_MAX", "0.10"))
 CADENCE_MAX_S = float(os.environ.get("KEVIN_SC_CADENCE_MAX", str(1.5 / HZ)))    # a dropped frame = missed cadence
+PAIR_WAIT_S = float(os.environ.get("KEVIN_SC_PAIR_WAIT", "0.010"))   # max wait for the RS2 frame paired with this RS1 frame when it is due
 CMD_STALE_S = 0.3
 T_CMD = 0.010                         # core decision -> CAN frame on the wire (assumed; measured: see log t_sent - t_dec)
 RAMP_NORMAL, RAMP_MAX = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")), 5.0
@@ -263,7 +264,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     clk1, clk2 = FrameClock(), FrameClock()
     LOG = open(log_path, "a", buffering=1 << 16) if log_path else None
     gc.collect(); gc.freeze(); gc.disable()                       # no GC pauses inside the loop (refcounting still frees)
-    s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}
+    s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}; n2 = 0; lat2 = None
     ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0
     while True:
         if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
@@ -285,12 +286,32 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
             ego.update(cam.verts); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
         else:
             per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
-        if B["rs2"].seq != s2:
-            s2, r2 = B["rs2"].read(out=r2); cap2 = clk2.capture(float(r2["stamp"][0]), float(r2["t_recv"][0]))
+        # RS2: of the frames not yet used, take the one captured nearest to this RS1 frame (the two cameras run
+        # unsynchronised; taking simply the newest skips a frame whenever RS1 is handled late, and misses one when RS2
+        # lands just after the read).  If the RS2 frame paired with this RS1 frame is due within PAIR_WAIT_S (expected
+        # delivery = previous capture + 1/HZ + measured RS2 delivery latency), wait for it.
+        ref = cap1p if new1 else None; t_end = time.monotonic() + PAIR_WAIT_S; best = None
+        while True:
+            if B["rs2"].seq != s2:
+                s2, r2 = B["rs2"].read(out=r2 if r2 else None); best = None
+                nw = int(r2["n"][0]); j = (nw - 1) % bus.RS2_RING
+                d = float(r2["t_recv"][j]) - clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
+                lat2 = d if lat2 is None else 0.9 * lat2 + 0.1 * d
+            if best is None and r2:
+                nw = int(r2["n"][0])
+                for k in range(max(n2 + 1, nw - bus.RS2_RING + 1), nw + 1):
+                    j = (k - 1) % bus.RS2_RING; c2 = clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
+                    if best is None or ref is None or abs(c2 - ref) <= abs(best[2] - ref): best = (k, j, c2)
+            due = (ref is not None and cap2p is not None and lat2 is not None and (best is None or best[2] < ref - 0.5 / HZ)
+                   and cap2p + 1.0 / HZ <= ref + 0.5 / HZ and cap2p + 1.0 / HZ + lat2 <= t_end)
+            if not due or time.monotonic() >= t_end: break
+            time.sleep(0.0005)
+        if best is not None:
+            n2, j, cap2 = best
             per2 = None if cap2p is None else cap2 - cap2p; cap2p = cap2
             sp = B["rs2pose"].read()[1]
             if int(sp["set"][0]): rs2.set_pose(sp["T"], sp["R"].reshape(3, 3))
-            P2, _ = rs2.points(r2["depth"], h_max=H_MAX)
+            P2, _ = rs2.points(r2["depth"][j], h_max=H_MAX)
         else: per2 = None
         tC = time.monotonic()                                          # frame age AT DECISION (after the transform)
         age1 = (tC - cap1p) if cap1p is not None else np.inf; age2 = (tC - cap2) if cap2 is not None else np.inf

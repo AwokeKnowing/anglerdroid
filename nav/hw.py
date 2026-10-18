@@ -65,6 +65,7 @@ class Hardware:
         if self.core:
             from nav import bus
             if not self.rs2proc: self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
+            if not self.rs2proc: self._rs2ring = bus.Rs2Ring(self.bus["rs2"])
             import multiprocessing as mp
             from nav.safety_core import core_main
             ctx = mp.get_context("spawn")
@@ -115,7 +116,7 @@ class Hardware:
             with self._rs2_lock:
                 if self.rs2.ingest(fs):
                     self.rs2.publish(); self.rs2_seq += 1; self.rs2_stamp = self.rs2.depth_stamp
-                    if getattr(self, "core", False): self.bus["rs2"].write(depth=self.rs2.depth, stamp=self.rs2_stamp, t_recv=t_recv)
+                    if getattr(self, "core", False): self._rs2ring.push(self.rs2.depth, self.rs2_stamp, t_recv)
 
 
 

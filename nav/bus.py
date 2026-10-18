@@ -3,7 +3,7 @@
 Seqlock blocks (writer: seq odd while writing, even when stable; readers copy and retry on change).  All times are
 time.monotonic() seconds (CLOCK_MONOTONIC is system-wide, so both processes read the same clock).
   sc_rs1    camera pump -> core : RS1 verts (n x 3 f32), n, stamp (camera), t_recv (host monotonic)
-  sc_rs2    camera pump -> core : RS2 depth u16, stamp, t_recv
+  sc_rs2    camera pump -> core : the last RS2_RING RS2 depth frames u16 + stamps, t_recv, n = frames written (Rs2Ring)
   sc_rs2pose brain -> core      : RS2 extrinsics (T 3, R 9) when nav.autocal updates them
   sc_cmd    brain -> core       : desired v, w, t_sent (the core is the only writer to the wheels)
   sc_wheel  core -> brain       : vl, vr, t, i_l, i_r, i_age (nan = none), battery
@@ -20,6 +20,7 @@ HDR = 64
 PREFIX = os.environ.get("KEVIN_SC_PREFIX", "kevin_sc")
 MAX_VERTS = 480 * 848
 IMU_RING = 1024
+RS2_RING = 2       # the core pairs each RS1 frame with the RS2 frame captured nearest to it, so it keeps the previous one too
 
 
 def _untrack(shm):
@@ -79,7 +80,7 @@ def layouts(depth_shape):
     H, W = depth_shape
     return dict(
         rs1=[("verts", (MAX_VERTS, 3), "f4"), ("n", (1,), "i8"), ("stamp", (1,), "f8"), ("t_recv", (1,), "f8")],
-        rs2=[("depth", (H, W), "u2"), ("stamp", (1,), "f8"), ("t_recv", (1,), "f8")],
+        rs2=[("depth", (RS2_RING, H, W), "u2"), ("stamp", (RS2_RING,), "f8"), ("t_recv", (RS2_RING,), "f8"), ("n", (1,), "i8")],
         rs2pose=[("T", (3,), "f8"), ("R", (9,), "f8"), ("set", (1,), "i8")],
         cmd=[("v", (1,), "f8"), ("w", (1,), "f8"), ("t", (1,), "f8")],
         wheel=[("vl", (1,), "f8"), ("vr", (1,), "f8"), ("t", (1,), "f8"), ("il", (1,), "f8"), ("ir", (1,), "f8"), ("iage", (1,), "f8"), ("batt", (1,), "f8")],
@@ -96,3 +97,13 @@ def layouts(depth_shape):
 
 def open_all(depth_shape, create=False):
     return {k: Block(k, L, create=create) for k, L in layouts(depth_shape).items()}
+
+
+class Rs2Ring:
+    """writer side of sc_rs2: frame k (1-based) lives in slot (k-1) % RS2_RING."""
+    def __init__(self, block):
+        self.b = block; self.d = np.zeros(block.arr["depth"].shape, np.uint16)
+        self.s = np.zeros(RS2_RING); self.t = np.zeros(RS2_RING); self.n = 0
+    def push(self, depth, stamp, t_recv):
+        j = self.n % RS2_RING; self.d[j] = depth; self.s[j] = stamp; self.t[j] = t_recv; self.n += 1
+        self.b.write(depth=self.d, stamp=self.s, t_recv=self.t, n=self.n)
