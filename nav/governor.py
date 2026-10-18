@@ -16,6 +16,9 @@ alone (the core checks a pure rotation without the translation bands), then stop
 from __future__ import annotations
 import numpy as np
 from nav.safety_core import sd, free_along, free_rotation, need_dist, need_angle, MARGIN
+from twin_geometry import FOOTPRINT_SAFE
+
+R_FP = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())   # footprint radius about the axle
 
 SCALES = (1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1)
 
@@ -29,6 +32,10 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
     """P (N,2) robot frame (brain points U core points); bands: core band rects [[front], [rear]] (x0, y0, x1, y1)
     or None.  Returns (v, w, scale, need2, why)."""
     sd0 = float(sd(P).min()) if len(P) else np.inf
+    # exact pruning (cost only): a sweep of arclength s keeps the footprint within s + R_FP of the axle, so points farther
+    # than that + MARGIN can neither stop it nor be 'closest'.  Same sampling steps as the core.
+    rP = np.hypot(P[:, 0], P[:, 1]) if len(P) else np.zeros(0)
+    near = lambda reach: P[rP <= reach + R_FP + MARGIN + 0.02]
     bf = bands is not None and _band(P, bands[0]); br = bands is not None and _band(P, bands[1])
 
     def ok(vs, ws):
@@ -36,10 +43,10 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
             sign = 1 if vs > 0 else -1
             if (sign > 0 and bf) or (sign < 0 and br): return False, 0.0
             ve = max(abs(vs), abs(v_meas) if v_meas * vs > 0 else 0.0); need2 = factor * (need_dist(ve) + MARGIN)
-            fr, mn = free_along(P, sign, ws / vs, need2)
+            fr, mn = free_along(near(need2), sign, ws / vs, need2)
         elif abs(ws) >= 1e-3:
             we = max(abs(ws), abs(w_meas) if w_meas * ws > 0 else 0.0); need2 = factor * need_angle(we)
-            fr, mn = free_rotation(P, 1 if ws > 0 else -1, need2)
+            fr, mn = free_rotation(near(0.0), 1 if ws > 0 else -1, need2)
         else: return True, 0.0
         return fr >= need2 or (sd0 < MARGIN and mn >= sd0 - 1e-3), need2
 
