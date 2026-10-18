@@ -13,6 +13,8 @@ import torch  # noqa: E402
 import planner as KP  # noqa: E402
 import fastpath as FP  # noqa: E402
 from core import Limits  # noqa: E402
+import twin_geometry as _TG  # noqa: E402
+_LB = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # body length (nose to tail)
 
 
 class Planner:
@@ -94,6 +96,14 @@ class Planner:
             p = FP.plan_path(self.m, st[:2].astype(float), g[:2], eps=2.0)
             if p is None:
                 self.status = "no path"; self.goal = None; return False, "no path to %.2f,%.2f" % tuple(gq)
+            if heading is None and len(p["xy"]) > 1:
+                # no requested heading: the MPPI goal-heading terms (terminal + near-goal) still pull toward g[2], which
+                # was 0.0 -- a phantom 'face +x' that made goals approached from the other side a local minimum
+                # 0.3-0.5 m short (stuck dumps 130053/130443: dithering at the couch/kitchen with 0.5 m clearance).
+                # The heading-free goal is arrived at along the path: its final tangent (over one body length).
+                P = p["xy"]; s_ = np.r_[0, np.cumsum(np.hypot(*np.diff(P[::-1], axis=0).T))]
+                k = len(P) - 1 - min(int(np.searchsorted(s_, _LB)), len(P) - 1)
+                if k < len(P) - 1: g[2] = math.atan2(P[-1, 1] - P[k, 1], P[-1, 0] - P[k, 0])
             self.M.set_paths(g[None], [p], keep_progress=True); self.M.sprog.zero_()
             self.goal = np.asarray(gq); self.heading = heading; self.path = p["xy"] + self.org; self.status = "driving"
         self.timing["newgoal_ms"] = (time.perf_counter() - t) * 1e3
