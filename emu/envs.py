@@ -15,7 +15,13 @@ import numpy as np
 TEX_DIR = os.path.join(os.environ.get("KEVIN_EMU_CACHE", os.path.expanduser("~/.cache/kevin_emu")), "tex")
 GT_RES = 0.02
 WALL_RES = 0.01        # mesh-wall collision raster (emu.world boxes); finer than GT_RES so the skin hugs the visual wall
-BAND = (0.03, 0.95)
+# Mesh-wall slicing band: floor clearance up to Kevin's full height.  Twin (kevin_full.xml, all geoms, axle at
+# 0.0857 m): top 1.006 m (mast head); above 0.20 m only the mast/RS1 column (x -0.20..+0.03 m from the axle).
+# Mesh features above ROBOT_TOP_M cannot touch Kevin and are not walls.  Slices every SLICE_DZ: the old 4 slices
+# (0.08/0.35/0.63/0.90 m) missed the casita island top (z 0.684-0.744 m) -> perceived but neither GT nor collision.
+ROBOT_TOP_M = 1.02
+SLICE_DZ = 0.02
+BAND = (0.03, ROBOT_TOP_M)
 
 
 @dataclass
@@ -429,7 +435,7 @@ def build(name: str, seed: int = 0) -> Env:
     if hasattr(e, "_mesh"):
         m, s, off = e._mesh; occ0 = occ.copy(); e.wall_levels = []; wr = e.wall_res = WALL_RES
         wshape = (int(math.ceil((y1 - y0) / wr)), int(math.ceil((x1 - x0) / wr)))
-        for zc in np.linspace(BAND[0] + 0.05, BAND[1] - 0.05, 4):
+        for zc in np.arange(BAND[0] + SLICE_DZ / 2, BAND[1], SLICE_DZ):     # slab [zc - dz/2, zc + dz/2] (world.py)
             lv = np.zeros(wshape, bool); e.wall_levels.append((float(zc), lv))
             # raw triangle/plane segments (Path3D.discrete chains open segments and drew phantom diagonals)
             import trimesh
