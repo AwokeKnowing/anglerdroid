@@ -22,6 +22,8 @@ from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
+GOAL_SAME_M = 0.20     # a re-sent goal within the xy goal tolerance (0.20 m, below) is the same goal
+GYRO_INC = os.environ.get("KEVIN_GYRO_INC", "1") != "0"     # 0: mean gyro rate x frame dt (previous behaviour)
 from nav.hw import AXLE_H
 RS1_T = _TG.RS1_T
 
@@ -93,11 +95,11 @@ class Brain:
             px, py = (c["x"], c["y"]) if "x" in c else (x, y)
             self.places.set(c["name"], px, py, th); self.log("labelled %s at %.2f,%.2f" % (c["name"], px, py))
         elif k == "forget": self.log(("forgot " if self.places.remove(c["name"]) else "no place ") + c["name"])
-        elif k == "goto_xy": self._goto((c["x"], c["y"]), c["heading"], None)
+        elif k == "goto_xy": self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
         elif k == "goto_place":
             p = self.places.get(c["name"])
             if p is None: self.log("unknown place '%s' (known: %s)" % (c["name"], ", ".join(self.places.d) or "none"))
-            else: self._goto(p[:2], None, c["name"])
+            else: self._goto(p[:2], None, c["name"], cmd=True)
         elif k == "relative": self._goto((x + c["d"] * math.cos(th), y + c["d"] * math.sin(th)), None, None, allow_back=c["d"] < 0)
         elif k == "turn":                       # relative turn: track the remaining angle (a 360 used to wrap to 0 -> 'arrived')
             self.turn_target = wrap(th + c["rad"]); self.turn_rem = c["rad"]; self._turn_th = th; self.mode = "turn"; self.log("turning %.0f°" % math.degrees(c["rad"]))
@@ -119,17 +121,27 @@ class Brain:
             else: self.vln.instruct(c["text"])
         else: self.log(c.get("msg", "?"))
 
-    def _goto(self, xy, heading, label, allow_back=False):
+    def _goto(self, xy, heading, label, allow_back=False, cmd=False):
         """Global coarse path on the whole map -> local subgoal for the 1 cm window/MPPI. Reports unreachable honestly."""
         if self.planner is None: self.log("planner disabled"); return
         from nav import globalplan as GP
         pose = self.slam.pose(); xy = np.asarray(xy, float)
+        # the same goal again (LightNav re-sends its receding-horizon waypoint every prediction, ~1.7 s): keep the
+        # running plan, the controller and the progress watchdog.  Re-planning reset the 'no progress' clock each time,
+        # so a wedged robot never got to retreat (live 07:01: 90 x "going to point (-3.82, -0.61)", cmd 0 0).
+        same = (cmd and self.mode in ("path", "turn", "backout") and getattr(self, "goal_req", None) is not None and label == self.goal_label
+                and float(np.hypot(*(xy - np.asarray(self.goal_req, float)))) < GOAL_SAME_M)
+        if same: self.goal_heading = heading; self.stats.add("goal_same", 1.0); return
+        cont = cmd and self.mode in ("path", "turn", "backout") and getattr(self, "_prog", None) is not None    # new goal mid-route
+        keep = (self._prog, self._stuck, self._best_d, self._best_t, self.goal_t0) if cont else None
         g = GP.plan(self.slam.grid, pose[:2], xy, self.obs)
         if g is None:
             self.mode = "idle"; self.log("unreachable: no path to %s (%.2f, %.2f)" % (label or "point", xy[0], xy[1])); return
         self.gpath = g; self.goal_req = xy; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
         self.goal_heading = heading; self.goal_label = label; self.goal_t0 = time.monotonic()
         self._prog = (self.goal_t0, pose); self._stuck = 0; self._snap_logged = False; self._resume_path = False; self.mode = "path"; self._best_d = 1e9; self._best_t = self.goal_t0
+        if keep is not None and not getattr(self, "_bo_retry", False):     # mid-route update: the watchdog keeps running
+            self._prog, self._stuck, _, self._best_t, self.goal_t0 = keep
         ok = self._set_sub(pose)
         if not ok:
             if getattr(self, "_bo_retry", False): self._bo_fail = True; return                 # retry after a retreat: caller decides
@@ -206,6 +218,11 @@ class Brain:
             self.hw.drive(0.0, 0.0); self.stats.add("frame_timeout", 1); return
         self.tick += 1
         vl, vr = self.hw.wheel_vels(); gz = self.hw.yaw_rate()
+        yi = getattr(self.hw, "yaw_inc", None)        # gyro rotation on its own clock -> rate over THIS odom step
+        if gz is not None and yi is not None and GYRO_INC:
+            self._yaw_carry = getattr(self, "_yaw_carry", 0.0) + yi[0]
+            ot = self.slam.odom.t; dtf = 0.0 if ot is None else min(max(t_frame - ot, 0.0), 0.6)
+            if dtf > 0: gz = self._yaw_carry / dtf; self._yaw_carry = 0.0
         self.slam.odom.update(t_frame, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
         self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0)
         try:

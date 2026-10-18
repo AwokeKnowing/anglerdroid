@@ -164,11 +164,21 @@ class Hardware:
         # mean of ALL gyro samples since the last call (200 Hz ring), not just the latest: a stalled loop
         # (CUDA warm-up, GC) during a spin otherwise lost the rotation (maze: 0.5 rad lost on the first turn,
         # 39 deg yaw error for the whole tour -> SLAM built a rotated map and never recovered)
-        G = None; A = None
+        # yaw_inc: the rotation itself, integrated on the gyro's own sample clock (sum w_i * (t_i - t_i-1)).  The mean
+        # rate x the loop's FRAME dt mis-scales every step by (frame dt - sample span); at LightNav's +-2.5 rad/s
+        # turns that jitter random-walked to ~20 deg in 30 s (live 2026-10-18, scan matching is off while |w| > 0.6).
+        G = None; A = None; self.yaw_inc = None
         if hasattr(self.imu, "drain_ring"):
             try:
                 gs, acs, ts, self._ring_since = self.imu.drain_ring(getattr(self, "_ring_since", 0), max_n=400)
-                if len(gs): G = gs.astype(float); A = acs.astype(float)
+                if len(gs):
+                    G = gs.astype(float); A = acs.astype(float); ts = np.asarray(ts, float)
+                    t_prev = getattr(self, "_gyro_tlast", None)
+                    dts = np.diff(np.r_[ts[0] if t_prev is None else t_prev, ts])
+                    if np.all(dts >= 0) and dts.max() < 0.25:
+                        wz = (((G - TG.GYRO_BIAS) * TG.GYRO_SCALE) @ TG.IMU_R.T)[:, 2]
+                        self.yaw_inc = (float(wz @ dts), float(ts[-1]))
+                    self._gyro_tlast = float(ts[-1])
             except Exception: G = None
         if G is None: G = np.asarray(self.imu.gyro, float)[None]
         if A is not None and len(A): self.accel_batch = (TG.IMU_R @ A.T).T      # base-frame specific force (bump detector)
