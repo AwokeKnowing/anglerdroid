@@ -163,6 +163,24 @@ class Brain:
         self._backing_for = None
         note = "" if g["snap_m"] < 0.05 else " (closest reachable point, %.2f m from it)" % g["snap_m"]
         self.log("going to %s (%.2f, %.2f)%s global %.0f ms, local %.1f ms" % (label or "point", xy[0], xy[1], note, g["ms"], self.planner.timing["newgoal_ms"]))
+        self._face_path(pose)
+
+    def _face_path(self, pose):
+        """The path leaves BEHIND (carrot one body length ahead on the global path is > 90 deg off the heading, i.e.
+        driving forward moves away from it) and Kevin has room to spin here (axle clearance >= R_ROTATE): turn in place
+        to face it, then hand back to MPPI (Nav2 RPP rotate-to-heading).  MPPI cannot find that itself: a half turn
+        fills its 2 s horizon without progress, reversing in the open is costed as a last resort, so the cheapest
+        rollout is standing still (stuck dump 125134: goal 0.53 m behind, 0.52 m clearance, u = 0 for 30 s).
+        Where Kevin cannot spin, MPPI keeps the path (multi-point turn / retreat along the trail)."""
+        gp = getattr(self, "gpath", None); x, y, th = pose
+        if gp is None or len(gp["xy"]) < 2 or self.planner is None or self.planner.clearance((x, y)) < _TG.R_ROTATE: return False
+        P = np.asarray(gp["xy"], float); i = int(np.argmin(np.hypot(P[:, 0] - x, P[:, 1] - y)))
+        s_ = np.r_[0, np.cumsum(np.hypot(*np.diff(P[i:], axis=0).T))]; j = i + min(int(np.searchsorted(s_, L_BODY)), len(s_) - 1)
+        if math.hypot(P[j, 0] - x, P[j, 1] - y) < 0.05: return False
+        hd = math.atan2(P[j, 1] - y, P[j, 0] - x); e = wrap(hd - th)
+        if abs(e) <= math.pi / 2: return False
+        self.turn_target = hd; self.turn_rem = None; self._resume_path = True; self._turn_t0 = time.monotonic(); self.mode = "turn"
+        self.log("path leaves behind: turning %.0f deg to face it (room to turn here)" % math.degrees(e)); return True
 
     def _retreat(self, goal_for, why):
         """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point (the last
@@ -405,6 +423,7 @@ class Brain:
                             self.log("stopped %.2f m short of %s (closest reachable)" % (dg, self.goal_label or "goal")); return
                         self._stuck += 1; self._stuck_dump("noprog%d" % self._stuck)
                         if self._stuck >= 4: self.mode = "idle"; self.goal = None; self.planner.cancel(); self.log("gave up: stuck (unreachable from here)")
+                        elif self._face_path((x, y, th)): pass          # room to turn here: face the path (no retreat needed)
                         else:
                             self._bo_stuck = self._stuck
                             if not self._retreat((self.goal_req, self.goal_heading, self.goal_label), "no progress (%d)" % self._stuck):
@@ -458,6 +477,13 @@ class Brain:
             # remembered map cells that land inside/at the footprint are pose-error artifacts (the robot cannot be
             # inside a wall it is not touching; fresh sensors cover contact): drop them, keep the rest as memory
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
+            if getattr(self.hw, "core", False) and len(mp):
+                # planner-side governor only (the legacy in-brain envelope and the safety core are unchanged): a memory
+                # cell the RS1 sees as clear floor RIGHT NOW is a pose-error ghost -- the planners' observation layer
+                # already drops it, so the governor must too, or it vetoes the planner's every move toward floor the
+                # camera sees free (stuck dump 124920: map cell 7.7 cm off the nose, RS1 FREE there, governed 20 s).
+                from nav.obslayer import FREE
+                mp = mp[self.obs.observed(mp) != FREE]
             if len(mp): pts = np.concatenate([pts, mp])
         v_pre, w_pre = self.v, self.w; t_cap = None                  # t_cap: only the KEVIN_SAFETY_STALE_NOW variant maps it
         if getattr(self.hw, "core", False):
