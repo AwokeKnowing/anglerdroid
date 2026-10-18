@@ -36,6 +36,8 @@ VIEW_CAMS = {"rs1_depth": (0.10, 212, 120, FOVY_D, DW / DH, (0.1, 0.9, 1.0)),   
              "rs2_color": (0.09, 160, 120, FOVY_C, CW / CH, (1.0, 0.85, 0.1))}  # forward D435i RGB
 VIEW_CLIP = (0.2, 1.2)   # drawn FOV range (m): D435 minimum depth ~0.2 m .. 1.2 m to keep the scene readable
 FPS = 30
+DEPTHPROC = os.environ.get("KEVIN_EMU_DEPTHPROC", "1") == "1"   # depth cameras in their own process (emu/depthcam.py)
+CAMLOG = open(os.environ["KEVIN_EMU_CAMLOG"], "a", buffering=1 << 16) if os.environ.get("KEVIN_EMU_CAMLOG") else None
 # Mounts = twin URDF optical frames (urdf/kevin.urdf, base_link = axle centre, x fwd, y left, z up):
 #   realsense_d435_depth_optical  (-0.007, 0, 0.8619)  looking straight down, x_opt = robot-backward
 #   realsense_d435_color_optical  (+0.008, 0, 0.8619)
@@ -515,6 +517,7 @@ class World:
         L2 = L1 + IRL; L1 = L1 + IRL                     # both RealSenses stream IR1/IR2 (cuVSLAM dual rig)
         self.b1 = shm.Block("kevin_rs1", L1, create=True); self.b2 = shm.Block("kevin_rs2", L2, create=True)
         self.imu = shm.ImuRing("kevin_imu", create=True)
+        if DEPTHPROC: self._start_depthcam(L1, L2)
         self.gt = shm.Block("kevin_gt", [("pose", (12,), "f8")], create=True)
         self.bm = shm.Block("kevin_mast", [("color", (MH, MW, 3), "u1")], create=True)
         di, ci = _intr(DW, DH, FOVY_D), _intr(CW, CH, FOVY_C)
@@ -537,6 +540,20 @@ class World:
         self.can = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.can.bind(("127.0.0.1", CAN_PORT)); self.can.setblocking(False)
         self.ctl = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); self.ctl.bind(("127.0.0.1", CTL_PORT)); self.ctl.setblocking(False)
         self.clients = set(); self.FMT = struct.Struct("<dIB??8s")
+
+    def _start_depthcam(self, L1, L2):
+        """RS1/RS2 depth in their own process (emu/depthcam.py): model binary + config in /dev/shm, pose block written by
+        the physics loop every camera tick, colour/IR side blocks written by the slow lane."""
+        import subprocess
+        from emu import depthcam
+        self.campose = shm.Block("kevin_campose", depthcam.pose_layout(self.m), create=True)
+        p = dict(DH=DH, DW=DW, CH=CH, CW=CW, ir=bool(self.a.ir), fpx=_intr(DW, DH, FOVY_D)["fx"], baseline=BASELINE, subpix=self.a.subpix,
+                 holes=self.a.holes, min_z=self.a.min_z, band=bool(self.a.band), cam_jit=NP["cam_jit"], world_pid=os.getpid(),
+                 layout1=[[n, list(s_), d] for n, s_, d in L1], layout2=[[n, list(s_), d] for n, s_, d in L2], model="/dev/shm/kevin_emu_model.mjb")
+        self.side1 = shm.Block("kevin_rs1_side", depthcam.side_layout(p), create=True); self.side2 = shm.Block("kevin_rs2_side", depthcam.side_layout(p), create=True)
+        self.mj.mj_saveModel(self.m, p["model"], None)
+        json.dump(p, open("/dev/shm/kevin_depthcam.json", "w"))
+        self.depthcam = subprocess.Popen([sys.executable, "-m", "emu.depthcam", "/dev/shm/kevin_depthcam.json"], cwd=REPO)
 
     def _send(self, aid, data):
         pkt = self.FMT.pack(time.time(), aid, len(data), False, False, bytes(data).ljust(8, b"\0"))
@@ -690,8 +707,11 @@ class World:
                                                         self.nodes[0].vel, self.nodes[1].vel, self.nodes[0].ax.input_vel, self.nodes[1].ax.input_vel]))
                 if self.d.time >= n_cam / FPS:
                     n_cam += 1
+                    if DEPTHPROC:          # depth process renders from this pose (capture stamp = physics time)
+                        self.campose.write(st_ns, qpos=self.d.qpos, mpos=self.d.mocap_pos, mquat=self.d.mocap_quat,
+                                           blind=np.array(["rs1" in self.blind, "rs2" in self.blind], np.uint8))
                     with cv:
-                        rq["job"] = rq["slow"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5])); cv.notify_all()
+                        rq["job"] = rq["slow"] = (st_ns, self.d.qpos.copy(), self.d.mocap_pos.copy(), self.d.mocap_quat.copy(), float(self.d.qvel[5]), time.monotonic_ns()); cv.notify_all()
             if now - last_report > 10:
                 s = self.state()
                 print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz" % (
@@ -818,29 +838,36 @@ class World:
             return zz.astype(np.uint16)
         FAST_RS2 = os.environ.get("KEVIN_EMU_FAST_RS2", "1") == "1"
         lane = {"pend1": {}, "pend2": {}, "d1": None, "d2": None, "lock": threading.Lock()}
+        if DEPTHPROC:                  # depth lives in emu/depthcam.py; this thread only runs the colour/IR/mast/viewer lane
+            with cv: rq["job"] = None
+            return self._slow_lane(rq, cv, lane, True)
         st = threading.Thread(target=self._slow_lane, args=(rq, cv, lane, FAST_RS2), daemon=True); st.start()
         jt = (lambda: int(self._rng_cam.normal(0, NP["cam_jit"]) * 1e9)) if NP["cam_jit"] else (lambda: 0)
         while True:
             with cv:
                 while rq["job"] is None: cv.wait()
-                st_ns, qpos, mocap, mquat, wz = rq["job"]; rq["job"] = None
+                st_ns, qpos, mocap, mquat, wz, t_job = rq["job"]; rq["job"] = None
+            t_pick = time.monotonic_ns()
             dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
             d1 = depth("rs1_depth")                                # top-down (safety) first, every tick
             if "rs1" in self.blind: d1[:] = 0
             with lane["lock"]:
                 p1 = lane["pend1"]; lane["pend1"] = {}
-            self.b1.write(st_ns + jt(), depth=d1, **p1)
+            t_r1 = time.monotonic_ns(); s1 = st_ns + jt(); self.b1.write(s1, depth=d1, **p1); t_w1 = time.monotonic_ns()
+            s2 = t_r2 = t_w2 = 0
             if FAST_RS2:
                 d2 = depth("rs2_ir1")
                 if "rs2" in self.blind: d2[:] = 0
                 with lane["lock"]:
                     p2 = lane["pend2"]; lane["pend2"] = {}
-                self.b2.write(st_ns + jt(), depth=d2, **p2); lane["d2"] = d2
+                t_r2 = time.monotonic_ns(); s2 = st_ns + jt(); self.b2.write(s2, depth=d2, **p2); lane["d2"] = d2; t_w2 = time.monotonic_ns()
             else:
                 with lane["lock"]:
                     p2 = lane["pend2"]; lane["pend2"] = {}
                 if p2: self.b2.write(p2.pop("_st"), **p2)
             lane["d1"] = d1; self._ncam += 1
+            if CAMLOG is not None:   # KEVIN_EMU_CAMLOG: per-frame stage stamps (monotonic ns) for the latency trace
+                CAMLOG.write("%d %d %d %d %d %d %d %d %d %d\n" % (st_ns, t_job, t_pick, t_r1, t_w1, t_r2, t_w2, s1, s2, int(bool(p1))))
 
     def _slow_lane(self, rq, cv, lane, fast_rs2):
         import cv2
@@ -872,7 +899,7 @@ class World:
             with cv:
                 while rq.get("slow") is None or rq["slow"] is last: cv.wait()
                 last = job = rq["slow"]
-            st_ns, qpos, mocap, mquat, wz = job
+            st_ns, qpos, mocap, mquat, wz, _ = job
             dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
             f1 = pool.submit(fxa, "rs1_color", rgb(Rc, "rs1_color"), wz); f2 = pool.submit(fxa, "rs2_color", rgb(Rc, "rs2_color"), wz)
             o1, o2 = {}, {}
@@ -891,8 +918,12 @@ class World:
             if Rd2 is not None:                                    # RS2 depth in the slow lane only if not fast
                 Rd2.update_scene(dr, "rs2_ir1"); Rd2.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
                 o2["depth"] = (Rd2.render() * 1000.0).astype(np.uint16); o2["_st"] = st_ns
-            with lane["lock"]:
-                lane["pend1"] = o1; lane["pend2"] = o2
+            if DEPTHPROC:
+                self.side1.write(st_ns, **o1); self.side2.write(st_ns, **o2)
+                lane["d1"] = self.b1.arr["depth"].copy(); lane["d2"] = self.b2.arr["depth"].copy()   # viewer only (torn frame harmless)
+            else:
+                with lane["lock"]:
+                    lane["pend1"] = o1; lane["pend2"] = o2
             self._ncol += 1
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
                 t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
