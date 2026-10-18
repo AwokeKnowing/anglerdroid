@@ -467,7 +467,7 @@ class World:
         self.d.qvel[:] = 0
         # never drop Kevin onto the dog (2026-10-17 bench ta1: teleport into the dog -> 5.3 m/s contact, Kevin left
         # at z 0.20): a dog within its keep-distance of the target moves off first
-        if self.dog and self.dog.clear_of([(float(x), float(y), self.dog.KEEP)] + list(self.dog.keep_out)):
+        if getattr(self, "dog", None) and self.dog.clear_of([(float(x), float(y), self.dog.KEEP)] + list(self.dog.keep_out)):
             p_, q_ = self.dog.pose(); self.d.mocap_pos[self.dog_mid] = p_; self.d.mocap_quat[self.dog_mid] = q_
             print("emu.world: dog moved off teleport target -> (%.2f, %.2f)" % (self.dog.x, self.dog.y), flush=True)
         self.mj.mj_forward(self.m, self.d)
