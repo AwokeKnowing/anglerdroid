@@ -493,11 +493,16 @@ class Brain:
         if getattr(self.hw, "core", False):
             # safety lives in the safety core process (nav/safety_core.py, last resort, owns the wheels).  Here: the
             # PLANNER keeps 2x the core's speed-relative threshold clear (governor), so the core rarely has to fire.
-            from nav.safety_core import governor
+            from nav.governor import governor
+            gw = "off"
             if valid < 0.05: v, w, sc, need2 = 0.0, 0.0, 0.0, 0.0
             elif os.environ.get("KEVIN_SC_GOVERNOR", "1") == "0": v, w, sc, need2 = self.v, self.w, 1.0, 0.0   # test: core brake alone
-            else: v, w, sc, need2 = governor(pts, self.v, self.w, v_meas=self.slam.odom.v)
-            info = dict(state="ok" if sc == 1.0 else "governed", scale=sc, need2=need2, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
+            else:
+                # same rules as the core, 2x (nav/governor.py), with the core's own hard bands.  The brain's points
+                # (RS1 ego + RS2 + map memory) are a superset of the core's sources (RS1 ego + RS2).
+                cv = self.hw.core_viz(); bands = cv[1] if cv is not None else None
+                v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w, bands=bands)
+            info = dict(state="ok" if gw in ("ok", "idle") else "governed", scale=sc, need2=need2, gov=gw, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
             if len(pts):
                 _d = self.env._sd(pts); _i = int(np.argmin(_d)); _near = [round(float(pts[_i, 0]), 3), round(float(pts[_i, 1]), 3), round(float(_d[_i]), 3)]
             else: _near = None
