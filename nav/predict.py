@@ -86,14 +86,19 @@ class CmdPredictor:
         # excitation: the measured wheel speeds must change by much more than their noise, else every delay fits
         if len(Cw) < 5 or max(np.ptp(M[:, 1]), np.ptp(M[:, 2])) < 0.10: return None
         C = C[C[:, 0] > M[0, 0] - D_MAX - 1.0]; a = self._a_wheel()
-        best = None; E = []
-        for d in np.arange(0.0, D_MAX + 1e-9, D_STEP * 2):
-            sl, sr = M[0, 1], M[0, 2]; e = 0.0
-            for k in range(1, len(M)):
-                sl, sr, _ = self._sim(C, M[k - 1, 0], M[k, 0], sl, sr, d, a)
-                e += (sl - M[k, 1]) ** 2 + (sr - M[k, 2]) ** 2
-            E.append(e)
-            if best is None or e < best[0]: best = (e, d)
+        # same model as _sim, vectorised over all candidate delays (one open-loop run from the first measurement):
+        # uniform SIM_DT grid, zero-order-hold command at t - d, per-wheel ramp limit; sampled at the measurement times
+        D = np.arange(0.0, D_MAX + 1e-9, D_STEP * 2); half = TG.TRACK_M / 2
+        T = np.arange(M[0, 0], M[-1, 0] + SIM_DT, SIM_DT)
+        idx = np.searchsorted(C[:, 0], T[None, :] - D[:, None], side="right") - 1          # (nd, nt)
+        Vc = np.where(idx >= 0, C[np.maximum(idx, 0), 1], 0.0); Wc = np.where(idx >= 0, C[np.maximum(idx, 0), 2], 0.0)
+        TL, TR = Vc - Wc * half, Vc + Wc * half; st = a * SIM_DT
+        SL = np.empty_like(TL); SR = np.empty_like(TR); sl = np.full(len(D), M[0, 1]); sr = np.full(len(D), M[0, 2])
+        for k in range(T.size):
+            sl = sl + np.clip(TL[:, k] - sl, -st, st); sr = sr + np.clip(TR[:, k] - sr, -st, st); SL[:, k] = sl; SR[:, k] = sr
+        kk = np.clip(np.round((M[1:, 0] - T[0]) / SIM_DT).astype(int), 0, T.size - 1)
+        E = ((SL[:, kk] - M[None, 1:, 1]) ** 2 + (SR[:, kk] - M[None, 1:, 2]) ** 2).sum(1)
+        ib = int(np.argmin(E)); best = (float(E[ib]), float(D[ib]))
         E = np.array(E); self.fit_info = dict(d=round(best[1], 3), sse_min=round(float(E.min()), 4), sse_d0=round(float(E[0]), 4), sse_max=round(float(E.max()), 4), n=len(M))
         if E.max() <= 0 or (E.max() - E.min()) / E.max() < 0.2: return None      # flat: the window does not determine d
         self._fits.append(best[1]); self.lat = float(np.median(self._fits))
