@@ -76,3 +76,24 @@ Root causes (traced with KEVIN_EMU_CAMLOG / KEVIN_SHIM_LOG / core log stage colu
 4. The core needs about 24-31 ms of CPU per frame.  On a hyperthread shared with a render lane it overran 33 ms.
    Fix: simpin.sh gives the core physical core 3 (only the light rs2cam on sibling 7).  Depth lanes run on 6/2.
    Everything else runs on 0,1,4,5, with LightNav/ollama at nice +10 and the viewer at +5 (user-level, no root).
+
+Measured (ms p50/p95/max; age = at decision, after the transform; missed = consumed-frame interval > 50 ms, % of
+ticks; period after the first 4 s of each window, which is nav-restart startup with Kevin still):
+
+| window | run | age RS1 | age RS2 | age > 100 ms | missed RS1 / RS2 | loop period | stops/inop events |
+|---|---|---|---|---|---|---|---|
+| goals | before r6 | 46/74/157 | 46/75/165 | 1.50 % | 0.23 / 1.47 % | 33.2/40.2 | cadence 69, age 16 |
+| goals | after lat4 | 50/60/122 | 50/60/113 | 0.16 % | 0.37 / 0.37 % | 33.4/41.3/91 | cadence 17, age 2 |
+| VLN | before r6 | 164/285/379 | 169/291/441 | 85.2 % | 2.41 / 12.20 % | 33.5/51.2 | age 150, cadence 38 |
+| VLN | after lat4 | 50/66/130 | 50/66/126 | 0.26 % | 0.36 / 0.34 % | 33.1/43.9/87 | cadence 6, age 4 |
+
+Ground truth (gtbench): before r6 goals 2/12, contacts 0, 3-D gap min 0.095 / p5 0.120 m.  After lat4 goals 7/12
+(kitchen 3/3, bedroom 3/3, couch 0/3 [planner "unreachable", in every run before too], VLN 1/3 arrived), contacts 0,
+3-D gap min 0.027 / p5 0.153 m.  The 2-D gap min of -0.005 m is the tool's clamp; it appears in every run.
+
+Per-stage after (lat4, ms p50/p95/max): physics tick -> depthcam pick-up 1.3/7.8/81; render RS1 12.2/19.2 and RS2
+8.7/16.4; noise 10.4/13.1; shm write 0.2-0.3; capture -> core RS1 wake 26/34-40; rs2cam wake 23/29-34, 0.00 % gaps;
+core ingest 9.3/12.1, ego 12.0/14.8, RS2 pick+cloud 1.5/2.1, decide 1.5/2.9, total 24.4/29.8.  The missed beats
+that remain (0.3-0.4 %) start upstream: depthcam publish intervals > 50 ms 0.35-0.43 % (physics/pick-up hiccups).
+Real Orin RS2 for reference: capture -> Python 32.1/32.5/33.2 ms, 33.3 ms steady, 0 drops.  Sim capture -> Python is
+26/34 ms: about the same median, more jitter.
