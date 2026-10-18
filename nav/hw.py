@@ -142,6 +142,12 @@ class Hardware:
             _, r = self.bus["wheel"].read(["vl", "vr"]); return float(r["vl"][0]), float(r["vr"][0])
         return self.wb.get_wheel_velocities_mps() if self.wb else (0.0, 0.0)
 
+    def wheel_t(self):
+        """monotonic time the wheel speeds were read (safety core stamps them), or None = now."""
+        if getattr(self, "core", False):
+            _, r = self.bus["wheel"].read(["t"]); return float(r["t"][0])
+        return None
+
     def core_state(self):
         """last safety-core decision as a dict (nav.safety_core.STATE_FIELDS), or None (no core)."""
         if not getattr(self, "core", False): return None

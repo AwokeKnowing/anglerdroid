@@ -22,6 +22,11 @@ from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
+# control cycle (James 2026-10-18).  KEVIN_CTL=cmd: command-triggered plan cycle in its own thread -- issuing a plan's
+# command starts the next plan; goals / global replans are latched and taken at the next cycle start; each plan starts
+# from the latency-compensated predicted state (nav/predict.py).  KEVIN_CTL=frame: the previous loop (one plan per RS1
+# frame, from the latest measured pose and the last commanded v, w).
+CTL_MODE = os.environ.get("KEVIN_CTL", "cmd")
 GOAL_SAME_M = 0.20     # a re-sent goal within the xy goal tolerance (0.20 m, below) is the same goal
 GYRO_INC = os.environ.get("KEVIN_GYRO_INC", "1") != "0"     # 0: mean gyro rate x frame dt (previous behaviour)
 from nav.hw import AXLE_H
@@ -68,15 +73,21 @@ class Brain:
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
         self._cmd_lock = threading.Lock(); self._pending = []
+        from nav.predict import CmdPredictor
+        self.pred = CmdPredictor(float(os.environ.get("KEVIN_VEL_RAMP", "3.0")))
+        self._ctl_cv = threading.Condition(); self._snap = None; self._snap_n = 0; self._latched_g = None
         self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
         self.running = True
         if self.planner: threading.Thread(target=self._plan_loop, daemon=True, name="plan").start()
+        threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
+        if CTL_MODE == "cmd": threading.Thread(target=self._ctl_loop, daemon=True, name="ctl").start()
 
     # -------------------------------------------------------------- commands (any thread)
     def command(self, text):
         c = G.parse(text)
         with self._cmd_lock: self._pending.append(c)
+        with self._ctl_cv: self._ctl_cv.notify_all()
         return c
 
     def log(self, s):
@@ -203,9 +214,11 @@ class Brain:
                                 if gc["snap_m"] > 0.05 and not getattr(self, "_snap_logged", False):
                                     self._snap_logged = True; self.log("goal pocket too tight: aiming for closest reachable point (%.2f m from %s)" % (gc["snap_m"], self.goal_label or "goal"))
                                 g = gc
+                        if g is not None: self.stats.add("global_ms", g["ms"])
+                        if CTL_MODE == "cmd": self._latched_g = (g,); continue      # taken at the next cycle start
                         if g is not None:
                             self.gpath = g; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
-                            self.stats.add("global_ms", g["ms"])
+                    if CTL_MODE == "cmd": self._latched_g = (None,); continue
                     if not self._set_sub(pose): self.log("local replan failed")
             except Exception as e:
                 self.log("planner error: %r" % e)
@@ -215,9 +228,9 @@ class Brain:
         t_frame, verts = self.hw.wait_rs1(200)
         t0 = time.monotonic()
         if verts is None:
-            self.hw.drive(0.0, 0.0); self.stats.add("frame_timeout", 1); return
+            self.hw.drive(0.0, 0.0); self.pred.issued(time.monotonic(), 0.0, 0.0); self.stats.add("frame_timeout", 1); return
         self.tick += 1
-        vl, vr = self.hw.wheel_vels(); gz = self.hw.yaw_rate()
+        vl, vr = self.hw.wheel_vels(); t_w = self.hw.wheel_t() or time.monotonic(); gz = self.hw.yaw_rate()
         yi = getattr(self.hw, "yaw_inc", None)        # gyro rotation on its own clock -> rate over THIS odom step
         if gz is not None and yi is not None and GYRO_INC:
             self._yaw_carry = getattr(self, "_yaw_carry", 0.0) + yi[0]
@@ -288,13 +301,61 @@ class Brain:
                              self.slam.stats.get("reloc_ms", 0), "" if ok else " -- AMBIGUOUS, pose not changed; drive a bit and 'relocalize'"))
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
+        self.pred.measured(t_frame, vl, vr, self.slam.odom.pose, t_w)  # odom pose at the frame stamp, wheel speeds at their read time
+        with self._ctl_cv:
+            self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._ctl_cv.notify_all()
+        tp = getattr(self, "_tpl", None); self._tpl = t0
+        self.stats.add("percep_ms", (time.monotonic() - t0) * 1e3)
+        if tp is not None: self.stats.add("percep_period_ms", (t0 - tp) * 1e3)
+        if CTL_MODE == "frame": self._control()
+
+    # -------------------------------------------------------------- control cycle
+    def _fit_loop(self):
+        while self.running:
+            time.sleep(1.0)
+            try: self.pred.fit_latency()
+            except Exception as e: self.stats.add("latfit_err", 1)
+
+    def _ctl_loop(self):
+        """command-triggered: the next plan starts as soon as the previous command is issued (path/backout).  Other
+        modes have no plan to run: they wait for new information (frame / command), as the frame loop did."""
+        last = -1
+        while self.running:
+            with self._ctl_cv:
+                busy = self.mode in ("path", "backout")
+                if self._snap is None or (not busy and self._snap_n == last and not self._pending):
+                    self._ctl_cv.wait(0.05); continue
+                last = self._snap_n
+            try: self._control()
+            except Exception as e:
+                self.stats.add("ctl_err", 1); self.log("control error: %r" % e); time.sleep(0.05)
+
+    def _control(self):
+        t_frame, ego_obs, valid, vl, vr, gz = self._snap
+        t0 = time.monotonic()
+        lg = self._latched_g
+        if lg is not None and CTL_MODE == "cmd":                    # global replan latched by _plan_loop
+            self._latched_g = None
+            if self.mode == "path" and self.goal is not None:
+                g = lg[0]
+                if g is not None: self.gpath = g; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
+                if not self._set_sub(self.slam.pose()): self.log("local replan failed")
         br = getattr(self, "_bump_resume", None)
         if br and time.monotonic() >= br[0]:
             self._bump_resume = None
             if self.mode == "idle": k = self._goal_bumps; self._goto(*br[1]); self._goal_bumps = k
         with self._cmd_lock: pend, self._pending = self._pending, []
         for c in pend: self._apply(c)
-        x, y, th = self.slam.pose(); dt = 1.0 / HZ
+        x, y, th = self.slam.pose(); dt = 1.0 / HZ; vs, ws = self.v, self.w        # plan start state (frame mode)
+        xm, ym = x, y; pr = None
+        if CTL_MODE == "cmd":
+            # latency-compensated start: measured state forward through the issued commands to when THIS command acts
+            dt = self.pred.period
+            cs = self.hw.core_state() if hasattr(self.hw, "core_state") else None
+            pr = self.pred.predict(t0 + self.pred.t_plan + self.pred.lat, ramp_tps=(cs or {}).get("ramp"))
+            if pr is not None and self.mode in ("path", "backout"):
+                from nav.slam import compose
+                (x, y, th) = compose(self.slam.T, pr[0]) if hasattr(self.slam, "T") else pr[0]; vs, ws = pr[1], pr[2]
         tr = self.__dict__.setdefault("trail", [])                    # breadcrumbs of where Kevin actually drove
         if not tr or math.hypot(tr[-1][0] - x, tr[-1][1] - y) > 0.05: tr.append((x, y)); del tr[:-80]
         L = self.planner and __import__("core").Limits; integrate_v = __import__("core").integrate_v
@@ -303,10 +364,15 @@ class Brain:
                 if self.goal_heading is not None: self.turn_target = self.goal_heading; self.turn_rem = None; self.mode = "turn"
                 else: self._arrive()
             else:
-                tp = time.perf_counter(); r = self.planner.step((x, y, th, self.v, self.w)); self.stats.add("mppi_ms", (time.perf_counter() - tp) * 1e3)
+                tp = time.perf_counter(); r = self.planner.step((x, y, th, vs, ws)); self.stats.add("mppi_ms", (time.perf_counter() - tp) * 1e3)
                 if r:
                     a, al = r
-                    self.v = integrate_v(self.v, a, dt, L.v_min, L.v_max); self.w = float(np.clip(self.w + al * dt, -L.w_max, L.w_max))
+                    self.v = integrate_v(vs, a, dt, L.v_min, L.v_max); self.w = float(np.clip(ws + al * dt, -L.w_max, L.w_max))
+                gp = getattr(self, "gpath", None)
+                if gp is not None and len(gp["xy"]) > 1:               # path tracking error (measured pose vs global path)
+                    P = np.asarray(gp["xy"], float); A, B = P[:-1], P[1:]; AB = B - A; q = np.array([xm, ym])
+                    tt = np.clip(((q - A) * AB).sum(1) / np.maximum((AB * AB).sum(1), 1e-9), 0, 1)
+                    self.stats.add("track_err_cm", float(np.min(np.hypot(*(A + tt[:, None] * AB - q).T))) * 100)
                 tn = time.monotonic(); dg = math.hypot(self.goal[0] - x, self.goal[1] - y)
                 if dg < getattr(self, "_best_d", 1e9) - 0.10: self._best_d = dg; self._best_t = tn
                 if tn - self._prog[0] > 5.0:
@@ -326,20 +392,20 @@ class Brain:
                     self._prog = (tn, (x, y, th))
         elif self.mode == "backout":                                  # MPPI to the retreat point (see _retreat)
             done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > getattr(self, 'back_T', 12.0)
-            r = None if done else self.planner.step((x, y, th, self.v, self.w))
+            r = None if done else self.planner.step((x, y, th, vs, ws))
             if r is None:
                 self.v = self.w = 0.0; xy, hd, lb = self._backing_for; self._backing_for = None
                 self._bo_fail = False; self._bo_retry = True; self._goto(xy, hd, lb); self._bo_retry = False
                 if self._bo_fail: self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (after retreating)" % (lb or "point"))
                 elif getattr(self, "_bo_stuck", 0): self._stuck = self._bo_stuck; self._bo_stuck = 0   # keep the stuck count (gives up after 4)
             else:
-                a, al = r; self.v = integrate_v(self.v, a, dt, L.v_min, L.v_max); self.w = float(np.clip(self.w + al * dt, -L.w_max, L.w_max))
+                a, al = r; self.v = integrate_v(vs, a, dt, L.v_min, L.v_max); self.w = float(np.clip(ws + al * dt, -L.w_max, L.w_max))
         elif self.mode == "drive":
             v, w, tend = self.drive_cmd
             if time.monotonic() > tend: self.v = self.w = 0.0; self.mode = "idle"; self.log("drive done")
             else:
                 L = __import__("core").Limits                      # same accel limits as MPPI
-                self.v += float(np.clip(v - self.v, -L.a_max / HZ, L.a_max / HZ)); self.w += float(np.clip(w - self.w, -L.alpha_max / HZ, L.alpha_max / HZ))
+                self.v += float(np.clip(v - self.v, -L.a_max * dt, L.a_max * dt)); self.w += float(np.clip(w - self.w, -L.alpha_max * dt, L.alpha_max * dt))
         elif self.mode == "turn":
             if getattr(self, "turn_rem", None) is not None:
                 self.turn_rem -= wrap(th - self._turn_th); self._turn_th = th; e = self.turn_rem
@@ -364,7 +430,8 @@ class Brain:
             self.v = self.w = 0.0
         # safety envelope: fresh RS1 ego + RS2 obstacles (robot frame), stamped
         pts = np.concatenate([ego_obs, self._rs2_obs]) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else ego_obs
-        if self.tick % 3 == 0 or not hasattr(self, "_mpts"): self._mpts = self._map_points(x, y, th)
+        if (self.tick % 3 == 0 and getattr(self, "_mpts_tick", -1) != self.tick) or not hasattr(self, "_mpts"):
+            self._mpts = self._map_points(xm, ym, self.slam.pose()[2]); self._mpts_tick = self.tick
         mp = self._mpts
         if len(self._mpts):
             # remembered map cells that land inside/at the footprint are pose-error artifacts (the robot cannot be
@@ -409,7 +476,13 @@ class Brain:
                 k = min(vc / max(abs(v), 1e-6), wc / max(abs(w), 1e-6)); v, w = v * k, w * k; self.stats.add("rate_capped", 1)
         v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
         if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
-        self.hw.drive(v, w)
+        self.hw.drive(v, w); t_iss = time.monotonic(); self.pred.issued(t_iss, v, w)
+        if self.mode in ("path", "backout"):             # score plan cycles: predicted start vs the raw measurement, both
+            if pr is not None: self.pred.remember(t_iss + self.pred.lat, (pr[0], pr[1], pr[2]), pr[3])   # against the state measured at effect
+            elif self.pred.meas: self.pred.remember(t_iss + self.pred.lat, None, self.pred.meas[-1])
+        tc = getattr(self, "_tc0", None); self._tc0 = t0; self.pred.cycle(t_iss - t0, None if tc is None else t0 - tc)
+        self.stats.add("ctl_compute_ms", (t_iss - t0) * 1e3)
+        if tc is not None: self.stats.add("ctl_period_ms", (t0 - tc) * 1e3)
         if _SLOG is not None:                                   # KEVIN_SAFETY_LOG: per-tick timing/clearance (debug only)
             def _near(P, n=4):                                  # closest n points: (x, y, signed dist to footprint), robot frame
                 if P is None or not len(P): return None
@@ -499,7 +572,7 @@ class Brain:
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks,
                                 core=self.hw.core_state() if hasattr(self.hw, "core_state") else None, governor=getattr(self, "_gov", None)),
-                    timing=self.stats.summary(), plan_timing=None if p is None else p.timing,
+                    timing=self.stats.summary(), plan_timing=None if p is None else p.timing, ctl=dict(mode=CTL_MODE, **self.pred.summary()),
                     bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])
 
