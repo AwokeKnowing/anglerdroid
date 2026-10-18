@@ -114,7 +114,14 @@ class MPPI:
         ch=chx[:,0]; dead1=d1[:,0]>0
         fb=dead1&~dead[bi,best]
         Uc=torch.where(fb[:,None,None],U[bi,best],Unew)
-        u0=Uc[:,0].clone()
+        # command = the first step the rollout actually EXECUTED (after its braking/limits), not the raw sampled
+        # acceleration: a capped rollout ignores a, so the raw a could drive the robot faster than what was checked
+        # (KEVIN_PLAN_OWNS_CLEARANCE only; default: the raw first step, PR #62)
+        if getattr(L, "poc", False):
+            _,_,cx=_mt.rollout(Uc.unsqueeze(1).contiguous(),state,s.goal,s.fp,s.edt,L,dt,6,erev=s.w.edt_rev)
+            u0=torch.stack([(cx[:,0,0,3]-state[:,3])/dt,(cx[:,0,0,4]-state[:,4])/dt],1)
+            ch=torch.where(fb[:,None,None],cx[:,0],ch)
+        else: u0=Uc[:,0].clone()
         s.U=torch.cat([Uc[:,1:],Uc[:,-1:]*0.0],1)
         dth=(TX[:,:,-1,2]-state[:,2:3]+math.pi)%(2*math.pi)-math.pi
         bins=((dth+math.pi)/(2*math.pi)*nprop).long().clamp(0,nprop-1)

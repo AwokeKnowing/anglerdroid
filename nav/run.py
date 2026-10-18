@@ -332,7 +332,7 @@ class Brain:
             # inside a wall it is not touching; fresh sensors cover contact): drop them, keep the rest as memory
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
             if len(mp): pts = np.concatenate([pts, mp])
-        v_pre, w_pre = self.v, self.w
+        v_pre, w_pre = self.v, self.w; t_cap = None                  # t_cap: only the KEVIN_SAFETY_STALE_NOW variant maps it
         if getattr(self.hw, "core", False):
             # safety lives in the safety core process (nav/safety_core.py, last resort, owns the wheels).  Here: the
             # PLANNER keeps 2x the core's speed-relative threshold clear (governor), so the core rarely has to fire.

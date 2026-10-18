@@ -5,12 +5,30 @@ import math, os, time, numpy as np, torch
 SIL12 = [[-0.27371,-0.01022],[-0.1995,-0.15],[-0.08009,-0.20998],[0.08319,-0.20998],[0.12372,-0.15418],[0.12629,-0.13818],
          [0.12629,0.13818],[0.12372,0.15418],[0.08319,0.20998],[-0.08009,0.20998],[-0.1995,0.15],[-0.27371,0.01022]]
 
+import sys as _sys
+_SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src')
+if _SRC_DIR not in _sys.path: _sys.path.append(_SRC_DIR)
+from twin_geometry import WHEEL_R_M as _WHEEL_R, SAFETY_MARGIN as _SAFETY_MARGIN, R_CIRC as _R_CIRC   # noqa: E402
+VEL_RAMP_TPS2 = float(os.environ.get("KEVIN_VEL_RAMP", "3.0"))   # same knob/default as src/wheelbase.py set_vel_ramp_rate
+
 class Limits:
     v_max=min(0.6, float(os.environ.get("KEVIN_VMAX", "0.6"))); v_min=-0.2;   # KEVIN_VMAX: bring-up speed cap   # reverse capped at 0.2 m/s (James 2026-10-13: too much reversing)
     rev_w=4.0; head_w=1.5    # MPPI: reverse cost scaled by clearance; face-the-carrot cost (mppi_cuda)
     a_max=1.96; a_lat=1.96; w_max=2.5; alpha_max=6.0; track=0.362; v_wheel=1.0
-    # proximity speed rule (hard): v*t_react + v^2/(2 a_brake) <= d - d_safe ; plus a comfort ramp
-    a_brake=1.5; t_react=0.10; d_safe=0.03; d_full=0.50; v_near=0.15; d_near=0.05   # a_brake = nav.safety (drive decel ~1.6 m/s^2: ODrive vel_ramp 3 turns/s^2)
+    # Planner-owned clearance (2026-10-17, James: "planner plans paths that can't crash; safety only for planner mistakes").
+    # Every rollout state must be able to STOP with its footprint, swept along the stopping arc and inflated by the
+    # distance its farthest point travels while stopping (gap = stopping distance: tolerates a 2x error in the stopping
+    # model), staying >= d_safe from the map; otherwise the rollout brakes at a_brake.  Values are MEASURED, not tuned:
+    #   t_react 0.15 s  = frame capture -> stop command in the 2026-10-17 sim stop test (frame age p50 109 ms + loop 26-52 ms)
+    #   a_brake 1.61    = drive decel limit: ODrive vel_ramp 3 turns/s^2 (src/wheelbase.py) x 2 pi x wheel R 85.65 mm
+    #   d_safe 0.045    = nav.safety margin 0.035 + 1 planning cell (EDT is on a 1 cm grid)
+    # KEVIN_PLAN_OWNS_CLEARANCE=1: superseded proposal (plan-owns-clearance-2026-10-17, not validated: drives closer,
+    # goals 7/12 vs 6/12 with 129 vs 32 samples < 3.5 cm).  Default OFF: the PR #62 values and kernel path.
+    poc = os.environ.get("KEVIN_PLAN_OWNS_CLEARANCE", "0") == "1"
+    if poc: t_react=0.15; a_brake=VEL_RAMP_TPS2*2*math.pi*_WHEEL_R; d_safe=_SAFETY_MARGIN+0.01
+    else:   a_brake=1.5; t_react=0.10; d_safe=0.03      # a_brake = nav.safety (drive decel ~1.6 m/s^2: ODrive vel_ramp 3 turns/s^2)
+    r_circ=_R_CIRC
+    d_full=0.50; v_near=0.15; d_near=0.05   # legacy comfort ramp, used only by plan_ref/v_cap_clear (CPU reference path)
 
 def integrate_v(v, a, dt, v_min, v_max):
     """Integrate an MPPI acceleration command over one control tick.  Braking never carries through zero into the
@@ -19,6 +37,14 @@ def integrate_v(v, a, dt, v_min, v_max):
     n = v + a * dt
     if v * n < 0: n = 0.0
     return float(min(max(n, v_min), v_max))
+
+def stop_reach(v, w, L=Limits):
+    """Emergency stop from (v, w): both wheels ramp down at a_brake (ODrive vel_ramp), so the stop takes
+    T_b = max wheel speed / a_brake after t_react.  Returns (s, th, g): arc length, heading change, and the distance
+    the farthest footprint point travels (|s| + |th| * r_circ) = the relative clearance gap."""
+    vw = abs(v) + abs(w) * L.track / 2; Tb = vw / L.a_brake
+    s = v * (L.t_react + Tb / 2); th = w * (L.t_react + Tb / 2)
+    return s, th, abs(s) + abs(th) * L.r_circ
 
 def v_cap_clear(d, L=Limits):
     """d = outline clearance (m, min EDT over the 12-gon boundary). Returns the speed cap (m/s)."""
