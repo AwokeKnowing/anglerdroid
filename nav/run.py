@@ -95,11 +95,12 @@ class Brain:
             if p is None: self.log("unknown place '%s' (known: %s)" % (c["name"], ", ".join(self.places.d) or "none"))
             else: self._goto(p[:2], None, c["name"])
         elif k == "relative": self._goto((x + c["d"] * math.cos(th), y + c["d"] * math.sin(th)), None, None, allow_back=c["d"] < 0)
-        elif k == "turn": self.turn_target = wrap(th + c["rad"]); self.mode = "turn"; self.log("turning %.0f°" % math.degrees(c["rad"]))
+        elif k == "turn":                       # relative turn: track the remaining angle (a 360 used to wrap to 0 -> 'arrived')
+            self.turn_target = wrap(th + c["rad"]); self.turn_rem = c["rad"]; self._turn_th = th; self.mode = "turn"; self.log("turning %.0f°" % math.degrees(c["rad"]))
         elif k == "drive":
             self.mode = "drive"; self.drive_cmd = (c["v"], c["w"], time.monotonic() + c["secs"]); self.goal_t0 = time.monotonic()
             self.log("drive v=%.2f w=%.2f for %.1f s" % (c["v"], c["w"], c["secs"]))
-        elif k == "face": self.turn_target = wrap(c["rad"]); self.mode = "turn"
+        elif k == "face": self.turn_target = wrap(c["rad"]); self.turn_rem = None; self.mode = "turn"
         elif k == "save": self.log("saved map to " + G.save_map(c["name"], self.slam.grid, self.places, self.slam.pose()))
         elif k == "load":
             try:
@@ -263,7 +264,7 @@ class Brain:
         L = self.planner and __import__("core").Limits; integrate_v = __import__("core").integrate_v
         if self.mode == "path" and self.planner is not None:
             if math.hypot(self.goal[0] - x, self.goal[1] - y) < 0.20:          # xy goal tolerance (Nav2 SimpleGoalChecker default 0.25 m)
-                if self.goal_heading is not None: self.turn_target = self.goal_heading; self.mode = "turn"
+                if self.goal_heading is not None: self.turn_target = self.goal_heading; self.turn_rem = None; self.mode = "turn"
                 else: self._arrive()
             else:
                 tp = time.perf_counter(); r = self.planner.step((x, y, th, self.v, self.w)); self.stats.add("mppi_ms", (time.perf_counter() - tp) * 1e3)
@@ -304,7 +305,9 @@ class Brain:
                 L = __import__("core").Limits                      # same accel limits as MPPI
                 self.v += float(np.clip(v - self.v, -L.a_max / HZ, L.a_max / HZ)); self.w += float(np.clip(w - self.w, -L.alpha_max / HZ, L.alpha_max / HZ))
         elif self.mode == "turn":
-            e = wrap(self.turn_target - th)
+            if getattr(self, "turn_rem", None) is not None:
+                self.turn_rem -= wrap(th - self._turn_th); self._turn_th = th; e = self.turn_rem
+            else: e = wrap(self.turn_target - th)
             if getattr(self, "_resume_path", False) and time.monotonic() - getattr(self, "_turn_t0", 0) > 6.0:
                 e = 0.0; self.w = 0.0                                   # blocked spin: give the path back to MPPI
             if abs(e) < math.radians(3) and abs(self.w) < 0.3:
