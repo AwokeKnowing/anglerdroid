@@ -38,3 +38,9 @@ benchB1–2 (proposal): 5.29 events/min (stop 15, limit 3, no_depth 4), goals 1/
 pre1–2 (current): 10.59 events/min, goals 7/8, collisions 0. The goal failures in both are at the kitchen island,
 whose top (z 0.684–0.744 m) is perceived but is not in the sim's 4-height collision slabs; not attributable to the
 safety change on n=2. The proposal does NOT yet meet "never triggers in normal driving" (it triggers 5.3/min).
+
+## r3 bench (sliced walls, n=3, PR #62 docs/bench_r3_2026-10-17.md)
+goals 8/12 (current 6/12), 14.41 events/min (current 10.05): overhang (island top, 2-D only) 60, no_depth 22,
+sweep 28, perceived-at-margin 11, at-margin 1, real 0.  3-D gap min 0.045, p5 0.125, 0 samples < 3.5 cm
+(current min 0.015, 32 samples).  The 22 no_depth stops are frames 0.25-0.71 s old that current code drives on
+(up to 0.54 m/s, 0.175 m blind).  Not yet "never triggers in normal driving".
