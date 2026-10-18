@@ -14,7 +14,7 @@ import nav  # noqa
 from nav.hw import Hardware
 from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform
-from nav.safety import Envelope
+from nav.safety import Envelope, FrameClock
 import twin_geometry as _TG
 _sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if _sl else None
 L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
@@ -47,7 +47,7 @@ class Brain:
         if os.environ.get("KEVIN_AUTOCAL", "0" if os.environ.get("KEVIN_HAL") == "sim" else "1") == "1":
             from nav.autocal import AutoCal, STILL_V
             self.autocal = AutoCal(hw.rs2_intr, log=self.log); self._still_v = STILL_V
-        _sk = os.environ.get('KEVIN_SLAM', '2'); self.slam = (__import__('nav.vslam_cuv', fromlist=['CuvSlam']).CuvSlam(GridMap()) if _sk == 'cuv' else __import__('nav.slam2', fromlist=['Slam2']).Slam2(GridMap(), match=match) if _sk == '2' else Slam(GridMap(), match=match)); self.places = G.Places(); self.env = Envelope()
+        _sk = os.environ.get('KEVIN_SLAM', '2'); self.slam = (__import__('nav.vslam_cuv', fromlist=['CuvSlam']).CuvSlam(GridMap()) if _sk == 'cuv' else __import__('nav.slam2', fromlist=['Slam2']).Slam2(GridMap(), match=match) if _sk == '2' else Slam(GridMap(), match=match)); self.places = G.Places(); self.env = Envelope(); self._fclk = FrameClock()
         self.planner = None
         if plan:
             from nav.plan import Planner
@@ -331,7 +331,9 @@ class Brain:
             mp = self._mpts[self.env._sd(self._mpts) > 0.03]
             if len(mp): pts = np.concatenate([pts, mp])
         v_pre, w_pre = self.v, self.w
-        v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
+        # staleness: frame age against the current time (old: now=t_frame -> age always 0); t0 = host receive time
+        t_cap = self._fclk.capture(t_frame, t0)
+        v, w, info = self.env.filter(self.v, self.w, pts, t_cap, valid, now=time.monotonic(), v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)
         v_saf, w_saf = v, w
         if info["state"] != "ok": self.v, self.w = v, w
         # sensor-rate speed bound: travel at most FRAME_STEP_M (heading FRAME_STEP_RAD) per depth frame, so a
@@ -359,7 +361,8 @@ class Brain:
                                     _mind(self._rs2_obs) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else None,
                                     round(vl, 3), round(vr, 3), round(self.slam.odom.v, 3), self.mode, _near(ego_obs),
                                     _near(self._rs2_obs) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else None,
-                                    _near(mp) if len(self._mpts) and len(mp) else None]) + "\n")
+                                    _near(mp) if len(self._mpts) and len(mp) else None, None if t_cap is None else round(t_cap, 4),
+                                    None if info.get("age") is None else round(info["age"], 4)]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
             self.rec.put(t=t_frame, v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
