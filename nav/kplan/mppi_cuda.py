@@ -44,7 +44,7 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
   const __half* e=edt+(long long)b*es;
   const __half* er=erv+(long long)b*es;   // clearance to obstacles OR not-currently-observed-free space: used while reversing
   float cost=0,dead=0,usq=0;
-  float clr=clearf(x,y,th,fp,P,e,Hm,Wm);
+  float clr=clearf(x,y,th,fp,P,e,Hm,Wm), clr0=clr;
   const float* ub=U+((long long)b*K+k)*(H*2); float* tb=tx+((long long)b*K+k)*(H*TXC);
   for(int t=0;t<H;t++){
     float a=ub[2*t], al=ub[2*t+1]; usq+=a*a+al*al;
@@ -69,7 +69,9 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
     tb[t*TXC]=x; tb[t*TXC+1]=y; tb[t*TXC+2]=th;
     if(TXC==6){ tb[t*TXC+3]=v; tb[t*TXC+4]=w; tb[t*TXC+5]=vc; }
     clr=clearf(x,y,th,fp,P,v<0.f?er:e,Hm,Wm);
-    if(clr<0.012f) dead=1.f;
+    // infeasible inside the safety margin (+1 cell): the planner never plans where nav.safety would have to act.
+    // Starting inside it (escape), only motions that do not get closer than the start (-5 mm, 1/2 cell) are allowed.
+    if(clr<0.012f || clr<fminf(L.d_safe,clr0-0.005f)) dead=1.f;
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
     cost+=dead*50+20*fmaxf(0.06f-clr,0.f);
@@ -94,7 +96,7 @@ void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,t
 import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
 import twin_geometry as _TG
 _SRC = _SRC.replace('@R_ROTATE@', '%.4f' % _TG.R_ROTATE).replace('@R_PASS@', '%.4f' % _TG.R_PASS)
-_ext = load_inline('kplan_mppi_cuda_v7', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
+_ext = load_inline('kplan_mppi_cuda_v8', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
                    cuda_sources=_SRC, functions=['roll'], extra_cuda_cflags=['-O3'], verbose=False)
 
 def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None, erev=None):
