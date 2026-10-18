@@ -1,4 +1,4 @@
-"""BENCH_MAPSNAP=1: also save the planning map after each goal (<out>_map<i>.png/.json).
+"""BENCH_DIRECT=1: goals go straight to nav /api/command (not the viewer chat).  BENCH_MAPSNAP=1: also save the planning map after each goal (<out>_map<i>.png/.json).
 Reverse-driving / success benchmark in the live sim.  python bench.py <tag>
 (Copy of ~/m1_backup/dbg/bench.py, the r3 goal bench; writes ~/m1_backup/dbg/bench_<tag>.json.)
 Teleports Kevin to the env start, restarts nav (fresh SLAM), runs goals kitchen -> bedroom -> couch, then teleports
@@ -9,6 +9,9 @@ sys.path.insert(0, '/home/james/gits/awokeknowing/anglerdroid')
 from emu import gt
 TAG = sys.argv[1]; OUT = os.path.expanduser('~/m1_backup/dbg/bench_%s.json' % TAG)
 def post(t):
+    if os.environ.get("BENCH_DIRECT") and not t.startswith("ask "):     # straight to nav (bypasses the viewer's 'Send all to LightNav')
+        r = urllib.request.Request("http://localhost:8090/api/command", data=json.dumps({"text": t}).encode(), method="POST", headers={"Content-Type": "application/json"})
+        return urllib.request.urlopen(r, timeout=10).read().decode()[:200]
     r = urllib.request.Request("http://localhost:8095/chat", data=json.dumps({"text": t, "who": "bench"}).encode(), method="POST", headers={"Content-Type": "application/json"})
     return json.load(urllib.request.urlopen(r, timeout=60))["reply"]
 def nav(): return json.load(urllib.request.urlopen("http://localhost:8090/api/state", timeout=5))
