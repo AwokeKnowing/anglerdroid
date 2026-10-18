@@ -58,7 +58,8 @@ def render(fn):
         col = lambda i: np.array([np.nan if r[i] is None else r[i] for r in rg], float)
         ax[2].plot(t, col(5), label="v planner"); ax[2].plot(t, col(7), label="v after governor"); ax[2].plot(t, col(9), "k", label="v issued")
         ax[2].plot(t, col(15), ":", label="v odom"); ax[2].plot(t, col(6), label="w planner", alpha=0.6); ax[2].plot(t, col(10), "--", label="w issued")
-        ax[2].plot(t, col(12), label="governor scale"); ax2 = ax[2].twinx(); ax2.semilogy(t, np.maximum(col(13), 1e-2), "r.", ms=2, label="MPPI min cost"); ax2.set_ylabel("MPPI min cost (>=1e4: all infeasible)")
+        ax[2].plot(t, col(12), label="governor scale")
+        if len(rg[0]) > 17: ax[2].plot(t, col(17), "y", lw=2, alpha=0.6, label="v safety core out"); ax[2].plot(t, col(18), "c", lw=2, alpha=0.4, label="w safety core out"); ax2 = ax[2].twinx(); ax2.semilogy(t, np.maximum(col(13), 1e-2), "r.", ms=2, label="MPPI min cost"); ax2.set_ylabel("MPPI min cost (>=1e4: all infeasible)")
         modes = [r[1] for r in rg]
         for k in range(1, len(modes)):
             if modes[k] != modes[k - 1]: ax[2].axvline(t[k], color="grey", lw=0.5); ax[2].text(t[k], 0.62, modes[k], fontsize=7, rotation=90)

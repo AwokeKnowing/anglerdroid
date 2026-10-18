@@ -561,7 +561,8 @@ class Brain:
             pt = self.planner.timing if self.planner is not None else {}
             self.__dict__.setdefault("_ring", collections.deque(maxlen=450)).append(
                 (round(t0, 3), self.mode, round(x, 3), round(y, 3), round(th, 3), round(v_pre, 3), round(w_pre, 3), round(v_saf, 3), round(w_saf, 3),
-                 round(v, 3), round(w, 3), info.get("state"), info.get("scale"), pt.get("mincost"), pt.get("u"), round(self.slam.odom.v, 3)))
+                 round(v, 3), round(w, 3), info.get("state"), info.get("scale"), pt.get("mincost"), pt.get("u"), round(self.slam.odom.v, 3),
+                 *(lambda c: (c.get("code"), c.get("v_out"), c.get("w_out"), c.get("free"), c.get("need"), c.get("sd0")) if c else (None,) * 6)(self.hw.core_state() if getattr(self.hw, "core", False) else None)))
 
     def _stuck_dump(self, why):
         """KEVIN_STUCK_DUMP=<dir>: everything the planners saw at a no-progress / give-up decision -> <dir>/<t>_<why>.npz
