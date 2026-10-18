@@ -18,7 +18,7 @@ Async: submit() never blocks the 30 Hz loop; a worker thread does matching/inser
 from __future__ import annotations
 import json, math, os, threading, time
 import numpy as np, cv2
-from nav.slam import Odom, GridMap, wrap, compose, inverse, transform
+from nav.slam import Odom, GridMap, wrap, compose, inverse, transform, carve_rays
 
 try:
     import torch
@@ -56,8 +56,9 @@ def _voxel(P, v=0.04, n=NPTS, seed=0):
 
 
 class KF:
-    __slots__ = ("odom", "pose", "obs", "free", "path")
-    def __init__(self, odom, pose, obs, free, path): self.odom, self.pose, self.obs, self.free, self.path = odom, pose, obs, free, path
+    __slots__ = ("odom", "pose", "obs", "free", "path", "carve")
+    def __init__(self, odom, pose, obs, free, path, carve=None):
+        self.odom, self.pose, self.obs, self.free, self.path, self.carve = odom, pose, obs, free, path, carve
 
 
 class Field:
@@ -178,8 +179,9 @@ class Slam2:
     # -- API shared with nav.slam.Slam
     def pose(self): return compose(self.T, self.odom.pose)
     def set_pose(self, x, y, th): self.T = compose((x, y, th), inverse(self.odom.pose))
-    def submit(self, t, obs_r, free_r, match_r=None):
-        with self._cv: self._job = (t, self.odom.at(t), obs_r, free_r); self._cv.notify()
+    def submit(self, t, obs_r, free_r, match_r=None, obs_h=None, rays=None):
+        """rays: current depth returns [(origin, E, floor)] for free-space carving (nav.slam.carve_rays)."""
+        with self._cv: self._job = (t, self.odom.at(t), obs_r, free_r, obs_h, rays); self._cv.notify()
     def relocalize(self, P, step=0.10, n_ang=72, keep=40):
         """Global search over the whole field (used after map load)."""
         self.seed_from_grid()
@@ -216,9 +218,9 @@ class Slam2:
         while self._run:
             with self._cv:
                 while self._job is None: self._cv.wait()
-                t, podom, obs, free = self._job; self._job = None
+                t, podom, obs, free, obs_h, rays = self._job; self._job = None
             if self.frozen: continue
-            try: self._step(t, podom, obs, free)
+            try: self._step(t, podom, obs, free, obs_h, rays)
             except Exception as e: print("slam2 error: %r" % e)
 
     def _Pcov(self, podom):
@@ -236,8 +238,8 @@ class Slam2:
         self._Pc, self._Pc_odom = P, podom
         return P
 
-    def _step(self, t, podom, obs, free):
-        t0 = time.perf_counter()
+    def _step(self, t, podom, obs, free, obs_h=None, rays=None):
+        t0 = time.perf_counter(); self._carve = None
         pm = compose(self.T, podom)
         if MATCH_TEST == "chi2": self._Pcov(podom)        # propagate prediction covariance every odom step
         lp = getattr(self, "_lastjob", None); self._lastjob = (t, podom)
@@ -284,19 +286,23 @@ class Slam2:
         # planning map: every scan that moved (free space needs many rays; keyframes alone left it 'unknown')
         lg = getattr(self, "_last_int", None)
         if lg is None or math.hypot(podom[0] - lg[0], podom[1] - lg[1]) > 0.04 or abs(wrap(podom[2] - lg[2])) > math.radians(2.5):
-            self.grid.integrate(pm, obs, free); self._last_int = podom
+            tc = time.perf_counter(); carve = carve_rays(rays, self.grid.res) if rays else None
+            self.grid.integrate(pm, obs, free, obs_h, carve); self._last_int = podom
+            self._carve = carve; self.stats["carve_ms"] = round((time.perf_counter() - tc) * 1e3, 1)
+            self.stats["carved"] = self.grid.n_carved; self.stats["carved_tot"] = self.stats.get("carved_tot", 0) + self.grid.n_carved
         last = self.kfs[-1] if self.kfs else None
         if last is None or math.hypot(podom[0] - last.odom[0], podom[1] - last.odom[1]) > KF_D or abs(wrap(podom[2] - last.odom[2])) > KF_A:
-            self._insert(podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free)
+            self._insert(podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free,
+                         getattr(self, "_carve", None))
         self.stats["ms"] = round((time.perf_counter() - t0) * 1e3, 2)
 
-    def _insert(self, podom, pm, obs, free):
+    def _insert(self, podom, pm, obs, free, carve=None):
         if self.kfs:
             a = self.kfs[-1]; self._path += math.hypot(podom[0] - a.odom[0], podom[1] - a.odom[1])
             z = compose(inverse(a.pose), pm); d = math.hypot(z[0], z[1])
             inf = np.array([1 / (0.01 + 0.03 * d) ** 2] * 2 + [1 / (0.005 + 0.02 * abs(z[2]) + 0.01 * d) ** 2])
             self.edges.append((len(self.kfs) - 1, len(self.kfs), z, inf))
-        self.kfs.append(KF(podom, pm, obs, free, self._path)); self.stats["kfs"] = len(self.kfs)
+        self.kfs.append(KF(podom, pm, obs, free, self._path, carve)); self.stats["kfs"] = len(self.kfs)
         self.field.add(pm, obs)
         if len(self.kfs) - self._last_loop_kf > 10: self._try_loop()
 
@@ -331,8 +337,10 @@ class Slam2:
 
     def _rebuild(self):
         f = Field(); g = GridMap(res=self.grid.res, size_m=self.grid.n * self.grid.res, origin=tuple(self.grid.origin))
+        g.Hlo[:] = self.grid.Hlo; g.Hhi[:] = self.grid.Hhi       # KF scans are 2-D: keep the live height evidence (shift ~cm)
         for k in self.kfs:
             f.add(k.pose, k.obs)
-            for _ in range(3): g.integrate(k.pose, k.obs, k.free)       # KFs ~1/4 of scans: weight them up
+            for _ in range(3): g.integrate(k.pose, k.obs, k.free, None, k.carve)   # KFs ~1/4 of scans: weight them up
         self.field = f
-        with self.grid.lock: self.grid.L[:] = g.L; self.grid.seen[:] = g.seen; self.grid.version += 1
+        with self.grid.lock:
+            self.grid.L[:] = g.L; self.grid.seen[:] = g.seen; self.grid.Hlo[:] = g.Hlo; self.grid.Hhi[:] = g.Hhi; self.grid.version += 1

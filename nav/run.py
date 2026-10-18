@@ -20,6 +20,10 @@ _sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if
 L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
 from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
+# Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
+CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
+from nav.hw import AXLE_H
+RS1_T = _TG.RS1_T
 
 HZ = 30.0
 
@@ -62,7 +66,7 @@ class Brain:
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
         self._cmd_lock = threading.Lock(); self._pending = []
-        self._rs2_seq = -1; self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
+        self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
         self.running = True
         if self.planner: threading.Thread(target=self._plan_loop, daemon=True, name="plan").start()
@@ -227,7 +231,8 @@ class Brain:
                 if self.autocal.n_win != nw:
                     self.rs2.set_pose(*self.autocal.pose())
                     if hasattr(self.hw, "set_rs2_pose"): self.hw.set_rs2_pose(*self.autocal.pose())
-            self._rs2_obs, self._rs2_floor = self.rs2.points(depth)
+            self._rs2_obs, self._rs2_obs_h, self._rs2_floor = self.rs2.points(depth, return_h=True)
+            self._rs2_rays = self.rs2.rays(depth) if CARVE else None
             if seq % 6 == 0 and getattr(self.slam.odom, "ekf", False):       # 5 Hz Manhattan heading (odom EKF, as kslam)
                 z4, nw = self.rs2.wall_z4(depth); self.slam.odom.observe_walls(st, z4, nw)
                 self.slam.stats['gyro_scale'] = round(self.slam.odom.scale, 5); self.slam.stats['walls'] = (self.slam.odom.n_wall, self.slam.odom.n_wall_rej, nw, round(abs(z4), 3), self.slam.odom.psi0 is not None)
@@ -237,11 +242,22 @@ class Brain:
             from nav.slam import compose, inverse
             d = compose(inverse(po), pr)
             eo = getattr(self.ego, 'map_obs', ego_obs); obs = np.concatenate([eo, transform(self._rs2_obs, d)]) if len(self._rs2_obs) else eo
+            eh = getattr(self.ego, 'map_obs_h', None)
+            if eh is None or len(eh) != len(eo): eh = np.full(len(eo), np.nan, np.float32)
+            obs_h = np.concatenate([eh, self._rs2_obs_h]) if len(self._rs2_obs) else eh
+            rays = None
+            if CARVE:      # free-space carving from THIS frame's depth rays (RS1 top-down + RS2 forward, RS2 moved to the RS1 stamp)
+                rays = [self.ego.rays((RS1_T[0], RS1_T[1], RS1_T[2] + AXLE_H))]
+                if self._rs2_rays is not None and t_frame - self._rs2_t < 0.3:
+                    o2, E2, f2 = self._rs2_rays
+                    rays.append((np.r_[transform(o2[None, :2], d)[0], o2[2]].astype(np.float32),
+                                 np.c_[transform(E2[:, :2], d), E2[:, 2]].astype(np.float32), f2))
             free = np.concatenate([self.ego.clear_xy(), transform(self._rs2_floor[::3], d)]) if len(self._rs2_floor) else self.ego.clear_xy()
             rs2m = transform(self._rs2_obs, d) if len(self._rs2_obs) else None
             # matching uses RS2 only (long range, twin-calibrated mount); RS1 ego points still go into the map
             self.slam.submit(t_frame, obs.astype(np.float32), free.astype(np.float32),
-                             rs2m.astype(np.float32) if rs2m is not None and len(rs2m) > 100 else None)
+                             rs2m.astype(np.float32) if rs2m is not None and len(rs2m) > 100 else None,
+                             obs_h=obs_h.astype(np.float32), rays=rays)
         if getattr(self, "_reloc_pending", False) and len(self._rs2_obs) > 200 and not getattr(self, "_reloc_busy", False):
             self._reloc_pending = False; self._reloc_busy = True
             P = self._rs2_obs[np.hypot(self._rs2_obs[:, 0], self._rs2_obs[:, 1]) < 3.5].astype(np.float32); po = self.slam.odom.pose

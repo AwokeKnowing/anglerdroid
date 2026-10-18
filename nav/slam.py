@@ -103,6 +103,41 @@ class Odom:
         return self.hist[0][1] if self.hist else self.pose
 
 
+# Free-space carving (observed-free cells of the CURRENT depth frames clear remembered obstacles).
+# CARVE_L: log-odds drop per frame that sees through a cell (> one hit, +0.9, so a contradicted cell clears in a few
+# frames even from saturation: 6.0 -> < 0.7 in 4 frames, ~0.8 s at the 5 Hz map rate).
+# CARVE_TOL: height slack = vertical spacing of neighbouring stride-8 RS2 rays at ~2 m (~4 cm).
+# CARVE_BAND: the obstacle height band used for cells with no 3-D evidence (RS2 obstacle band 3..95 cm).
+CARVE_L, CARVE_TOL, CARVE_BAND = 1.5, 0.04, (0.03, 0.95)
+
+
+def carve_rays(rays, res=0.02, hmax=0.95):
+    """Free space seen by depth rays.  rays: [(origin(3), E(N,3), floor(N))] in the robot frame, z = height above the
+    floor; E = measured returns (no-return pixels are unknown and carve nothing).  Each ray is sampled every <= res
+    horizontally up to its return minus the depth noise margin (D435: 2 cells + 0.012 z^2; floor returns: 1 cell),
+    keeping 0..hmax m.  Returns (cells(M,2) robot frame, fmin(M), fmax(M)): per res cell the height range crossed."""
+    Ps = []
+    for o, E, fl in rays:
+        E = np.asarray(E, np.float32)
+        if not len(E): continue
+        o = np.asarray(o, np.float32); d = E - o; rng = np.linalg.norm(d, axis=1); lh = np.hypot(d[:, 0], d[:, 1])
+        marg = np.where(fl, res, 2 * res + 0.012 * rng * rng)
+        te = np.clip((rng - marg) / np.maximum(rng, 1e-6), 0.0, 1.0)
+        ns = np.ceil(lh * te / res).astype(np.int64); sel = ns > 0
+        d, te, ns = d[sel], te[sel], ns[sel]
+        if not len(ns): continue
+        rid = np.repeat(np.arange(len(ns)), ns); j = np.arange(len(rid)) - np.repeat(np.cumsum(ns) - ns, ns)
+        t = (j + 1) / ns[rid] * te[rid]
+        P = o + t[:, None].astype(np.float32) * d[rid]
+        Ps.append(P[(P[:, 2] >= 0.0) & (P[:, 2] <= hmax)])
+    if not Ps: return np.zeros((0, 2), np.float32), np.zeros(0, np.float32), np.zeros(0, np.float32)
+    P = np.concatenate(Ps); ij = np.floor(P[:, :2] / res).astype(np.int64)
+    k = (ij[:, 0] + (1 << 20)) * (1 << 21) + (ij[:, 1] + (1 << 20))
+    o = np.argsort(k, kind="stable"); k, h, ij = k[o], P[o, 2], ij[o]
+    uk, i0 = np.unique(k, return_index=True)
+    return ((ij[i0] + 0.5) * res).astype(np.float32), np.minimum.reduceat(h, i0), np.maximum.reduceat(h, i0)
+
+
 class GridMap:
     """Log-odds occupancy, 2 cm (5 cm cells cap scan matching at ~4 cm; 2 cm gives ~2 cm, measured). origin = world coords of cell (0,0) corner."""
     def __init__(self, size_m=40.0, res=0.02, origin=(-20.0, -20.0)):
@@ -110,21 +145,53 @@ class GridMap:
         self.L = np.zeros((self.n, self.n), np.float32); self.seen = np.zeros((self.n, self.n), bool)
         self.lock = threading.Lock(); self.version = 0
         self.lf = np.zeros((self.n, self.n), np.float32)
+        # obstacle-evidence height band per cell (m above floor; inf/-inf = no 3-D evidence, e.g. loaded map)
+        self.Hlo = np.full((self.n, self.n), np.inf, np.float16); self.Hhi = np.full((self.n, self.n), -np.inf, np.float16)
+        self.n_carved = 0
 
     def rc(self, P):
         ij = np.floor((P - self.origin) / self.res).astype(np.int32)
         ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < self.n) & (ij[:, 1] < self.n)
         return ij[ok, 1], ij[ok, 0]
 
-    def integrate(self, pose, obs_r, free_r):
+    def integrate(self, pose, obs_r, free_r, obs_h=None, carve=None):
+        """obs_r/free_r: robot-frame points (obs_h: their heights above floor, NaN = unknown).
+        carve = carve_rays(...) of THIS frame: cells crossed by depth rays with no return there.  A cell is carved only
+        where this frame's rays pass through the whole height band in which the cell's obstacle evidence was seen
+        (a removed box clears; a wall is never crossed; a table top clears only if rays pass at table height);
+        cells hit in this frame and cells out of view are untouched."""
         with self.lock:
+            Lr, Lo, Hi = self.L.ravel(), self.Hlo.ravel(), self.Hhi.ravel()
             if len(free_r):
                 r, c = self.rc(transform(free_r, pose)); np.subtract.at(self.L, (r, c), 0.25); self.seen[r, c] = True
+            hit = np.zeros(0, np.int64)
             if len(obs_r):
-                r, c = self.rc(transform(obs_r, pose))
-                k = np.unique(r.astype(np.int64) * self.n + c)          # one hit per cell per scan
-                self.L.ravel()[k] += 0.9; self.seen.ravel()[k] = True
-            np.clip(self.L, -4.0, 6.0, out=self.L); self.version += 1
+                k, ok = self._keys(transform(obs_r, pose))
+                hit = np.unique(k)                                   # one hit per cell per scan
+                Lr[hit] += 0.9; self.seen.ravel()[hit] = True
+                if obs_h is not None:
+                    h = np.asarray(obs_h, np.float32)[ok]; m = np.isfinite(h)
+                    np.minimum.at(Lo, k[m], h[m].astype(np.float16)); np.maximum.at(Hi, k[m], h[m].astype(np.float16))
+            if carve is not None and len(carve[0]):
+                k, ok = self._keys(transform(carve[0], pose)); fmin, fmax = carve[1][ok], carve[2][ok]
+                o = np.argsort(k, kind="stable"); k, fmin, fmax = k[o], fmin[o], fmax[o]
+                uk, i0 = np.unique(k, return_index=True)
+                if len(uk):
+                    fmin, fmax = np.minimum.reduceat(fmin, i0), np.maximum.reduceat(fmax, i0)
+                    lo, hi = Lo[uk].astype(np.float32), Hi[uk].astype(np.float32); none = lo > hi
+                    lo[none], hi[none] = CARVE_BAND                  # no height evidence: needs the whole obstacle band
+                    m = (fmin <= lo + CARVE_TOL) & (fmax >= hi - CARVE_TOL) & ~np.isin(uk, hit)
+                    kk = uk[m]; Lr[kk] -= CARVE_L; self.seen.ravel()[kk] = True
+                    self.n_carved = int(((Lr[kk] + CARVE_L) > 0.7).sum())     # cells that were occupied before this frame
+            np.clip(self.L, -4.0, 6.0, out=self.L)
+            if carve is not None and len(carve[0]) and len(uk):
+                gone = kk[Lr[kk] <= 0.0]; Lo[gone] = np.inf; Hi[gone] = -np.inf   # evidence fully contradicted: forget its band
+            self.version += 1
+
+    def _keys(self, Pw):
+        ij = np.floor((Pw - self.origin) / self.res).astype(np.int64)
+        ok = (ij[:, 0] >= 0) & (ij[:, 1] >= 0) & (ij[:, 0] < self.n) & (ij[:, 1] < self.n)
+        return ij[ok, 1] * self.n + ij[ok, 0], ok
 
     def occupied(self, thr=0.7):
         return self.L > thr
@@ -221,11 +288,11 @@ class Slam:
     def set_pose(self, x, y, th):
         self.T = compose((x, y, th), inverse(self.odom.pose))
 
-    def submit(self, t, obs_r, free_r, match_r=None):
+    def submit(self, t, obs_r, free_r, match_r=None, obs_h=None, rays=None):
         """Latest scan (robot-frame obstacle + free points, stamp t; match_r = points used for scan matching,
         default obs_r). Dropped if the worker is busy."""
         with self._cv:
-            self._job = (t, self.odom.at(t), obs_r, free_r, obs_r if match_r is None else match_r); self._cv.notify()
+            self._job = (t, self.odom.at(t), obs_r, free_r, obs_r if match_r is None else match_r, obs_h, rays); self._cv.notify()
         if self.rec is not None: self.rec.append(self._job)
 
     def _loop(self):
@@ -233,7 +300,7 @@ class Slam:
         while self._run:
             with self._cv:
                 while self._job is None: self._cv.wait()
-                t, podom, obs, free, mpts = self._job; self._job = None
+                t, podom, obs, free, mpts, obs_h, rays = self._job; self._job = None
             if self.frozen: continue                                        # loaded map, not yet relocalized
             t0 = time.perf_counter()
             pmap = compose(self.T, podom)
@@ -262,7 +329,7 @@ class Slam:
                         self.stats["clamped"] = self.stats.get("clamped", 0) + 1
                     pmap = (pmap[0] + dx, pmap[1] + dy, wrap(pmap[2] + dth))
                     self.T = compose(pmap, inverse(podom)); self.stats["accepted"] += 1
-            self.grid.integrate(pmap, obs, free); last_int = podom; last_int_t = time.monotonic()
+            self.grid.integrate(pmap, obs, free, obs_h, carve_rays(rays, self.grid.res) if rays else None); last_int = podom; last_int_t = time.monotonic()
             if time.monotonic() - last_lf > 0.4:
                 self.grid.refresh_likelihood(); last_lf = time.monotonic()
             self.stats["ms"] = (time.perf_counter() - t0) * 1e3

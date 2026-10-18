@@ -164,6 +164,7 @@ class Ego:
         self.obs_mask = m                                              # safety-grade obstacles this frame (planner obstacle layer)
         mm = m if getattr(self, "lab_map", None) is None else (m & (self.lab_map == OBSTACLE))
         self.map_obs = np.stack([self.X[mm], self.Y[mm]], 1)
+        self.map_obs_h = self.hgt[mm].astype(np.float32) * 0.01                # cm -> m above floor (carving height band)
         P = np.stack([self.X[m], self.Y[m]], 1)
         if max_n and len(P) > max_n:
             P = P[np.random.default_rng(0).choice(len(P), max_n, replace=False)]
@@ -189,6 +190,15 @@ class Ego:
         m = self.lab[::stride, ::stride] == CLEAR
         return np.stack([self.X[::stride, ::stride][m], self.Y[::stride, ::stride][m]], 1)
 
+    def rays(self, origin, stride=4):
+        """RS1 returns for free-space carving: CLEAR floor pixels (h = 0) and measured OBSTACLE pixels at their height,
+        as rays from the RS1 lens (origin, z = height above floor).  UNKNOWN pixels carve nothing."""
+        lab = self.lab[::stride, ::stride]; cl = lab == CLEAR; ob = (lab == OBSTACLE) & ~self.body[::stride, ::stride]
+        m = cl | ob
+        E = np.stack([self.X[::stride, ::stride][m], self.Y[::stride, ::stride][m],
+                      np.where(cl, 0.0, self.hgt[::stride, ::stride] * 0.01)[m].astype(np.float32)], 1)
+        return (np.asarray(origin, np.float32), E, cl[m])
+
 
 class Rs2Cloud:
     """RS2 depth -> base frame points. Obstacles: 3..95 cm above floor; floor: |h| < 2 cm."""
@@ -203,16 +213,29 @@ class Rs2Cloud:
     def set_pose(self, T, R):
         self.T, self.R = np.asarray(T, np.float32), np.asarray(R, np.float32)
 
-    def points(self, depth_u16, h_max=0.95):
+    def points(self, depth_u16, h_max=0.95, return_h=False):
         z = depth_u16[::self.s, ::self.s].ravel().astype(np.float32) * 1e-3
         ok = (z > 0.2) & (z < self.max_range)
         z = z[ok]
         P = np.stack([self.rx[ok] * z, self.ry[ok] * z, z], 1) @ self.R.T + self.T
         hgt = P[:, 2] + AXLE_H                       # height above floor
         hmin = 0.03 + 0.012 * z * z                  # D435 depth error grows ~z^2: keep noisy far floor out of 'obstacle'
-        obs = P[(hgt > hmin) & (hgt < h_max), :2]          # safety core: h_max 1.0 (all below Kevin's top -> 2-D)
+        mo = (hgt > hmin) & (hgt < h_max)
+        obs = P[mo, :2]          # safety core: h_max 1.0 (all below Kevin's top -> 2-D)
         flo = P[np.abs(hgt) < 0.02, :2]
+        if return_h: return obs, hgt[mo], flo
         return obs, flo
+
+    def rays(self, depth_u16, sub=2):
+        """RS2 returns for free-space carving (every sub-th stride pixel): rays from the lens, z = height above floor.
+        No-return / out-of-range pixels are unknown and carve nothing."""
+        hh, ww = depth_u16[::self.s, ::self.s].shape
+        z = depth_u16[::self.s, ::self.s][::sub, ::sub].ravel().astype(np.float32) * 1e-3
+        rx = self.rx.reshape(hh, ww)[::sub, ::sub].ravel(); ry = self.ry.reshape(hh, ww)[::sub, ::sub].ravel()
+        ok = (z > 0.2) & (z < self.max_range); z = z[ok]
+        P = np.stack([rx[ok] * z, ry[ok] * z, z], 1) @ self.R.T + self.T
+        P[:, 2] += AXLE_H; o = self.T.copy(); o[2] += AXLE_H
+        return (o, P, np.abs(P[:, 2]) < 0.02)
 
     def wall_z4(self, depth_u16):
         """Wall directions for the Manhattan heading (bench/slam/kslam): surface normals from neighbouring depth
