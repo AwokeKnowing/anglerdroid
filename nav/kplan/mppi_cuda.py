@@ -61,24 +61,25 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
     w=fmaxf(fminf(w+al*dt,wl),-wl);
     { // planner-owned clearance: the next state must be able to stop with gap; else brake (wheels at a_brake)
       float nth=th+w*dt, nx=x+v*cosf(nth)*dt, ny=y+v*sinf(nth)*dt, g;
-      float cs=stopclear(nx,ny,nth,v,w,fp,P,v<0.f?er:e,Hm,Wm,L,&g);
+      float cs=stopclear(nx,ny,nth,v,w,fp,P,e,Hm,Wm,L,&g);   // obstacles only (not-observed space is the reverse check below)
       if(cs<fminf(L.d_safe+g,clr)){            // already closer than d_safe: allowed only if it does not get closer
         float ab=L.a_brake*dt, wb=2.f*L.a_brake/L.track*dt;
         v=copysignf(fmaxf(fabsf(v0)-ab,0.f),v0); w=copysignf(fmaxf(fabsf(w0)-wb,0.f),w0); av=fabsf(v); } }
     th=th+w*dt; x=x+v*cosf(th)*dt; y=y+v*sinf(th)*dt;
     tb[t*TXC]=x; tb[t*TXC+1]=y; tb[t*TXC+2]=th;
     if(TXC==6){ tb[t*TXC+3]=v; tb[t*TXC+4]=w; tb[t*TXC+5]=vc; }
-    clr=clearf(x,y,th,fp,P,v<0.f?er:e,Hm,Wm);
+    clr=clearf(x,y,th,fp,P,e,Hm,Wm);                       // clearance to obstacles
+    float crv=v<0.f?clearf(x,y,th,fp,P,er,Hm,Wm):clr;     // reversing: also stay inside space observed free
     // infeasible inside the safety margin (+1 cell): the planner never plans where nav.safety would have to act.
     // Starting inside it (escape), only motions that do not get closer than the start (-5 mm, 1/2 cell) are allowed.
-    if(clr<0.012f || clr<fminf(L.d_safe,clr0-0.005f)) dead=1.f;
+    if(crv<0.012f || clr<fminf(L.d_safe,clr0-0.005f)) dead=1.f;
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
-    cost+=dead*50+20*fmaxf(0.06f-clr,0.f);
-    cost+=dt*(expf(-clr/0.15f)+2.0f*fminf(fmaxf(R_ROTATE-ax,0.f)/(R_ROTATE-R_PASS),1.f));   // not-turnable (twin_geometry)
+    cost+=dead*50+20*fmaxf(0.06f-crv,0.f);   // cost terms unchanged (clearance in the field the step uses)
+    cost+=dt*(expf(-crv/0.15f)+2.0f*fminf(fmaxf(R_ROTATE-ax,0.f)/(R_ROTATE-R_PASS),1.f));   // not-turnable (twin_geometry)
     float dx=x-gx, dy=y-gy, nr=expf(-sqrtf(dx*dx+dy*dy)/0.25f);
     // reverse is for escapes: cost grows with clearance (free space -> turn and drive forward)
-    float cr=fminf(fmaxf((clr-0.05f)/0.20f,0.f),1.f), dg=sqrtf(dx*dx+dy*dy);
+    float cr=fminf(fmaxf((crv-0.05f)/0.20f,0.f),1.f), dg=sqrtf(dx*dx+dy*dy);
     cost+=0.1f*dt*20*nr*(1-cosf(th-gth))*2+(0.5f+4.0f*nr+L.rev_w*cr*(1-nr))*dt*(v<0?1.f:0.f)*av/0.2f;
     // heading alignment: face the carrot (path tangent direction) when away from the goal and there is room
     if(dg>0.35f) cost+=L.head_w*dt*cr*(1-nr)*(1-cosf(th-atan2f(-dy,-dx))); }
@@ -96,7 +97,7 @@ void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,t
 import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
 import twin_geometry as _TG
 _SRC = _SRC.replace('@R_ROTATE@', '%.4f' % _TG.R_ROTATE).replace('@R_PASS@', '%.4f' % _TG.R_PASS)
-_ext = load_inline('kplan_mppi_cuda_v8', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
+_ext = load_inline('kplan_mppi_cuda_v9', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
                    cuda_sources=_SRC, functions=['roll'], extra_cuda_cflags=['-O3'], verbose=False)
 
 def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None, erev=None):
