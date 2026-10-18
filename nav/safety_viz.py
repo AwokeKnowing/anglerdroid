@@ -37,7 +37,7 @@ def render(pts, bands, core, gov):
     v_c, w_c = c.get("v_cmd") or 0.0, c.get("w_cmd") or 0.0
     # planner 2x threshold (governor: what the brain asked before governing -> need2), cyan
     if gov:
-        vp, wp, vg, wg, need2 = gov
+        vp, wp, vg, wg, need2 = gov[:5]
         if need2 and abs(vg) >= 1e-3:
             for P in _swept(vg, wg, need2): cv2.polylines(img, [_px(P)], True, (200, 200, 0), 1, cv2.LINE_AA)
         elif need2 and abs(wg) >= 1e-3:
@@ -58,8 +58,8 @@ def render(pts, bands, core, gov):
     txt = ["core %s  ramp %.1f" % (c.get("code", "-"), c.get("ramp") or 0),
            "age rs1 %s rs2 %s ms  period %s ms" % tuple(("%.0f" % (1e3 * c[k])) if c.get(k) is not None else "-" for k in ("age1", "age2", "period")),
            "cmd %.2f %.2f  meas %.2f %.2f  out %.2f %.2f" % (v_c, w_c, vm, c.get("w_m") or 0, c.get("v_out") or 0, c.get("w_out") or 0),
-           "white footprint  yellow bands (red=occupied)  orange core stop envelope  cyan planner 2x"]
-    for i, t in enumerate(txt): cv2.putText(img, t, (6, 16 + 15 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (230, 230, 230), 1, cv2.LINE_AA)
+           "white footprint  yellow 5cm bands (red=occupied)", "orange core stop envelope  cyan planner 2x"]
+    for i, t in enumerate(txt): cv2.putText(img, t, (6, 14 + 13 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (230, 230, 230), 1, cv2.LINE_AA)
     return img
 
 

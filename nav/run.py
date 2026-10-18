@@ -341,7 +341,10 @@ class Brain:
             elif os.environ.get("KEVIN_SC_GOVERNOR", "1") == "0": v, w, sc, need2 = self.v, self.w, 1.0, 0.0   # test: core brake alone
             else: v, w, sc, need2 = governor(pts, self.v, self.w, v_meas=self.slam.odom.v)
             info = dict(state="ok" if sc == 1.0 else "governed", scale=sc, need2=need2, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
-            self._gov = (self.v, self.w, v, w, need2)
+            if len(pts):
+                _d = self.env._sd(pts); _i = int(np.argmin(_d)); _near = [round(float(pts[_i, 0]), 3), round(float(pts[_i, 1]), 3), round(float(_d[_i]), 3)]
+            else: _near = None
+            self._gov = (self.v, self.w, v, w, need2, sc, _near, len(pts), len(self._mpts))
             if sc < 1.0: self.stats.add("governed", 1)
         else:
             v, w, info = self.env.filter(self.v, self.w, pts, t_frame, valid, now=t_frame, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w)

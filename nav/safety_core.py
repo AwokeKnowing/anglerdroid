@@ -205,16 +205,17 @@ def _brake_ramp(P, v_m, w_m):
 def governor(P, v, w, v_meas=0.0, factor=2.0):
     """PLANNER side (brain): largest scale of (v, w) whose sweep keeps factor x the core's threshold (need + margin)
     clear, so the core rarely fires.  Returns (v, w, scale, need2)."""
+    sd0 = float(sd(P).min()) if len(P) else np.inf
     for s in (1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1, 0.0):
         vs, ws = v * s, w * s
         if abs(vs) >= 1e-3:
             ve = max(abs(vs), abs(v_meas) if v_meas * vs > 0 else 0.0); need2 = factor * (need_dist(ve) + MARGIN)
-            fr, _ = free_along(P, 1 if vs > 0 else -1, ws / vs, need2, step=0.02)
-            if fr >= need2: return vs, ws, s, need2
+            fr, mn = free_along(P, 1 if vs > 0 else -1, ws / vs, need2, step=0.02)
         elif abs(ws) >= 1e-3:
-            need2 = factor * need_angle(ws); fa, _ = free_rotation(P, 1 if ws > 0 else -1, need2, step=0.04)
-            if fa >= need2: return vs, ws, s, need2
+            need2 = factor * need_angle(ws); fr, mn = free_rotation(P, 1 if ws > 0 else -1, need2, step=0.04)
         else: return 0.0, 0.0, s, 0.0
+        # clear for 2x the threshold, or a motion that gets no closer to anything (leaving a tight spot)
+        if fr >= need2 or mn >= sd0 - 1e-3: return vs, ws, s, need2
     return 0.0, 0.0, 0.0, 0.0
 
 
@@ -243,13 +244,17 @@ def _realtime(cpu):
     return ", ".join(got)
 
 
-def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
+def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     """entry point of the safety core process (multiprocessing 'spawn')."""
     cpu = int(os.environ.get("KEVIN_SC_CPU", str((os.cpu_count() or 1) - 1)))
     rt = _realtime(cpu); print("safety_core: pid %d %s" % (os.getpid(), rt), flush=True)
     from nav import bus
     from nav.perceive import Ego, Rs2Cloud
     B = bus.open_all(rs2_shape, create=False)
+    from cameras import RSCamera                                  # the core owns RS1 (top-down): its frames never
+    cam = RSCamera(rs1_serial, compute_pointcloud=True)           # wait on the brain process
+    rs1_intr = cam.depth_intrinsics()
+    B["rs1info"].write(f=np.array([rs1_intr[k] for k in ("fx", "fy", "ppx", "ppy", "width", "height")], float), set=1)
     import wheelbase
     cwd = os.getcwd(); os.chdir(nav.SRC)
     try: wb = wheelbase.WheelBase()
@@ -262,7 +267,10 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
     ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0
     while True:
         if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
-        new1 = _wait(B["rs1"], s1, CADENCE_MAX_S)                  # next RS1 frame, or wake up and stop
+        fs = cam.wait_frameset(int(CADENCE_MAX_S * 1e3))           # next RS1 frame, or wake up and stop
+        t_recv = time.monotonic(); new1 = fs is not None and cam.ingest(fs)
+        if new1:
+            cam.publish(); B["rs1"].write(verts=cam.verts, n=len(cam.verts), stamp=cam.depth_stamp, t_recv=t_recv)
         t_dec = time.monotonic()
         vl, vr = wb.get_wheel_velocities_mps(); v_m = 0.5 * (vl + vr); w_m = (vr - vl) / TRACK_M
         cur = wb.get_motor_currents()
@@ -272,9 +280,9 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
         if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
         else: code_c = None
         if new1:
-            s1, n, r1 = _read_rs1(B["rs1"], r1); tA = time.monotonic(); cap1 = clk1.capture(float(r1["stamp"][0]), float(r1["t_recv"][0]))
+            tA = time.monotonic(); cap1 = clk1.capture(float(cam.depth_stamp), t_recv)
             per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
-            ego.update(r1["verts"][:n]); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
+            ego.update(cam.verts); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
         else:
             per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
         if B["rs2"].seq != s2:
@@ -315,7 +323,7 @@ def core_main(rs1_intr, rs2_intr, rs2_shape, parent_pid, log_path=None):
             viz_t = t_dec
         if LOG is not None:
             LOG.write(json.dumps([round(x, 4) if isinstance(x, float) and math.isfinite(x) else (None if isinstance(x, float) else x) for x in
-                                  [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, tA - t_dec, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
+                                  [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, t_dec - t_recv, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
             ps += 1
             if ps % 30 == 0: LOG.flush()
 

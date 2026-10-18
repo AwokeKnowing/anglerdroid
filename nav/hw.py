@@ -12,6 +12,24 @@ _s, _c = math.sin(RS2_PITCH), math.cos(RS2_PITCH)
 AXLE_H = TG.AXLE_H_M                                                             # per KEVIN_TIRE profile
 
 
+class _Rs1Bus:
+    """RS1 as seen by the brain when the safety core owns the camera: latest frame from nav.bus."""
+    def __init__(self, B):
+        self.B = B; self._seq = B["rs1"].seq; self.verts = np.zeros((0, 3), np.float32); self.depth_stamp = 0.0; self.depth = None; self._out = {}
+        i = B["rs1info"].read()[1]["f"]; self._intr = dict(fx=float(i[0]), fy=float(i[1]), ppx=float(i[2]), ppy=float(i[3]), width=int(i[4]), height=int(i[5]))
+    def depth_intrinsics(self): return dict(self._intr)
+    def wait(self, timeout):
+        from nav.safety_core import _read_rs1
+        t_end = time.monotonic() + timeout; b = self.B["rs1"]
+        while True:
+            s = b.seq
+            if s != self._seq and not (s & 1): break
+            if time.monotonic() > t_end: return None, None
+            time.sleep(0.0005)
+        self._seq, n, self._out = _read_rs1(b, self._out); self.verts = self._out["verts"]; self.depth_stamp = float(self._out["stamp"][0])
+        return self.depth_stamp, self.verts
+
+
 class Hardware:
     def __init__(self, drive=True, stereo=True):
         import pyrealsense2 as rs
@@ -20,32 +38,36 @@ class Hardware:
         ser = TG.realsense_roles(rs)                  # by product (D435 top-down / D435i forward), not sort order
         if not all(ser):
             raise RuntimeError("need RS1 (D435 top-down) + RS2 (D435i forward), found %s" % (ser,))
-        self.rs1 = RSCamera(ser[0], compute_pointcloud=True)
+        # safety core (nav/safety_core.py): separate process that OWNS the RS1 (top-down, the 30 Hz safety camera) and
+        # the wheels; it publishes RS1 frames to this process over nav.bus, this process publishes RS2 depth to it and
+        # sends desired (v, w).  KEVIN_SAFETY_CORE=0: old in-process path.
+        self.core = drive and os.environ.get("KEVIN_SAFETY_CORE", "1") == "1"
         self.rs2 = RSCamera(ser[1], compute_pointcloud=False, capture_ir=stereo, emitter=not stereo)
         self.imu = IMUPipeline(ser[1])
         self.rs2_intr = self.rs2.depth_intrinsics()
-        self.wb = None
-        # safety core (nav/safety_core.py): separate process, owns the wheels; this process publishes camera frames to
-        # it over nav.bus from dedicated pump threads and sends desired (v, w).  KEVIN_SAFETY_CORE=0: old in-process path.
-        self.core = drive and os.environ.get("KEVIN_SAFETY_CORE", "1") == "1"
-        self.rs1_intr = self.rs1.depth_intrinsics() if hasattr(self.rs1, "depth_intrinsics") else None
-        self._run = True
+        self.wb = None; self._run = True
         if self.core:
             from nav import bus
             self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
-            self._rs1_cv = threading.Condition(); self._rs1_seq = 0; self._rs1_got = 0
-            threading.Thread(target=self._rs1_pump, daemon=True, name="rs1").start()
             import multiprocessing as mp
             from nav.safety_core import core_main
             ctx = mp.get_context("spawn")
             self.core_proc = ctx.Process(target=core_main, name="safety_core", daemon=True,
-                                         args=(self.rs1_intr, self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG")))
+                                         args=(ser[0], self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG")))
             env0 = {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}
             os.environ.update({k: "1" for k in env0})                 # single-threaded BLAS in the core (one pinned CPU)
             self.core_proc.start(); drive = False
             for k, v in env0.items():
                 if v is None: os.environ.pop(k, None)
-                else: os.environ[k] = v                    # the core creates WheelBase
+                else: os.environ[k] = v
+            t_end = time.monotonic() + 60
+            while not int(self.bus["rs1info"].arr["set"][0]):
+                if time.monotonic() > t_end or not self.core_proc.is_alive(): raise RuntimeError("safety core did not start (RS1)")
+                time.sleep(0.05)
+            self.rs1 = _Rs1Bus(self.bus); self.rs1_intr = self.rs1.depth_intrinsics()
+        else:
+            self.rs1 = RSCamera(ser[0], compute_pointcloud=True)
+            self.rs1_intr = self.rs1.depth_intrinsics() if hasattr(self.rs1, "depth_intrinsics") else None                    # the core creates WheelBase
         if drive:
             import wheelbase
             cwd = os.getcwd(); os.chdir(nav.SRC)          # WheelBase reads flat_endpoints.json relative to src/
@@ -74,17 +96,7 @@ class Hardware:
                     self.rs2.publish(); self.rs2_seq += 1; self.rs2_stamp = self.rs2.depth_stamp
                     if getattr(self, "core", False): self.bus["rs2"].write(depth=self.rs2.depth, stamp=self.rs2_stamp, t_recv=t_recv)
 
-    def _rs1_pump(self):
-        """core mode: every RS1 frame goes to the safety core at once, independent of the brain loop's timing."""
-        while self._run:
-            fs = self.rs1.wait_frameset(200)
-            if fs is None: continue
-            t_recv = time.monotonic()
-            with self._rs1_cv:
-                if not self.rs1.ingest(fs): continue
-                self.rs1.publish(); v = self.rs1.verts
-                self.bus["rs1"].write(verts=v, n=len(v), stamp=self.rs1.depth_stamp, t_recv=t_recv)
-                self._rs1_seq += 1; self._rs1_cv.notify_all()
+
 
     def rs2_snapshot(self):
         """(seq, stamp_s, depth u16, color rgb, ir_left, ir_right) — copies, safe across threads."""
@@ -95,12 +107,8 @@ class Hardware:
 
     def wait_rs1(self, timeout_ms=200):
         """Block on the RS1 camera clock (30 Hz). Returns (stamp_s, verts) or (None, None) on timeout."""
-        if getattr(self, "core", False):                 # latest frame from the pump (skips frames if the brain is slow)
-            with self._rs1_cv:
-                if self._rs1_seq == self._rs1_got and not self._rs1_cv.wait_for(lambda: self._rs1_seq != self._rs1_got, timeout_ms * 1e-3):
-                    return None, None
-                self._rs1_got = self._rs1_seq
-                return self.rs1.depth_stamp, self.rs1.verts.copy()
+        if getattr(self, "core", False):                 # latest RS1 frame from the safety core (skips if the brain is slow)
+            return self.rs1.wait(timeout_ms * 1e-3)
         fs = self.rs1.wait_frameset(timeout_ms)
         if fs is None or not self.rs1.ingest(fs):
             return None, None
