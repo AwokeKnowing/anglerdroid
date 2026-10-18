@@ -111,31 +111,37 @@ class Odom:
 CARVE_L, CARVE_TOL, CARVE_BAND = 1.5, 0.04, (0.03, 0.95)
 
 
-def carve_rays(rays, res=0.02, hmax=0.95):
+def carve_rays(rays, res=0.02, hmax=0.95, max_lh=3.0):
     """Free space seen by depth rays.  rays: [(origin(3), E(N,3), floor(N))] in the robot frame, z = height above the
     floor; E = measured returns (no-return pixels are unknown and carve nothing).  Each ray is sampled every <= res
     horizontally up to its return minus the depth noise margin (D435: 2 cells + 0.012 z^2; floor returns: 1 cell),
-    keeping 0..hmax m.  Returns (cells(M,2) robot frame, fmin(M), fmax(M)): per res cell the height range crossed."""
-    Ps = []
+    keeping 0..hmax m and <= max_lh m horizontally from the lens (beyond, the noise margin is > 15 cm and the rays are
+    > 6 cm apart: carving gets patchy, and the cost grows with the ray length).  Returns (cells(M,2) robot frame, fmin(M), fmax(M)): per res cell the height range crossed."""
+    X, Y, H = [], [], []
     for o, E, fl in rays:
         E = np.asarray(E, np.float32)
         if not len(E): continue
         o = np.asarray(o, np.float32); d = E - o; rng = np.linalg.norm(d, axis=1); lh = np.hypot(d[:, 0], d[:, 1])
         marg = np.where(fl, res, 2 * res + 0.012 * rng * rng)
-        te = np.clip((rng - marg) / np.maximum(rng, 1e-6), 0.0, 1.0)
-        ns = np.ceil(lh * te / res).astype(np.int64); sel = ns > 0
+        te = np.clip(np.minimum((rng - marg) / np.maximum(rng, 1e-6), max_lh / np.maximum(lh, 1e-6)), 0.0, 1.0).astype(np.float32)
+        ns = np.ceil(lh * te / res).astype(np.int32); sel = ns > 0
         d, te, ns = d[sel], te[sel], ns[sel]
         if not len(ns): continue
-        rid = np.repeat(np.arange(len(ns)), ns); j = np.arange(len(rid)) - np.repeat(np.cumsum(ns) - ns, ns)
-        t = (j + 1) / ns[rid] * te[rid]
-        P = o + t[:, None].astype(np.float32) * d[rid]
-        Ps.append(P[(P[:, 2] >= 0.0) & (P[:, 2] <= hmax)])
-    if not Ps: return np.zeros((0, 2), np.float32), np.zeros(0, np.float32), np.zeros(0, np.float32)
-    P = np.concatenate(Ps); ij = np.floor(P[:, :2] / res).astype(np.int64)
-    k = (ij[:, 0] + (1 << 20)) * (1 << 21) + (ij[:, 1] + (1 << 20))
-    o = np.argsort(k, kind="stable"); k, h, ij = k[o], P[o, 2], ij[o]
-    uk, i0 = np.unique(k, return_index=True)
-    return ((ij[i0] + 0.5) * res).astype(np.float32), np.minimum.reduceat(h, i0), np.maximum.reduceat(h, i0)
+        rid = np.repeat(np.arange(len(ns), dtype=np.int32), ns)
+        j = np.arange(1, len(rid) + 1, dtype=np.int32) - np.repeat(np.cumsum(ns, dtype=np.int32) - ns, ns)
+        t = j.astype(np.float32) * np.repeat((te / ns).astype(np.float32), ns)               # samples 1..ns of each ray, last one at te
+        h = o[2] + t * np.repeat(d[:, 2], ns); keep = (h >= 0.0) & (h <= hmax)
+        t, h = t[keep], h[keep]; ks = np.flatnonzero(keep)
+        X.append(o[0] + t * np.repeat(d[:, 0], ns)[ks]); Y.append(o[1] + t * np.repeat(d[:, 1], ns)[ks]); H.append(h)
+    if not X: return np.zeros((0, 2), np.float32), np.zeros(0, np.float32), np.zeros(0, np.float32)
+    ix = np.floor(np.concatenate(X) * (1.0 / res)).astype(np.int32); iy = np.floor(np.concatenate(Y) * (1.0 / res)).astype(np.int32)
+    H = np.concatenate(H).astype(np.float32, copy=False); x0, y0 = int(ix.min()), int(iy.min()); w = int(ix.max()) - x0 + 1; hgt = int(iy.max()) - y0 + 1
+    k = ((iy - y0) * w + (ix - x0)).astype(np.intp)                       # dense local window (intp: ufunc.at fast path)
+    fmin = np.full(w * hgt, np.inf, np.float32); fmax = np.full(w * hgt, -np.inf, np.float32)
+    np.minimum.at(fmin, k, H); np.maximum.at(fmax, k, H)
+    u = np.flatnonzero(fmin <= fmax)
+    C = np.stack([u % w + x0, u // w + y0], 1)
+    return ((C + 0.5) * res).astype(np.float32), fmin[u], fmax[u]
 
 
 class GridMap:
