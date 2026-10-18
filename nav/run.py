@@ -342,11 +342,15 @@ class Brain:
             except Exception as e:
                 self.stats.add("ctl_err", 1); self.log("control error: %r" % e); time.sleep(0.05); continue
             if busy and getattr(self.hw, "core", False):
+                # sleep (GIL released) until the core's predicted forwarding tick, then confirm; no busy polling
+                # (polling at 1 kHz made the perception thread hand over the GIL constantly: RS1 period 45 -> 80 ms)
                 t_h = self._t_iss; t_end = t_h + 3 * self.pred.core_period
-                while self.running and time.monotonic() < t_end and not self._pending:
-                    cs = self._feed_core()
-                    if cs and (cs.get("t_sent") or 0) > t_h: break
-                    time.sleep(0.001)
+                while self.running and not self._pending:
+                    cs = self._feed_core(); now = time.monotonic()
+                    if (cs and (cs.get("t_sent") or 0) > t_h) or now >= t_end: break
+                    ts = (cs or {}).get("t_sent") or now; P = self.pred.core_period
+                    nxt = ts + max(1, math.ceil((t_h - ts) / P)) * P          # first core tick after the hand-over
+                    time.sleep(min(max(nxt - now, 0.0) + 0.002, t_end - now))
                 self.stats.add("ctl_wait_ms", (time.monotonic() - t_h) * 1e3)
 
     def _control(self):
