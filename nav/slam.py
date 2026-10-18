@@ -68,8 +68,11 @@ class Odom:
                     F = np.array([[1.0, gyro_w * dt, -dt], [0, 1, 0], [0, 0, 1]])
                     self.P = F @ self.P @ F.T + np.diag([self.QG * dt, self.QS * dt, self.QB * dt])
                 if self._still > 15:                         # ZUPT: true yaw rate 0 -> observes bias (and scale x rate)
-                    self._upd(np.array([0.0, gyro_w, -1.0]), 0.0 - w, self.QG * 10); self.n_zupt += 1
-                    w = 0.0
+                    # 5-sigma gate: wheels stopped but the gyro still sees rotation (body settling / sliding after a
+                    # fast turn) is not a standstill; accepting it pulled the scale estimate -1.2 % in one LightNav run
+                    H = np.array([0.0, gyro_w, -1.0]); Sz = float(H @ self.P @ H) + self.QG * 10
+                    if w * w / Sz < 25.0: self._upd(H, 0.0 - w, self.QG * 10); self.n_zupt += 1; w = 0.0
+                    else: self.n_zupt_rej = getattr(self, "n_zupt_rej", 0) + 1        # really rotating: keep the gyro
         else: w = wd
         if self.t is not None:
             x, y, th = self.pose; thm = th + 0.5 * w * dt   # gyro rate = mean over the gap (hw.yaw_rate)

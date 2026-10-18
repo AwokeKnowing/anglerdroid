@@ -224,7 +224,7 @@ class Brain:
             ot = self.slam.odom.t; dtf = 0.0 if ot is None else min(max(t_frame - ot, 0.0), 0.6)
             if dtf > 0: gz = self._yaw_carry / dtf; self._yaw_carry = 0.0
         self.slam.odom.update(t_frame, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
-        self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0)
+        self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0); self.slam.stats['zupt_rej'] = getattr(self.slam.odom, 'n_zupt_rej', 0)
         try:
             lc = getattr(self, "last", None) or {}
             ev = self.bump.update(t_frame, (lc.get("v", 0.0), lc.get("w", 0.0)), (vl, vr), gz, self.hw.motor_currents(), getattr(self.hw, "accel_batch", None))
