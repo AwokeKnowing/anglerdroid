@@ -22,6 +22,7 @@ from nav import goals as G
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
+STUCK_DUMP = os.environ.get("KEVIN_STUCK_DUMP")      # dir: planner state dumps at no-progress / give-up (diagnostics)
 # control cycle (James 2026-10-18).  KEVIN_CMD_CYCLE=1 (opt-in): goals / global replans are latched and taken at the
 # next cycle start (a new goal never interrupts a plan before its command is issued) and each plan starts from the
 # latency-compensated predicted state (nav/predict.py) at the time its command takes effect.  Default: the previous
@@ -402,7 +403,7 @@ class Brain:
                         if self._stuck >= 3 and dg < 0.35:                # honest near-arrival instead of "stuck"
                             self.mode = "idle"; self.goal = None; self.planner.cancel(); self.v = self.w = 0.0
                             self.log("stopped %.2f m short of %s (closest reachable)" % (dg, self.goal_label or "goal")); return
-                        self._stuck += 1
+                        self._stuck += 1; self._stuck_dump("noprog%d" % self._stuck)
                         if self._stuck >= 4: self.mode = "idle"; self.goal = None; self.planner.cancel(); self.log("gave up: stuck (unreachable from here)")
                         else:
                             self._bo_stuck = self._stuck
@@ -413,6 +414,7 @@ class Brain:
             done = math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 or time.monotonic() - self.back_t0 > getattr(self, 'back_T', 12.0)
             r = None if done else self.planner.step((x, y, th, vs, ws))
             if r is None:
+                self._stuck_dump("backout_end_%s" % ("reached" if math.hypot(self.back_tgt[0] - x, self.back_tgt[1] - y) < 0.15 else "timeout"))
                 self.v = self.w = 0.0; xy, hd, lb = self._backing_for; self._backing_for = None
                 self._bo_fail = False; self._bo_retry = True; self._goto(xy, hd, lb); self._bo_retry = False
                 if self._bo_fail: self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (after retreating)" % (lb or "point"))
@@ -529,6 +531,42 @@ class Brain:
         self.stats.add("loop_ms", (t1 - t0) * 1e3); self.stats.add("frame_to_cmd_ms", (t1 - t_frame) * 1e3)
         if hasattr(self, "_tl"): self.stats.add("period_ms", (t0 - self._tl) * 1e3)
         self._tl = t0; self.last = dict(v=v, w=w, safety=info, valid=valid)
+        if STUCK_DUMP and self.mode in ("path", "backout", "turn"):     # last ~15 s of control decisions (for _stuck_dump)
+            pt = self.planner.timing if self.planner is not None else {}
+            self.__dict__.setdefault("_ring", collections.deque(maxlen=450)).append(
+                (round(t0, 3), self.mode, round(x, 3), round(y, 3), round(th, 3), round(v_pre, 3), round(w_pre, 3), round(v_saf, 3), round(w_saf, 3),
+                 round(v, 3), round(w, 3), info.get("state"), info.get("scale"), pt.get("mincost"), pt.get("u"), round(self.slam.odom.v, 3)))
+
+    def _stuck_dump(self, why):
+        """KEVIN_STUCK_DUMP=<dir>: everything the planners saw at a no-progress / give-up decision -> <dir>/<t>_<why>.npz
+        (planning window occ + EDT + reverse mask, observation layer, global + local path, trail, MPPI proposals and
+        min cost, governor, the last ~15 s of control decisions).  Rendered by emu/tools/stuck_render.py."""
+        if not STUCK_DUMP or self.planner is None: return
+        try:
+            os.makedirs(STUCK_DUMP, exist_ok=True); p = self.planner
+            occ, rev = p._occ_window()
+            inf = getattr(p, "last_info", None) or {}
+            def _np(a):
+                try: return a.detach().float().cpu().numpy()
+                except Exception: return np.asarray(a) if a is not None else np.zeros(0)
+            with self.obs.lock: src, opose, otr = self.obs.src, self.obs.pose, list(self.obs.trail)
+            gp = getattr(self, "gpath", None)
+            meta = dict(why=why, t=time.time(), mode=self.mode, pose=list(self.slam.pose()), goal=None if self.goal is None else list(map(float, self.goal)),
+                        goal_req=None if getattr(self, "goal_req", None) is None else list(map(float, self.goal_req)), label=self.goal_label,
+                        stuck=self._stuck, best_d=getattr(self, "_best_d", None), prog=[self._prog[0], list(self._prog[1])] if getattr(self, "_prog", None) else None,
+                        planner_status=p.status, planner_goal=None if p.goal is None else list(map(float, p.goal)), timing=dict(p.timing), org=list(map(float, p.org)),
+                        gov=getattr(self, "_gov", None), clearance=p.clearance(self.slam.pose()[:2]), R_ROTATE=_TG.R_ROTATE,
+                        gp_inflate=None if gp is None else gp.get("inflate"), gp_snap=None if gp is None else gp.get("snap_m"),
+                        back_tgt=None if getattr(self, "back_tgt", None) is None else list(map(float, self.back_tgt)), events=list(self.events)[-12:],
+                        ring=list(getattr(self, "_ring", [])), map_origin=list(map(float, self.slam.grid.origin)), map_res=float(self.slam.grid.res))
+            fn = os.path.join(STUCK_DUMP, "%s_%s.npz" % (time.strftime("%H%M%S"), why.replace(" ", "_").replace("(", "").replace(")", "")))
+            np.savez_compressed(fn, meta=json.dumps(meta, default=str), occ=occ, rev=rev, edt=np.asarray(p.m.edt, np.float32), edt_rev=_np(p.W.edt_rev),
+                                obs=src if src is not None else np.zeros((0, 0), np.uint8), obs_pose=np.asarray(opose or (0, 0, 0)), obs_trail=np.asarray(otr),
+                                trail=np.asarray(getattr(self, "trail", [])), gpath=np.asarray(gp["xy"]) if gp is not None else np.zeros((0, 2)),
+                                lpath=np.asarray(p.path) if p.path is not None else np.zeros((0, 2)), props=_np(inf.get("props")), pcost=_np(inf.get("pcost")),
+                                chosen=_np(inf.get("chosen")), mapL=self.slam.grid.L)
+            print("[nav] stuck dump", fn, flush=True)
+        except Exception as e: print("[nav] stuck dump failed: %r" % e, flush=True)
 
     def _on_bump(self, ev):
         """Contact detected (nav/bump.py).  Additive safety: it can only stop the robot.

@@ -113,6 +113,7 @@ class Planner:
             st = torch.as_tensor(np.array([[*self.to_win(state[:2]), state[2], state[3], state[4]]], np.float32), device=self.M.dev)
             u, info = self.G.plan(st)
             a, al = u[0].tolist()
+        self.last_info = info                                             # (diagnostics: nav.run._stuck_dump)
         self.timing["plan_ms"] = (time.perf_counter() - t) * 1e3
         mc = info.get("mincost") if isinstance(info, dict) else None
         if mc is not None: self.timing["mincost"] = round(float(mc.reshape(-1)[0]), 2)   # >= 1e4: every rollout infeasible
