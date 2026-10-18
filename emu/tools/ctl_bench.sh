@@ -3,7 +3,7 @@
 cd /home/james/gits/awokeknowing/anglerdroid
 PY=~/.venv-kevinrobot/bin/python
 for M in ${MODES:-pre cmd}; do
-  if [ $M = pre ]; then export KEVIN_REPO=/home/james/gits/anglerdroid_pre; unset KEVIN_CTL; else unset KEVIN_REPO; export KEVIN_CTL=$M; fi
+  if [ $M = pre ]; then export KEVIN_REPO=/home/james/gits/anglerdroid_pre; unset KEVIN_CTL; else unset KEVIN_REPO; export KEVIN_CTL=$M KEVIN_CMD_CYCLE=1; fi
   for i in 1 2 3; do
     echo "== $M bench $i $(date +%T)"
     (source emu/tools/simpin.sh; emu/tools/simpin.sh apply >/dev/null 2>&1; BENCH_DIRECT=1 $PY emu/tools/goal_bench.py ctl_${M}$i > ~/m1_backup/dbg/bench_ctl_${M}$i.log 2>&1); tail -3 ~/m1_backup/dbg/bench_ctl_${M}$i.log
