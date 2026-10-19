@@ -377,3 +377,26 @@ gshm2 failed before any LightNav use: robot boxed at the start ('local replan fa
 path does not touch the new code, but cause not identified, so the default stays OFF until a clean n>=3.
 MASt3R-SLAM with odometry prior + exit fix prepared (`emu/tools/slamlog/odom_prior.py`, `~/slamlogs/res/queue2.sh`), not run:
 it needs ~17 GB GPU and LightNav holds 12.3 GB of 24.5 GB -> sim-off window.
+
+## 2026-10-19 07:41-08:22 PT — MASt3R-SLAM sim-off window (queue2: n=3, with/without wheel-odom prior, 1200 s cap)
+Exit-hang fix worked (every run exited, wall 139-184 s on L4, 337-345 s on L3) but left orphaned multiprocessing workers
+(killed afterwards; next fix: kill the process group). Real-depth injection not implemented -> not used.
+
+| log | method | n | ATE m | head max ° | aligned m | coverage | wall p90 cm | scale |
+|---|---|---|---|---|---|---|---|---|
+| L4 80 s | kslam live | 1 | 0.113 | 4.6 | 0.086 | 1.0 | 7.3 | – |
+| L4 | odometry | 1 | 0.130 | 3.5 | 0.044 | 1.0 | 12.7 | – |
+| L4 | lgfg fused | 1 | 0.115 | 5.4 | 0.038 | 1.0 | 13.9 | – |
+| L4 | MASt3R, no prior (r1-r3) | 3 | 0.061-0.066 | 0.85-0.98 | 0.011-0.012 | 0.50-0.53 | 2.0-2.1 | 0.87-0.88 |
+| L4 | MASt3R + odom prior (o1-o3) | 3 | 0.056-0.060 | 0.94-1.01 | 0.021-0.046 | **0.05** | 1.8 | 0.85-0.88 |
+| L3 150 s | kslam live | 1 | 0.182 | 12.4 | 0.112 | 1.0 | 11.0 | – |
+| L3 | odometry | 1 | 0.125 | 10.5 | 0.119 | 1.0 | 8.0 | – |
+| L3 | lgfg fused | 1 | 0.194 | 12.1 | 0.043 | 1.0 | 14.4 | – |
+| L3 | MASt3R, no prior (r1-r3) | 3 | 1.12 | 2.8 | 0.86 | **0.053** | 33.8 | 0.37 |
+| L3 | MASt3R + odom prior (o1-o3) | 3 | 1.12 | 2.8 | 0.86 | **0.053** | 33.8 | 0.37 |
+
+MASt3R ATE/heading are only over the poses it produced (coverage = fraction of RS2 frames with a pose). It is very accurate where
+it tracks (L4 heading < 1°, walls 2 cm) but loses tracking at the first fast spin and mostly fails to relocalize
+(L3: 14 keyframes, ~290 reloc attempts, identical with/without prior). The odometry initial-pose prior made L4 worse (coverage
+0.5 -> 0.05, n=3); prior convention checked against MASt3R's own relative rotations (agree to ~0.01 rad) so it is not a frame bug.
+Not a replacement for kslam as is. Next: real depth (metric scale) and feeding the prior into RELOC/keyframe selection, not just init.
