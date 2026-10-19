@@ -112,7 +112,7 @@ class VLN:
                             tick = max(tick + 1.0 / FPS, time.monotonic() - 0.5 / FPS)
                             color = self.cam.grab()
                             if color is None: continue
-                            pose = tuple(float(v) for v in self.b.slam.pose())
+                            pose = tuple(float(v) for v in self.b.navpose())
                             ok, jpg = cv2.imencode(".jpg", color[..., ::-1] if color.ndim == 3 else color, [cv2.IMWRITE_JPEG_QUALITY, 85])
                             tn = time.monotonic()
                             if tprev: self.fps = (0.8 * self.fps + 0.2 / max(tn - tprev, 1e-3)) if self.fps else 1.0 / max(tn - tprev, 1e-3)

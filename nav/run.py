@@ -13,7 +13,7 @@ import numpy as np
 import nav  # noqa
 from nav.hw import Hardware
 from nav.perceive import Ego, Rs2Cloud
-from nav.slam import Slam, GridMap, wrap, transform
+from nav.slam import Slam, GridMap, wrap, transform, carve_rays
 from nav.safety import Envelope, FrameClock
 import twin_geometry as _TG
 _sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if _sl else None
@@ -60,10 +60,22 @@ class Brain:
             from nav.autocal import AutoCal, STILL_V
             self.autocal = AutoCal(hw.rs2_intr, log=self.log); self._still_v = STILL_V
         _sk = os.environ.get('KEVIN_SLAM', '2'); self.slam = (__import__('nav.vslam_cuv', fromlist=['CuvSlam']).CuvSlam(GridMap()) if _sk == 'cuv' else __import__('nav.slam2', fromlist=['Slam2']).Slam2(GridMap(), match=match) if _sk == '2' else Slam(GridMap(), match=match)); self.places = G.Places(); self.env = Envelope(); self._fclk = FrameClock()
+        # KEVIN_NAV_DECOUPLE=1 (James 21:47 architecture): driving, LightNav waypoints, the nav envelope's memory and the
+        # planners work in the ODOMETRY frame on a short-horizon local grid built from odometry only (live frames are the
+        # truth; unseen evidence decays with TAU_LOCAL).  The SLAM map/pose is an optional layer: named places, map-frame
+        # goals and labels go through T_map<-odom only while the SLAM pose agrees with the current view (map_check()).
+        self.decouple = os.environ.get("KEVIN_NAV_DECOUPLE", "0") == "1"
+        self.slam_off = os.environ.get("KEVIN_SLAM_OFF", "0") == "1"                     # test: no SLAM at all
+        self.slam_lag = float(os.environ.get("KEVIN_SLAM_LAG_S", "0"))                     # test: SLAM correction lagged
+        _e = [float(v) for v in os.environ.get("KEVIN_SLAM_ERR", "0,0,0").split(",")]      # test: injected error dx,dy,dth_deg
+        self.slam_err = (_e[0], _e[1], math.radians(_e[2]))
+        self.lgrid = GridMap() if self.decouple else None; self._lg_t = None; self._lg_job = None; self._lg_ev = threading.Event()
+        if self.decouple: threading.Thread(target=self._lg_worker, daemon=True, name="localgrid").start()
+        self._Thist = collections.deque(maxlen=2000); self.map_ok = False; self.map_agree = None; self._mc_t = 0.0
         self.planner = None
         if plan:
             from nav.plan import Planner
-            self.planner = Planner(self.slam.grid)
+            self.planner = Planner(self.navgrid)
         from nav.obslayer import ObsLayer
         self.obs = ObsLayer()                       # current RS1 frame, authoritative over the map where it sees (planners)
         from nav.bump import BumpDetector                # contact detector (motor current + IMU), additive safety
@@ -94,8 +106,71 @@ class Brain:
     def log(self, s):
         self.events.append((time.time(), s)); self.msg = s; print("[nav]", s, flush=True)
 
+    TAU_LOCAL = 30.0      # s: local-grid evidence half-life scale = the map lag the system must tolerate (James 21:47)
+    AGREE_R, AGREE_MIN = 2, 0.5   # map check: live RS2 obstacle points within AGREE_R cells of a mapped obstacle; >= AGREE_MIN
+
+    def _lg_worker(self):      # local odom-frame grid off the 30 Hz loop (carving costs ms); always takes the newest frame
+        while True:
+            self._lg_ev.wait(); self._lg_ev.clear(); j = self._lg_job
+            if j is None: continue
+            t, po, obs, free, obs_h, rays = j
+            try:
+                if self._lg_t is not None:
+                    with self.lgrid.lock: self.lgrid.L *= np.float32(math.exp(-max(t - self._lg_t, 0.0) / self.TAU_LOCAL))
+                self._lg_t = t; cv = carve_rays(rays, self.lgrid.res) if rays else None; lg = getattr(self, "_lg_last", None)
+                if lg is None or math.hypot(po[0] - lg[0], po[1] - lg[1]) > 0.04 or abs(wrap(po[2] - lg[2])) > math.radians(2.5):
+                    self.lgrid.integrate(po, obs, free, obs_h=obs_h, carve=cv); self._lg_last = po      # same rule as the SLAM grid
+                elif cv is not None:      # parked: no new evidence weight (would saturate), carve what is seen through now
+                    self.lgrid.integrate(po, obs, np.zeros((0, 2), np.float32), obs_h=obs_h, carve=cv, w_hit=0.0)
+            except Exception as e: self.log("local grid: %s" % e)
+
+    def navpose(self):
+        return self.slam.odom.pose if self.decouple else self.slam.pose()
+
+    @property
+    def navgrid(self):
+        return self.lgrid if self.decouple else self.slam.grid
+
+    def map_T(self):
+        """T map<-odom as the map layer sees it (lag / error injection for tests)."""
+        from nav.slam import compose
+        T = tuple(getattr(self.slam, "T", (0.0, 0.0, 0.0)))
+        if self.slam_lag > 0:
+            tl = time.monotonic() - self.slam_lag; T = (0.0, 0.0, 0.0)
+            for tt, TT in self._Thist:
+                if tt <= tl: T = TT
+                else: break
+        return compose(self.slam_err, T) if any(self.slam_err) else T
+
+    def map_check(self):
+        """Does the SLAM map agree with the current view?  Fraction of live RS2 obstacle points that land (with the map-layer
+        pose) within AGREE_R cells of a mapped obstacle (L > 0.7, the grid's own occupied test)."""
+        from nav.slam import compose, transform
+        P = getattr(self, "_rs2_obs", None); g = self.slam.grid
+        if self.slam_off or P is None or len(P) < 100: self.map_ok = False; self.slam.stats['map_ok'] = False; return
+        pm = compose(self.map_T(), self.slam.odom.pose); W = transform(P[::4].astype(np.float32), pm)
+        r, c = g.rc(np.asarray(W, np.float64)); occ = g.L > 0.7; hit = np.zeros(len(r), bool); known = np.zeros(len(r), bool)
+        for dr in range(-self.AGREE_R, self.AGREE_R + 1):
+            for dc in range(-self.AGREE_R, self.AGREE_R + 1):
+                rr, cc = np.clip(r + dr, 0, g.n - 1), np.clip(c + dc, 0, g.n - 1); hit |= occ[rr, cc]; known |= g.seen[rr, cc]
+        # only points that fall where the map has evidence can (dis)agree; new territory is no evidence either way:
+        # then keep the last verdict for at most TAU_LOCAL (the map lag the system is built to tolerate)
+        now = time.monotonic()
+        if known.sum() >= 50:
+            self.map_agree = float(hit[known].mean()); self.map_ok = self.map_agree >= self.AGREE_MIN; self._mc_ok_t = now
+        elif now - getattr(self, "_mc_ok_t", -1e9) > self.TAU_LOCAL: self.map_ok = False
+        self.slam.stats['map_agree'] = None if self.map_agree is None else round(self.map_agree, 3); self.slam.stats['map_ok'] = self.map_ok
+
+    def to_nav(self, xy):
+        from nav.slam import inverse, transform
+        return tuple(transform(np.array([xy[:2]], np.float32), inverse(self.map_T()))[0]) if self.decouple else tuple(xy[:2])
+
+    def to_map(self, xy):
+        from nav.slam import transform
+        return tuple(transform(np.array([xy[:2]], np.float32), self.map_T())[0]) if self.decouple else tuple(xy[:2])
+
     def _apply(self, c):
-        k = c["kind"]; x, y, th = self.slam.pose()
+        k = c["kind"]; x, y, th = self.navpose()
         if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
         if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
             self.bump_latched = None                                       # a new command acknowledges the bump latch
@@ -104,14 +179,18 @@ class Brain:
         elif k == "where": self.log("pose %.2f %.2f %.0f°" % (x, y, math.degrees(th)))
         elif k == "places": self.log("places: " + ", ".join("%s(%.1f,%.1f)" % (n, p[0], p[1]) for n, p in self.places.d.items()) or "none")
         elif k == "label":
-            px, py = (c["x"], c["y"]) if "x" in c else (x, y)
+            px, py = (c["x"], c["y"]) if "x" in c else self.to_map((x, y))
+            if self.decouple and "x" not in c and not self.map_ok: self.log("label here needs a verified map (places live in the map frame)"); return
             self.places.set(c["name"], px, py, th); self.log("labelled %s at %.2f,%.2f" % (c["name"], px, py))
         elif k == "forget": self.log(("forgot " if self.places.remove(c["name"]) else "no place ") + c["name"])
-        elif k == "goto_xy": self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
+        elif k == "goto_xy":
+            if self.decouple and not self.map_ok: self.log("no verified map: goal taken in the odometry frame"); self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
+            else: self._goto(self.to_nav((c["x"], c["y"])), c["heading"], None, cmd=True)
         elif k == "goto_place":
             p = self.places.get(c["name"])
             if p is None: self.log("unknown place '%s' (known: %s)" % (c["name"], ", ".join(self.places.d) or "none"))
-            else: self._goto(p[:2], None, c["name"], cmd=True)
+            elif self.decouple and not self.map_ok: self.log("named places need a map that agrees with the current view (agreement %s); use LightNav ('ask ...') or 'forward/turn'" % (None if self.map_agree is None else round(self.map_agree, 2)))
+            else: self._goto(self.to_nav(p[:2]), None, c["name"], cmd=True)
         elif k == "relative": self._goto((x + c["d"] * math.cos(th), y + c["d"] * math.sin(th)), None, None, allow_back=c["d"] < 0)
         elif k == "turn":                       # relative turn: track the remaining angle (a 360 used to wrap to 0 -> 'arrived')
             self.turn_target = wrap(th + c["rad"]); self.turn_rem = c["rad"]; self._turn_th = th; self.mode = "turn"; self.log("turning %.0f°" % math.degrees(c["rad"]))
@@ -137,7 +216,7 @@ class Brain:
         """Global coarse path on the whole map -> local subgoal for the 1 cm window/MPPI. Reports unreachable honestly."""
         if self.planner is None: self.log("planner disabled"); return
         from nav import globalplan as GP
-        pose = self.slam.pose(); xy = np.asarray(xy, float)
+        pose = self.navpose(); xy = np.asarray(xy, float)
         # the same goal again (LightNav re-sends its receding-horizon waypoint every prediction, ~1.7 s): keep the
         # running plan, the controller and the progress watchdog.  Re-planning reset the 'no progress' clock each time,
         # so a wedged robot never got to retreat (live 07:01: 90 x "going to point (-3.82, -0.61)", cmd 0 0).
@@ -146,7 +225,7 @@ class Brain:
         if same: self.goal_heading = heading; self.stats.add("goal_same", 1.0); return
         cont = cmd and self.mode in ("path", "turn", "backout") and getattr(self, "_prog", None) is not None    # new goal mid-route
         keep = (self._prog, self._stuck, self._best_d, self._best_t, self.goal_t0) if cont else None
-        g = GP.plan(self.slam.grid, pose[:2], xy, self.obs)
+        g = GP.plan(self.navgrid, pose[:2], xy, self.obs)
         if g is None:
             self.mode = "idle"; self.log("unreachable: no path to %s (%.2f, %.2f)" % (label or "point", xy[0], xy[1])); return
         self.gpath = g; self.goal_req = xy; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
@@ -190,7 +269,7 @@ class Brain:
         """Leave a dead end along our own trail (where we actually drove: traversable).  The retreat point (the last
         trail pose with room to spin, below) is an ordinary MPPI goal, so the robot turns and drives forward when there is room and reverses only into space
         the RS1 currently sees as free (World.edt_rev).  Afterwards the original goal is planned again."""
-        tr = list(getattr(self, "trail", [])); x, y, th = self.slam.pose()
+        tr = list(getattr(self, "trail", [])); x, y, th = self.navpose()
         if len(tr) < 3 or self.planner is None: return False
         # target: the most recent trail pose where Kevin can spin in place (axle clearance >= R_ROTATE, current map +
         # observation).  From there every direction is open again.  The whole trail is swept-footprint 'known
@@ -226,13 +305,13 @@ class Brain:
         while self.running:
             time.sleep(0.8 if self.mode in ("path", "backout") else 2.0); n += 1
             try:
-                pose = self.slam.pose()
+                pose = self.navpose()
                 self.planner.refresh(pose[:2]); self.stats.add("map_refresh_ms", self.planner.timing["refresh_ms"])
                 if self.mode == "path" and self.goal is not None:
                     if n % 3 == 0:                                    # global replan ~every 2.4 s on the grown map
-                        g = GP.plan(self.slam.grid, pose[:2], self.goal_req, self.obs)
+                        g = GP.plan(self.navgrid, pose[:2], self.goal_req, self.obs)
                         if self._stuck >= 2:          # repeated no-progress: the goal pocket is tighter than the
-                            gc = GP._plan(self.slam.grid, pose[:2], self.goal_req, 0.30, self.obs)   # plan claims; aim for a
+                            gc = GP._plan(self.navgrid, pose[:2], self.goal_req, 0.30, self.obs)   # plan claims; aim for a
                             if gc is not None:                                               # conservatively reachable point
                                 if gc["snap_m"] > 0.05 and not getattr(self, "_snap_logged", False):
                                     self._snap_logged = True; self.log("goal pocket too tight: aiming for closest reachable point (%.2f m from %s)" % (gc["snap_m"], self.goal_label or "goal"))
@@ -278,7 +357,7 @@ class Brain:
             self.stats.add("bump_err", 1)
         lab = self.ego.update(verts)
         ego_obs = self.ego.obstacle_xy(max_n=1500); valid = self.ego.valid_fraction()
-        if valid > 0: self.obs.update(self.slam.pose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
+        if valid > 0: self.obs.update(self.navpose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
         snap = None
         seq, st = self.hw.rs2_seq, self.hw.rs2_stamp
         if seq != self._rs2_seq:
@@ -316,7 +395,12 @@ class Brain:
             free = np.concatenate([self.ego.clear_xy(), transform(self._rs2_floor[::3], d)]) if len(self._rs2_floor) else self.ego.clear_xy()
             rs2m = transform(self._rs2_obs, d) if len(self._rs2_obs) else None
             # matching uses RS2 only (long range, twin-calibrated mount); RS1 ego points still go into the map
-            self.slam.submit(t_frame, obs.astype(np.float32), free.astype(np.float32),
+            if self.decouple:
+                self._lg_job = (t_frame, po, obs.astype(np.float32), free.astype(np.float32), obs_h.astype(np.float32), rays)
+                self._lg_ev.set()
+                self._Thist.append((time.monotonic(), tuple(getattr(self.slam, "T", (0.0, 0.0, 0.0)))))
+                if time.monotonic() - self._mc_t > 1.0: self._mc_t = time.monotonic(); self.map_check()
+            if not self.slam_off: self.slam.submit(t_frame, obs.astype(np.float32), free.astype(np.float32),
                              rs2m.astype(np.float32) if rs2m is not None and len(rs2m) > 100 else None,
                              obs_h=obs_h.astype(np.float32), rays=rays)
         if getattr(self, "_reloc_pending", False) and len(self._rs2_obs) > 200 and not getattr(self, "_reloc_busy", False):
@@ -383,14 +467,14 @@ class Brain:
             if self.mode == "path" and self.goal is not None:
                 g = lg[0]
                 if g is not None: self.gpath = g; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
-                if not self._set_sub(self.slam.pose()): self.log("local replan failed")
+                if not self._set_sub(self.navpose()): self.log("local replan failed")
         br = getattr(self, "_bump_resume", None)
         if br and time.monotonic() >= br[0]:
             self._bump_resume = None
             if self.mode == "idle": k = self._goal_bumps; self._goto(*br[1]); self._goal_bumps = k
         with self._cmd_lock: pend, self._pending = self._pending, []
         for c in pend: self._apply(c)
-        x, y, th = self.slam.pose(); dt = 1.0 / HZ; vs, ws = self.v, self.w        # plan start state (frame mode)
+        x, y, th = self.navpose(); dt = 1.0 / HZ; vs, ws = self.v, self.w        # plan start state (frame mode)
         t_eff = self.pred.effect_time(t0)
         xm, ym = x, y; pr = None
         if CTL_MODE == "cmd":
@@ -483,7 +567,7 @@ class Brain:
         # safety envelope: fresh RS1 ego + RS2 obstacles (robot frame), stamped
         pts = np.concatenate([ego_obs, self._rs2_obs]) if len(self._rs2_obs) and t_frame - self._rs2_t < 0.3 else ego_obs
         if (self.tick % 3 == 0 and getattr(self, "_mpts_tick", -1) != self.tick) or not hasattr(self, "_mpts"):
-            self._mpts = self._map_points(xm, ym, self.slam.pose()[2]); self._mpts_tick = self.tick
+            self._mpts = self._map_points(xm, ym, self.navpose()[2]); self._mpts_tick = self.tick
         mp = self._mpts
         if len(self._mpts):
             # remembered map cells that land inside/at the footprint are pose-error artifacts (the robot cannot be
@@ -566,7 +650,7 @@ class Brain:
                                     None if info.get("age") is None else round(info["age"], 4)]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
-            self.rec.put(t=t_frame, t_od=getattr(self, "_t_od", t_frame), v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
+            self.rec.put(t=t_frame, t_od=getattr(self, "_t_od", t_frame), v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.navpose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
                          rs1=None if r1 is None else r1.copy(), rs2=None if r2 is None else r2.copy(),
                          accel=None if im is None else np.array(im.accel, np.float32), gyro=None if im is None else np.array(im.gyro, np.float32),
                          imu_t=None if im is None else getattr(im, "timestamp", None))
@@ -595,20 +679,20 @@ class Brain:
                 except Exception: return np.asarray(a) if a is not None else np.zeros(0)
             with self.obs.lock: src, opose, otr = self.obs.src, self.obs.pose, list(self.obs.trail)
             gp = getattr(self, "gpath", None)
-            meta = dict(why=why, t=time.time(), mode=self.mode, pose=list(self.slam.pose()), goal=None if self.goal is None else list(map(float, self.goal)),
+            meta = dict(why=why, t=time.time(), mode=self.mode, pose=list(self.navpose()), goal=None if self.goal is None else list(map(float, self.goal)),
                         goal_req=None if getattr(self, "goal_req", None) is None else list(map(float, self.goal_req)), label=self.goal_label,
                         stuck=self._stuck, best_d=getattr(self, "_best_d", None), prog=[self._prog[0], list(self._prog[1])] if getattr(self, "_prog", None) else None,
                         planner_status=p.status, planner_goal=None if p.goal is None else list(map(float, p.goal)), timing=dict(p.timing), org=list(map(float, p.org)),
-                        gov=getattr(self, "_gov", None), clearance=p.clearance(self.slam.pose()[:2]), R_ROTATE=_TG.R_ROTATE,
+                        gov=getattr(self, "_gov", None), clearance=p.clearance(self.navpose()[:2]), R_ROTATE=_TG.R_ROTATE,
                         gp_inflate=None if gp is None else gp.get("inflate"), gp_snap=None if gp is None else gp.get("snap_m"),
                         back_tgt=None if getattr(self, "back_tgt", None) is None else list(map(float, self.back_tgt)), events=list(self.events)[-12:],
-                        ring=list(getattr(self, "_ring", [])), map_origin=list(map(float, self.slam.grid.origin)), map_res=float(self.slam.grid.res))
+                        ring=list(getattr(self, "_ring", [])), map_origin=list(map(float, self.navgrid.origin)), map_res=float(self.navgrid.res))
             fn = os.path.join(STUCK_DUMP, "%s_%s.npz" % (time.strftime("%H%M%S"), why.replace(" ", "_").replace("(", "").replace(")", "")))
             np.savez_compressed(fn, meta=json.dumps(meta, default=str), occ=occ, rev=rev, edt=np.asarray(p.m.edt, np.float32), edt_rev=_np(p.W.edt_rev),
                                 obs=src if src is not None else np.zeros((0, 0), np.uint8), obs_pose=np.asarray(opose or (0, 0, 0)), obs_trail=np.asarray(otr),
                                 trail=np.asarray(getattr(self, "trail", [])), gpath=np.asarray(gp["xy"]) if gp is not None else np.zeros((0, 2)),
                                 lpath=np.asarray(p.path) if p.path is not None else np.zeros((0, 2)), props=_np(inf.get("props")), pcost=_np(inf.get("pcost")),
-                                chosen=_np(inf.get("chosen")), mapL=self.slam.grid.L)
+                                chosen=_np(inf.get("chosen")), mapL=self.navgrid.L)
             print("[nav] stuck dump", fn, flush=True)
         except Exception as e: print("[nav] stuck dump failed: %r" % e, flush=True)
 
@@ -632,8 +716,8 @@ class Brain:
                     self._floor_log_t = time.monotonic(); self.log("floor step (camera sees clear floor %s): %s -- not a contact" % (ev["dir"], ev["why"]))
                 return
         self.v = self.w = 0.0; self._bump_hold = time.monotonic() + 0.5; self.hw.drive(0.0, 0.0)
-        pose = self.slam.pose()
-        for _ in range(2): self.slam.grid.integrate(pose, P, np.zeros((0, 2), np.float32))     # 2 hits = confident cell
+        pose = self.navpose()
+        for _ in range(2): self.navgrid.integrate(pose, P, np.zeros((0, 2), np.float32))     # 2 hits = confident cell
         x, y, th = pose; ev = dict(ev, x=round(x, 2), y=round(y, 2)); self.bump_latched = ev; self.bump.last = ev
         resume = None
         vln_on = self.vln is not None and getattr(self.vln, "text", None) is not None
@@ -647,7 +731,7 @@ class Brain:
 
     def _map_points(self, x, y, th, r=0.7):
         """Mapped obstacles within r m, robot frame: memory of what is beside/behind the robot (outside RS1/RS2 view)."""
-        g = self.slam.grid; c0 = np.floor((np.array([x - r, y - r]) - g.origin) / g.res).astype(int); n = int(2 * r / g.res)
+        g = self.navgrid; c0 = np.floor((np.array([x - r, y - r]) - g.origin) / g.res).astype(int); n = int(2 * r / g.res)
         if (c0 < 0).any() or (c0 + n >= g.n).any(): return np.zeros((0, 2), np.float32)
         occ = g.L[c0[1]:c0[1] + n, c0[0]:c0[0] + n] > 1.5            # confident cells only (>= 2 hits)
         iy, ix = np.nonzero(occ)
@@ -660,13 +744,13 @@ class Brain:
         el = time.monotonic() - self.goal_t0
         d = 0.0
         if getattr(self, "goal_req", None) is not None and self.goal is not None:
-            x, y, _ = self.slam.pose(); d = math.hypot(self.goal_req[0] - x, self.goal_req[1] - y)
+            x, y, _ = self.navpose(); d = math.hypot(self.goal_req[0] - x, self.goal_req[1] - y)
         self.log(("arrived at %s in %.1f s" % (self.goal_label or "goal", el)) + ("" if d < 0.2 else " (%.2f m from the requested point: closest reachable)" % d))
         self.mode = "idle"; self.goal = None
         self.planner and self.planner.cancel(); self.v = self.w = 0.0
 
     def state(self):
-        x, y, th = self.slam.pose()
+        x, y, th = self.navpose()
         p = self.planner
         return dict(t=time.time(), t0=self.t0, pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg,
                     goal=None if self.goal is None else list(self.goal), label=self.goal_label,
