@@ -362,3 +362,18 @@ Decoupling (`KEVIN_NAV_DECOUPLE=1`, default off; commits 941601a, 77d9904): driv
 30 s local grid; SLAM map used for named places only when a live-scan vs map agreement check passes. Goal bench n=2: flag off 6/6
 goals arrive; flag on 5/6 + 1 refusal (check fixed after). Injected 1 m/30° error detected (agreement 0.23) but a goal sent ~6 s
 after start was accepted (single-scan check aliases at startup). SLAM-off LightNav and 30 s lag tests not completed. Not default.
+
+## 2026-10-19 05:40-06:07 — goal interface step 1 (docs/ARCHITECTURE_LOOPS.md)
+`KEVIN_GOAL_SHM=1` (default off): LightNav runs as its own process (`nav/lightnav_proc.py`, fixed 250 ms loop) and writes an
+odometry-frame goal block that nav consumes (`nav/goalio.py`). Measured: loop lateness max 4 ms / p99 3.4 ms, 4.00 fps capture,
+predictions 220-480 ms, 0 errors.
+
+| goal bench (kitchen/bedroom/couch, final GT m) + LightNav 'find the kitchen' 90 s | goals arrived | LightNav final GT m |
+|---|---|---|
+| flag on, gshm1-3 | 3/3, 0/3, 3/3 | 1.70, 1.19, 1.56 |
+| flag off, base19_1-2 (same morning) | 3/3, 3/3 | 1.84, 1.01 |
+
+gshm2 failed before any LightNav use: robot boxed at the start ('local replan failed', axle clearance 0.06 m) — the place-goal
+path does not touch the new code, but cause not identified, so the default stays OFF until a clean n>=3.
+MASt3R-SLAM with odometry prior + exit fix prepared (`emu/tools/slamlog/odom_prior.py`, `~/slamlogs/res/queue2.sh`), not run:
+it needs ~17 GB GPU and LightNav holds 12.3 GB of 24.5 GB -> sim-off window.
