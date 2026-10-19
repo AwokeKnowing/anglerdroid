@@ -37,6 +37,7 @@ class Odom:
     the scale observable.  Noise values are kslam's (D435i gyro / wheel), not tuned here.  No gyro -> wheel difference.
     KEVIN_ODOM_EKF=0: the previous gyro-minus-EMA-bias integration (fixed scale)."""
     QG, QS, QB = 0.004 ** 2, 1e-6 ** 2, 2e-5 ** 2           # per second: yaw-rate noise, scale-error / bias random walk
+    SIG_WD = 0.0052                                         # rad/s wheel yaw-rate jitter at standstill (realistic sim, measured)
     def __init__(self, track=None):
         self.pose = (0.0, 0.0, 0.0); self.v = 0.0; self.w = 0.0; self.t = None
         import twin_geometry as TG; self.track = track or TG.TRACK_M
@@ -78,12 +79,13 @@ class Odom:
                     # 'still' allows wheels up to 1 cm/s, i.e. a real yaw rate up to 2*0.01/track ~ 0.07 rad/s: the
                     # measurement is the wheel yaw rate wd (no slip at these speeds), not 0 -- with 0, a slow creep was
                     # read as gyro scale error (live: scale -4.8 % in one LightNav run -> 29 deg yaw error)
-                    # measurement = the gyro reading itself, predicted from the wheel rate: g = wd / (1 + s) + b.  The
-                    # noisy reading is z, not part of H: writing it as 'wd = (g - b)(1 + s)' puts the gyro noise into H
-                    # (errors-in-variables) and pulls (1 + s) toward 0 on every standstill tick (offline: -0.37 after
-                    # 1.6 h idle with either scale form).  At rest wd ~ 0, so ZUPT observes the bias and not the scale.
-                    H = np.array([0.0, -wd / (1.0 + self.scale) ** 2, 1.0]); Rz = self.QG * 10
-                    r = gyro_w - (wd / (1.0 + self.scale) + self.bias); Sz = float(H @ self.P @ H) + Rz
+                    # measurement: g - b = true rate, and at a standstill the true rate is the wheel rate wd, itself
+                    # only known to the encoder jitter (SIG_WD).  H = [0, 0, 1]: a standstill says nothing about the
+                    # scale.  Both earlier forms put a noisy quantity into H_s -- the gyro reading (H_s = g; idle 1.6 h ->
+                    # scale -0.50) and then the wheel rate (H_s = -wd; E[H_s r] = +var(wd) > 0 every tick, live 17:00-17:18:
+                    # scale +0.24 after one 5-min run + idle, 'turn left 180' turned 142 deg).  Errors-in-variables both times.
+                    H = np.array([0.0, 0.0, 1.0]); Rz = self.QG * 10 + self.SIG_WD ** 2
+                    r = gyro_w - self.bias - wd; Sz = float(H @ self.P @ H) + Rz
                     if r * r / Sz < 25.0: self._upd(H, r, Rz); self.n_zupt += 1; w = wd
                     else: self.n_zupt_rej = getattr(self, "n_zupt_rej", 0) + 1        # really rotating: keep the gyro
         else: w = wd
