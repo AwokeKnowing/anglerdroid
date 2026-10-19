@@ -342,3 +342,23 @@ Configure alerts (e.g., via logging or remote monitoring) for:
 - `wheelbase.py`: Encoder health, CAN diagnostics
 - `vision.py`: Capture loop, SLAM integration
 - `TOPDOWN_NEAR_FIELD_REFLEX.md`: Safety-critical depth monitoring
+
+## 2026-10-19 — L4 offline candidates (sim-off overnight queue) + nav/SLAM decoupling status
+L4 = 80 s sim log (synced RS2 framesets, fixed odom stamps). ATE anchored at the first pose (no fit), plus SE(2)-aligned ATE; scored with
+`emu.tools.slamlog.ext_eval` / `baseline.py`. Results in `~/slamlogs/res/`.
+
+| method | n | ATE rmse m | ATE max m | head max ° | aligned m | notes |
+|---|---|---|---|---|---|---|
+| kslam (live SLAM2) | 1 | 0.113 | 0.246 | 4.6 | 0.086 | full run |
+| odometry (EKF) | 1 | 0.130 | 0.199 | 3.5 | 0.044 | full run |
+| lgfg fused (DISK+LightGlue VO + iSAM2, s/tau states) | 1 | 0.115 | – | 5.4 | 0.038 | |
+| DROID-SLAM RGB-D | 3 | 2.47–2.51 | 7.8–7.9 | 169–174 | 0.073–0.076 | heading flip breaks anchoring; wall p90 54–66 cm |
+| MASt3R-SLAM | 1 | 0.066 | 0.068 | 0.85 | 0.012 | **coverage 0.53** (52 keyframe poses, 77 relocalizations), scale 0.866, wall p90 2.0 cm |
+
+MASt3R-SLAM is accurate where it tracks but covers only half of the run, n=1 (the run hung at exit after saving; queue stopped
+before r2/r3). Not comparable to the full-run numbers until coverage is fixed. Nothing changed in the live default.
+
+Decoupling (`KEVIN_NAV_DECOUPLE=1`, default off; commits 941601a, 77d9904): driving/planner/envelope/LightNav in the odom frame on a
+30 s local grid; SLAM map used for named places only when a live-scan vs map agreement check passes. Goal bench n=2: flag off 6/6
+goals arrive; flag on 5/6 + 1 refusal (check fixed after). Injected 1 m/30° error detected (agreement 0.23) but a goal sent ~6 s
+after start was accepted (single-scan check aliases at startup). SLAM-off LightNav and 30 s lag tests not completed. Not default.
