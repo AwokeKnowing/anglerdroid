@@ -19,6 +19,8 @@ import twin_geometry as _TG
 _sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if _sl else None
 L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
 from nav import goals as G
+from nav import goalio as GI
+from emu import shm
 _VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
@@ -72,6 +74,8 @@ class Brain:
         self.lgrid = GridMap() if self.decouple else None; self._lg_t = None; self._lg_job = None; self._lg_ev = threading.Event()
         if self.decouple: threading.Thread(target=self._lg_worker, daemon=True, name="localgrid").start()
         self._Thist = collections.deque(maxlen=2000); self.map_ok = False; self.map_agree = None; self._mc_t = 0.0
+        self.goal_shm = os.environ.get("KEVIN_GOAL_SHM", "0") == "1"      # goal interface blocks (nav/goalio.py)
+        self._ns = shm.Block("kevin_navstate", GI.L_NAVSTATE, create=True) if self.goal_shm else None
         self.planner = None
         if plan:
             from nav.plan import Planner
@@ -170,7 +174,16 @@ class Brain:
         from nav.slam import transform
         return tuple(transform(np.array([xy[:2]], np.float32), self.map_T())[0]) if self.decouple else tuple(xy[:2])
 
+    def _odom_to_nav(self, x, y, th):
+        """odometry-frame pose -> the frame nav plans in (odom itself when decoupled, else the SLAM frame via T)."""
+        if self.decouple: return x, y, th
+        from nav.slam import compose
+        return compose(tuple(getattr(self.slam, "T", (0.0, 0.0, 0.0))), (x, y, 0.0 if th is None else th))[:2] + (None if th is None else wrap(th + getattr(self.slam, "T", (0, 0, 0))[2]),)
+
     def _apply(self, c):
+        if c.get("frame") == "odom":   # goals from the goal interface are in the odometry frame
+            if c["kind"] == "goto_xy": c = dict(c, frame="nav"); c["x"], c["y"], c["heading"] = self._odom_to_nav(c["x"], c["y"], c["heading"])
+            elif c["kind"] == "face": c = dict(c, frame="nav"); c["rad"] = self._odom_to_nav(0.0, 0.0, c["rad"])[2]
         k = c["kind"]; x, y, th = self.navpose()
         if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
         if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
@@ -475,6 +488,12 @@ class Brain:
             self._bump_resume = None
             if self.mode == "idle": k = self._goal_bumps; self._goto(*br[1]); self._goal_bumps = k
         with self._cmd_lock: pend, self._pending = self._pending, []
+        if self.goal_shm:              # goal interface (KEVIN_GOAL_SHM=1): publish nav state, take a producer's new goal
+            od = self.slam.odom.pose
+            self._ns.write(time.monotonic_ns(), odom=np.array(od, float), t_od=getattr(self, "_t_od", 0.0), mode=GI.MODES.get(self.mode, 5),
+                           ack=self.vln.last_gseq if self.vln is not None and hasattr(self.vln, "last_gseq") else 0,
+                           map_T=np.array(getattr(self.slam, "T", (0.0, 0.0, 0.0)), float), map_c=0.0)
+            if self.vln is not None and hasattr(self.vln, "poll"): pend = pend + self.vln.poll()
         for c in pend: self._apply(c)
         x, y, th = self.navpose(); dt = 1.0 / HZ; vs, ws = self.v, self.w        # plan start state (frame mode)
         t_eff = self.pred.effect_time(t0)
@@ -805,7 +824,11 @@ def main():
     hw = Hardware()
     b = Brain(hw, match=not a.no_match, plan=not a.no_plan)
     if a.map: b.command("load " + a.map)
-    if a.vln:
+    if a.vln and b.goal_shm:      # LightNav in its own fixed-period process; nav only sees its goal block
+        import subprocess
+        b.vln = GI.GoalPort("lightnav", b.log)
+        b._lnp = subprocess.Popen([sys.executable, "-m", "nav.lightnav_proc", "--url", a.vln], stdout=open(os.path.expanduser("~/.kevin/emu/lightnav_proc.log"), "w"), stderr=subprocess.STDOUT)
+    elif a.vln:
         from nav.vln import VLN
         b.vln = VLN(a.vln, b)
     from nav.server import serve
