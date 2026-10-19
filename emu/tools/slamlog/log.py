@@ -19,9 +19,14 @@ class Log:
         g, fr = [], {}
         for l in open(os.path.join(d, "index.jsonl")):
             r = json.loads(l)
-            if "gt" in r: g.append([r["t_mono"]] + r["gt"][:3])
+            if "gt" in r: g.append([r["t_mono"]] + r["gt"][:3] + [r["t_sim"]])
             else: fr.setdefault(r["cam"], {})[r["stamp_ns"]] = r["file"]
-        g = np.array(g); self.gt_t = g[:, 0]; self.gt_xy = g[:, 1:3]; self.gt_yaw = np.unwrap(g[:, 3])
+        g = np.array(g); self.gt_xy = g[:, 1:3]; self.gt_yaw = np.unwrap(g[:, 3])
+        # GT time: the pose belongs to sim time t_sim; t_mono (query midpoint) carries the UDP round trip (p99 +20 ms).
+        # Map t_sim -> monotonic by the lower envelope of (t_mono - t_sim) (latency only adds), fitted per 5 s chunk.
+        off = g[:, 0] - g[:, 4]; ch = np.floor((g[:, 4] - g[0, 4]) / 5.0); cx, cy = [], []
+        for c in np.unique(ch): m = ch == c; i = np.argmin(off[m]); cx.append(g[m, 4][i]); cy.append(off[m][i])
+        self.gt_t = g[:, 4] + (np.polyval(np.polyfit(cx, cy, 1), g[:, 4]) if len(cx) > 2 else off.min())
         self.frames = {c: sorted((s * 1e-9, f) for s, f in v.items()) for c, v in fr.items()}
         mast = self.info["mast"]; T_m = np.array(mast["pos"], float); T_m[2] -= AXLE_H   # mast pos is floor-relative
         self.ext = dict(rs1=(R_RS1, T_RS1), rs2=(R_RS2, T_RS2), mast=(R_MAST, T_m))
