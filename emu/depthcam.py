@@ -16,7 +16,7 @@ KEVIN_EMU_CAM_LAT_MS (default 0): fixed capture->delivery latency; a frame is pu
 (31 = the measured real readout).  Late frames are never held back further; a tick that is already superseded by a
 newer pose when its render starts is dropped (counted in the log), exactly like a hardware frame drop."""
 from __future__ import annotations
-import json, os, sys, threading, time
+import collections, json, os, sys, threading, time
 import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__)); sys.path.insert(0, os.path.dirname(HERE))
 from emu import shm  # noqa: E402
@@ -95,6 +95,12 @@ def main(cfg_path):
             except Exception: pass
         blk = shm.Block(blk_name, [(n, tuple(s), d) for n, s, d in p["layout%d" % idx]])
         side = shm.Block(side_name, side_layout(p)); side_seq = side.seq; sd = None
+        # <blk>_sync: hardware-synced frameset (like a RealSense frameset): colour + IR + the depth rendered at the SAME
+        # pose, stamped with that depth frame's stamp.  The live block above stays depth-first (safety path: depth is
+        # published the moment it is rendered; its attached colour/IR is the slow lane's latest, rendered at an older
+        # pose -- up to ~80 ms).  A frameset is emitted when the slow lane's colour for pose st_ns meets the depth of st_ns.
+        sync = shm.Block(blk_name + "_sync", side_layout(p) + [("depth", (p["DH"], p["DW"]), "u2"), ("pose_ns", (1,), "i8")], create=True)
+        ring = collections.deque(maxlen=16); pend = None
         dr = mj.MjData(m); Rd = mj.Renderer(m, p["DH"], p["DW"]); Rd.enable_depth_rendering()
         depth = depth_model(mj, m, Rd, p, seed); rj = np.random.default_rng(seed + 100)
         seen = pose.seq; po = None; drops = 0
@@ -114,11 +120,16 @@ def main(cfg_path):
             t_noise = time.monotonic_ns()
             extra = {}
             if side.seq != side_seq and not (side.seq & 1):
-                side_seq, _, sd = side.read(sd); extra = sd
+                side_seq, sst, sd = side.read(sd); extra = sd; pend = (sst, {k: v.copy() for k, v in sd.items()})
             stamp = st_ns + (int(rj.normal(0, jit) * 1e9) if jit else 0)
             t_hold = time.monotonic_ns(); wait = st_ns + lat_ns - t_hold
             if wait > 0: time.sleep(wait * 1e-9)
             t_pub = time.monotonic_ns(); blk.write(stamp, depth=d, **extra); t_w = time.monotonic_ns()
+            ring.append((st_ns, stamp, d))
+            if pend is not None:
+                hit = [r for r in ring if r[0] == pend[0]]
+                if hit: sync.write(hit[0][1], depth=hit[0][2], pose_ns=np.array([pend[0]]), **pend[1]); pend = None
+                elif pend[0] < ring[0][0]: pend = None                     # its depth frame was dropped
             if log is not None:
                 with llock: log.write("%d %d %d %d %d %d %d %d %d %d\n" % (idx, st_ns, stamp, t_pick, depth.t_render[0], t_noise, t_pub, t_w, int(bool(extra)), drops))
 
