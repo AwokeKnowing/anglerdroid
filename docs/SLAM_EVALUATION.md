@@ -405,3 +405,47 @@ Not a replacement for kslam as is. Next: real depth (metric scale) and feeding t
 Spikes >100 ms came from emu.world's 1 kHz loop writing camera poses 30-236 ms late under CPU contention on cpus 0,1,4,5 (plus
 desktop apps on the depth/core cpus). simpin now keeps Chrome/Grok Bot app off cpus 2,3,6,7 and lowers Chrome/viewer priority:
 2 nav restarts x 130 s, 0 frames >100 ms (max 88 / 93 ms) vs 3 >100 ms per 200 s before. Safety core unchanged.
+
+## 2026-10-19 09:18-09:52 PT — goal-shm bench rerun (paired with flag-off), gshm2 trap analysis, MASt3R prep
+**gshm2 "boxed-in" (0/3 goals) is not caused by the goal-shm flag. It is a nav failure that already existed, and the root cause is not proven.**
+- Kevin was not boxed in at the start. On "go to the kitchen" he first went north, then turned back and looped east
+  (GT (3.67,2.24)->(3.27,3.73)->(5.25,2.48)->(5.81,3.4)->(5.38,4.79)). He stopped at (5.17,4.94) at t~19 s, 1.29 m from the kitchen.
+  The log then shows "local replan failed" x8, then "unreachable ... axle clearance 0.06 m". Bedroom and couch then failed instantly from that spot.
+- The same "unreachable: local planner found no path" result appears in 6 earlier flag-off benches (benchB1, postA2, postA3, postC2,
+  r3_cur2, r3_ta1). Place goals do not go through the goal-shm code path.
+- Hypothesis, unverified: at the start of that leg the dog was at (2.10,6.51), near the kitchen route. It may have blocked the direct
+  route, causing the reroute, and/or left stale occupied cells that closed the corridor. No map snapshot or dog trace exists for gshm2.
+  Instrumentation added (3bdc848): the GT trace now logs dog x,y, and gb3 runs use BENCH_MAPSNAP=1, so the next occurrence will show it.
+- Separate pre-existing pattern: legs where nav's "arrived in X s" is much shorter than the bench wall time (goal clock restarted
+  mid-leg, long detour). Found in 37 of 161 arrived legs across all benches, flag-off included (e.g. r3_ta2, fix61, dcon1).
+**Paired bench, both arms with nav launched at nice 0 through nice0.sh (BENCH_RESTART, /tmp/gb3.sh), n=3 each, same session:**
+| arm | goals | collisions | place-leg wall s (run1 / run2 / run3) | LightNav "find the kitchen" final GT m |
+|---|---|---|---|---|
+| KEVIN_GOAL_SHM=1 (gs21-23) | 9/9 | 0 | 8.6,20.5,36.1 / 8.5,15.7,65.1 / 8.5,58.9,44.6 | 0.87, 1.58, 0.34 |
+| flag off (base20_1-3) | 9/9 | 1 (bedroom run 3) | 15.6,28.3,26.6 / 8.6,38.1,57.2 / 8.7,49.3,28.3 | 2.52, 0.52, 1.99 |
+All runs including earlier ones: flag-on 18/21 goals (the 3 misses are gshm2), LightNav mean 1.21 m (n=6). Flag-off 15/15,
+LightNav mean 1.58 m (n=5). These are within noise of each other.
+**Default NOT flipped.** Reasons: (a) the viewer chat -> LightNav path was not tested with the flag on (the bench uses nav
+/api/command directly); (b) the session end state requires KEVIN_GOAL_SHM unset = off. James should decide. To flip it, change one line, nav/run.py:77.
+**MASt3R offline prep, done; NOT run (needs a sim-off window):**
+- Files: ~/slamcand/MASt3R-SLAM/main.py (backup main.py.pre_prep2; full diff ~/slamlogs/res/m3s_main_kevin_prep2.patch).
+  New env flags, all default off:
+  - M3S_ODOM prior is now rotation-only unless M3S_DEPTH is set (the map scale is arbitrary). With M3S_DEPTH, translation is converted to prev-camera
+    units (t/s_prev). This is a weak, untested hypothesis for the L4 prior regression (L4 Sim3 scale was 0.87).
+  - M3S_ODOM_COAST=1: when tracking fails but the odom rotation since the last keyframe is < HFOV, stay in TRACKING on the odom pose
+    instead of switching to RELOC.
+  - M3S_ODOM_KF=1: create a keyframe when 1 - odom_angle/HFOV < match_frac_thresh. This is the same threshold MASt3R already uses; no new weight.
+  - M3S_DEPTH=<dir>: real depth (uint16 mm, resized to the frame image). It sets the INIT keyframe's Sim3 scale to median(real z / pointmap z)
+    and logs KFSCALE per keyframe.
+  - Orphan kill: before os._exit, psutil terminates, then kills, all child processes.
+- Finding, measured offline from the odom priors: in L3 (16 frames) and L4 (18 frames), consecutive RS2 frames are rotated 20-56 deg apart.
+  Each of these coincides with a camera-log gap of 0.13-0.6 s during spins. The KF-overlap bound is 36 deg (1-0.333 x 54.2 deg HFOV),
+  so image-only tracking cannot bridge them. This is consistent with L3 losing tracking for good, and motivates COAST.
+- Next run: ~/slamlogs/res/queue3.sh. It is SIM-OFF ONLY and refuses to start if emu.world or LightNav is running.
+  Variants oc / dc / o / r, L3+L4, n=2, 1200 s cap per run, orphan pkill, ext_eval tum@30.
+**End state 09:52 PT:**
+- Live defaults: flag-off, NOLOGS=1. Nav pid 224290 at nice 0, started 09:44. World and depthcam at nice 0.
+- "stop" sent; Kevin idle (v 0, w 0).
+- Safety core frame age (ageprobe, 90 s, n=688): p50 48 / p90 54 / max 77 ms, 0% over 100 ms.
+- Viewer 200; cloudflared pid 10874 ready (1 connection). viewer_mode.json unchanged.
+- Nothing sent to the Orin; safety untouched.
