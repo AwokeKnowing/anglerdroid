@@ -17,6 +17,7 @@ from .log import Log, wrap
 from .metrics import evaluate
 
 DEV = "cuda"; NKP = 2048
+import os; ODOM = os.environ.get("LGFG_ODOM", "1") == "1"      # ablation: 0 = VO only (odom just seeds the initial guess)
 CALIB = dict(z=[0.48, 0.69, 0.78, 0.87, 0.97, 1.11, 1.31, 1.65], sigma=[0.0014, 0.0022, 0.0037, 0.0064, 0.0088, 0.0103, 0.012, 0.0445])
 # ^ calib() on log L1 (62k matched RS2 points under GT motion; includes GT timing jitter, so conservative)
 def SIG(z): return np.where(np.asarray(z) > CALIB["z"][-1], CALIB["sigma"][-1] * (np.asarray(z) / CALIB["z"][-1]) ** 2, np.interp(z, CALIB["z"], CALIB["sigma"]))
@@ -104,7 +105,7 @@ def run(d, cam="rs2", loops=True, every=1, win=None):
             g.add(gtsam.PriorFactorPose2(0, gtsam.Pose2(*od[0]), gtsam.noiseModel.Diagonal.Sigmas([1e-4, 1e-4, 1e-5]))); v.insert(0, gtsam.Pose2(*od[0]))
         else:
             a, b = gtsam.Pose2(*od[k - 1]), gtsam.Pose2(*od[k]); dz = a.between(b); dt = t - fr[k - 1][0]
-            g.add(gtsam.BetweenFactorPose2(k - 1, k, dz, huber(gtsam.noiseModel.Diagonal.Sigmas(odom_sigma(dz.x(), dz.y(), dz.theta(), dt)))))
+            if ODOM: g.add(gtsam.BetweenFactorPose2(k - 1, k, dz, huber(gtsam.noiseModel.Diagonal.Sigmas(odom_sigma(dz.x(), dz.y(), dz.theta(), dt)))))
             v.insert(k, isam.calculateEstimatePose2(k - 1).compose(dz))
             for j in (k - 1, k - 2):
                 if j < 0: continue
