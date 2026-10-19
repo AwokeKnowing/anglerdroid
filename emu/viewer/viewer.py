@@ -152,14 +152,14 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
         if S: st.update(kevin=S.get("kevin"), dog=S.get("dog"), collisions=S.get("collisions"), env=S.get("env"))
         try:
             n = json.loads(nav("/api/state"))
-            st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), pose=n.get("pose"), places=n.get("places"),
+            st.update(goal=n.get("goal"), path=n.get("path"), mode=n.get("mode"), msg=n.get("msg"), core_alarm=n.get("core_alarm"), pose=n.get("pose"), places=n.get("places"),
                       safety=((n.get("safety") or {}).get("last") or {}).get("state"), cmd=n.get("cmd"), events=n.get("events"), hb=n.get("hb"),
                       bump=dict(latched=((n.get("bump") or {}).get("latched")), armed=(n.get("bump") or {}).get("armed")))
             relay_nav_events(n.get("events"))
             update_anchor(S, n)
             st["vln"] = n.get("vln")                            # wp_map / goal: nav frame, drawn under the anchor like everything nav
             st["odom"] = n.get("odom")
-        except Exception as e: st["nav_error"] = str(e)[:80]
+        except Exception as e: st["nav_error"] = str(e)[:80]; st["core_alarm"] = "nav not answering: " + str(e)[:60]
         st["send_all_vln"] = MODE["send_all_vln"]; st["anchor"] = ANCHOR["a"]; st["anchor_src"] = ANCHOR["src"]; st["slam_map"] = SLAMMAP["meta"]
         with lock: st["log"] = [r[:3] for r in LOG[-30:]]; st["log_n"] = LOGN[0]
         with CL_LOCK: st["clients"] = len(CLIENTS)

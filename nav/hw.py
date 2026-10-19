@@ -26,7 +26,9 @@ class _Rs1Bus:
             if s != self._seq and not (s & 1): break
             if time.monotonic() > t_end: return None, None
             time.sleep(0.0005)
-        self._seq, n, self._out = _read_rs1(b, self._out); self.verts = self._out["verts"]; self.depth_stamp = float(self._out["stamp"][0])
+        try: self._seq, n, self._out = _read_rs1(b, self._out)
+        except TimeoutError: self._out = {}; return None, None        # core paused/died mid-write: no frame (nav stops)
+        self.verts = self._out["verts"]; self.depth_stamp = float(self._out["stamp"][0])
         return self.depth_stamp, self.verts
 
 
@@ -66,17 +68,8 @@ class Hardware:
             from nav import bus
             if not self.rs2proc: self.bus = bus.open_all((self.rs2_intr["height"], self.rs2_intr["width"]), create=True)
             if not self.rs2proc: self._rs2ring = bus.Rs2Ring(self.bus["rs2"])
-            import multiprocessing as mp
-            from nav.safety_core import core_main
-            ctx = mp.get_context("spawn")
-            self.core_proc = ctx.Process(target=core_main, name="safety_core", daemon=True,
-                                         args=(ser[0], self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG")))
-            env0 = {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}
-            os.environ.update({k: "1" for k in env0})                 # single-threaded BLAS in the core (one pinned CPU)
-            self.core_proc.start(); drive = False
-            for k, v in env0.items():
-                if v is None: os.environ.pop(k, None)
-                else: os.environ[k] = v
+            self._core_args = (ser[0], self.rs2_intr, (self.rs2_intr["height"], self.rs2_intr["width"]), os.getpid(), os.environ.get("KEVIN_SAFETY_CORE_LOG"))
+            self._start_core(); drive = False; self.core_restarts = 0
             t_end = time.monotonic() + 60
             while not int(self.bus["rs1info"].arr["set"][0]):
                 if time.monotonic() > t_end or not self.core_proc.is_alive(): raise RuntimeError("safety core did not start (RS1)")
@@ -120,6 +113,55 @@ class Hardware:
 
 
 
+    def _start_core(self):
+        import multiprocessing as mp
+        from nav.safety_core import core_main
+        self.core_proc = mp.get_context("spawn").Process(target=core_main, name="safety_core", daemon=True, args=self._core_args)
+        env0 = {k: os.environ.get(k) for k in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")}
+        os.environ.update({k: "1" for k in env0})                 # single-threaded BLAS in the core (one pinned CPU)
+        self.core_proc.start(); self.core_t_start = time.monotonic()
+        for k, v in env0.items():
+            if v is None: os.environ.pop(k, None)
+            else: os.environ[k] = v
+
+    # core heartbeat (its last decision, t_dec) older than this = core hung.  Not tighter: the core legitimately blocks
+    # ~0.55 s (measured 546/536 ms) in wheelbase.twist re-engaging the axes from idle at every motion start.
+    CORE_HB_MAX_S = 1.5
+
+    def core_health(self):
+        """(ok, why): the safety core process is alive and its heartbeat is fresh.  Cheap (one small bus read)."""
+        if not getattr(self, "core", False): return True, None
+        if not self.core_proc.is_alive(): return False, "safety core process dead (exit code %s)" % self.core_proc.exitcode
+        sq, r = self.bus["state"].try_read()
+        if sq is None: return True, None                         # mid-write: it is alive and writing
+        t_dec = float(r["f"][0]); now = time.monotonic()
+        if t_dec <= self.core_t_start:                           # (re)starting: allow its camera/wheel bring-up
+            return (now - self.core_t_start < 30.0), (None if now - self.core_t_start < 30.0 else "safety core did not start in 30 s")
+        age = now - t_dec
+        return (age < self.CORE_HB_MAX_S), (None if age < self.CORE_HB_MAX_S else "safety core heartbeat stale (%.1f s)" % age)
+
+    def emergency_zero(self):
+        """core dead/hung: the wheels keep their last velocity until the ODrive watchdog (5 s; measured: kill -9 at
+        0.48 m/s -> still 0.47 m/s 5 s later).  So nav sends zero-velocity frames straight to both axes (socketcan
+        allows a second sender; same frame the core's set_velocity sends).  Only zero, only while the core is down."""
+        try:
+            import can, struct
+            if getattr(self, "_ez_bus", None) is None: self._ez_bus = can.Bus(os.environ.get("CAN_IFACE", "can1"), interface="socketcan")
+            for node in (0, 1):                                          # ODriveAxisCAN.CMD_SET_INPUT_VEL = 0x0d
+                self._ez_bus.send(can.Message(arbitration_id=(node << 5 | 0x0d), data=struct.pack('<ff', 0.0, 0.0), is_extended_id=False))
+            return True
+        except Exception as e:
+            self.ez_err = str(e)[:120]; return False
+
+    def restart_core(self):
+        """supervised restart: stop the old core (zero command first), start a new one.  The new core owns RS1 + wheels."""
+        self.bus["cmd"].write(v=0.0, w=0.0, t=0.0)
+        try:
+            if self.core_proc.is_alive(): self.core_proc.terminate(); self.core_proc.join(2.0)
+            if self.core_proc.is_alive(): self.core_proc.kill(); self.core_proc.join(1.0)
+        except Exception: pass
+        self.core_restarts += 1; self._start_core()
+
     def rs2_snapshot(self):
         """(seq, stamp_s, depth u16, color rgb, ir_left, ir_right) — copies, safe across threads."""
         with self._rs2_lock:
@@ -154,6 +196,7 @@ class Hardware:
         from nav.safety_core import STATE_FIELDS, CODES
         f = self.bus["state"].read()[1]["f"]; d = dict(zip(STATE_FIELDS, [float(x) if math.isfinite(x) else None for x in f]))
         d["code"] = CODES[int(d["code"])] if d["code"] is not None and 0 <= d["code"] < len(CODES) else "?"; d["alive"] = self.core_proc.is_alive()
+        d["hb_age"] = None if d.get("t_dec") is None else round(time.monotonic() - d["t_dec"], 3); d["restarts"] = getattr(self, "core_restarts", 0)
         return d
 
     def core_viz(self):

@@ -69,6 +69,22 @@ class Block:
             if int(self.hdr[0]) == s0: return s0, res
         raise TimeoutError("bus %s: writer stuck" % self.name)
 
+    def try_read(self, keys=None, out=None, budget_s=0.005):
+        """read() for the safety core: never raises.  Returns (seq, res), or (None, None) when no consistent copy was
+        possible within budget_s (writer paused mid-write = stale data; the caller treats it as no new frame).
+        `out` may hold a torn copy afterwards, so on (None, None) the caller must drop it."""
+        keys = keys or [k for k in self.arr]; t_end = time.monotonic() + budget_s
+        while True:
+            s0 = int(self.hdr[0])
+            if not (s0 & 1):
+                res = out if out is not None else {}
+                for k in keys:
+                    if k in res and res[k].shape == self.arr[k].shape: np.copyto(res[k], self.arr[k])
+                    else: res[k] = self.arr[k].copy()
+                if int(self.hdr[0]) == s0: return s0, res
+            if time.monotonic() >= t_end: return None, None
+            time.sleep(0.0001)
+
     def close(self, unlink=False):
         self.shm.close()
         if unlink:

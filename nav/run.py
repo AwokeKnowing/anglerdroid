@@ -87,6 +87,7 @@ class Brain:
         self.bump = BumpDetector(_TG.TRACK_M); self.bump_latched = None; self._bump_hold = 0.0
         if self.planner is not None: self.planner.obs = self.obs
         self.mode = "idle"; self.msg = ""; self.v = 0.0; self.w = 0.0; self.turn_target = None
+        self.core_alarm = None; self._core_ok_t = None; self._core_bad_t = 0.0
         self.goal = None; self.goal_heading = None; self.goal_label = None; self.goal_t0 = 0.0
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
         self._cmd_lock = threading.Lock(); self._pending = []
@@ -185,6 +186,8 @@ class Brain:
             if c["kind"] == "goto_xy": c = dict(c, frame="nav"); c["x"], c["y"], c["heading"] = self._odom_to_nav(c["x"], c["y"], c["heading"])
             elif c["kind"] == "face": c = dict(c, frame="nav"); c["rad"] = self._odom_to_nav(0.0, 0.0, c["rad"])[2]
         k = c["kind"]; x, y, th = self.navpose()
+        if self.core_alarm is not None and k not in ("stop", "where", "places", "label", "forget"):
+            self.log("refused '%s': %s" % (k, self.core_alarm)); return
         if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
         if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
             self.bump_latched = None                                       # a new command acknowledges the bump latch
@@ -341,9 +344,40 @@ class Brain:
                 self.log("planner error: %r" % e)
 
     # -------------------------------------------------------------- 30 Hz loop
+    CORE_RESTART_S = 3.0      # supervised restart: dead/hung core -> restart after this long, then every this long
+
+    def _core_watch(self):
+        """safety core supervision, every step: dead or stale heartbeat -> stop all goals, refuse motion, alarm (state
+        core_alarm + event -> viewer), supervised restart.  Alarm clears after the core has been healthy for 2 s."""
+        ok, why = self.hw.core_health(); now = time.monotonic()
+        if ok:
+            if self.core_alarm is not None:
+                if self._core_ok_t is None: self._core_ok_t = now
+                elif now - self._core_ok_t > 2.0:
+                    self.log("safety core OK again (restarts %d): alarm cleared, motion allowed - goals were cancelled, re-issue" % self.hw.core_restarts)
+                    self.core_alarm = None
+            return self.core_alarm is None
+        self._core_ok_t = None
+        if self.core_alarm is None:
+            self.core_alarm = why; self._core_bad_t = now
+            self._apply({"kind": "stop"}); self.log("SAFETY CORE ALARM: %s - all goals stopped, motion refused" % why)
+        self.core_alarm = why; self.hw.drive(0.0, 0.0); self.v = self.w = 0.0
+        if not self.hw.emergency_zero() and not getattr(self, "_ez_logged", False):
+            self._ez_logged = True; self.log("safety core alarm: emergency zero over CAN FAILED (%s)" % getattr(self.hw, "ez_err", "?"))
+        if now - self._core_bad_t > self.CORE_RESTART_S and now - getattr(self, "_core_rs_t", 0.0) > self.CORE_RESTART_S:
+            self._core_rs_t = now; self.log("safety core: supervised restart #%d (%s)" % (self.hw.core_restarts + 1, why))
+            try: self.hw.restart_core()
+            except Exception as e: self.log("safety core restart failed: %s" % e)
+        return False
+
     def step(self):
         t_frame, verts = self.hw.wait_rs1(200)
         t0 = time.monotonic()
+        if getattr(self.hw, "core", False) and not self._core_watch():
+            self.mode = "idle"; self.goal = None; self.stats.add("core_alarm", 1)
+            with self._cmd_lock: pend, self._pending = self._pending, []
+            for c in pend: self._apply(c)                                  # answered now (refused unless stop/where/...)
+            return
         if verts is None:
             self.hw.drive(0.0, 0.0); self.pred.issued(time.monotonic(), 0.0, 0.0); self.stats.add("frame_timeout", 1); return
         self.tick += 1
@@ -773,7 +807,7 @@ class Brain:
     def state(self):
         x, y, th = self.navpose()
         p = self.planner
-        return dict(t=time.time(), t0=self.t0, pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg,
+        return dict(t=time.time(), t0=self.t0, pose=[x, y, th], goal_last=getattr(self, "goal_last", None), odom=list(self.slam.odom.pose), mode=self.mode, msg=self.msg, core_alarm=self.core_alarm,
                     goal=None if self.goal is None else list(self.goal), label=self.goal_label,
                     path=None if (p is None or p.path is None) else p.path[::5].round(3).tolist(),
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,

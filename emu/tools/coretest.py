@@ -1,0 +1,65 @@
+# sim-only fault injection for the safety core (copied from /tmp/coretest.py).  python emu/tools/coretest.py A|B
+"""safety-core fault injection (sim only). A: stuck RS2 writer (SIGSTOP camproc + seq left odd) 2 s.  B: kill -9 core."""
+import json, os, signal, sys, time, subprocess, urllib.request as u
+sys.path.insert(0, '/home/james/gits/awokeknowing/anglerdroid/src'); sys.path.insert(0, '/home/james/gits/awokeknowing/anglerdroid')
+from nav import bus
+from nav.safety_core import STATE_FIELDS, CODES
+from emu import gt
+import numpy as np
+L = bus.layouts((480, 848)); ST = bus.Block('state', L['state']); RS2 = bus.Block('rs2', L['rs2'])
+def cmd(t):
+    r = u.Request('http://localhost:8090/api/command', data=json.dumps({"text": t}).encode(), headers={'Content-Type': 'application/json'}); return u.urlopen(r, timeout=10).read()[:120]
+def nst(): return json.load(u.urlopen('http://localhost:8090/api/state', timeout=5))
+nav = int(subprocess.check_output(['pgrep', '-f', 'nav.run --port 8090']).split()[0])
+kids = [int(x) for x in subprocess.check_output(['pgrep', '-P', str(nav)]).split()]
+aff = {k: subprocess.check_output(['taskset', '-cp', str(k)]).decode().split(':')[1].strip() for k in kids}
+core = [k for k in kids if aff[k] == '3'][0]; cam = [k for k in kids if aff[k] == '7'][0]
+print('nav', nav, 'core', core, 'camproc', cam)
+def rec(T, out, ev=None):
+    t_end = time.monotonic() + T; last = None
+    while time.monotonic() < t_end:
+        sq, r = ST.try_read()
+        if sq is not None:
+            f = r['f']
+            if f[0] != last:
+                last = f[0]; d = dict(zip(STATE_FIELDS, f)); s = gt.state() if len(out) % 3 == 0 else None
+                out.append(dict(t=time.monotonic(), t_dec=d['t_dec'], age1=d['age1'], age2=d['age2'], v_cmd=d['v_cmd'], v_out=d['v_out'], w_out=d['w_out'],
+                                code=CODES[int(d['code'])] if 0 <= d['code'] < len(CODES) else '?', gt_v=None if s is None else s['v'], ev=ev))
+        time.sleep(0.002)
+mode = sys.argv[1]; R = []
+if mode == 'A':
+    print(cmd('forward 2')); rec(1.0, R, 'pre')
+    for _ in range(40):
+        rec(0.1, R, 'pre')
+        if R and abs(R[-1]['v_out']) > float(os.environ.get('VMIN', '0.1')): break
+    print('moving: v_out %.2f' % R[-1]['v_out'])
+    os.kill(cam, signal.SIGSTOP); bumped = False
+    if not int(RS2.hdr[0]) & 1: RS2.hdr[0] += 1; bumped = True       # writer "stopped mid-write"
+    t_inj = time.monotonic(); print('injected stuck writer (seq odd, bumped=%s)' % bumped)
+    rec(2.0, R, 'stall')
+    if bumped: RS2.hdr[0] += 1
+    os.kill(cam, signal.SIGCONT); t_rel = time.monotonic(); rec(3.0, R, 'post'); print(cmd('stop'))
+    st = [x for x in R if x['ev'] == 'stall']; post = [x for x in R if x['ev'] == 'post']
+    first_stale = next((x for x in st if x['age2'] > 0.1), None)
+    print('core alive after:', os.path.exists('/proc/%d' % core), 'ticks during stall', len(st), 'max tick gap %.0f ms' % (1e3 * max(np.diff([x['t_dec'] for x in R]))))
+    print('stall codes', sorted(set(x['code'] for x in st)), 'v_out during stall max %.3f' % max(abs(x['v_out']) for x in st))
+    if first_stale: i = R.index(first_stale); print('first stale tick: %.0f ms after inject, age2 %.0f ms, v_out %.3f code %s; previous tick v_out %.3f code %s' % (1e3 * (first_stale['t_dec'] - t_inj + (first_stale['t'] - first_stale['t_dec']) * 0), 1e3 * first_stale['age2'], first_stale['v_out'], first_stale['code'], R[i-1]['v_out'], R[i-1]['code']))
+    rec_ok = next((x for x in post if x['code'] not in ('inop_age', 'inop_cadence')), None)
+    print('recovered: %s %.0f ms after release' % (rec_ok['code'] if rec_ok else None, 1e3 * (rec_ok['t'] - t_rel) if rec_ok else -1))
+    print('gt v pre %.2f | during stall %s' % (max(x['gt_v'] or 0 for x in R if x['ev'] == 'pre'), [round(x['gt_v'], 2) for x in st if x['gt_v'] is not None][:12]))
+elif mode == 'B':
+    print(cmd('forward 2')); rec(1.0, R, 'pre')
+    for _ in range(40):
+        rec(0.1, R, 'pre')
+        if R and abs(R[-1]['v_out']) > float(os.environ.get('VMIN', '0.1')): break
+    print('moving: v_out %.2f' % R[-1]['v_out']); t_k = time.monotonic(); os.kill(core, signal.SIGKILL); print('kill -9 core', core)
+    G = []
+    while time.monotonic() - t_k < 12:
+        s = gt.state(); n = nst(); c = n['safety']['core'] or {}
+        G.append((round(time.monotonic() - t_k, 2), round(s['v'], 3), n['mode'], n['core_alarm'], c.get('alive'), c.get('restarts')))
+        time.sleep(0.05)
+    for g in G[:40:2] + G[40::20]: print(g)
+    print('events', [e[1] for e in nst()['events'][-6:]])
+    print(cmd('forward 1'))   # must be refused while alarmed / or accepted after recovery
+    time.sleep(1); print('events', [e[1] for e in nst()['events'][-3:]]); print(cmd('stop'))
+json.dump(R, open('/home/james/m1_backup/dbg/coretest_%s.json' % mode, 'w'))

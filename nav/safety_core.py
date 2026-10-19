@@ -23,7 +23,7 @@ Measured (sim, emu.tools.brake_test, twin ODrive model, carpet): stop distance f
   ramp 8: 0.609 m/s 0.083 m but wheel skid 0.24 m/s, pitch 8.1 deg -> ramp 5 taken as MAX (sim; real bot: verify).
 """
 from __future__ import annotations
-import gc, json, math, os, sys, time
+import gc, json, math, os, sys, time, traceback
 import numpy as np
 
 import nav  # noqa (src on path)
@@ -34,6 +34,7 @@ AGE_MAX_S = float(os.environ.get("KEVIN_SC_AGE_MAX", "0.10"))
 CADENCE_MAX_S = float(os.environ.get("KEVIN_SC_CADENCE_MAX", str(1.5 / HZ)))    # a dropped frame = missed cadence
 PAIR_WAIT_S = float(os.environ.get("KEVIN_SC_PAIR_WAIT", "0.010"))   # max wait for the RS2 frame paired with this RS1 frame when it is due
 CMD_STALE_S = 0.3
+ERR_MAX = 30          # consecutive failing ticks (1 s) before the core zeroes the wheels and exits loudly
 T_CMD = 0.010                         # core decision -> CAN frame on the wire (assumed; measured: see log t_sent - t_dec)
 RAMP_NORMAL, RAMP_MAX = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")), 5.0
 BRAKE = {RAMP_NORMAL: (0.0987, 2.47), RAMP_MAX: (0.0926, 4.26)}     # (lag s, decel m/s^2), fits above
@@ -265,88 +266,110 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     LOG = open(log_path, "a", buffering=1 << 16) if log_path else None
     gc.collect(); gc.freeze(); gc.disable()                       # no GC pauses inside the loop (refcounting still frees)
     s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}; n2 = 0; lat2 = None
-    ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0
+    ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0; n_stuck = 0; errs = 0
     while True:
-        if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
-        fs = cam.wait_frameset(int(CADENCE_MAX_S * 1e3))           # next RS1 frame, or wake up and stop
-        t_recv = time.monotonic(); new1 = fs is not None and cam.ingest(fs)
-        if new1:
-            cam.publish(); B["rs1"].write(verts=cam.verts, n=len(cam.verts), stamp=cam.depth_stamp, t_recv=t_recv)
-        t_dec = time.monotonic()
-        vl, vr = wb.get_wheel_velocities_mps(); v_m = 0.5 * (vl + vr); w_m = (vr - vl) / TRACK_M
-        cur = wb.get_motor_currents()
-        B["wheel"].write(vl=vl, vr=vr, t=t_dec, il=cur[0] if cur else np.nan, ir=cur[1] if cur else np.nan, iage=cur[2] if cur else np.nan, batt=float(getattr(wb, "_batt_pct", 0) or 0))
-        _, c = B["cmd"].read(); v_c, w_c, t_c = float(c["v"][0]), float(c["w"][0]), float(c["t"][0])
-        code = None
-        if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
-        else: code_c = None
-        if new1:
-            tA = time.monotonic(); cap1 = clk1.capture(float(cam.depth_stamp), t_recv)
-            per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
-            ego.update(cam.verts); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
-        else:
-            per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
-        # RS2: of the frames not yet used, take the one captured nearest to this RS1 frame (the two cameras run
-        # unsynchronised; taking simply the newest skips a frame whenever RS1 is handled late, and misses one when RS2
-        # lands just after the read).  If the RS2 frame paired with this RS1 frame is due within PAIR_WAIT_S (expected
-        # delivery = previous capture + 1/HZ + measured RS2 delivery latency), wait for it.
-        ref = cap1p if new1 else None; t_end = time.monotonic() + PAIR_WAIT_S; best = None
-        while True:
-            if B["rs2"].seq != s2:
-                s2, r2 = B["rs2"].read(out=r2 if r2 else None); best = None
-                nw = int(r2["n"][0]); j = (nw - 1) % bus.RS2_RING
-                d = float(r2["t_recv"][j]) - clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
-                lat2 = d if lat2 is None else 0.9 * lat2 + 0.1 * d
-            if best is None and r2:
-                nw = int(r2["n"][0])
-                for k in range(max(n2 + 1, nw - bus.RS2_RING + 1), nw + 1):
-                    j = (k - 1) % bus.RS2_RING; c2 = clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
-                    if best is None or ref is None or abs(c2 - ref) <= abs(best[2] - ref): best = (k, j, c2)
-            due = (ref is not None and cap2p is not None and lat2 is not None and (best is None or best[2] < ref - 0.5 / HZ)
-                   and cap2p + 1.0 / HZ <= ref + 0.5 / HZ and cap2p + 1.0 / HZ + lat2 <= t_end)
-            if not due or time.monotonic() >= t_end: break
-            time.sleep(0.0005)
-        if best is not None:
-            n2, j, cap2 = best
-            per2 = None if cap2p is None else cap2 - cap2p; cap2p = cap2
-            sp = B["rs2pose"].read()[1]
-            if int(sp["set"][0]): rs2.set_pose(sp["T"], sp["R"].reshape(3, 3))
-            P2, _ = rs2.points(r2["depth"][j], h_max=H_MAX)
-        else: per2 = None
-        tC = time.monotonic()                                          # frame age AT DECISION (after the transform)
-        age1 = (tC - cap1p) if cap1p is not None else np.inf; age2 = (tC - cap2) if cap2 is not None else np.inf
-        if not new1 or age1 > AGE_MAX_S or age2 > AGE_MAX_S:
-            code = "inop_age"
-        elif (per is not None and per > CADENCE_MAX_S) or (per2 is not None and per2 > CADENCE_MAX_S):
-            code = "inop_cadence"
-        elif valid < 0.05:
-            code = "no_depth"
-        free = need = np.nan; sd0 = np.nan; bf = br = False; npts = 0; P = np.zeros((0, 2), np.float32)
-        if code is not None:
-            v_o = w_o = 0.0; ramp = RAMP_MAX if (abs(v_m) > 0.02 or abs(w_m) > 0.05) else RAMP_NORMAL
-        else:
-            P = np.concatenate([motion_comp(P1, v_m, w_m, age1), motion_comp(P2, v_m, w_m, age2)]) if len(P2) else motion_comp(P1, v_m, w_m, age1)
-            npts = len(P)
-            v_o, w_o, code, ramp, free, need, sd0, bf, br = decide(P, bands, v_c, w_c, v_m, w_m)
-            if code_c and code == "idle": code = code_c
-        if ramp != ramp_now:                                       # brake ramp first, then the zero command
-            with wb.bus_lock:
-                for ax in (wb.left, wb.right): ax.write_property_nowait('axis0.controller.config.vel_ramp_rate', float(ramp))
-            ramp_now = ramp
-        if code in ("brake", "band_front", "band_rear", "inop_age", "inop_cadence", "no_depth") and (abs(v_c) > 1e-3 or abs(w_c) > 1e-3): brakes += 1
-        tD = time.monotonic(); wb.twist(v_o, w_o); t_sent = time.monotonic()
-        period = None if t_prev is None else t_dec - t_prev; t_prev = t_dec
-        f = [t_dec, period if period is not None else np.nan, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, CODES.index(code) if code in CODES else -1,
-             ramp, free, need, sd0, bf, br, npts, 0, cpu, t_sent, cap1p or np.nan, cap2 or np.nan, brakes]
-        B["state"].write(f=np.array(f, np.float64))
-        if new1 and t_dec - viz_t > 0.2 and len(P):                                # 5 Hz snapshot for the viewer overlay
-            k = min(len(P), 2000); B["viz"].write(pts=P[:k].astype(np.float32), n=np.array([k]), bands=np.array(bands.rects(), np.float64).ravel(), t=np.array([t_dec]))
-            viz_t = t_dec
-        if LOG is not None:
-            LOG.write(json.dumps([round(x, 4) if isinstance(x, float) and math.isfinite(x) else (None if isinstance(x, float) else x) for x in
-                                  [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, t_dec - t_recv, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
-            ps += 1
-            if ps % 30 == 0: LOG.flush()
+        try:
+            if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
+            fs = cam.wait_frameset(int(CADENCE_MAX_S * 1e3))           # next RS1 frame, or wake up and stop
+            t_recv = time.monotonic(); new1 = fs is not None and cam.ingest(fs)
+            if new1:
+                cam.publish(); B["rs1"].write(verts=cam.verts, n=len(cam.verts), stamp=cam.depth_stamp, t_recv=t_recv)
+            t_dec = time.monotonic()
+            vl, vr = wb.get_wheel_velocities_mps(); v_m = 0.5 * (vl + vr); w_m = (vr - vl) / TRACK_M
+            cur = wb.get_motor_currents()
+            B["wheel"].write(vl=vl, vr=vr, t=t_dec, il=cur[0] if cur else np.nan, ir=cur[1] if cur else np.nan, iage=cur[2] if cur else np.nan, batt=float(getattr(wb, "_batt_pct", 0) or 0))
+            sq, c = B["cmd"].try_read()
+            if sq is None: v_c = w_c = 0.0; t_c = -1e9; n_stuck += 1      # cmd writer paused mid-write -> treated as stale
+            else: v_c, w_c, t_c = float(c["v"][0]), float(c["w"][0]), float(c["t"][0])
+            code = None
+            if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
+            else: code_c = None
+            if new1:
+                tA = time.monotonic(); cap1 = clk1.capture(float(cam.depth_stamp), t_recv)
+                per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
+                ego.update(cam.verts); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
+            else:
+                per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
+            # RS2: of the frames not yet used, take the one captured nearest to this RS1 frame (the two cameras run
+            # unsynchronised; taking simply the newest skips a frame whenever RS1 is handled late, and misses one when RS2
+            # lands just after the read).  If the RS2 frame paired with this RS1 frame is due within PAIR_WAIT_S (expected
+            # delivery = previous capture + 1/HZ + measured RS2 delivery latency), wait for it.
+            ref = cap1p if new1 else None; t_end = time.monotonic() + PAIR_WAIT_S; best = None
+            while True:
+                if B["rs2"].seq != s2:
+                    sq, rr = B["rs2"].try_read(out=r2 if r2 else None)
+                    if sq is None:                                  # writer paused mid-write: no RS2 this tick (stale frame;
+                        r2 = {}; best = None; n_stuck += 1          # age2 grows -> inop_age -> zero).  Used to raise and kill the core.
+                        if n_stuck == 1 or n_stuck % 30 == 0: print("safety_core: rs2 bus writer stuck -> stale (%d)" % n_stuck, flush=True)
+                        break
+                    s2, r2 = sq, rr; best = None
+                    nw = int(r2["n"][0]); j = (nw - 1) % bus.RS2_RING
+                    d = float(r2["t_recv"][j]) - clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
+                    lat2 = d if lat2 is None else 0.9 * lat2 + 0.1 * d
+                if best is None and r2:
+                    nw = int(r2["n"][0])
+                    for k in range(max(n2 + 1, nw - bus.RS2_RING + 1), nw + 1):
+                        j = (k - 1) % bus.RS2_RING; c2 = clk2.capture(float(r2["stamp"][j]), float(r2["t_recv"][j]))
+                        if best is None or ref is None or abs(c2 - ref) <= abs(best[2] - ref): best = (k, j, c2)
+                due = (ref is not None and cap2p is not None and lat2 is not None and (best is None or best[2] < ref - 0.5 / HZ)
+                       and cap2p + 1.0 / HZ <= ref + 0.5 / HZ and cap2p + 1.0 / HZ + lat2 <= t_end)
+                if not due or time.monotonic() >= t_end: break
+                time.sleep(0.0005)
+            if best is not None:
+                n2, j, cap2 = best
+                per2 = None if cap2p is None else cap2 - cap2p; cap2p = cap2
+                sp = B["rs2pose"].try_read()[1]
+                if sp is not None and int(sp["set"][0]): rs2.set_pose(sp["T"], sp["R"].reshape(3, 3))
+                P2, _ = rs2.points(r2["depth"][j], h_max=H_MAX)
+            else: per2 = None
+            tC = time.monotonic()                                          # frame age AT DECISION (after the transform)
+            age1 = (tC - cap1p) if cap1p is not None else np.inf; age2 = (tC - cap2) if cap2 is not None else np.inf
+            if not new1 or age1 > AGE_MAX_S or age2 > AGE_MAX_S:
+                code = "inop_age"
+            elif (per is not None and per > CADENCE_MAX_S) or (per2 is not None and per2 > CADENCE_MAX_S):
+                code = "inop_cadence"
+            elif valid < 0.05:
+                code = "no_depth"
+            free = need = np.nan; sd0 = np.nan; bf = br = False; npts = 0; P = np.zeros((0, 2), np.float32)
+            if code is not None:
+                v_o = w_o = 0.0; ramp = RAMP_MAX if (abs(v_m) > 0.02 or abs(w_m) > 0.05) else RAMP_NORMAL
+            else:
+                P = np.concatenate([motion_comp(P1, v_m, w_m, age1), motion_comp(P2, v_m, w_m, age2)]) if len(P2) else motion_comp(P1, v_m, w_m, age1)
+                npts = len(P)
+                v_o, w_o, code, ramp, free, need, sd0, bf, br = decide(P, bands, v_c, w_c, v_m, w_m)
+                if code_c and code == "idle": code = code_c
+            if ramp != ramp_now:                                       # brake ramp first, then the zero command
+                with wb.bus_lock:
+                    for ax in (wb.left, wb.right): ax.write_property_nowait('axis0.controller.config.vel_ramp_rate', float(ramp))
+                ramp_now = ramp
+            if code in ("brake", "band_front", "band_rear", "inop_age", "inop_cadence", "no_depth") and (abs(v_c) > 1e-3 or abs(w_c) > 1e-3): brakes += 1
+            tD = time.monotonic(); wb.twist(v_o, w_o); t_sent = time.monotonic()
+            period = None if t_prev is None else t_dec - t_prev; t_prev = t_dec
+            f = [t_dec, period if period is not None else np.nan, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, CODES.index(code) if code in CODES else -1,
+                 ramp, free, need, sd0, bf, br, npts, 0, cpu, t_sent, cap1p or np.nan, cap2 or np.nan, brakes]
+            B["state"].write(f=np.array(f, np.float64))
+            if new1 and t_dec - viz_t > 0.2 and len(P):                                # 5 Hz snapshot for the viewer overlay
+                k = min(len(P), 2000); B["viz"].write(pts=P[:k].astype(np.float32), n=np.array([k]), bands=np.array(bands.rects(), np.float64).ravel(), t=np.array([t_dec]))
+                viz_t = t_dec
+            if LOG is not None:
+                LOG.write(json.dumps([round(x, 4) if isinstance(x, float) and math.isfinite(x) else (None if isinstance(x, float) else x) for x in
+                                      [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, t_dec - t_recv, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
+                ps += 1
+                if ps % 30 == 0: LOG.flush()
+            errs = 0
+        except Exception:
+            # never die silently: zero the wheels, report, keep looping; persistent failure -> zero + exit loudly (nav
+            # sees the core dead, stops all goals and restarts it)
+            errs += 1
+            try: wb.twist(0.0, 0.0)
+            except Exception: pass
+            print("safety_core: tick error %d (wheels zeroed):\n%s" % (errs, traceback.format_exc()), flush=True)
+            if errs >= ERR_MAX:
+                print("safety_core: %d consecutive tick errors -> wheels zero, EXIT" % errs, flush=True)
+                try: wb.twist(0.0, 0.0); wb.shutdown()
+                except Exception: pass
+                sys.exit(3)
+            time.sleep(T_TICK)
 
 
 def _read_rs1(blk, out):
