@@ -1,0 +1,199 @@
+--- main.py.orig	2026-10-19 01:04:50.558618610 -0700
++++ main.py	2026-10-19 14:14:38.597460805 -0700
+@@ -1,3 +1,5 @@
++import os
++import numpy as np
+ import argparse
+ import datetime
+ import pathlib
+@@ -21,7 +23,17 @@
+ )
+ from mast3r_slam.multiprocess_utils import new_queue, try_get_msg
+ from mast3r_slam.tracker import FrameTracker
+-from mast3r_slam.visualization import WindowMsg, run_visualization
++try:
++    from mast3r_slam.visualization import WindowMsg, run_visualization
++except ImportError:  # headless (no imgui/in3d): only --no-viz runs
++    import dataclasses
++    @dataclasses.dataclass
++    class WindowMsg:
++        is_terminated: bool = False
++        is_paused: bool = False
++        next: bool = False
++        C_conf_threshold: float = 1.5
++    run_visualization = None
+ import torch.multiprocessing as mp
+ 
+ 
+@@ -71,8 +83,17 @@
+         return successful_loop_closure
+ 
+ 
++
++def _kevin_mem_cap(tag):
++    # Kevin capped mode (sim up, 2026-10-19 PM): M3S_MEM_FRAC = torch per-process memory fraction (each CUDA process).
++    f = os.environ.get("M3S_MEM_FRAC")
++    if f:
++        torch.cuda.set_per_process_memory_fraction(float(f), 0)
++        print(f"[{tag}] torch memory fraction {f} ({float(f) * torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB)", flush=True)
++
+ def run_backend(cfg, model, states, keyframes, K):
+     set_global_config(cfg)
++    _kevin_mem_cap('backend')
+ 
+     device = keyframes.device
+     factor_graph = FactorGraph(model, keyframes, K, device)
+@@ -147,6 +168,8 @@
+     torch.backends.cuda.matmul.allow_tf32 = True
+     torch.set_grad_enabled(False)
+     device = "cuda:0"
++    _kevin_mem_cap('frontend')
++    _SLEEP = float(os.environ.get("M3S_FRAME_SLEEP_MS", "0")) / 1e3   # GPU duty throttle per frame (sim up)
+     save_frames = False
+     datetime_now = str(datetime.datetime.now()).replace(" ", "_")
+ 
+@@ -229,6 +252,50 @@
+     fps_timer = time.time()
+ 
+     frames = []
++    _ODOM = np.load(os.environ["M3S_ODOM"]) if os.environ.get("M3S_ODOM") else None
++    # Kevin prep (2026-10-19, untested on GPU yet; all default off):
++    #  M3S_DEPTH=<dir of uint16 mm png, same names as the rgb>: real-depth metric anchor at INIT (sets the first
++    #     keyframe's Sim3 scale = median(real z / mast3r z)), enables metric odom translation, logs KFSCALE per keyframe.
++    #  M3S_ODOM_KF=1: also make a keyframe when odom rotation since the last keyframe leaves overlap
++    #     1 - angle/HFOV below the existing match_frac_thresh (same criterion the image test uses).
++    #  M3S_ODOM_COAST=1: when tracking fails but odom says the last keyframe can still overlap (angle < HFOV),
++    #     stay in TRACKING on the odom-propagated pose instead of dropping to RELOC (L3 never recovered from RELOC).
++    #  M3S_HFOV_DEG: horizontal FOV (default from config calibration fx and width, else 54.2 = Kevin RS2).
++    _DEPTH = os.environ.get("M3S_DEPTH") or None
++    _ODOM_KF = os.environ.get("M3S_ODOM_KF") == "1" and _ODOM is not None
++    _ODOM_COAST = os.environ.get("M3S_ODOM_COAST") == "1" and _ODOM is not None
++    _HFOV = np.radians(float(os.environ.get("M3S_HFOV_DEG", "54.2")))
++    _MFT = config["tracking"]["match_frac_thresh"]
++
++    def _odom_ang(a, b):          # rotation angle (rad) between odom camera poses of frames a and b, None if unknown
++        if _ODOM is None or a >= len(_ODOM) or b >= len(_ODOM) or np.isnan(_ODOM[a, 0, 0]) or np.isnan(_ODOM[b, 0, 0]):
++            return None
++        R = _ODOM[a, :3, :3].T @ _ODOM[b, :3, :3]
++        return float(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
++
++    def _real_z(i, shape):        # real depth (m) resized to the frame image, NaN where invalid; None if unavailable
++        import cv2 as _cv2
++        f = pathlib.Path(_DEPTH) / pathlib.Path(dataset.rgb_files[i]).name if hasattr(dataset, "rgb_files") else None
++        if f is None or not f.exists():
++            return None
++        d = _cv2.imread(str(f), -1).astype(np.float32) / 1000.0
++        h, w = shape
++        if abs(d.shape[1] / d.shape[0] - w / h) > 0.02:
++            print("M3S_DEPTH: aspect mismatch, skipped"); return None
++        d = _cv2.resize(d, (w, h), interpolation=_cv2.INTER_NEAREST); d[d <= 0.05] = np.nan
++        return d
++
++    def _scale_est(frame):        # median(real z / pointmap z) over valid pixels: metres per camera unit
++        zr = _real_z(frame.frame_id, frame.img.shape[-2:])
++        if zr is None:
++            return None
++        zm = frame.X_canon[:, 2].detach().cpu().numpy()
++        if zm.size != zr.size:
++            print(f"M3S_DEPTH: pointmap {zm.size} vs depth {zr.shape}, skipped"); return None
++        zm = zm.reshape(zr.shape)
++        ok = np.isfinite(zr) & (zm > 1e-6)
++        return float(np.median(zr[ok] / zm[ok])) if ok.sum() > 100 else None
++    _coast = 0
+ 
+     while True:
+         mode = states.get_mode()
+@@ -251,6 +318,8 @@
+             break
+ 
+         timestamp, img = dataset[i]
++        if _SLEEP:
++            time.sleep(_SLEEP)
+         if save_frames:
+             frames.append(img)
+ 
+@@ -260,12 +329,30 @@
+             if i == 0
+             else states.get_frame().T_WC
+         )
++        # Kevin: wheel+gyro odometry motion prior (M3S_ODOM=<(N,4,4) T_odom<-cam npy>, emu/tools/slamlog/odom_prior.py):
++        # start tracking from last pose * odom camera delta instead of the last pose (big spins lost tracking).
++        if i > 0 and _ODOM is not None and not (np.isnan(_ODOM[i - 1, 0, 0]) or np.isnan(_ODOM[i, 0, 0])):
++            from scipy.spatial.transform import Rotation as _Rot
++            D = np.linalg.inv(_ODOM[i - 1]) @ _ODOM[i]
++            dq = _Rot.from_matrix(D[:3, :3]).as_quat()           # x y z w (lietorch order)
++            # Translation: odom is metric, the Sim3 delta is in prev-camera units (world = s_prev * R * t).  Without a
++            # metric anchor (M3S_DEPTH) the map scale is arbitrary, so use rotation only (scale-free).  Untested hypothesis
++            # for the L4 prior regression (coverage 0.5 -> 0.05, 2026-10-19); weak: L4 sim3 scale was 0.87 (near metric).
++            s_prev = float(T_WC.data[0, 7])
++            dt = D[:3, 3] / s_prev if _DEPTH else np.zeros(3)
++            dS = lietorch.Sim3(torch.tensor([[*dt, *dq, 1.0]], dtype=T_WC.data.dtype, device=device))
++            T_WC = T_WC * dS
+         frame = create_frame(i, img, T_WC, img_size=dataset.img_size, device=device)
+ 
+         if mode == Mode.INIT:
+             # Initialize via mono inference, and encoded features neeed for database
+             X_init, C_init = mast3r_inference_mono(model, frame)
+             frame.update_pointmap(X_init, C_init)
++            if _DEPTH:
++                se = _scale_est(frame)
++                print(f"M3S_DEPTH init scale {se}", flush=True)
++                if se:
++                    frame.T_WC = lietorch.Sim3(torch.tensor([[0, 0, 0, 0, 0, 0, 1, se]], dtype=frame.T_WC.data.dtype, device=device))
+             keyframes.append(frame)
+             states.queue_global_optimization(len(keyframes) - 1)
+             states.set_mode(Mode.TRACKING)
+@@ -275,6 +362,14 @@
+ 
+         if mode == Mode.TRACKING:
+             add_new_kf, match_info, try_reloc = tracker.track(frame)
++            if _ODOM_KF or _ODOM_COAST:
++                ang = _odom_ang(keyframes.last_keyframe().frame_id, i)
++            if try_reloc and _ODOM_COAST and ang is not None and ang < _HFOV:
++                try_reloc = False; _coast += 1
++                print(f"COAST frame {i} (odom angle to last kf {np.degrees(ang):.1f} deg, {_coast} coasted)")
++            if not add_new_kf and not try_reloc and _ODOM_KF and ang is not None and 1 - ang / _HFOV < _MFT:
++                add_new_kf = True; tracker.reset_idx_f2k()
++                print(f"ODOM_KF frame {i} (odom angle {np.degrees(ang):.1f} deg)")
+             if try_reloc:
+                 states.set_mode(Mode.RELOC)
+             states.set_frame(frame)
+@@ -295,6 +390,9 @@
+             raise Exception("Invalid mode")
+ 
+         if add_new_kf:
++            if _DEPTH:
++                se = _scale_est(frame)
++                print(f"KFSCALE frame {i} real {se} map {float(frame.T_WC.data[0, 7]):.4f}")
+             keyframes.append(frame)
+             states.queue_global_optimization(len(keyframes) - 1)
+             # In single threaded mode, wait for the backend to finish
+@@ -329,7 +427,25 @@
+             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+             cv2.imwrite(f"{savedir}/{i}.png", frame)
+ 
+-    print("done")
+-    backend.join()
++    print("done", flush=True)
++    print(f"frontend peak torch alloc {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB reserved {torch.cuda.max_memory_reserved() / 2**30:.2f} GiB", flush=True)
++    # exit-hang fix (Kevin 2026-10-19): results are saved above; the backend/manager processes sometimes never return
++    # (L4_r1 hung 3.7 h after saving).  Bounded join, then terminate and hard-exit.
++    backend.join(timeout=30)
++    if backend.is_alive():
++        print("backend did not exit in 30 s: terminating", flush=True); backend.terminate(); backend.join(timeout=5)
+     if not args.no_viz:
+-        viz.join()
++        viz.join(timeout=10)
++    # orphan kill: multiprocessing manager/resource-tracker children survived os._exit (2026-10-19 queue2)
++    try:
++        import psutil
++        kids = psutil.Process().children(recursive=True)
++        for k in kids:
++            k.terminate()
++        _, alive = psutil.wait_procs(kids, timeout=5)
++        for k in alive:
++            k.kill()
++        print(f"killed {len(kids)} child processes ({len(alive)} needed SIGKILL)", flush=True)
++    except Exception as e:
++        print("orphan kill failed:", e, flush=True)
++    os._exit(0)

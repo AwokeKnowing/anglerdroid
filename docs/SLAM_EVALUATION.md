@@ -449,3 +449,59 @@ LightNav mean 1.58 m (n=5). These are within noise of each other.
 - Safety core frame age (ageprobe, 90 s, n=688): p50 48 / p90 54 / max 77 ms, 0% over 100 ms.
 - Viewer 200; cloudflared pid 10874 ready (1 connection). viewer_mode.json unchanged.
 - Nothing sent to the Orin; safety untouched.
+
+## 2026-10-19 14:09-14:30 PT — LightNav + MASt3R together with the sim up (James t583): NOT achieved under the 100 ms abort rule
+**Found first: the safety core process had been DEAD since 12:28 PT** (nav pid 224290, started 09:44).
+- Traceback: `nav/bus.py read: TimeoutError("bus kevin_sc_rs2: writer stuck")`, raised from nav/safety_core.py:296 `B["rs2"].read()`.
+  The seqlock reader gives up after 200 tries and raises; core_main does not catch it, so the core process exits. The camera
+  process (writer, cpu 7) was still alive.
+- Nav kept running and reported core alive=false, but nothing acts on that: no fail-stop, no alert, no respawn. Kevin was idle.
+  The wheels belong to the core, so the sim wheels just got no commands. The core was dead ~1 h 45 min.
+- Copy of the log: ~/m1_backup/dbg/live_nav_core_crash_1228.log. Restored by a nav restart via nice0.sh at 14:13; core alive, code idle.
+- I don't know what load at 12:28 caused it; nothing was running from me then.
+- PROPOSALS for James (safety core, NOT applied):
+  (a) In the core, treat a bus read timeout as "frame stale -> brake/hold" and keep looping, instead of letting the exception kill the process.
+  (b) In nav, when core_proc dies: stop all goals, raise a visible alarm, and only then (optionally) respawn the core.
+  (c) The same uncaught-raise path would exist on the bot.
+**Watchdog tool:** emu/tools/agewatch.py.
+- Same /api/state source as /tmp/ageprobe.py, but runs continuously: one summary line per 10 s and an ALERT line for any max(age1, age2) > 100 ms.
+- On an ALERT it SIGTERMs, then SIGKILLs, the process groups listed in /tmp/heavy.pgids.
+- Sampling: /api/state takes ~60 ms, so the watchdog sees ~25% of core decisions (the "gaps" column counts the misses).
+- At 0.03 s polling (40-80% of decisions seen) alerts were more frequent. The extra nav load may have caused some of them, so it now polls at 0.09 s, the same as ageprobe.
+- Log: ~/m1_backup/dbg/agewatch_1019pm.log.
+**LightNav low-memory restart (step 2):**
+- The 5-6 GB target is not reachable: the bf16 weights alone are 9.1 GB.
+- Note: `gpu_memory_utilization` is effectively not the limit, because LightNav sets the KV cache size directly (VLN_KV_CACHE_GIB, default 2 GiB).
+- Measured per-process GPU memory (nvidia-smi):
+  | LightNav config | GPU memory | request time |
+  |---|---|---|
+  | default: bf16, CUDA graphs, KV 2 GiB, 0.4 | 12.5-13.4 GB | 0.58-0.64 s |
+  | fp8_llm_only + eager + KV 0.5 GiB + 0.25 | 8.27 GB | 0.83-1.07 s |
+- The fp8 setup answered "ask find the kitchen" (Kevin moved; waypoints came back), but its nav quality was NOT benched.
+- Other GPU users: nav 0.45-0.47 GB; world/desktop graphics ~2.5 GB (3.0 GB total with LightNav off).
+- After the test I restored LightNav to the default command (live default, quality-benched): pid 751263, 12.5 GB; a request was verified at 14:24.
+**MASt3R capped (step 3): 3 attempts, all aborted by agewatch 10-21 s after launch, during model load (before any frame was tracked):**
+- Setup: L3 oc / dc, then oc again.
+  - All attempts: nice 19, torch memory fraction 0.22 (5.2 GiB per CUDA process), PYTORCH expandable segments.
+  - Attempts 1-2 on cpus 0,1,4,5. Attempt 3 at SCHED_IDLE on a single logical cpu (5), 1 thread, 30 ms/frame throttle.
+- No MASt3R GPU memory was ever recorded: it was killed before it registered on the GPU.
+- Spikes > 100 ms also happen WITHOUT MASt3R, every time a big model loads or exits:
+  LightNav load 14:14 (5 alerts, max 124 ms), LightNav kill+reload 14:22-14:23 (3), LightNav first request 14:24 (112 ms),
+  and two near-idle ones (14:15:26 at 108 ms, 14:20:27 at 101 ms, the latter 10 s after a MASt3R kill).
+  Steady idle with the 0.09 s probe: 14:18:15-14:20:05, n=600, max 91 ms, 0 alerts.
+- The SCHED_IDLE single-cpu attempt still triggered a spike, so CPU share is probably not the mechanism. Hypothesis (untested):
+  large GPU allocations and host-to-device weight transfers stall the world/depthcam renders on the same 3090.
+- No ATE table: nothing produced poses. Earlier sim-off numbers (queue2) stand.
+**Recommendation for full coverage on L3 (fast spins):**
+- In L3/L4 the odom priors show 16/18 frame pairs that are 20-56 deg apart, all at camera-log gaps of 0.13-0.6 s during spins. The keyframe-overlap
+  limit is 36 deg, so no image-only tracker (MASt3R, kslam visual) can bridge them.
+- Full coverage must come from wheel+gyro odometry as the always-on, fixed-rate backbone. Today the fused lgfg/odom estimate already has
+  coverage 1.0 on L3, ATE 0.125-0.194.
+- A learned SLAM (MASt3R) should be an async correction sensor: map->odom transform plus confidence, used as loop closure / relocalisation,
+  exactly the slot in ARCHITECTURE_LOOPS. Run it with the odom coast/keyframe hooks (queue3 "oc"/"dc").
+- Fix the RS2 log/frame gaps during spins at the source.
+- MASt3R on this box only fits sim-off, or with a second GPU (or the Orin later, read-only now).
+- Not yet measured: whether "oc" bridges the L3 spins. That needs one sim-off run: `VARS="oc dc" N=1 bash ~/slamlogs/res/queue3.sh`, ~15 min.
+**Tooling committed:** emu/tools/agewatch.py; emu/tools/slamlog/m3s/{queue3.sh, queue3c.sh, m3s_main_kevin_prep2.patch}.
+- main.py additions: M3S_MEM_FRAC, M3S_FRAME_SLEEP_MS, and a peak-memory print.
+- queue3c: nice 19 + SCHED_IDLE, CPUS/NT options, early kill on reloc storms, per-pid GPU log, kill-file registration.
