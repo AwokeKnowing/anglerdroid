@@ -29,7 +29,8 @@ def reset():
     r_ = gt.ctl("dog", enabled=(md != "off"), keep_out=([[x, y, R_]] if md == "keepout" else []))
     print("dog:", r_, flush=True)
     gt.ctl("teleport", x=x, y=y, yaw=a); time.sleep(2)
-    subprocess.run([os.path.expanduser('~/m1_backup/dbg/restart_nav.sh')], stdout=subprocess.DEVNULL); time.sleep(3)
+    if os.environ.get('BENCH_RESTART'): subprocess.run(os.environ['BENCH_RESTART'], shell=True, stdout=subprocess.DEVNULL); time.sleep(3)   # e.g. via nice0.sh
+    else: subprocess.run([os.path.expanduser('~/m1_backup/dbg/restart_nav.sh')], stdout=subprocess.DEVNULL); time.sleep(3)
 def run(cmd, place, T, vln=False):
     s0 = gt.state(); c0 = s0['collisions']; w0 = time.monotonic()      # + real-time factor of the sim over this run
     try: b0 = (nav().get('bump') or {}).get('stats', {}).get('events', 0)
@@ -37,7 +38,7 @@ def run(cmd, place, T, vln=False):
     rev = fwd = trev = 0.0; t0 = time.time(); t0m = time.monotonic(); tl = t0; modes = {}
     print(cmd, '->', post(cmd), flush=True)
     while time.time() - t0 < T:
-        time.sleep(0.05); s = gt.state(); GTL.append([time.monotonic(), s.get('x'), s.get('y'), s.get('v'), s.get('collisions'), (s.get('dog') or {}).get('contacts'), s.get('yaw'), s.get('last_contact'), s.get('w')]); tn = time.time(); dt = tn - tl; tl = tn; v = s['v']
+        time.sleep(0.05); s = gt.state(); GTL.append([time.monotonic(), s.get('x'), s.get('y'), s.get('v'), s.get('collisions'), (s.get('dog') or {}).get('contacts'), s.get('yaw'), s.get('last_contact'), s.get('w'), (s.get('dog') or {}).get('x'), (s.get('dog') or {}).get('y')]); tn = time.time(); dt = tn - tl; tl = tn; v = s['v']
         if v < -0.02: rev += -v * dt; trev += dt
         elif v > 0.02: fwd += v * dt
         try: n = nav()
