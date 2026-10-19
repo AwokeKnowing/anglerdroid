@@ -400,3 +400,8 @@ it tracks (L4 heading < 1°, walls 2 cm) but loses tracking at the first fast sp
 (L3: 14 keyframes, ~290 reloc attempts, identical with/without prior). The odometry initial-pose prior made L4 worse (coverage
 0.5 -> 0.05, n=3); prior convention checked against MASt3R's own relative rotations (agree to ~0.01 rad) so it is not a frame bug.
 Not a replacement for kslam as is. Next: real depth (metric scale) and feeding the prior into RELOC/keyframe selection, not just init.
+
+## 2026-10-19 09:18 — sim safety-core frame-age spikes (sim artefact, not the core)
+Spikes >100 ms came from emu.world's 1 kHz loop writing camera poses 30-236 ms late under CPU contention on cpus 0,1,4,5 (plus
+desktop apps on the depth/core cpus). simpin now keeps Chrome/Grok Bot app off cpus 2,3,6,7 and lowers Chrome/viewer priority:
+2 nav restarts x 130 s, 0 frames >100 ms (max 88 / 93 ms) vs 3 >100 ms per 200 s before. Safety core unchanged.
