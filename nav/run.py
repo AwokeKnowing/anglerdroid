@@ -255,11 +255,19 @@ class Brain:
         self.tick += 1
         vl, vr = self.hw.wheel_vels(); t_w = self.hw.wheel_t() or time.monotonic(); gz = self.hw.yaw_rate()
         yi = getattr(self.hw, "yaw_inc", None)        # gyro rotation on its own clock -> rate over THIS odom step
+        # odom time = the time of the data it integrates, not the RS1 frame stamp: the gyro increment runs to its last
+        # sample (yi[1], ~now) and the wheel speeds were read at t_w, both ~one frame age (45-50 ms) after t_frame.
+        # Stamping the step at t_frame made odom.at(t_cap) return a pose ~45 ms in the future (6 deg at 2.5 rad/s):
+        # RS1/RS2 frames were mapped at the wrong pose in turns (L1-L3 fit vs GT: odom leads by 45-50 ms).
+        t_od = t_frame
         if gz is not None and yi is not None and GYRO_INC:
+            t_od = max(float(yi[1]), t_frame)
             self._yaw_carry = getattr(self, "_yaw_carry", 0.0) + yi[0]
-            ot = self.slam.odom.t; dtf = 0.0 if ot is None else min(max(t_frame - ot, 0.0), 0.6)
+            ot = self.slam.odom.t; dtf = 0.0 if ot is None else min(max(t_od - ot, 0.0), 0.6)
             if dtf > 0: gz = self._yaw_carry / dtf; self._yaw_carry = 0.0
-        self.slam.odom.update(t_frame, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
+        elif self.hw.wheel_t() is not None: t_od = max(float(t_w), t_frame)
+        self._t_od = t_od
+        self.slam.odom.update(t_od, vl, vr, gz, commanded_zero=(self.v == 0.0 and self.w == 0.0))
         self.slam.stats['gyro_bias'] = round(self.slam.odom.bias, 5); self.slam.stats['zupt'] = getattr(self.slam.odom, 'n_zupt', 0); self.slam.stats['zupt_rej'] = getattr(self.slam.odom, 'n_zupt_rej', 0)
         try:
             lc = getattr(self, "last", None) or {}
@@ -325,7 +333,7 @@ class Brain:
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
         self._feed_core()
-        self.pred.measured(t_frame, vl, vr, self.slam.odom.pose, t_w)  # odom pose at the frame stamp, wheel speeds at their read time
+        self.pred.measured(t_od, vl, vr, self.slam.odom.pose, t_w)  # odom pose at its data time, wheel speeds at their read time
         with self._ctl_cv:
             self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._snap_t = time.monotonic(); self._ctl_cv.notify_all()
         self.stats.add("rx_age_ms", (t0 - t_frame) * 1e3)            # frame stamp -> brain picks it up
@@ -558,7 +566,7 @@ class Brain:
                                     None if info.get("age") is None else round(info["age"], 4)]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
-            self.rec.put(t=t_frame, v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
+            self.rec.put(t=t_frame, t_od=getattr(self, "_t_od", t_frame), v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.slam.pose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
                          rs1=None if r1 is None else r1.copy(), rs2=None if r2 is None else r2.copy(),
                          accel=None if im is None else np.array(im.accel, np.float32), gyro=None if im is None else np.array(im.gyro, np.float32),
                          imu_t=None if im is None else getattr(im, "timestamp", None))

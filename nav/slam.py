@@ -125,8 +125,14 @@ class Odom:
         self.n_wall += 1; return self._upd(np.array([1.0, 0.0, 0.0]), r, sig ** 2)
 
     def at(self, t):
+        """pose at time t, linearly interpolated between the odom steps around it (steps are stamped at their data time)."""
+        nxt = None
         for tt, p in reversed(self.hist):
-            if tt <= t: return p
+            if tt <= t:
+                if nxt is None or nxt[0] <= tt: return p
+                a = (t - tt) / (nxt[0] - tt); q = nxt[1]
+                return (p[0] + a * (q[0] - p[0]), p[1] + a * (q[1] - p[1]), wrap(p[2] + a * wrap(q[2] - p[2])))
+            nxt = (tt, p)
         return self.hist[0][1] if self.hist else self.pose
 
 
