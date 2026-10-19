@@ -97,8 +97,9 @@ class Brain:
             threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
 
     # -------------------------------------------------------------- commands (any thread)
-    def command(self, text):
-        c = G.parse(text)
+    def command(self, text, frame=None):
+        c = G.parse(text)     # frame="nav": coordinates are already in the nav (odom) frame (LightNav waypoints), not the map frame
+        if frame: c["frame"] = frame
         with self._cmd_lock: self._pending.append(c)
         with self._ctl_cv: self._ctl_cv.notify_all()
         return c
@@ -184,7 +185,8 @@ class Brain:
             self.places.set(c["name"], px, py, th); self.log("labelled %s at %.2f,%.2f" % (c["name"], px, py))
         elif k == "forget": self.log(("forgot " if self.places.remove(c["name"]) else "no place ") + c["name"])
         elif k == "goto_xy":
-            if self.decouple and not self.map_ok: self.log("no verified map: goal taken in the odometry frame"); self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
+            if c.get("frame") == "nav": self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
+            elif self.decouple and not self.map_ok: self.log("no verified map: goal taken in the odometry frame"); self._goto((c["x"], c["y"]), c["heading"], None, cmd=True)
             else: self._goto(self.to_nav((c["x"], c["y"])), c["heading"], None, cmd=True)
         elif k == "goto_place":
             p = self.places.get(c["name"])

@@ -149,7 +149,7 @@ class VLN:
                         f, l, yw = (list(wp[k]) + [0.0, 0.0, 0.0])[:3]; hd = math.degrees(pose[2] + yw); gk = wmap[k]
                         if math.hypot(f, l) < 0.15:
                             if abs(yw) > 0.2: self.b.command("face %.1f" % hd)
-                        else: self.b.command("go to %.3f %.3f %.1f" % (gk[0], gk[1], hd))
+                        else: self.b.command("go to %.3f %.3f %.1f" % (gk[0], gk[1], hd), frame="nav")
                     finally: run[0] = False
             except Exception as e:
                 with self._lock: self.stats["errors"] += 1; self.error = repr(e)[:200]
