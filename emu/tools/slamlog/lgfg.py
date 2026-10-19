@@ -17,7 +17,15 @@ from .log import Log, wrap
 from .metrics import evaluate
 
 DEV = "cuda"; NKP = 2048
-import os; ODOM = os.environ.get("LGFG_ODOM", "1") == "1"      # ablation: 0 = VO only (odom just seeds the initial guess)
+import os; ODOM = os.environ.get("LGFG_ODOM", "est")   # "0" VO only | "fixed" old factor (1 % scale prior in sigma) | "est"
+# "est": odom factor with the gyro scale s and the odom clock offset tau as graph STATES (one each for the run):
+#   z_k = odom increment between t_{k-1}+tau and t_k+tau (interpolated), heading / s;  priors s ~ N(1, 0.01) (BMI055 /
+#   emu 'realistic' g_scale spec), tau ~ N(0, 0.1 s) (broad).  Per-step noise: the odom pose samples carry the nav tick's
+#   timing jitter, so the increment error grows with the rate: sigma_th = |w| SIG_T, sigma_d = |v| SIG_T (+ the encoder /
+#   gyro white terms).  SIG_T = 15 ms measured on calibration log L2 (robust std of the per-0.1 s heading residual after
+#   fitting s, tau: 13-16 % of the step for 0.05-0.3 rad steps), not fitted on the test log L3.
+SIG_T = 0.015
+VOCOV = os.environ.get("LGFG_VOCOV", "resid")
 CALIB = dict(z=[0.48, 0.69, 0.78, 0.87, 0.97, 1.11, 1.31, 1.65], sigma=[0.0014, 0.0022, 0.0037, 0.0064, 0.0088, 0.0103, 0.012, 0.0445])
 # ^ calib() on log L1 (62k matched RS2 points under GT motion; includes GT timing jitter, so conservative)
 def SIG(z): return np.where(np.asarray(z) > CALIB["z"][-1], CALIB["sigma"][-1] * (np.asarray(z) / CALIB["z"][-1]) ** 2, np.interp(z, CALIB["z"], CALIB["sigma"]))
@@ -84,9 +92,33 @@ def rel(fa, fb, idx, rng):
     W = 1 / sg[best] ** 2; Bb = B[best]; Rb = Bb @ np.array([[c, s], [-s, c]])
     J = np.zeros((2 * len(Bb), 3)); J[0::2, 0] = 1; J[1::2, 1] = 1; J[0::2, 2] = -Rb[:, 1]; J[1::2, 2] = Rb[:, 0]
     Wv = np.repeat(W, 2); chi = float((W[:, None] * r[best] ** 2).sum()) / max(1, 2 * len(Bb) - 3)
-    cov = np.linalg.inv(J.T @ (Wv[:, None] * J)) * max(chi, 1.0)
+    cov = np.linalg.inv(J.T @ (Wv[:, None] * J)) * (chi if VOCOV == "resid" else max(chi, 1.0))   # resid: standard LS sigma^2 estimate from this pair's own inlier residuals
     # gtsam Pose2 between noise is in the body frame of a: (x, y) already in a's frame, theta last
     return x, y, th, cov, int(best.sum())
+
+KS, KT = 10 ** 7, 10 ** 7 + 1; ODO = None
+
+def odom_err(odo, ta, tb):
+    t, X, Y, A = odo
+    def z(tau, s):
+        pa = gtsam.Pose2(np.interp(ta + tau, t, X), np.interp(ta + tau, t, Y), np.interp(ta + tau, t, A))
+        pb = gtsam.Pose2(np.interp(tb + tau, t, X), np.interp(tb + tau, t, Y), np.interp(tb + tau, t, A)); d = pa.between(pb)
+        return gtsam.Pose2(d.x(), d.y(), d.theta() / s)
+    def e(xa, xb, s, tau): return z(tau, s).localCoordinates(xa.between(xb))
+    def f(this, vals, H):
+        k = this.keys(); xa, xb = vals.atPose2(k[0]), vals.atPose2(k[1]); s = vals.atVector(k[2])[0]; tau = vals.atVector(k[3])[0]
+        r = e(xa, xb, s, tau)
+        if H is not None:
+            h = 1e-6
+            for i, key in enumerate((0, 1)):
+                J = np.zeros((3, 3))
+                for j in range(3):
+                    dv = np.zeros(3); dv[j] = h; xp = (xa if key == 0 else xb).retract(dv)
+                    J[:, j] = ((e(xp, xb, s, tau) if key == 0 else e(xa, xp, s, tau)) - r) / h
+                H[i] = J
+            H[2] = ((e(xa, xb, s + h, tau) - r) / h)[:, None]; H[3] = ((e(xa, xb, s, tau + 1e-4) - r) / 1e-4)[:, None]
+        return r
+    return f
 
 def odom_sigma(dx, dy, dth, dt):
     d = math.hypot(dx, dy); st = G_SCALE * abs(dth) + G_WHITE / math.sqrt(G_HZ) * math.sqrt(dt * G_HZ) + 1e-4
@@ -97,15 +129,23 @@ def run(d, cam="rs2", loops=True, every=1, win=None):
     if win: fr = [x for x in fr if fr[0][0] + win[0] <= x[0] <= fr[0][0] + win[1]]
     od = np.column_stack([np.interp([t for t, _ in fr], N["t"], N["odom"][:, k]) for k in range(2)] + [np.interp([t for t, _ in fr], N["t"], np.unwrap(N["odom"][:, 2]))])
     F = Front(L, cam); rng = np.random.default_rng(0)
+    global ODO; ODO = (N["t"], N["odom"][:, 0], N["odom"][:, 1], np.unwrap(N["odom"][:, 2]))
     isam = gtsam.ISAM2(); out = []; kfs = []; feats = {}; prev = None; stats = dict(vo=0, vo_fail=0, loops=0, ms=[])
     huber = lambda nm: gtsam.noiseModel.Robust.Create(gtsam.noiseModel.mEstimator.Huber.Create(1.345), nm)
     for k, (t, f) in enumerate(fr):
         t0 = time.perf_counter(); g = gtsam.NonlinearFactorGraph(); v = gtsam.Values(); fk = F.frame(f); feats[k] = fk
         if k == 0:
             g.add(gtsam.PriorFactorPose2(0, gtsam.Pose2(*od[0]), gtsam.noiseModel.Diagonal.Sigmas([1e-4, 1e-4, 1e-5]))); v.insert(0, gtsam.Pose2(*od[0]))
+            if ODOM == "est":
+                v.insert(KS, np.array([1.0])); v.insert(KT, np.array([0.0]))
+                g.add(gtsam.PriorFactorVector(KS, np.array([1.0]), gtsam.noiseModel.Isotropic.Sigma(1, 0.01)))
+                g.add(gtsam.PriorFactorVector(KT, np.array([0.0]), gtsam.noiseModel.Isotropic.Sigma(1, 0.1)))
         else:
             a, b = gtsam.Pose2(*od[k - 1]), gtsam.Pose2(*od[k]); dz = a.between(b); dt = t - fr[k - 1][0]
-            if ODOM: g.add(gtsam.BetweenFactorPose2(k - 1, k, dz, huber(gtsam.noiseModel.Diagonal.Sigmas(odom_sigma(dz.x(), dz.y(), dz.theta(), dt)))))
+            if ODOM == "fixed": g.add(gtsam.BetweenFactorPose2(k - 1, k, dz, huber(gtsam.noiseModel.Diagonal.Sigmas(odom_sigma(dz.x(), dz.y(), dz.theta(), dt)))))
+            elif ODOM == "est":
+                sg = odom_sigma(dz.x(), dz.y(), 0.0, dt) + np.array([1, 1, 0]) * math.hypot(dz.x(), dz.y()) / dt * SIG_T + np.array([0, 0, abs(dz.theta()) / dt * SIG_T])
+                g.add(gtsam.CustomFactor(huber(gtsam.noiseModel.Diagonal.Sigmas(sg)), [k - 1, k, KS, KT], odom_err(ODO, fr[k - 1][0], t)))
             v.insert(k, isam.calculateEstimatePose2(k - 1).compose(dz))
             for j in (k - 1, k - 2):
                 if j < 0: continue
@@ -133,6 +173,7 @@ def run(d, cam="rs2", loops=True, every=1, win=None):
     final = isam.calculateEstimate(); sm = np.array([[t, final.atPose2(k).x(), final.atPose2(k).y(), final.atPose2(k).theta()] for k, (t, _) in enumerate(fr)])
     out = np.array(out); out[:, 3] = np.unwrap(out[:, 3]); sm[:, 3] = np.unwrap(sm[:, 3])
     ms = np.array(stats.pop("ms"))
+    if ODOM == "est": stats.update(gyro_scale=float(final.atVector(KS)[0]), odom_tau_s=float(final.atVector(KT)[0]))
     return dict(causal=evaluate(out, L), smoothed=evaluate(sm, L), frames=len(fr), ms_p50=float(np.median(ms)), ms_p90=float(np.percentile(ms, 90)),
                 gpu_mb=float(torch.cuda.max_memory_allocated() / 1e6), **stats), out, sm
 
