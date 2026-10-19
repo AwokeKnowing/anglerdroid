@@ -26,7 +26,8 @@ def run(slam_path=None, idle_s=5760.0, seed=0, sv=0.0013):
 
 
 def test_idle_does_not_move_scale():
-    r = run(idle_s=600.0); assert abs(r["scale_after_idle"]) < 0.02 and abs(r["yaw_err_after_10_spins_deg"]) < 10, r
+    # after the idle the filter must still hold its prior (scale 0), so 10 spins carry the unaided true +1 % = +36 deg
+    r = run(idle_s=600.0); assert abs(r["scale_after_idle"]) < 0.005 and abs(r["yaw_err_after_10_spins_deg"] - 36.0) < 10, r
 
 
 if __name__ == "__main__":
