@@ -127,9 +127,9 @@ def odom_sigma(dx, dy, dth, dt):
 def run(d, cam="rs2", loops=True, every=1, win=None):
     L = Log(d); N = L.nav(); fr = L.frames[cam][::every]; fr = [x for x in fr if N["t"][0] <= x[0] <= N["t"][-1] and L.gt_t[0] <= x[0] <= L.gt_t[-1]]
     if win: fr = [x for x in fr if fr[0][0] + win[0] <= x[0] <= fr[0][0] + win[1]]
-    od = np.column_stack([np.interp([t for t, _ in fr], N["t"], N["odom"][:, k]) for k in range(2)] + [np.interp([t for t, _ in fr], N["t"], np.unwrap(N["odom"][:, 2]))])
+    od = np.column_stack([np.interp([t for t, _ in fr], N["t_od"], N["odom"][:, k]) for k in range(2)] + [np.interp([t for t, _ in fr], N["t_od"], np.unwrap(N["odom"][:, 2]))])
     F = Front(L, cam); rng = np.random.default_rng(0)
-    global ODO; ODO = (N["t"], N["odom"][:, 0], N["odom"][:, 1], np.unwrap(N["odom"][:, 2]))
+    global ODO; ODO = (N["t_od"], N["odom"][:, 0], N["odom"][:, 1], np.unwrap(N["odom"][:, 2]))
     isam = gtsam.ISAM2(); out = []; kfs = []; feats = {}; prev = None; stats = dict(vo=0, vo_fail=0, loops=0, ms=[])
     huber = lambda nm: gtsam.noiseModel.Robust.Create(gtsam.noiseModel.mEstimator.Huber.Create(1.345), nm)
     for k, (t, f) in enumerate(fr):
@@ -147,11 +147,15 @@ def run(d, cam="rs2", loops=True, every=1, win=None):
                 sg = odom_sigma(dz.x(), dz.y(), 0.0, dt) + np.array([1, 1, 0]) * math.hypot(dz.x(), dz.y()) / dt * SIG_T + np.array([0, 0, abs(dz.theta()) / dt * SIG_T])
                 g.add(gtsam.CustomFactor(huber(gtsam.noiseModel.Diagonal.Sigmas(sg)), [k - 1, k, KS, KT], odom_err(ODO, fr[k - 1][0], t)))
             v.insert(k, isam.calculateEstimatePose2(k - 1).compose(dz))
+            n_vo = 0
             for j in (k - 1, k - 2):
                 if j < 0: continue
                 r = rel(feats[j], fk, F.match(feats[j], fk), rng)
                 if r is None: stats["vo_fail"] += 1; continue
-                g.add(gtsam.BetweenFactorPose2(j, k, gtsam.Pose2(r[0], r[1], r[2]), huber(gtsam.noiseModel.Gaussian.Covariance(r[3])))); stats["vo"] += 1
+                g.add(gtsam.BetweenFactorPose2(j, k, gtsam.Pose2(r[0], r[1], r[2]), huber(gtsam.noiseModel.Gaussian.Covariance(r[3])))); stats["vo"] += 1; n_vo += 1
+            if n_vo == 0 and ODOM == "0":     # VO-only ablation: a frame with no VO link would leave the graph indeterminant
+                # (gtsam IndeterminantLinearSystemException = the earlier 'stall'): bridge it with the odom increment
+                g.add(gtsam.BetweenFactorPose2(k - 1, k, dz, gtsam.noiseModel.Diagonal.Sigmas(odom_sigma(dz.x(), dz.y(), dz.theta(), dt)))); stats["bridged"] = stats.get("bridged", 0) + 1
         isam.update(g, v); est = isam.calculateEstimatePose2(k)
         if loops and (not kfs or math.hypot(est.x() - kfs[-1][1].x(), est.y() - kfs[-1][1].y()) > KF_D or abs(wrap(est.theta() - kfs[-1][1].theta())) > KF_A):
             cur = isam.calculateEstimate(); added = 0; cand = []

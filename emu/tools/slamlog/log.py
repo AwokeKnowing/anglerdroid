@@ -56,7 +56,7 @@ class Log:
         return out
 
     def nav(self):
-        """nav KEVIN_RECORD ticks: t, vl, vr, gz (EKF gyro z as nav saw it), raw gyro xyz, accel xyz, pose, odom."""
+        """nav KEVIN_RECORD ticks: t (RS1 frame), t_od (time of the odom/pose data, 8f59e4a+), vl, vr, gz (EKF gyro z as nav saw it), raw gyro xyz, accel xyz, pose, odom."""
         if self._nav is None:
             cache = os.path.join(self.d, "nav_ticks.npz")
             if os.path.exists(cache): self._nav = dict(np.load(cache))
@@ -64,8 +64,9 @@ class Log:
                 R = []
                 for f in sorted(glob.glob(os.path.join(self.d, "nav", "*.npz"))):
                     z = np.load(f); m = json.loads(str(z["meta"]))
-                    R.append([m["t"], m["vl"], m["vr"], m["gz"]] + list(z["gyro"]) + list(z["accel"]) + list(m["pose"]) + list(m["odom"]) + [m.get("imu_t") or m["t"]])
+                    R.append([m["t"], m["vl"], m["vr"], m["gz"]] + list(z["gyro"]) + list(z["accel"]) + list(m["pose"]) + list(m["odom"]) + [m.get("imu_t") or m["t"], m.get("t_od", m["t"])])
                 R = np.array(R, float)
-                self._nav = dict(t=R[:, 0], vl=R[:, 1], vr=R[:, 2], gz=R[:, 3], gyro=R[:, 4:7], accel=R[:, 7:10], pose=R[:, 10:13], odom=R[:, 13:16], imu_t=R[:, 16])
+                self._nav = dict(t=R[:, 0], vl=R[:, 1], vr=R[:, 2], gz=R[:, 3], gyro=R[:, 4:7], accel=R[:, 7:10], pose=R[:, 10:13], odom=R[:, 13:16], imu_t=R[:, 16], t_od=R[:, 17])
                 np.savez(cache, **self._nav)
+        if "t_od" not in self._nav: self._nav["t_od"] = self._nav["t"]      # logs before 8f59e4a: odom stamped at t_frame
         return self._nav
