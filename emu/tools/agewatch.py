@@ -22,11 +22,11 @@ while True:
     try: c = json.load(urllib.request.urlopen('http://localhost:8090/api/state', timeout=2))['safety']['core']
     except Exception as e: f.write('%s state error %s\n' % (time.strftime('%T'), e)); time.sleep(1); continue
     if c['t_dec'] != last:
-        if last is not None and c['t_dec'] - last > 0.06: miss += 1        # skipped >=1 decision between polls
+        if last is not None and c.get('period'): miss += max(0, round((c['t_dec'] - last) / c['period']) - 1)   # decisions not seen
         last = c['t_dec']; a = max(c['age1'] or 0, c['age2'] or 0); W.append(a); N += 1; MX = max(MX, a)
         if a > 0.100:
             NB += 1; f.write('%s ALERT age %.0f ms (age1 %.0f age2 %.0f)\n' % (time.strftime('%T'), 1e3 * a, 1e3 * c['age1'], 1e3 * c['age2'])); kill()
     if time.time() - tw >= 10:
-        if W: f.write('%s n %d max %.0f ms >100: %d | total n %d max %.0f >100: %d | gaps %d\n' % (time.strftime('%T'), len(W), 1e3 * max(W), sum(x > 0.1 for x in W), N, 1e3 * MX, NB, miss))
+        if W: f.write('%s n %d max %.0f ms >100: %d | total n %d max %.0f >100: %d | unseen decisions %d\n' % (time.strftime('%T'), len(W), 1e3 * max(W), sum(x > 0.1 for x in W), N, 1e3 * MX, NB, miss))
         W = []; tw = time.time()
     time.sleep(per)
