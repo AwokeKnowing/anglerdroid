@@ -505,3 +505,31 @@ LightNav mean 1.58 m (n=5). These are within noise of each other.
 **Tooling committed:** emu/tools/agewatch.py; emu/tools/slamlog/m3s/{queue3.sh, queue3c.sh, m3s_main_kevin_prep2.patch}.
 - main.py additions: M3S_MEM_FRAC, M3S_FRAME_SLEEP_MS, and a peak-memory print.
 - queue3c: nice 19 + SCHED_IDLE, CPUS/NT options, early kill on reloc storms, per-pid GPU log, kill-file registration.
+
+## 2026-10-19 evening: 30 Hz synced sim stream, L8 log, light methods (MASt3R dropped per James t596)
+
+Sim sensor stream (emu/world.py, commits cda48c9, 2a73f7c):
+- Colour was 12.4-14 Hz: the colour/IR/mast/viewer "slow lane" ran as a thread in the world process.  Slow-lane ms/s at
+  14 Hz: IR pairs 450, viewer 286, colour 141, mast 105.
+- Fixes: IR stereo pairs opt-in (KEVIN_EMU_IR=1; only KEVIN_SLAM=cuv and scripts/bench stereo read them), third-person
+  viewer in its own thread at 10 Hz, and the whole lane in its own forked process (KEVIN_EMU_SLOWPROC=1) so it no longer
+  shares the GIL with the 1 kHz physics loop that publishes depth poses.  Colour 28.8-30.0 Hz.
+- sensorlog keeps frames in RAM and encodes after the recording at nice 19 / 1 thread (encoding 60 img/s took ~1 core).
+- Safety frame age (agewatch, nav driving + 30 Hz sensorlog + encoding): max 99 ms, 0 > 100 ms.  Before: max 169 ms
+  while recording, 323 ms while encoding.
+- Tyre contact (7d65cd1): drive tyres collide as ellipsoids at the tread centreline (cylinder rim-edge contact hopped
+  +-6 mm -> yaw ripple + up to 1.5 % bias).  drive 0 pi/2: GT within 0.04 % of the wheel setpoint.
+
+Logs (RS2 frames): L3 8.9 Hz, gap max 0.50 s / 52 deg; L6 12.4 Hz, 0.167 s / 13.4 deg; L7 22.5 Hz, 0.134 s;
+L8 (70 s, spin-heavy, nav recording on) 28.8 Hz, gap median 0.033 p99 0.067 max 0.100 s, max 7.3 deg/frame.
+
+L8 results (ext metrics; coverage = fraction of frames with a pose):
+| method | ATE rmse | ATE max | worst heading | aligned | runtime | GPU |
+|---|---|---|---|---|---|---|
+| wheel+gyro odom (live) | 0.217 m | 0.506 m | 7.41 deg | 0.083 m | live | 0 |
+| kslam (live, odom+gyro + visual) | 0.088 m | 0.174 m | 3.41 deg | 0.053 m | live (nav) | shared |
+| o3d_rgbd RS2 (Open3D hybrid RGB-D VO, odom-prior init, no gating) | diverged (316 km) | - | 180 deg | - | 326 ms/frame CPU (0.1x RT) | 0 |
+| o3d_rgbd RS1 | diverged (1.3 km) | - | 180 deg | - | 327 ms/frame | 0 |
+o3d_rgbd: Open3D reports success on 2015/2016 steps but drifts upward from frame ~100 and blows up by frame 600; a
+step must be gated against the wheel+gyro prior (and projected to planar motion) before it is usable.  Not committed yet.
+MASt3R dropped (James t596).
