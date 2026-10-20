@@ -39,6 +39,7 @@ VIEW_CLIP = (0.2, 1.2)   # drawn FOV range (m): D435 minimum depth ~0.2 m .. 1.2
 FPS = 30
 DEPTHPROC = os.environ.get("KEVIN_EMU_DEPTHPROC", "1") == "1"
 SLOWPROC = os.environ.get("KEVIN_EMU_SLOWPROC", "1") == "1"       # colour/IR/mast/viewer lane in its own process (with DEPTHPROC)   # depth cameras in their own process (emu/depthcam.py)
+FX_PIPE = os.environ.get("KEVIN_EMU_FX_PIPE", "1") == "1"         # colour CamFX overlapped with the next render (slow lane)
 CAMLOG = open(os.environ["KEVIN_EMU_CAMLOG"], "a", buffering=1 << 16) if os.environ.get("KEVIN_EMU_CAMLOG") else None
 # Mounts = twin URDF optical frames (urdf/kevin.urdf, base_link = axle centre, x fwd, y left, z up):
 #   realsense_d435_depth_optical  (-0.007, 0, 0.8619)  looking straight down, x_opt = robot-backward
@@ -994,12 +995,20 @@ class World:
                         g += irn2[int(rng.integers(NB))][oy:oy + DH, ox:ox + DW]
                         o[nm] = np.clip(g, 0, 255).astype(np.uint8)
             _b = _pc(); TS["ir"] += _b - _a
+            if FX_PIPE and DEPTHPROC and Rd2 is None:
+                # pipelined: write the PREVIOUS frame (its CamFX ran in the pool while this frame rendered), keep this
+                # one pending.  Stamps stay the render pose (sync is by stamp); delivery is one colour frame later.
+                # Serial fx wait was ~9 ms of every 33 ms frame (L13/L14: colour 28.2/28.5 Hz while driving).
+                prev = getattr(self, "_fx_prev", None); self._fx_prev = (st_ns, f1, f2, o1, o2)
+                if prev is None: TS["fx"] += _pc() - _b; continue
+                st_w, f1, f2, o1, o2 = prev
+            else: st_w = st_ns
             o1["color"] = f1.result(); o2["color"] = f2.result(); _a = _pc(); TS["fx"] += _a - _b
             if Rd2 is not None:                                    # RS2 depth in the slow lane only if not fast
                 Rd2.update_scene(dr, "rs2_ir1"); Rd2.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
                 o2["depth"] = (Rd2.render() * 1000.0).astype(np.uint16); o2["_st"] = st_ns
             if DEPTHPROC:
-                self.side1.write(st_ns, **o1); self.side2.write(st_ns, **o2)
+                self.side1.write(st_w, **o1); self.side2.write(st_w, **o2)
                 lane["d1"] = self.b1.arr["depth"].copy(); lane["d2"] = self.b2.arr["depth"].copy()   # viewer only (torn frame harmless)
             else:
                 with lane["lock"]:
