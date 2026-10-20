@@ -212,6 +212,8 @@ class Brain:
         elif k == "relative": self._goto((x + c["d"] * math.cos(th), y + c["d"] * math.sin(th)), None, None, allow_back=c["d"] < 0)
         elif k == "turn":                       # relative turn: track the remaining angle (a 360 used to wrap to 0 -> 'arrived')
             self.turn_target = wrap(th + c["rad"]); self.turn_rem = c["rad"]; self._turn_th = th; self.mode = "turn"; self.log("turning %.0f°" % math.degrees(c["rad"]))
+            # the arrival report is about THIS turn (it used to print the previous goal's label and time since that goal)
+            self.goal_t0 = time.monotonic(); self.goal_label = "turn %+.0f°" % math.degrees(c["rad"]); self.goal_req = None; self.goal = None; self._resume_path = False
         elif k == "drive":
             self.mode = "drive"; self.drive_cmd = (c["v"], c["w"], time.monotonic() + c["secs"]); self.goal_t0 = time.monotonic()
             self.log("drive v=%.2f w=%.2f for %.1f s" % (c["v"], c["w"], c["secs"]))

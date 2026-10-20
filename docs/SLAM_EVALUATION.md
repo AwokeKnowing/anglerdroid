@@ -573,3 +573,32 @@ The sim camera mounts, intrinsics and stamps match the twin (mounts within 0.05 
 ray-cast median −0.03 mm RS1 / −3.4 mm RS2, best stamp offset 0 ms). The bias is the planar point-to-point ICP under-estimating rotation
 (2.8 % of the yaw step on logged depth, 2.0 % on noise-free renders). No sim change, so kslam is unaffected.
 Tools: emu/tools/slamlog/camcheck.py, icpbias.py. Details are in docs/SLAM_LIFELONG.md §9.
+
+### 2026-10-19 20:00 PT: body pitch in the sim; where kslam's heading error comes from
+**Body attitude while driving** (live sim, base_link quaternion from the kevin_campose shm, read-only; go to kitchen, a 360° turn,
+go to couch; 2762 samples):
+- at rest: pitch −0.24°, base z 75.7 mm above world z = 0;
+- moving (> 0.1 m/s): |pitch| p50 0.34°, p95 1.43°, max 3.03°; |roll| p95 1.54°, max 1.67°; height change p95 10 mm.
+
+**RS2 floor-plane fit** (L9–L11, every 10th frame, fits with tilt > 11° discarded): tilt p95 1.8–2.6° (x) and 1.0–2.4° (y), offset p95 6–17 mm.
+
+**Safety-core ground clipping (report only, no change):**
+- **RS1 top-down** (nav.perceive.Ego._cliff) already fits the floor plane per frame and levels the cloud (LEVEL = True), so body pitch is handled.
+- **RS2 forward cone (Rs2Cloud.points)** uses the static extrinsic with hmin = 3 cm + 1.2 cm·z². On L9/L10/L11, 5.7 / 5.5 / 8.4 % of RS2 frames
+  have pixels that are floor by that frame's fitted plane (within 1.5 cm) but are labelled OBSTACLE: p99 133–300 px per frame, nearest 0.31 m.
+  These are phantom obstacles from pitch, beyond the 5 cm hard bands but inside the brake sweep at speed. A per-frame RS2 floor-plane
+  levelling (as RS1 does) would remove them. This is a proposal for the safety core and needs James's go-ahead.
+- Caveat: the plane fit can itself be wrong when little floor is visible.
+
+**kslam heading:** nav records pose = T∘odom. The odom heading already includes the Manhattan wall correction, so T_θ is the scan matcher's share.
+At the worst kslam heading point:
+
+| log | kslam heading error | odom heading error | matcher T_θ |
+|---|---|---|---|
+| L9 | 7.34° | 4.26° | +3.08° |
+| L10 | −8.75° | −1.89° | −6.86° |
+| L11 | 8.24° | 1.59° | +6.65° |
+
+So the error enters through the **CSM matcher**, not the wall-direction correction. By speed, most of the net matcher rotation is at v < 0.1 m/s
+(spins in place): on L11, +9.0° net, with only 18 % of steps moving toward GT. That points to scans matched while spinning
+(rotation during a frame, or a stale map at the clamp), not to body pitch, which is largest when accelerating forward. Not fixed yet.
