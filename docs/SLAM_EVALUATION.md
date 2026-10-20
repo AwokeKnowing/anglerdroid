@@ -567,3 +567,9 @@ At 326 ms/frame it is ~10× too slow for real time even if fixed.
 Recommendation: keep kslam. None of the established light methods beats it, or even odometry, on L8. If a depth-geometry
 term is wanted, the RS2 planar ICP is real time at stride 10 (16 ms/frame, one core). It should be a factor inside kslam,
 weighted by its measured covariance, not a standalone odometry, and only once the −0.2°/keyframe bias is explained.
+
+### 2026-10-19 19:05 PT: depth-ICP yaw bias root cause
+The sim camera mounts, intrinsics and stamps match the twin (mounts within 0.05 mm / 0.000°, fovy 58 → fx 432.97, render vs
+ray-cast median −0.03 mm RS1 / −3.4 mm RS2, best stamp offset 0 ms). The bias is the planar point-to-point ICP under-estimating rotation
+(2.8 % of the yaw step on logged depth, 2.0 % on noise-free renders). No sim change, so kslam is unaffected.
+Tools: emu/tools/slamlog/camcheck.py, icpbias.py. Details are in docs/SLAM_LIFELONG.md §9.
