@@ -73,11 +73,14 @@ class MPPI:
     @staticmethod
     def step_dyn(x,y,th,v,w,a,al,dt,L,vcap=None):
         v0=v
+        alon=L.a_max*(1-((v0*w)/L.a_lat)**2).clamp(min=0).sqrt()                  # friction ellipse (twin_geometry.w_limit)
+        a=torch.where(a*v0>=0, torch.maximum(torch.minimum(a,alon),-alon), a)
         v=(v+a*dt).clamp(L.v_min,L.v_max)
         if vcap is not None:   # proximity rule; never brake harder than a_brake per step
             lim=torch.maximum(vcap,v0.abs()-L.a_brake*dt)
             v=torch.maximum(torch.minimum(v,lim),-torch.minimum(lim,torch.full_like(lim,-L.v_min)))
-        wl=torch.minimum(torch.full_like(v,L.w_max), L.a_lat/v.abs().clamp(min=1e-3))
+        alu=torch.where(v.abs()>v0.abs(),(v.abs()-v0.abs())/dt,torch.zeros_like(v))
+        wl=torch.minimum(torch.full_like(v,L.w_max), L.a_lat*(1-(alu/L.a_max)**2).clamp(min=0).sqrt()/v.abs().clamp(min=1e-3))
         wl=torch.minimum(wl,((L.v_wheel-v.abs())/(L.track/2)).clamp(min=0))
         w=torch.maximum(torch.minimum(w+al*dt,wl),-wl)
         th=th+w*dt; x=x+v*torch.cos(th)*dt; y=y+v*torch.sin(th)*dt

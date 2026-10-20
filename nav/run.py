@@ -21,7 +21,7 @@ L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min()) 
 from nav import goals as G
 from nav import goalio as GI
 from emu import shm
-_VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = float(os.environ.get("KEVIN_WMAX", "2.5"))
+_VMAX = float(os.environ.get("KEVIN_VMAX", "0.6")); _VREV = min(0.2, _VMAX); _WMAX = _TG.W_MAX_RADS        # pi/2 (twin_geometry)
 # Free-space carving of the SLAM/planning map from current depth rays (KEVIN_CARVE=0: floor-point decay only, as before)
 CARVE = os.environ.get("KEVIN_CARVE", "1") != "0"
 STUCK_DUMP = os.environ.get("KEVIN_STUCK_DUMP")      # dir: planner state dumps at no-progress / give-up (diagnostics)
@@ -616,7 +616,7 @@ class Brain:
                 if getattr(self, "_resume_path", False) and self.goal is not None:
                     self._resume_path = False; self.mode = "path"; self._prog = (time.monotonic(), (x, y, th)); self._set_sub((x, y, th))
                 else: self.log("no room to turn in place: final heading skipped"); self._arrive()
-            else: self.v = 0.0; self.w = float(np.clip(2.2 * e, -1.6, 1.6))
+            else: self.v = 0.0; self.w = float(np.clip(2.2 * e, -_WMAX, _WMAX))
         else:
             self.v = self.w = 0.0
         # safety envelope: fresh RS1 ego + RS2 obstacles (robot frame), stamped
@@ -677,8 +677,14 @@ class Brain:
             vc, wc = 0.05 / fdt, 0.35 / fdt
             if abs(v) > vc or abs(w) > wc:
                 k = min(vc / max(abs(v), 1e-6), wc / max(abs(w), 1e-6)); v, w = v * k, w * k; self.stats.add("rate_capped", 1)
-        v = max(-_VREV, min(_VMAX, v)); w = max(-_WMAX, min(_WMAX, w))      # hard cap on EVERY command (incl. 'drive v w s')
+        v = max(-_VREV, min(_VMAX, v)); v, w = _TG.limit_vw(v, w)      # hard cap on EVERY command (incl. 'drive v w s'): pi/2, slow for 0.1 g lateral
+        # angular-accel limit (twin_geometry.ALPHA_MAX) on spin-UP only, for the controllers that set w directly (turn,
+        # follower, drive); slowing |w| / reversing through 0 is never delayed.  MPPI's w already obeys it in rollouts.
+        tn = time.monotonic(); wp = getattr(self, "_w_iss", 0.0) if w * getattr(self, "_w_iss", 0.0) > 0 else 0.0
+        wu = abs(wp) + _TG.ALPHA_MAX * min(max(tn - getattr(self, "_t_w_iss", tn), 0.0), 0.2)
+        if abs(w) > wu: w = math.copysign(wu, w)
         if time.monotonic() < self._bump_hold: v = w = 0.0                  # contact detected: stop (additive; see _on_bump)
+        self._w_iss, self._t_w_iss = w, tn
         self.hw.drive(v, w); t_iss = self._t_iss = time.monotonic(); self.pred.issued(t_iss, v, w)
         if self.mode in ("path", "backout"):             # score plan cycles: predicted start vs the raw measurement, both
             if pr is not None: self.pred.remember(t_eff, (pr[0], pr[1], pr[2]), pr[3])   # against the state measured at effect

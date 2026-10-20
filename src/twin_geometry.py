@@ -32,6 +32,30 @@ def frame(name):
 
 WHEEL_R_M = _G["wheel_r_m"] * CALIB.get("wheel_r_scale", 1.0)
 TRACK_M = _G["track_m"] * CALIB.get("track_scale", 1.0)
+# Angular velocity limit (James 2026-10-19): exactly 90 deg/s, for every w cap (planner, nav command cap, LightNav
+# follower via the planner, wheelbase/teleop clamp).  KEVIN_WMAX may only LOWER it.  At 30 Hz = 3 deg per camera frame.
+W_MAX_RADS = min(math.pi / 2, float(os.environ.get("KEVIN_WMAX", math.pi / 2)))
+# Friction-ellipse acceleration limit (James 2026-10-19): (a_long/A_LON)^2 + (v*w/A_LAT)^2 <= 1 with
+# A_LON = 0.2 g (the 0.2 g kplan.core.Limits already used as a_max) and A_LAT = 0.1 g; |w| <= W_MAX_RADS (pi/2);
+# angular accel |dw/dt| <= ALPHA_MAX.  Braking is never reduced by the ellipse (a_brake is the stopping model).
+A_LON = 0.2 * 9.81
+A_LAT = 0.1 * 9.81
+ALPHA_MAX = 3.0
+
+def w_limit(v, a_long=0.0):
+    """max |w| (rad/s) at forward speed v (m/s) while using a_long (m/s^2, speeding up) of the ellipse.
+    Same formula inside the planner rollouts (kplan mppi_cuda / mppi_triton / planner.step_dyn).
+    At 1.5 m/s: 0.654 rad/s; the pi/2 cap binds below 0.625 m/s."""
+    r = max(1.0 - (a_long / A_LON) ** 2, 0.0) ** 0.5
+    return min(W_MAX_RADS, A_LAT * r / max(abs(v), 1e-3))
+
+def limit_vw(v, w):
+    """THE shared command limit (nav LightNav/turn follower + every nav command, wheelbase/teleop/gamepad).
+    |w| <= pi/2, then if the curve is too fast for 0.1 g lateral (v^2*kappa = |v*w| > A_LAT) SLOW DOWN to
+    v = A_LAT/|w| (= sqrt(A_LAT/kappa)), keeping the commanded curvature instead of widening the turn."""
+    w = max(-W_MAX_RADS, min(W_MAX_RADS, float(w))); v = float(v)
+    if abs(v * w) > A_LAT: v = math.copysign(A_LAT / abs(w), v)
+    return v, w
 AXLE_H_M = _G["axle_height_m"]                       # base_link height above floor (= loaded wheel R; includes ride dz)
 RS1_T, RS1_R = frame("rs1_depth")
 RS2_T, RS2_R = frame("rs2_depth")

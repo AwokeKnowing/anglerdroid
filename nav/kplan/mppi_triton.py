@@ -37,7 +37,7 @@ def _vcap(d, v_max, a_brake, t_react, d_safe, d_full, v_near, d_near):
 def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
              cost_o, dead_o, tx_o, K, dt,
              v_max, v_min, a_brake, t_react, d_safe, d_full, v_near, d_near,
-             a_lat, w_max, v_wheel, track,
+             a_lat, w_max, v_wheel, track, a_lon,
              H: tl.constexpr, P: tl.constexpr, TXC: tl.constexpr, BLOCK: tl.constexpr):
     b = tl.program_id(0); k = tl.program_id(1)*BLOCK + tl.arange(0, BLOCK); mask = k < K
     zero = tl.zeros([BLOCK], tl.float32)
@@ -55,11 +55,15 @@ def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
         vc = tl.minimum(_vcap(clr, v_max, a_brake, t_react, d_safe, d_full, v_near, d_near),   # + approach scaling (see mppi_cuda)
                         tl.maximum(0.08, v_max*tl.sqrt((x-gx)*(x-gx) + (y-gy)*(y-gy))/0.6))
         v0 = v
+        q = tl.abs(v0*w)/a_lat
+        alon = a_lon*tl.sqrt(tl.maximum(1.0 - q*q, 0.0))                        # friction ellipse (twin_geometry.w_limit)
+        a = tl.where(a*v0 >= 0.0, tl.minimum(tl.maximum(a, -alon), alon), a)
         v = tl.minimum(tl.maximum(v + a*dt, v_min), v_max)
         lim = tl.maximum(vc, tl.abs(v0) - a_brake*dt)
         v = tl.maximum(tl.minimum(v, lim), -tl.minimum(lim, -v_min))
         av = tl.abs(v)
-        wl = tl.minimum(w_max, a_lat/tl.maximum(av, 1e-3))
+        alu = tl.where(av > tl.abs(v0), (av - tl.abs(v0))/dt, 0.0)
+        wl = tl.minimum(w_max, a_lat*tl.sqrt(tl.maximum(1.0 - (alu/a_lon)*(alu/a_lon), 0.0))/tl.maximum(av, 1e-3))
         wl = tl.minimum(wl, tl.maximum((v_wheel - av)/(track/2), 0.0))
         w = tl.maximum(tl.minimum(w + al*dt, wl), -wl)
         th = th + w*dt; x = x + v*tl.cos(th)*dt; y = y + v*tl.sin(th)*dt
@@ -98,5 +102,5 @@ def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None
     BLOCK = 64 if K >= 64 else 16
     _rollout[(B, triton.cdiv(K, BLOCK))](U, state.contiguous(), goal.contiguous(), fp, edt, erev.contiguous(), est, Hm, Wm, cost, dead, tx, K, float(dt),
         float(L.v_max), float(L.v_min), float(L.a_brake), float(L.t_react), float(L.d_safe), float(L.d_full), float(L.v_near), float(L.d_near),
-        float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), H=H, P=fp.shape[0], TXC=txc, BLOCK=BLOCK, num_warps=2)
+        float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), float(L.a_max), H=H, P=fp.shape[0], TXC=txc, BLOCK=BLOCK, num_warps=2)
     return cost, dead, tx

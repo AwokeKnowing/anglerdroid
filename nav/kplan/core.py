@@ -8,13 +8,14 @@ SIL12 = [[-0.27371,-0.01022],[-0.1995,-0.15],[-0.08009,-0.20998],[0.08319,-0.209
 import sys as _sys
 _SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src')
 if _SRC_DIR not in _sys.path: _sys.path.append(_SRC_DIR)
-from twin_geometry import WHEEL_R_M as _WHEEL_R, SAFETY_MARGIN as _SAFETY_MARGIN, R_CIRC as _R_CIRC   # noqa: E402
+from twin_geometry import WHEEL_R_M as _WHEEL_R, SAFETY_MARGIN as _SAFETY_MARGIN, R_CIRC as _R_CIRC, W_MAX_RADS as _W_MAX, A_LON as _A_LON, A_LAT as _A_LAT, ALPHA_MAX as _ALPHA_MAX   # noqa: E402
 VEL_RAMP_TPS2 = float(os.environ.get("KEVIN_VEL_RAMP", "3.0"))   # same knob/default as src/wheelbase.py set_vel_ramp_rate
 
 class Limits:
     v_max=min(0.6, float(os.environ.get("KEVIN_VMAX", "0.6"))); v_min=-0.2;   # KEVIN_VMAX: bring-up speed cap   # reverse capped at 0.2 m/s (James 2026-10-13: too much reversing)
     rev_w=4.0; head_w=1.5    # MPPI: reverse cost scaled by clearance; face-the-carrot cost (mppi_cuda)
-    a_max=1.96; a_lat=1.96; w_max=2.5; alpha_max=6.0; track=0.362; v_wheel=1.0
+    a_max=_A_LON; a_lat=_A_LAT; w_max=_W_MAX; alpha_max=_ALPHA_MAX;   # friction ellipse 0.2 g long / 0.1 g lat (twin_geometry, see step_dyn), pi/2, 3 rad/s^2 (was 6)
+    _unused=0; track=0.362; v_wheel=1.0
     # Planner-owned clearance (2026-10-17, James: "planner plans paths that can't crash; safety only for planner mistakes").
     # Every rollout state must be able to STOP with its footprint, swept along the stopping arc and inflated by the
     # distance its farthest point travels while stopping (gap = stopping distance: tolerates a 2x error in the stopping

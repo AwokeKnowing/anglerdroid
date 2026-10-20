@@ -7,7 +7,7 @@ _SRC = r'''
 #include <torch/extension.h>
 #include <cuda_fp16.h>
 #include <c10/cuda/CUDAStream.h>
-struct LP { float v_max,v_min,a_brake,t_react,d_safe,d_full,v_near,d_near,a_lat,w_max,v_wheel,track,rev_w,head_w,r_circ,poc; };
+struct LP { float v_max,v_min,a_brake,t_react,d_safe,d_full,v_near,d_near,a_lat,w_max,v_wheel,track,rev_w,head_w,r_circ,poc,a_lon; };
 __device__ __forceinline__ float clearf(float x,float y,float th,const float* fp,int P,const __half* e,int Hm,int Wm){
   float c=cosf(th), sn=sinf(th), m=1e9f;
   for(int p=0;p<P;p++){ float fx=fp[2*p], fy=fp[2*p+1];
@@ -55,11 +55,15 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
     // (KEVIN_PLAN_OWNS_CLEARANCE: obstacle clearance is the stopping-envelope rule below, no isotropic ramp)
     float vc=fmaxf(APPROACH_VMIN,L.v_max*sqrtf((x-gx)*(x-gx)+(y-gy)*(y-gy))/APPROACH_D), v0=v, w0=w;
     if(L.poc<0.5f) vc=fminf(vcap(clr,L),vc);
+    // friction ellipse (twin_geometry.w_limit): (a/a_lon)^2+(v w/a_lat)^2<=1 when speeding up; braking is never reduced.
+    // w <= a_lat/|v| below, so a rollout that must take a curve has to SLOW first (v <= sqrt(a_lat/kappa)).
+    { float q=fabsf(v0*w0)/L.a_lat, alon=L.a_lon*sqrtf(fmaxf(1.f-q*q,0.f)); if(a*v0>=0.f) a=fminf(fmaxf(a,-alon),alon); }
     v=fminf(fmaxf(v+a*dt,L.v_min),L.v_max);
     float lim=fmaxf(vc,fabsf(v0)-L.a_brake*dt);
     v=fmaxf(fminf(v,lim),-fminf(lim,-L.v_min));
     float av=fabsf(v);
-    float wl=fminf(L.w_max,L.a_lat/fmaxf(av,1e-3f));
+    float alu=(av>fabsf(v0))?(av-fabsf(v0))/dt:0.f;
+    float qa=alu/L.a_lon, wl=fminf(L.w_max,L.a_lat*sqrtf(fmaxf(1.f-qa*qa,0.f))/fmaxf(av,1e-3f));
     wl=fminf(wl,fmaxf((L.v_wheel-av)/(L.track/2),0.f));
     w=fmaxf(fminf(w+al*dt,wl),-wl);
     if(L.poc>0.5f){ // planner-owned clearance: the next state must be able to stop with gap; else brake (wheels at a_brake)
@@ -104,7 +108,7 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
 void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,torch::Tensor edt,torch::Tensor erv,int64_t es,int64_t Hm,int64_t Wm,
   torch::Tensor co,torch::Tensor de,torch::Tensor tx,int64_t TXC,double dt,std::vector<double> l){
   int B=U.size(0),K=U.size(1),H=U.size(2);
-  LP L{(float)l[0],(float)l[1],(float)l[2],(float)l[3],(float)l[4],(float)l[5],(float)l[6],(float)l[7],(float)l[8],(float)l[9],(float)l[10],(float)l[11],(float)l[12],(float)l[13],(float)l[14],(float)l[15]};
+  LP L{(float)l[0],(float)l[1],(float)l[2],(float)l[3],(float)l[4],(float)l[5],(float)l[6],(float)l[7],(float)l[8],(float)l[9],(float)l[10],(float)l[11],(float)l[12],(float)l[13],(float)l[14],(float)l[15],(float)l[16]};
   int T=K>=64?64:32; dim3 g((K+T-1)/T,B);
   k_roll<<<g,T,0,c10::cuda::getCurrentCUDAStream()>>>(U.data_ptr<float>(),st.data_ptr<float>(),goal.data_ptr<float>(),fp.data_ptr<float>(),(int)fp.size(0),
     (const __half*)edt.data_ptr<at::Half>(),(const __half*)erv.data_ptr<at::Half>(),es,(int)Hm,(int)Wm,co.data_ptr<float>(),de.data_ptr<float>(),tx.data_ptr<float>(),K,H,(int)TXC,(float)dt,L); }
@@ -126,5 +130,5 @@ def rollout(U, state, goal, fp, edt, L, dt, txc=3, cost=None, dead=None, tx=None
     Hm, Wm = edt.shape[-2:]; est = 0 if edt.dim() == 2 else Hm*Wm
     _ext.roll(U.contiguous(), state.float().contiguous(), goal.float().contiguous(), fp.float().contiguous(), edt.contiguous(), erev.contiguous(), est, Hm, Wm, cost, dead, tx, txc, float(dt),
               [float(L.v_max), float(L.v_min), float(L.a_brake), float(L.t_react), float(L.d_safe), float(L.d_full), float(L.v_near), float(L.d_near),
-               float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), float(getattr(L, "rev_w", 4.0)), float(getattr(L, "head_w", 1.5)), float(getattr(L, "r_circ", 0.274)), float(bool(getattr(L, "poc", False)))])
+               float(L.a_lat), float(L.w_max), float(L.v_wheel), float(L.track), float(getattr(L, "rev_w", 4.0)), float(getattr(L, "head_w", 1.5)), float(getattr(L, "r_circ", 0.274)), float(bool(getattr(L, "poc", False))), float(L.a_max)])
     return cost, dead, tx
