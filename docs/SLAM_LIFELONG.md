@@ -161,3 +161,25 @@ Nothing was changed in the sim, so kslam results are unchanged. A fix belongs in
 likelihood-field (kslam-style) scoring, and scan-to-submap instead of scan-to-keyframe.
 - **Side finding:** logged vs rendered depth agree < 2 cm on ~90 % of pixels when the robot is still, but only 27–63 % at
   0.45–0.5 m/s. The likely cause is body pitch during acceleration (the render used zero pitch); not yet verified.
+
+## 10. Phase 1 status (2026-10-19 19:45 PT): offline replay, work in progress
+Code: `nav/lslam/` (model.py: SE(2), odom model, chi2 gate, Kalman fuse; journal.py; submap.py; core.py: state machine),
+`emu/tools/slamlog/lslam_replay.py` (calib / run + faults corrupt, rescale, slip, gyro), `tests/test_lslam.py`.
+The tests pass: chi2 / SE(2), **exact submap rebuild from the journal after truncation**, and a wrong-place scan rejected → DEAD_RECKONING →
+back to TRACKING within 5 frames. Not wired into nav. Loop closure / pose-graph optimization is phase 2; submap anchors are a chain.
+
+Measured on L8, used as the training log (calib):
+- **Odometry, per ~0.1 s increment:** sd_xy = 1.42 % of distance + 0.5 mm; sd_th = 1.57 % of rotation + 1.23°/m.
+- **RS2 floor height:** median −0.7 mm, sd (MAD) 4.2 mm.
+- **CSM error with a GT-built reference** (online submap policy): heavy-tailed. A χ²-trimmed core has sd 3.6 / 4.8 mm and 0.26°, but 39 % of
+  matches fall outside it, and their median error is only 2.8 cm / 0.46°. That is not a few gross failures but a wide, real error.
+  The suspected cause is body pitch while driving (it also showed up as the depth-vs-render mismatch in §9). The fraction outside the core
+  is higher with bigger references (59 % at ≥30 scans vs 33 % below).
+
+First L8 run with the trimmed R: ATE 0.172 m (kslam 0.088, odom 0.217). Only 23 matches were accepted, 607 rejected, and the run was 92 % in
+DEAD_RECKONING. Mean NIS of accepted matches was 5.3 (should be 3), and 7 % of frames failed the sensor gate (should be 1 %). Both point
+to the same thing: R and the floor sd are underestimated. **The ATE requirement (not worse than kslam) is not met yet.**
+Next:
+- R = the untrimmed sample covariance (the code is changed; the re-calib + rerun is in progress);
+- consider a pitch-aware scan (floor-plane-referenced heights) so the error is smaller rather than just modelled;
+- then the L9–L11 runs and the fault matrix.
