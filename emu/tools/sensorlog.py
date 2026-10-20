@@ -46,7 +46,7 @@ def main():
     #  * a frame that does not fit the queue, or would leave less than SENSORLOG_DISK_MIN_GB (default 6) free on disk, is
     #    DROPPED: counted per camera in stats.json (enc_dropped / disk_dropped) and printed at the first drop.  Never
     #    unbounded, never silent.
-    MEM = float(os.environ.get("SENSORLOG_MEM_MB", "1024")) * 2 ** 20; DMIN = float(os.environ.get("SENSORLOG_DISK_MIN_GB", "6")) * 2 ** 30
+    MEM = float(os.environ.get("SENSORLOG_MEM_MB", "1024")) * 2 ** 20; DMIN = float(os.environ.get("SENSORLOG_DISK_MIN_GB", "30")) * 2 ** 30
     NENC = int(os.environ.get("SENSORLOG_ENC_THREADS", "3")); ENC_CPUS = os.environ.get("SENSORLOG_ENC_CPUS")
     LIVE = os.environ.get("SENSORLOG_DEPTH_LIVE", "auto")      # auto (above) | fast (always uncompressed while recording) | full
     PNG_FULL = [cv2.IMWRITE_PNG_COMPRESSION, 1, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_SUB]
@@ -59,6 +59,15 @@ def main():
     # packed to the usual PNG16 later by emu/tools/sensorlog_pack.py, which only runs while the sim is stopped
     # (emu/tools/offline_gate.sh); readers (slamlog.log.depth_u16) accept either file.  Raw depth is 49 MB/s for both
     # cameras (6 GB per 120 s): the SENSORLOG_DISK_MIN_GB guard drops (counted) once the disk gets that full.
+    # v5 (2026-10-20, James: keep >= 30 GB free on i777 at all times): raw depth (49 MB/s) cannot fit that budget, and no
+    # GPU lossless coder is available without fragile installs (no zstd/lz4/nvcomp in the venvs).  So recordings are
+    # sized to need: colour stays 30 Hz (GPU JPEG; visual odometry needs it in spins), depth is saved for every
+    # SENSORLOG_DEPTH_EVERY-th colour frame (default 3 = 10 Hz; the replays use rs2 depth at 5 Hz) as lossless PNG16
+    # (SUB, zlib 1: 15 ms -> ~0.3 core at 2 x 10 Hz in the SCHED_IDLE encoder; 280 KB/frame).  ~11 MB/s, 1.3 GB/120 s.
+    # Index rows of colour-only frames carry "depth": false (slamlog.log keeps the paired ones in frames[cam] and all
+    # colour in frames[cam + "_rgb"]).  SENSORLOG_DEPTH_FMT=raw keeps the .npy path (49 MB/s at every frame).
+    # Disk: the guard default is now 30 GB free (SENSORLOG_DISK_MIN_GB), and the recording is SHORTENED up front (loud) if
+    # its estimated size would cross it.
     MODE = os.environ.get("SENSORLOG_ENC", "gpu")
     if MODE == "gpu":
         try:
@@ -68,10 +77,19 @@ def main():
     if MODE == "gpu":
         if "SENSORLOG_ENC_THREADS" not in os.environ: NENC = 1
         encode_jpeg(torch.zeros((3, 8, 8), dtype=torch.uint8, device="cuda"))            # CUDA / nvjpeg init before t0
+    DFMT = os.environ.get("SENSORLOG_DEPTH_FMT", "png"); DEVERY = max(1, int(os.environ.get("SENSORLOG_DEPTH_EVERY", "3"))); kd = {}
+    rate = 2 * min(hz, 30) * (85e3 + (816e3 if DFMT == "raw" else 280e3) / DEVERY) + 10 * 60e3   # bytes/s, measured sizes
+    st_ = os.statvfs(d); free = st_.f_bavail * st_.f_frsize; fit = (free - DMIN) / rate
+    if fit < T:
+        print("sensorlog: DISK BUDGET: %.1f GB free, keep >= %.0f GB -> recording shortened %.0f -> %.0f s (est %.1f MB/s)"
+              % (free / 2 ** 30, DMIN / 2 ** 30, T, max(fit, 0), rate / 1e6), file=sys.stderr, flush=True)
+        T = max(fit, 0.0)
+    print("sensorlog: %s, depth %s every %d colour frame(s), est %.1f MB/s = %.2f GB for %.0f s; %.1f GB free (keep >= %.0f)"
+          % (MODE, DFMT, DEVERY, rate / 1e6, rate * T / 2 ** 30, T, free / 2 ** 30, DMIN / 2 ** 30), flush=True)
     def enc(path, img, prm, bgr):
         if MODE == "null": return
-        if MODE == "gpu":
-            if path.endswith(".npy"): np.save(path, img, allow_pickle=False); return     # raw depth
+        if path.endswith(".npy"): np.save(path, img, allow_pickle=False); return         # raw depth
+        if MODE == "gpu" and path.endswith(".jpg"):
             t = torch.from_numpy(np.ascontiguousarray(img)).cuda(non_blocking=False).permute(2, 0, 1)
             open(path, "wb").write(encode_jpeg(t if bgr else t.flip(0), quality=prm[1]).cpu().numpy().tobytes()); return
         cv2.imwrite(path, img[..., ::-1].copy() if bgr else img, prm)
@@ -129,19 +147,22 @@ def main():
             if lc is not None and cnt - lc > 1: S[cam]["colour_reader_missed"] += cnt - lc - 1
             lc = cnt; S[cam]["colour_src"] += 1
             if sc - last_saved < min_dt: continue                        # decimation only when hz < camera rate
-            dd = None; tw = time.monotonic() + 0.1
+            dd = None; tw = time.monotonic() + (0.1 if (kd.get(cam, -1) + 1) % DEVERY == 0 else 0.0)
             with cv:
                 while True:
                     m = [(abs(st - sc), st, x) for st, x in ring]
                     if m and min(m, key=lambda x: x[0])[0] <= 5e6: _, st, dd = min(m, key=lambda x: x[0]); break
                     if time.monotonic() > tw: break
                     cv.wait(0.01)
-            if dd is None: S[cam]["unpaired"] += 1; continue
-            f = "%s/%d" % (cam, sc); last_saved = sc
+            if dd is None and (kd.get(cam, -1) + 1) % DEVERY == 0: S[cam]["unpaired"] += 1; continue
+            f = "%s/%d" % (cam, sc); last_saved = sc; kd[cam] = kd.get(cam, -1) + 1
+            if kd[cam] % DEVERY:                                         # colour-only frame (depth decimated)
+                if not put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True, cam): continue
+                row(dict(cam=cam, stamp_ns=sc, file=f, depth=False)); S[cam]["saved"] += 1; saved[cam].append(sc); continue
             ok1 = put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True, cam)
-            ok2 = put(os.path.join(d, f + (".npy" if MODE == "gpu" else ".png")), dd, None, False, cam)
+            ok2 = put(os.path.join(d, f + (".npy" if DFMT == "raw" else ".png")), dd, None, False, cam)
             if not (ok1 and ok2): continue                               # dropped (counted): not indexed, not 'saved'
-            row(dict(cam=cam, stamp_ns=sc, depth_stamp_ns=st, file=f)); S[cam]["saved"] += 1; saved[cam].append(sc)
+            row(dict(cam=cam, stamp_ns=sc, depth_stamp_ns=st, file=f)); S[cam]["saved"] += 1; S[cam]["depth_saved"] += 1; saved[cam].append(sc)
     def mast_loop(b):
         last = b.seq
         while wait(b, last):

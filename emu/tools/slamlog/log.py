@@ -26,7 +26,9 @@ class Log:
         for l in open(os.path.join(d, "index.jsonl")):
             r = json.loads(l)
             if "gt" in r: g.append([r["t_mono"]] + r["gt"][:3] + [r["t_sim"]])
-            else: fr.setdefault(r["cam"], {})[r["stamp_ns"]] = r["file"]
+            else:
+                if r.get("depth", True): fr.setdefault(r["cam"], {})[r["stamp_ns"]] = r["file"]     # colour + depth pairs
+                if r["cam"] != "mast": fr.setdefault(r["cam"] + "_rgb", {})[r["stamp_ns"]] = r["file"]   # all colour (v5: 30 Hz)
         g = np.array(g); self.gt_xy = g[:, 1:3]; self.gt_yaw = np.unwrap(g[:, 3])
         # GT time: the pose belongs to sim time t_sim; t_mono (query midpoint) carries the UDP round trip (p99 +20 ms).
         # Map t_sim -> monotonic by the lower envelope of (t_mono - t_sim) (latency only adds), fitted per 5 s chunk.
