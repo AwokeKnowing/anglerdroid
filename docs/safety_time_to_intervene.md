@@ -1,133 +1,121 @@
 # Safety core vs. the time-to-intervene model (design note, 2026-10-20, PROPOSAL, nothing changed)
 
-**Principle (James, 2026-10-20):** the safety core prevents collisions. It does not enforce safe speeds. The planner owns
-slow speeds near obstacles; its margin is about 2x the safety margin. Each tick the core asks one question: if braking
-started after a lead time, could the robot still stop before contact at its current speed? While the answer is yes,
-the command passes untouched. When the remaining lead time drops to a threshold (about 100 ms), the core steps in and
-forces the speed down fast. There is no blanket throttling near obstacles. Throttling of that kind conflicted with
-wall-following and squeezing in past behaviour models. The escape creep cap (|v| <= 0.05, |w| <= 0.3 inside the margin)
-was proposed and **rejected** under this principle.
+**Principle (James, t610/t611):** the safety core prevents collisions. It does not enforce safe speeds. The planner owns
+slow speeds near obstacles; its margin is about 2x the safety margin. The core's question is bounded. Continue the current
+command for the lead time, then brake gracefully to v=0, w=0 within the traction (friction-ellipse) limits. Sweep the
+footprint along **that horizon only**. Intervene only if that braking trajectory contacts an obstacle; otherwise pass the
+command untouched. Spins and straight or arc motion get the same test. "Eventually collides" is not a criterion, because every
+forward command eventually collides. The escape creep cap (|v| <= 0.05, |w| <= 0.3 inside the margin) was rejected under this principle.
 
-`safety_core.py` and `governor.py` are not edited by this note. Everything below is a proposal for approval.
+`safety_core.py` and `governor.py` are not edited. This note is a proposal for approval.
 
 ## 1. What the core does today (nav/safety_core.decide, nav/governor.governor)
 
-| Rule | Today | Matches TTI? |
+| Rule | Today | vs. bounded braking-trajectory test |
 |---|---|---|
-| Brake check | Sweep the commanded arc (or the measured one, if faster) for `need = v(T_TICK+T_CMD) + d_stop(v, ramp 5)` and pass if that sweep stays `MARGIN` (3.5 cm) clear of every point. Otherwise output zero and raise the ramp only as far as needed. | **Mostly.** It asks "can I still stop if I pass this tick?" and passes unchanged or zeroes (no gradual throttling). The difference is that the buffer is a **distance** (3.5 cm), not a **time**, and the built-in lead is only one tick plus latency (43 ms). |
-| Rotation | Same check, using `need_angle(w)` on a spin in place. | Same as the brake check. |
-| Hard bands | Any point in the 5 cm strip ahead of (or behind) the footprint means v toward it is 0, at any speed. | **No.** This is a speed-independent keep-out. At wall-follow or docking speed it vetoes motion that could stop in under 1 cm. |
-| Escape | When `sd0 < MARGIN`, pass any command whose sweep min-sd `mn >= sd0`, at **any** speed. | **No, and unsafe.** It tests only the *global* minimum, so it is neither a collision test nor a speed rule (see section 3). |
-| Operability | Frame age > 100 ms, missed cadence, or no depth: STOP. | Orthogonal. Keep it. |
-| Governor (brain) | Scales (v, w) by 1 down to 0.1 so the sweep keeps 2x(need + MARGIN) clear, then rotate-only, then stop. The same `mn >= sd0` escape applies when inside the margin. | **Yes for scaling.** This is the planner owning slow speeds, with factor 2 = "planner margin about 2x safety". Its escape clause has the same flaw as the core's. |
+| Brake check (arc and spin) | Sweep the commanded arc at constant curvature (the measured motion, if faster) for `need = v(T_TICK+T_CMD) + d_stop(v, ramp 5)`, where `d_stop = 0.0926 v + v²/(2·4.26)`. Pass if the sweep stays `MARGIN` = 3.5 cm clear; otherwise zero with the ramp raised as needed. A spin uses `need_angle` with `alpha_max = 4.26/(0.181) = 23.5 rad/s²`. | **Same structure.** It is already "continue, then brake, sweep only that horizon, pass untouched or zero" (no throttling). Three differences: (a) contact is defined as 3.5 cm, not about 0; (b) the brake is modelled at constant curvature, while the ODrive ramps each wheel separately (see section 2); (c) there is no explicit friction-ellipse check. |
+| Hard bands | Any point in the 5 cm strip ahead of or behind the footprint makes v toward it 0, at any speed. | **Not bounded by the trajectory.** It is a speed-independent keep-out; at 0.05 m/s the braking trajectory reaches only about 0.6 cm. |
+| Escape | When `sd0 < MARGIN`, pass any command with global sweep-min `mn >= sd0`, at any speed. | **Wrong test.** It uses the global minimum instead of per-point penetration change (section 3). |
+| Operability | Frame age > 100 ms, missed cadence, or no depth: STOP. | Orthogonal; keep. |
+| Governor (brain) | Scales (v, w) 1 down to 0.1 so the sweep keeps 2x(need + MARGIN) clear, then rotate-only, then stop. Uses the same `mn >= sd0` escape. | The scaling is the planner owning slow speed (factor 2 ≈ "planner margin 2x"). Keep it. The escape clause has the same flaw as the core's. |
 
-Effective lead time of today's brake check. This is the time left before the core must act, i.e. `33 ms + MARGIN/v`:
+### Lead time / threshold the current core implies, and the 30 Hz / 100 ms budget
 
-| v (m/s) | need (m) | need + MARGIN (m) | equivalent lead (ms) |
-|---|---|---|---|
-| 0.05 | 0.007 | 0.042 | 733 |
-| 0.10 | 0.015 | 0.050 | 383 |
-| 0.20 | 0.032 | 0.067 | 208 |
-| 0.30 | 0.051 | 0.086 | 150 |
-| 0.45 | 0.085 | 0.120 | 111 |
+Horizon modelled today, for continuing the command before the wheels decelerate:
+* `T_TICK` = 33.3 ms. If this tick passes the command, the next decision can stop it at the earliest one frame later.
+* `T_CMD` = 10 ms (assumed decision-to-CAN; logged as `t_sent - t_dec`).
+* The actuator lag in the measured stop fit is 92.6 ms at ramp 5 (98.7 ms at ramp 3). This is physical: ramp shape and motor loop. It is not a choice.
+* So the modelled "keep going" time is **≈ 43 ms decision lead + 93 ms actuator lag ≈ 136 ms**, then 4.26 m/s² decel.
+* The 3.5 cm MARGIN adds the equivalent of `MARGIN/v` of extra lead: 700 ms at 0.05 m/s, 350 ms at 0.1, 117 ms at 0.3,
+  78 ms at 0.45. The total equivalent lead is therefore 0.73 s, 0.38 s, 0.15 s and 0.11 s (computed from the code's brake fits, sim-measured).
+  At planner speeds the margin, not the dynamics, decides. That is why the core acts like a distance keep-out when wall-following or squeezing.
 
-These numbers are computed from the code's own brake fits (measured in sim, ramp 5). At planner speeds of 0.05 to 0.1 m/s, the
-fixed 3.5 cm margin makes the core act 0.4 to 0.7 s early. That works as a distance keep-out and is what fights squeezing.
-At 0.45 m/s it is already about 110 ms, which is close to the proposed rule.
+Relation to the 100 ms budget: obstacle points reach the decision up to `AGE_MAX` = 100 ms old. Measured live:
+frame-age p50 ≈ 52 ms, p99 75 to 87 ms, max 95 to 116 ms on the route. The points are motion-compensated to *now* with wheel odometry,
+so frame age does not shorten the horizon. It does bound how late a *newly appearing* obstacle can enter the test
+(≤ age + 1 tick ≈ 133 ms), and it adds compensation error ≈ odometry error × age. With a 100 ms reaction threshold,
+the decision lead stays the 43 ms that the 30 Hz loop actually needs, and the 100 ms covers the rest
+(frame-age slack plus a check one tick early). That means: intervene when continuing for `T_LEAD` = 100 ms, then braking, would
+contact. 100 ms ≥ 43 ms always holds, so the core still acts at least one full tick before it is too late.
 
-## 2. Proposed rule (time-to-intervene)
+## 2. Proposed test (bounded braking trajectory)
 
-For the commanded motion (or the measured one, if faster):
+For the current command (v_c, w_c), taking the measured twist where it is faster in the same direction:
+1. **Trajectory.** Hold (v_c, w_c) for `T_LEAD` (default 0.10 s, env `KEVIN_SC_T_LEAD`; must be ≥ T_TICK + T_CMD). Then
+   play the **measured brake response**: actuator lag, then each wheel ramps to 0 at the chosen ramp. The ODrive ramps
+   each axis on its own, so on an arc the slower wheel stops first and the curvature changes during the stop. The brake
+   is integrated per wheel (vl, vr), not along a constant-curvature arc. For a pure spin and for straight motion both reduce to today's
+   formulas.
+2. **Traction (friction ellipse).** Along the brake, require `sqrt(a_t² + (v·w)²) ≤ μg` with μ taken from the measured skid
+   onset: ramp 8 skidded and ramp 5 did not, on carpet in sim. If ramp 5 would violate it (fast arc), use the largest
+   ramp that does not; the horizon simply gets longer. The core never assumes it can brake harder than traction allows.
+3. **Sweep** the footprint over that trajectory only, 1 cm / 0.02 rad steps as today.
+4. **Contact** means any point comes within `EPS` of the footprint. EPS covers perception and pose error only, not comfort. Proposed 1.5 cm,
+   an **assumption** to be measured: motion-compensation residual at p99 frame age plus sim depth noise.
+5. **Decision.** If there is no contact on the horizon, **pass untouched**, whatever the speed. If there is contact, intervene now: zero, with the
+   ramp raised as far as traction allows (current brake path). Nothing in between.
+6. **Bands:** points in the band strips go into the same test, with no separate veto. Open question for James: keep the bands
+   only as a *blind-zone* guard (unseen rear space treated as occupied at the visibility edge), or drop them.
 
-* `d_contact` is the arclength (or angle) along the sweep to the first pose where any point comes within `EPS` of the footprint.
-  `EPS` covers perception and pose error only, not comfort. Proposed value: 1.5 cm, which is an **assumption**. It would be
-  measured from the motion-compensation residual (frame age x speed) and the sim depth noise before it is adopted.
-* `t_lead = (d_contact - v*T_CMD - d_stop(v, RAMP_MAX)) / |v|` is how long braking could still wait.
-  For rotation, use the same formula with angle, `need_angle`, and `alpha_max`.
-* If `t_lead > T_INTERVENE` (100 ms, plus one tick of decision period, i.e. checked as `>= T_INTERVENE + T_TICK`), **pass
-  untouched**. Otherwise zero the command with the ramp raised as needed. This is the current brake path, unchanged.
-* Equivalent pass distance: `v*(T_INTERVENE + T_TICK + T_CMD) + d_stop + EPS`. That is 2.5 cm at 0.05 m/s, 3.6 cm at
-  0.1, 6.0 cm at 0.2, 8.6 cm at 0.3 and 13 cm at 0.45. It is about the same as today at speed, and much less at creep speed.
-* **Bands** become ordinary points in the same test, so no speed-independent veto remains. One part is kept: the rear band's
-  *visibility* learning. It still decides where the rear camera is blind, and blind rear space counts as occupied at
-  the edge of visibility. *Decision for James:* keep the front/rear bands as a blind-spot guard only (points we cannot
-  re-observe), or drop them entirely.
-* **Escape → per-point collision test.** This replaces `mn >= sd0`. A command is *colliding* if, anywhere on its
-  sweep up to `d_stop + lead`, **any point gets closer than `min(its own current sd, EPS)`**. In words: no point that is now
-  outside EPS may come inside it, and no point that is already inside may get deeper. A colliding command is rejected at
-  **any speed**. A non-colliding command is then handled by the t_lead rule, which passes it untouched at planner speed.
-  There is no speed cap.
-* The governor gets the same per-point clause in place of its `mn >= sd0` clause. Its 2x scaling stays as the planner's
-  speed policy.
+Equivalent pass distance (straight line, ramp 5): `v·(T_LEAD + 0.0926) + v²/(2·4.26) + EPS` gives 2.5 cm at 0.05 m/s,
+3.5 cm at 0.1, 5.8 cm at 0.2, 8.3 cm at 0.3 and 12.7 cm at 0.45. Today's values are 4.2 / 5.0 / 6.7 / 8.6 / 12.0 cm. The two are nearly identical
+at speed and much smaller at creep speed.
 
-## 3. The in-contact full-speed spin (L15 wedge) under this model
+## 3. In-contact case (L15 wedge)
 
-Observed (L15, measured from the core log): `code = escape` passed w up to 1.57 rad/s and v 0.15 m/s with sd0 between -1.7 and -4.3 cm,
-meaning a point was *inside* the footprint.
+Measured (L15 core log): `code = escape` passed w up to 1.57 rad/s and v 0.15 m/s with sd0 between -1.7 and -4.3 cm. A point was inside the
+footprint, so stopping room was zero.
 
-Why today's rule passes it (inferred from the code, not yet replayed per point): `mn` is the **global** minimum over all
-points and all sweep poses. With the deepest point at -4.3 cm, a spin keeps that point at about -4.3 cm (it sits near the
-rotation axis or on a convex corner), while *other* points 1 to 3 cm outside get swept into the hull. Their new depth,
-for example -3 cm, is still >= -4.3, so `mn >= sd0` holds and the colliding spin passes at full speed.
+Under the bounded test, a robot already inside EPS has no horizon to spare. Any trajectory pose that *increases
+penetration* is contact, and the command is rejected at any speed. Per-point rule over the same bounded horizon:
+for every point, `sd_along(p) ≥ min(sd_now(p), EPS) - 1e-3`. No point outside EPS may enter it, and no point inside may get deeper.
+A motion that *reduces* penetration for the near points passes untouched at planner speed. Examples are a straight reverse out of
+the wedge, or nav/escape.py's planned rot -60° / back 12 cm chain.
 
-Under the proposed per-point rule:
-* A spin whose swept footprint takes any currently-outside point inside EPS, or pushes an inside point deeper, is
-  colliding and is **rejected regardless of speed**. That holds whether it is a 0.3 rad/s creep or a 1.57 rad/s spin.
-* A move that increases clearance for every close point (e.g. nav/escape.py's planned "rot -60°, back 12 cm" primitive
-  chain, or a straight reverse out of the wedge) is **allowed at planner speed**, untouched.
-* A point inside the footprint that cannot be real (self-mask leak, chassis returns) would block every motion. Today that
-  case is hidden by the global-min rule. Under the new rule it must be logged as a code (`inside_fp`) so we fix the mask
-  rather than the rule.
+Why today's rule passes the L15 full-speed spin: this is inferred from the code and has not yet been replayed per point. `mn` is the *global* minimum. The deepest
+point (-4.3 cm) stays at about -4.3 cm during the spin while other points 1 to 3 cm outside are swept into the hull, for example to -3 cm.
+Since -3 ≥ -4.3, the clause holds. The per-point rule rejects that spin and still allows the clearance-increasing exit. A point that
+cannot be real (self-mask leak) would block every motion. It gets its own log code (`inside_fp`) so the mask gets fixed,
+instead of a rule hiding it.
 
 ## 4. Proposed diff summary (for approval; not applied)
 
 `nav/safety_core.py`
-1. Add constants `T_INTERVENE = 0.10` (env `KEVIN_SC_T_INTERVENE`) and `EPS = 0.015` (env `KEVIN_SC_EPS`).
-2. Change `_first_hit(m, steps)` so it can take a threshold. The default stays MARGIN for backward-compatible callers, and the
-   core uses EPS.
-3. Add `per_point_sweep(P, poses)`, which returns the (S, N) sd matrix (the vectorised `_sweep` without the `min`). Add
-   `colliding(P, poses, eps) = any((sd_s < minimum(sd_0, eps) - 1e-3) & (sd_s < eps))`. Only points near the hull are
-   evaluated, using the existing reach pruning.
-4. `decide()`:
-   * Band branch: replace the unconditional veto with "add band-strip points as occupied only where the band is blind"
-     (pending James's band decision).
-   * Translation and rotation: first `colliding(...)` over `need_tti + 0.02`, which gives code `collide` (new) and a zero
-     output. Then pass if `free >= need_tti`, where `need_tti = need(v) + v*T_INTERVENE + EPS`. Otherwise `brake`.
-   * Delete both `sd0 < MARGIN and mn >= sd0` escape clauses. The "escape" code is kept in CODES for log
-     compatibility, now meaning "inside EPS, non-colliding, passed".
-5. Add `"collide"` and `"inside_fp"` to CODES, appended so existing log indices are unchanged.
-6. Delete the legacy unused `safety_core.governor()` (nav/governor.py is the live one), or leave it alone, as James prefers.
+1. Add constants `T_LEAD = 0.10` (`KEVIN_SC_T_LEAD`, asserted ≥ T_TICK + T_CMD), `EPS = 0.015` (`KEVIN_SC_EPS`) and `MU_G`
+   (traction limit from the skid measurement).
+2. Add `brake_traj(v, w, v_m, w_m, ramp)`, which returns the poses for hold-for-T_LEAD followed by a per-wheel lag+ramp stop, with the
+   ramp lowered until the friction ellipse holds. It replaces `need_dist` / `need_angle` arc sampling in `decide`, and the old functions stay for callers.
+3. Add `contact(P, poses)` (per-point (S, N) sd matrix, the vectorised `_sweep` without the min). It returns True if any point violates
+   `sd ≥ min(sd_now, EPS) - 1e-3` (pruned to points within reach + R_FOOT, as today).
+4. `decide()`: one path for straight, arc and spin. Idle/coast stays as is. Then `contact(P, brake_traj(...))`: contact gives
+   `brake` (or `collide` when sd0 < EPS) with zero output; otherwise `ok` (`escape` if sd0 < EPS, kept for log compatibility). The two
+   `mn >= sd0` clauses and the unconditional band veto are removed (bands: per James's decision).
+5. CODES: append `collide` and `inside_fp`, so existing indices are unchanged. Log fields: `free`/`need` become horizon length and contact arclength.
+6. The legacy unused `safety_core.governor()` is deleted or left as is, as James prefers.
 
 `nav/governor.py`
-1. Same `colliding()` test on the brain point set in place of `mn >= sd0 - 1e-3`.
-2. Keep 2x scaling but on `need_tti + MARGIN_PLANNER`, where MARGIN_PLANNER = 2 x EPS + 3.5 cm is today's planner comfort.
-   The planner keeps owning slow speeds.
-3. The property test (0/3000 disagreements with the core) is re-run on the new rule. Required: 0 disagreements.
+1. The same `contact()` on brain points, over `brake_traj` with the planner horizon (factor 2 on T_LEAD + EPS + 3.5 cm planner margin).
+2. Scaling stays (planner-owned speed). The property test is re-run: 0/3000 governor-pass / core-reject disagreements required.
 
-`emu/tools/stuckdiag/escape_offline.py` (and a new `sc_tti_offline.py`)
-* Replay L15, L14 and L17 core inputs through old and new `decide()` and report per-code counts, plus every tick where old
-  passed and new rejects (and vice versa) with the point geometry.
+Offline tools: `emu/tools/stuckdiag/sc_tti_offline.py` (new) replays logged core inputs through the old and new `decide`.
 
-## 5. Sim test plan (n >= 3 each; old rule vs. new rule, same seeds/starts; fresh world and nav per run)
+## 5. Sim test plan (n ≥ 3 each, old vs. new rule, fresh world and nav per run)
 
-Offline first (sim stopped, offline_gate):
-* O1. Replay the L15 wedge ticks. Expected: every `escape` tick with |w| > 0.3 and a point swept inward becomes `collide`,
-  and the escape.py plan's primitives stay `ok`/`escape`.
-* O2. Replay L17, L14 and L8 to L13 (normal driving). Count ticks where new != old. Expected: new passes strictly more at
-  v <= 0.15, and zero new passes that have a contact within 1 s in the world contact log.
+Offline first (sim stopped, via offline_gate):
+* O1. L15 wedge ticks. Expected: escape-passed spins that sweep points inward become `collide`, and escape.py plan primitives stay `ok`/`escape`.
+* O2. L8 to L17 normal driving. Count new ≠ old. Expected: new passes more at v ≤ 0.15, and zero new passes have a world contact
+  within the horizon (checked against the world contact log).
+* O3. Brake-model check: predicted per-wheel stop poses vs. `emu.tools.brake_test` on arcs (0.3 m/s at κ = 0, 1, 3 1/m), to confirm the
+  curvature drift during the stop.
 
-Live (sim):
-1. **Wedge** (L15 start 3.877, 1.566, yaw 1.238, "go to kitchen", KEVIN_ESCAPE=1). Metrics: world contact count and max
-   penetration, time to clear, whether a full-speed spin with sd0 < 0 ever reaches the wheels (expected 0 under new),
-   and success to goal.
-2. **Wall-follow at planner speed.** Scripted drive 0.15 to 0.25 m/s parallel to the hallway wall at 6 cm, then 4 cm, clearance.
-   Metrics: core interventions per metre, min clearance, world contacts (must be 0), and speed held vs commanded. Expected:
-   old intervenes or bands at 4 cm, new passes untouched.
-3. **Squeeze through a gap.** Two chairs (or env obstacles) at gap = footprint width + 4 cm, then + 2 cm, approached at
-   0.1 m/s. Metrics: pass-through success, interventions, and world contacts (must be 0).
-4. **Control: head-on approach** to a wall at 0.1, 0.3 and 0.45 m/s with no planner slow-down (raw command). Metric: stop gap
-   at rest. It must be > 0 (no contact) and should be about EPS. This shows the core alone still prevents the collision.
+Live:
+1. **Wedge** (L15 start 3.877, 1.566, yaw 1.238; "go to kitchen"; KEVIN_ESCAPE=1). Metrics: contacts and max penetration,
+   time to clear, number of penetration-increasing commands reaching the wheels (expected 0 under new), and goal reached.
+2. **Wall-follow at planner speed:** 0.15 to 0.25 m/s parallel to the hallway wall at 6 cm, then 4 cm. Metrics: interventions per metre,
+   commanded vs. achieved speed, min clearance, and world contacts (must be 0). Expected: old intervenes or bands, new passes untouched.
+3. **Squeeze through a gap:** gap = footprint + 4 cm, then + 2 cm, at 0.1 m/s. Metrics: success, interventions, and contacts (must be 0).
+4. **Control: raw head-on approach** (planner slow-down bypassed) at 0.1, 0.3 and 0.45 m/s, plus a 1.5 rad/s spin next to a chair leg.
+   Metric: rest gap > 0 (≈ EPS). This shows the core alone prevents the collision.
 
-Acceptance: 0 world contacts in tests 2 to 4, the wedge cleared with fewer contacts than old, and no frame-age regressions
-(core p99 and max unchanged). Every result is reported as measured vs assumed (EPS and T_INTERVENE are assumptions until
-the measurements above).
+Acceptance: 0 world contacts in tests 2 to 4, the wedge cleared with fewer contacts than old, and no frame-age regression in the core.
+Every result is reported as measured vs. assumed. T_LEAD, EPS and μ remain assumptions until O3 and the noise and residual measurements are done.
