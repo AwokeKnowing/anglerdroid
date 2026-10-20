@@ -36,6 +36,7 @@ __device__ __forceinline__ float stopclear(float x,float y,float th,float v,floa
 #define R_ROTATE @R_ROTATE@f
 #define R_PASS @R_PASS@f
 #define APPROACH_VMIN 0.08f
+#define D_DEAD @D_DEAD@f  // nav/limits.py MPPI_DEAD: planner clearance (+1 EDT cell); a start inside it may only not get closer (-5 mm)
 #define REV_IN 0.005f   // half a 1 cm planning cell: the sample lies in a known-traversable cell
 __global__ void k_roll(const float* U,const float* st,const float* goal,const float* fp,int P,const __half* edt,const __half* erv,long long es,int Hm,int Wm,
   float* co,float* deo,float* tx,int K,int H,int TXC,float dt,LP L){
@@ -90,7 +91,7 @@ __global__ void k_roll(const float* U,const float* st,const float* goal,const fl
       // 'retreat along the way in' never moved (stuck1 dumps: footprint edt_rev 0.000 at 9/10 trail poses).
       clr=clearf(x,y,th,fp,P,e,Hm,Wm);
       crv=v<0.f?clearf(x,y,th,fp,P,er,Hm,Wm):1.f;
-      if(clr<0.012f || crv<REV_IN) dead=1.f;
+      if(clr<0.012f || clr<fminf(D_DEAD,clr0-0.005f) || crv<REV_IN) dead=1.f;
       crv=clr; }
     int ix=min(max((int)(x*100.0f),0),Wm-1), iy=min(max((int)(y*100.0f),0),Hm-1);
     float ax=__half2float(e[(long long)iy*Wm+ix]);
@@ -115,7 +116,9 @@ void roll(torch::Tensor U,torch::Tensor st,torch::Tensor goal,torch::Tensor fp,t
 '''
 import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
 import twin_geometry as _TG
-_SRC = _SRC.replace('@R_ROTATE@', '%.4f' % _TG.R_ROTATE).replace('@R_PASS@', '%.4f' % _TG.R_PASS)
+_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..'))
+from nav import limits as _LIM
+_SRC = _SRC.replace('@R_ROTATE@', '%.4f' % _TG.R_ROTATE).replace('@R_PASS@', '%.4f' % _TG.R_PASS).replace('@D_DEAD@', '%.4f' % _LIM.MPPI_DEAD)
 _ext = load_inline('kplan_mppi_cuda_v10', cpp_sources='void roll(torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,int64_t,int64_t,torch::Tensor,torch::Tensor,torch::Tensor,int64_t,double,std::vector<double>);',
                    cuda_sources=_SRC, functions=['roll'], extra_cuda_cflags=['-O3'], verbose=False)
 

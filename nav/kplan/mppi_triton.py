@@ -4,6 +4,9 @@ import math, torch, triton, triton.language as tl
 import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
 import twin_geometry as _TG
 R_ROTATE = tl.constexpr(_TG.R_ROTATE); R_PASS = tl.constexpr(_TG.R_PASS)
+_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..'))
+from nav import limits as _LIM
+D_DEAD = tl.constexpr(_LIM.MPPI_DEAD)   # see mppi_cuda D_DEAD
 
 @triton.jit
 def _atan2(y, x):
@@ -46,7 +49,7 @@ def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
     gx = tl.load(goal + b*3); gy = tl.load(goal + b*3 + 1); gth = tl.load(goal + b*3 + 2)
     eoff = b.to(tl.int64)*estride
     cost = zero; dead = zero; usq = zero
-    clr = _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask)
+    clr = _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask); clr0 = clr
     ub = U + (b*K + k).to(tl.int64)*(H*2)
     txb = tx_o + (b*K + k).to(tl.int64)*(H*TXC)
     for t in range(H):
@@ -73,7 +76,7 @@ def _rollout(U, state, goal, fp, edt, erev, estride, Hm, Wm,
         # obstacle clearance (metric) vs reverse containment in known-traversable space (see mppi_cuda REV_IN)
         clr = _clear(x, y, th, fp, P, edt, eoff, Hm, Wm, mask)
         crv = tl.where(v < 0, _clear(x, y, th, fp, P, erev, eoff, Hm, Wm, mask), 1.0)
-        dead = tl.where((clr < 0.012) | (crv < 0.005), 1.0, dead)
+        dead = tl.where((clr < 0.012) | (clr < tl.minimum(D_DEAD, clr0 - 0.005)) | (crv < 0.005), 1.0, dead)
         ix = tl.minimum(tl.maximum((x*100.0).to(tl.int32), 0), Wm-1)
         iy = tl.minimum(tl.maximum((y*100.0).to(tl.int32), 0), Hm-1)
         ax = tl.load(edt + eoff + iy.to(tl.int64)*Wm + ix, mask=mask, other=1.0).to(tl.float32)

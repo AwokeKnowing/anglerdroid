@@ -49,7 +49,7 @@ def plan(Pw, pose, bands=None, max_exp=4000, max_s=3.0, goal_r=GOAL_R, reach=0.6
         for k in (4, 2, 1, 3):                                            # cheap sweep test first (end pose first)
             if sd(to_robot(Pw, _step(p, kind, a * k / 4))).min() < CLEAR: return None
         v, w = (math.copysign(CREEP_V, a), 0.0) if kind == "lin" else (0.0, math.copysign(CREEP_W, a))
-        if governor(to_robot(Pw, p), v, w, bands=bands)[4] != "ok": return None
+        if governor(to_robot(Pw, p), v, w, bands=bands, escape=True)[4] != "ok": return None
         return _step(p, kind, a)
 
     key = lambda p: (round(p[0] / 0.02), round(p[1] / 0.02), round(((p[2] + math.pi) % (2 * math.pi)) / STEP_A) % 36)

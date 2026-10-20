@@ -18,7 +18,7 @@ factor x the reaction lead time."""
 from __future__ import annotations
 import numpy as np
 from nav import limits as LIM
-from nav.safety_core import sd, free_along, free_rotation, need_dist, need_angle, MARGIN, SC_DECEL, T_R, brake_traj, decel_violates, decel_prep, traj_travel
+from nav.safety_core import sd, free_along, free_rotation, need_dist, need_angle, MARGIN, SC_DECEL, T_R, brake_traj, decel_violates, decel_prep, traj_travel, _sd_matrix_T, D_CELL_ERR, D_TOL
 from twin_geometry import FOOTPRINT_SAFE
 
 R_FP = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())   # footprint radius about the axle
@@ -26,12 +26,31 @@ R_FP = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())   # foo
 SCALES = (1.0, 0.8, 0.6, 0.45, 0.3, 0.2, 0.1)
 
 
+def _plan_violates(prep, poses, mg, escape=False):
+    """planner-side clearance test (SC_DECEL): the core's per-obstacle rule at clearance mg (clearance along the trajectory
+    >= min(now, mg)), PLUS no entering the zone (below).  The second part makes the planner side
+    unable to move INTO the zone at all -- the per-obstacle 'not closer than now' alone lets fresh points (further along
+    a wall) approach down to the closest point's value, which re-measured every tick with perception jitter ratchets the
+    robot inward (bench wall_drift_2deg --perc measured).  Per point implies per obstacle, so governor-pass => core-pass holds.
+    prep: safety_core.decel_prep() cells (mg + D_CELL_ERR is the cell-centre threshold, as in decel_violates)."""
+    Q, st = prep[0], prep[1]; M = _sd_matrix_T(Q, poses); thr = mg + D_CELL_ERR
+    cm = np.minimum.reduceat(M, st, axis=0)
+    if (cm < np.minimum(cm[:, :1], thr) - D_TOL).any(): return True
+    # no entering.  Normal planning: no POINT outside the zone may come inside it, so inside the zone only motions that
+    # leave it pass (a slow drift cannot hide in the perception jitter).  Escape/backout (escape=True, wedged on purpose):
+    # only obstacles that are entirely outside the zone are held to it, so motions along an obstacle already inside --
+    # e.g. reversing out of a wedge beside a wall -- keep the core's per-obstacle rule.
+    out = M[:, 0] >= thr
+    if escape: out &= np.repeat(cm[:, 0] >= thr, np.diff(np.r_[st, len(Q)]))
+    return bool((out & (M.min(1) < thr - D_TOL)).any())
+
+
 def _band(P, rect):
     x0, y0, x1, y1 = rect
     return bool(len(P)) and bool(((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any())
 
 
-def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
+def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0, escape=False):
     """P (N,2) robot frame (brain points U core points); bands: core band rects [[front], [rear]] (x0, y0, x1, y1)
     or None.  Returns (v, w, scale, need2, why)."""
     sd0 = float(sd(P).min()) if len(P) else np.inf
@@ -56,8 +75,9 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
     if SC_DECEL:
         # mirror of the core's designed-decel rule (safety_core.decide_decel) with the PLANNER accel limits (safety / PLAN_MULT,
         # nav/limits.py) and PLAN_MULT x the reaction lead, so the planner slows before the core would have to act; same
-        # margin, no band veto (the core has none in this mode)
+        # no band veto (the core has none in this mode); clearance PLAN_CLEARANCE (nav/limits.py)
         factor = LIM.PLAN_MULT; aL, aT = LIM.PLAN_A_LONG, LIM.PLAN_A_LAT
+        MG = LIM.PLAN_CLEARANCE      # spatial: margin + measured perception allowance (>= MARGIN, so governor-pass => core-pass holds)
         sdP = sd(P) if len(P) else np.zeros(0); PREP = {}
         def ok(vs, ws):
             if abs(vs) < 1e-3 and abs(ws) < 1e-3: return True, 0.0
@@ -67,9 +87,9 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
             if not len(P): return True, t_stop
             if "p" not in PREP:     # candidates once, for the largest travel of this call (full command, or measured if faster)
                 big = brake_traj(max(abs(v), abs(v_meas)), max(abs(w), abs(w_meas)), factor * T_R, aL, aT)[0]
-                PREP["p"] = decel_prep(P, sdP, max(traj_travel(big), traj_travel(poses)), MARGIN)
+                PREP["p"] = decel_prep(P, sdP, max(traj_travel(big), traj_travel(poses)), MG)
             if PREP["p"] is None: return True, t_stop
-            return not decel_violates(P, sdP, poses, MARGIN, PREP["p"])[0], t_stop
+            return not _plan_violates(PREP["p"], poses, MG, escape), t_stop
     if abs(v) < 1e-3 and abs(w) < 1e-3: return 0.0, 0.0, 1.0, 0.0, "idle"
     for s in SCALES:
         g, n2 = ok(v * s, w * s)

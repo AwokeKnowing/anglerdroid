@@ -37,14 +37,14 @@ def const(v, w): return lambda t, pose: (v, w)
 
 # scene: world points, start pose, planner policy, duration, success test(pose, log) -> bool, what 'correct' means
 SCENES = collections.OrderedDict()
-def scene(name, pts, policy, T, goal, expect, start=(0.0, 0.0, 0.0)):
-    SCENES[name] = dict(P=np.vstack(pts), policy=policy, T=T, goal=goal, expect=expect, start=np.array(start, float))
+def scene(name, pts, policy, T, goal, expect, start=(0.0, 0.0, 0.0), escape=False):
+    SCENES[name] = dict(P=np.vstack(pts), policy=policy, T=T, goal=goal, expect=expect, start=np.array(start, float), escape=escape)
 
 _wedge = [post((0.11, 0.15), 0.006), line((-0.45, HW + 0.015), (0.45, HW + 0.015)), line((0.45, HW + 0.015), (0.45, 0.6))]
 scene("wedge_spin_in", _wedge, const(0.0, 1.57), 2.0, lambda p, L: L["deepen"] <= 0.002,
       "in contact (leg inside fp, edge 1.5 cm left): full-speed CCW spin sweeps the front-left corner into the edge -> must be rejected")
 scene("wedge_reverse_out", _wedge, const(-0.12, 0.0), 2.0, lambda p, L: p[0] <= -0.2 and L["deepen"] <= 0.002,
-      "same wedge: straight reverse at planner speed increases clearance -> must pass untouched and exit")
+      "same wedge: straight reverse at planner speed increases clearance -> must pass untouched and exit (governor in escape mode)", escape=True)
 scene("wall_follow_4.5cm", [line((-0.5, HW + 0.045), (4.0, HW + 0.045))], const(0.20, 0.0), 10.0, lambda p, L: p[0] >= 1.8,
       "wall 4.5 cm to the left, 0.20 m/s straight -> untouched, 2 m in 10 s")
 scene("wall_follow_2.5cm", [line((-0.5, HW + 0.025), (4.0, HW + 0.025))], const(0.15, 0.0), 10.0, lambda p, L: p[0] >= 1.3,
@@ -64,6 +64,21 @@ scene("spin_leg_r0.42", [post((0.42, 0.0))], const(0.0, 1.57), 4.0, lambda p, L:
       "leg 42 cm ahead (rear corners clear by 6 cm), spin 1.57 -> untouched, > 180 deg")
 scene("band_creep_4.5cm", [line((XF + 0.045, -0.4), (XF + 0.045, 0.4))], const(0.03, 0.0), 3.0, lambda p, L: L["sd_min"] >= S.MARGIN - 0.005 and p[0] >= 0.005,
       "box face 4.5 cm ahead (inside the 5 cm band), 0.03 m/s docking creep -> may close to the margin, not further")
+_PC = LIM.PLAN_CLEARANCE; _PA = LIM.PERCEPTION_ALLOWANCE
+_core_clean = lambda L: L["interv"] == 0 and L["sd_min"] >= S.MARGIN
+scene("plan_wall_follow", [line((-0.5, HW + _PC + _PA + 0.005), (4.0, HW + _PC + _PA + 0.005))], const(0.25, 0.0), 10.0,
+      lambda p, L: p[0] >= 2.0 and _core_clean(L),
+      "PLANNER keeps margin+allowance (+under-read, +5 mm) beside a wall, 0.25 m/s: core never intervenes, 2 m")
+scene("plan_wall_4.5cm", [line((-0.5, HW + 0.045), (4.0, HW + 0.045))], const(0.25, 0.0), 10.0, lambda p, L: _core_clean(L),
+      "wall 4.5 cm (< margin + allowance): the planner side may slow or stop; the core must not have to intervene")
+scene("plan_wall_drift", [line((-0.5, HW + _PC + _PA + 0.005), (4.0, HW + _PC + _PA + 0.005))], const(0.20, 0.0), 10.0, lambda p, L: _core_clean(L),
+      "starts where the planner keeps it (margin + allowance + under-read + 5 mm), heading 2 deg into the wall, raw 0.20 m/s: "
+      "the planner side must stop it at its zone, the core must not have to act", start=(0, 0, math.radians(2)))
+scene("plan_gap_4cm", [post((0.8, HW + 0.04 + 0.015)), post((0.8, -HW - 0.04 - 0.015))], const(0.10, 0.0), 14.0, lambda p, L: _core_clean(L),
+      "gap 4 cm/side (< margin + allowance): the planner side declines (stops short); the core must not have to act")
+scene("plan_gap_pass", [post((0.8, HW + _PC + _PA + 0.005 + 0.015)), post((0.8, -HW - _PC - _PA - 0.005 - 0.015))], const(0.10, 0.0), 14.0,
+      lambda p, L: p[0] >= 1.2 and _core_clean(L),
+      "narrowest gap that should pass: margin + allowance + under-read allowance + 5 mm per side -> through, core untouched")
 scene("arc_fast_wall", [line((1.0, -1.0), (1.0, 1.5))], const(0.45, 0.6), 4.0, lambda p, L: L["sd_min"] >= S.MARGIN - 0.005,
       "0.45 m/s arc (w 0.6) toward a wall -> stop before margin (per-wheel ramp vs modelled arc stop)")
 
@@ -82,7 +97,21 @@ def age_sampler(spec, rng):
     a = float(spec); return lambda: a
 
 
-def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0):
+# perception under-read model (measured live, emu/tools/scbench/noiseprobe.py 2026-10-20): every point is seen closer to the
+# footprint along the normal of its nearest edge; per tick, independently for the core and the brain/governor:
+# side edges u ~ N(0.78, 0.35) cm clipped [0, 1.87] (moving, n 1083), front/rear edges u ~ N(0.10, 0.03) cm (static)
+PERC = dict(none=None, measured=dict(side=(0.0078, 0.0035, 0.0187), front=(0.0010, 0.0003, 0.0016)))
+def perceive(P, model, rng):
+    if model is None or not len(P): return P
+    D = P @ S.N_.T - S.C_; e = D.argmax(1); n = S.N_[e]; side = np.abs(n[:, 1]) > 0.7
+    us = float(np.clip(rng.normal(*model["side"][:2]), 0, model["side"][2])); uf = float(np.clip(rng.normal(*model["front"][:2]), 0, model["front"][2]))
+    # per-point spread within a tick (ASSUMED, not measured separately): each point under-reads u * U(0.6, 1), so the
+    # closest point still matches the measured per-tick min under-read while points along a wall flicker by up to 40 %
+    k = rng.uniform(0.6, 1.0, len(P)) if model.get("spread", True) else 1.0
+    return (P - (np.where(side, us, uf) * k)[:, None] * n).astype(np.float32)
+
+
+def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0, perc=None):
     sc = (scenes or SCENES)[name]; Pw = sc["P"]; pose = sc["start"].copy(); bands = StubBands()
     S.SC_DECEL = GOV.SC_DECEL = (rule == "wired"); rule_ = rule; rule = "core" if rule in ("core", "wired") else rule
     rng = np.random.default_rng(seed); age_f = age_sampler(age, rng); hist = collections.deque(maxlen=400)   # (t, pose) 1 ms
@@ -93,7 +122,7 @@ def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0):
     def cl_min(s): return np.array([s[lab == c].min() for c in range(nc)])
     c_start = cl_min(S.sd(to_robot(Pw, pose))); prev_wheels = (0.0, 0.0)
     # wired+gov runs the real command path: governor -> CmdLimiter (hw.drive) -> core, whose LimitCheck counts planner bugs
-    climit = LIM.CmdLimiter(S.TRACK_M) if (use_gov and rule_ == "wired") else None; chk = LIM.LimitCheck(S.TRACK_M); log["plan_bugs"] = 0
+    climit = LIM.CmdLimiter(S.TRACK_M) if (use_gov and rule_ == "wired") else None; chk = LIM.LimitCheck(S.TRACK_M); log["plan_bugs"] = 0; log["gov_interv"] = 0
     while t < sc["T"] - 1e-9:
         if t >= t_next - 1e-9:
             t_next += S.T_TICK; log["ticks"] += 1
@@ -102,10 +131,12 @@ def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0):
                 # what the core sees: points captured 'ag' ago (pose then), moved into NOW with the measured twist (as the core)
                 k = max(0, len(hist) - 1 - int(round(ag / DT_PLANT))); P = S.motion_comp(to_robot(Pw, hist[k][1]), v_m * (1 + odo), w_m * (1 + odo), ag)
             else: P = to_robot(Pw, pose)
-            v_c, w_c = sc["policy"](t, pose)
+            v_c, w_c = sc["policy"](t, pose); Pg = perceive(P, perc, rng); P = perceive(P, perc, rng)
             if use_gov:
-                if rule == "core": v_c, w_c = GOV.governor(P, v_c, w_c, v_m, w_m, bands.rects())[:2]
+                v0_, w0_ = v_c, w_c
+                if rule == "core": v_c, w_c = GOV.governor(Pg, v_c, w_c, v_m, w_m, bands.rects(), escape=sc.get("escape", False))[:2]
                 else: v_c, w_c = PD.governor(P, v_c, w_c)[:2]
+                if abs(v_c - v0_) > 1e-6 or abs(w_c - w0_) > 1e-6: log["gov_interv"] += 1
             if climit is not None: v_c, w_c = climit(v_c, w_c, t)
             if use_gov and rule_ == "wired": chk(v_c, w_c, t); log["plan_bugs"] = chk.bugs
             if ag > S.AGE_MAX_S:
@@ -150,6 +181,7 @@ def open_loop(name, rule):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("scenes", nargs="*"); ap.add_argument("--json")
     ap.add_argument("--age", default=None, help="frame-age model: seconds, or 'route' (measured distribution)"); ap.add_argument("--seeds", type=int, default=1)
+    ap.add_argument("--perc", default="none", choices=list(PERC), help="perception under-read model (measured: live noiseprobe)")
     ap.add_argument("--odo", type=float, default=0.0, help="relative error of the twist used for motion compensation (-0.1: under-reads 10%%)")
     a = ap.parse_args()
     names = a.scenes or list(SCENES); out = {}
@@ -160,13 +192,13 @@ if __name__ == "__main__":
         row = {}
         for rule in RULES:
             for g in (False, True):
-                Ls = [run(n, rule, g, a.age, sd_, odo=a.odo) for sd_ in range(a.seeds)]; L = min(Ls, key=lambda x: (x["ok"], x["sd_min"]))   # worst seed
+                Ls = [run(n, rule, g, a.age, sd_, odo=a.odo, perc=PERC[a.perc]) for sd_ in range(a.seeds)]; L = min(Ls, key=lambda x: (x["ok"], x["sd_min"]))   # worst seed
                 L["n_ok"] = sum(x["ok"] for x in Ls); L["open"] = open_loop(n, rule); row["%s%s" % (rule, "+gov" if g else "")] = L
         def cell(L, Lg):
             return "%s%s %-5s int%3d sd%+5.1f dp%4.1f | gov %s" % ("PASS" if L["ok"] else "FAIL", "" if a.seeds == 1 else "%d/%d" % (L["n_ok"], a.seeds), L["open"][:5], L["interv"], 100 * L["sd_min"], 100 * L["deepen"], "PASS" if Lg["ok"] else "FAIL")
-        print("%-18s | %-34s | %-34s | %-34s | bugs %d" % (n, cell(row["core"], row["core+gov"]), cell(row["wired"], row["wired+gov"]), cell(row["proto"], row["proto+gov"]), row["wired+gov"]["plan_bugs"]))
+        print("%-18s | %-34s | %-34s | %-34s | bugs %d | wired+gov: core int %d gov int %d sd %+.1f x %.2f" % (n, cell(row["core"], row["core+gov"]), cell(row["wired"], row["wired+gov"]), cell(row["proto"], row["proto+gov"]), row["wired+gov"]["plan_bugs"], row["wired+gov"]["interv"], row["wired+gov"]["gov_interv"], 100 * row["wired+gov"]["sd_min"], row["wired+gov"]["pose"][0]))
         out[n] = {k: {kk: (dict(vv) if isinstance(vv, collections.Counter) else vv) for kk, vv in L.items()} for k, L in row.items()}
         out[n]["expect"] = SCENES[n]["expect"]
-    print("age model: %s, odometry error %+.0f%%, seeds %d (worst seed shown)" % (a.age, 100 * a.odo, a.seeds))
+    print("age model: %s, odometry error %+.0f%%, perception %s, seeds %d (worst seed shown); PLAN_CLEARANCE %.3f (margin %.3f + allowance %.3f)" % (a.age, 100 * a.odo, a.perc, a.seeds, LIM.PLAN_CLEARANCE, S.MARGIN, LIM.PERCEPTION_ALLOWANCE))
     print("(%.1f s)  cell: goal PASS/FAIL, first-tick code, interventions (ticks), min sd cm, max per-obstacle clearance lost below min(start, margin) cm | with governor" % (time.time() - t0))
     if a.json: json.dump(out, open(a.json, "w"), indent=1, default=float)

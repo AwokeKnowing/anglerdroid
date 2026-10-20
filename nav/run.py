@@ -760,7 +760,8 @@ class Brain:
                 # same rules as the core, 2x (nav/governor.py), with the core's own hard bands.  The brain's points
                 # (RS1 ego + RS2 + map memory) are a superset of the core's sources (RS1 ego + RS2).
                 cv = self.hw.core_viz(); bands = cv[1] if cv is not None else None
-                v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w, bands=bands)
+                v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w, bands=bands,
+                                              escape=self.mode in ("escape", "backout"))   # escapes may move along an obstacle already in the planner zone
                 self._gov_in = (pts, (xm, ym, self.navpose()[2]), bands)     # nav/escape.py searches on this exact point set
             info = dict(state="ok" if gw in ("ok", "idle") else "governed", scale=sc, need2=need2, gov=gw, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
             if len(pts):

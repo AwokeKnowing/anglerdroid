@@ -21,6 +21,31 @@ PLAN_A_LAT = SAFETY_A_LAT / PLAN_MULT
 PLAN_LIMIT = os.environ.get("KEVIN_PLAN_LIMIT", "1" if os.environ.get("KEVIN_HAL") == "sim" else "0") == "1"   # output clamp: sim default (Orin untouched)
 STALE_S = 0.3                       # older last command: the core has zeroed the wheels, start from rest
 
+# ---- spatial: planner clearance (James 2026-10-20, t615: "have the planner keep margin plus noise beside walls") ----------
+# The safety core keeps SAFETY_MARGIN (3.5 cm) on the clearance it PERCEIVES.  Perception reads side clearance low, so a
+# plan that keeps exactly the margin makes the core act.  The planner side (governor, MPPI, global route) therefore keeps
+#   PLAN_CLEARANCE = SAFETY_MARGIN + PERCEPTION_ALLOWANCE
+# PERCEPTION_ALLOWANCE is MEASURED (emu/tools/scbench/noiseprobe.py, sim, 2026-10-20): core sd0 vs GT clearance of the safe
+# footprint beside a wall of test boxes: static 3-8 cm under-read 1.00 cm (constant, ego-grid quantisation, flicker sd 0);
+# moving 0.15-0.35 m/s, n 1083: mean 0.78, p99 1.23, p99.9 1.28, max 1.87 cm; ahead (RS2) 0.1-0.15 cm.  Value: p99.9 of
+# the moving side samples rounded up to the mm = 1.3 cm (one value, applied in every direction: conservative ahead).
+# How this relates to the "2x" planner margin: PLAN_MULT is TEMPORAL (2x the reaction lead, half the decel: the planner
+# starts slowing earlier and brakes gentler); PLAN_CLEARANCE is SPATIAL (where the planner may be at all).  The governor
+# applies both: the core's designed-decel test with PLAN_MULT x lead at PLAN_A_* and clearance PLAN_CLEARANCE.
+# MPPI judges clearance on a 1 cm EDT grid, so it adds one cell (PLAN_GRID_CELL) to stay out of what the exact governor
+# would refuse.  KEVIN_PLAN_CLEARANCE=0 (default off the sim, Orin untouched) restores the PR #62 planner values.
+import sys as _sys
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src")
+if _SRC not in _sys.path: _sys.path.append(_SRC)
+import twin_geometry as _TG
+SAFETY_MARGIN = _TG.SAFETY_MARGIN
+PERCEPTION_ALLOWANCE = float(os.environ.get("KEVIN_PERCEPTION_ALLOWANCE_M", "0.013"))
+PLAN_CLEAR = os.environ.get("KEVIN_PLAN_CLEARANCE", "1" if os.environ.get("KEVIN_HAL") == "sim" else "0") == "1"
+PLAN_GRID_CELL = 0.01
+PLAN_CLEARANCE = SAFETY_MARGIN + PERCEPTION_ALLOWANCE if PLAN_CLEAR else SAFETY_MARGIN       # governor (exact, points)
+MPPI_DEAD = PLAN_CLEARANCE + PLAN_GRID_CELL if PLAN_CLEAR else 0.012                       # MPPI rollout infeasible below
+GLOBAL_INFLATE = (_TG.HALF_W + PLAN_CLEARANCE,) if PLAN_CLEAR else (_TG.R_PASS, _TG.HALF_W)  # route: axle clearance
+
 
 def wheels(v, w, track):
     return v - w * track / 2, v + w * track / 2

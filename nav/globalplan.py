@@ -35,8 +35,10 @@ def coarse_blocked(grid, inflate=0.20, obs=None):
 
 def plan(grid, start, goal, obs=None):
     """Try the full robot half-width first, then a tighter inflation (doors/narrow passes; MPPI does the exact footprint)."""
-    from twin_geometry import R_PASS, HALF_W
-    for infl in (R_PASS, HALF_W):                 # half-width + envelope margin, then the bare half-width (0.12 routed through 0.3 m gaps)
+    from nav import limits as LIM
+    # PLAN_CLEARANCE on (sim): half-width + margin + perception allowance only -- never route where the robot would be inside
+    # it; off: half-width + margin, then the bare half-width (PR #62)
+    for infl in LIM.GLOBAL_INFLATE:
         r = _plan(grid, start, goal, infl, obs)
         if r is not None: r["inflate"] = infl; return r
     return None

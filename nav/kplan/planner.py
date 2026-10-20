@@ -10,6 +10,9 @@ if os.environ.get('KPLAN_FAST','1')!='0':
         except Exception as _e: print('kplan: backend',_n,'unavailable:',repr(_e)[:200])
 import sys as _s, os as _o; _o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..', 'src'))   # twin_geometry (single source of the footprint radii)
 from twin_geometry import R_ROTATE, R_PASS
+_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..') in _s.path or _s.path.append(_o.path.join(_o.path.dirname(_o.path.abspath(__file__)), '..', '..'))
+from nav import limits as _LIM
+D_DEAD=_LIM.MPPI_DEAD   # see mppi_cuda D_DEAD
 from core import Limits, footprint_samples, edt_capped, cost_to_go, SIL12, v_cap_clear
 
 HARD_CLR=0.200   # axle clearance below which a coarse cell is blocked (robot half-width 0.2036 / 12-gon 0.21)
@@ -147,12 +150,12 @@ class MPPI:
         gx,gy,gth=[s.goal[:,i:i+1] for i in range(3)]
         cost=torch.zeros(B,K,device=s.dev); dead=torch.zeros(B,K,dtype=torch.bool,device=s.dev)
         TX=torch.empty(B,K,H,3,device=s.dev)
-        clr=s.clearance(x,y,th)
+        clr=s.clearance(x,y,th); clr0=clr.clone()
         for t in range(H):
             x,y,th,v,w=s.step_dyn(x,y,th,v,w,U[:,:,t,0],U[:,:,t,1],dt,L,v_cap_clear(clr))
             TX[:,:,t,0]=x;TX[:,:,t,1]=y;TX[:,:,t,2]=th
             clr=s.clearance(x,y,th)                                            # obstacles (metric); reversing: containment
-            dead|=(clr<0.012)|((v<0)&(s.clearance(x,y,th,s.w.edt_rev)<0.005))     # in known-traversable space (mppi_cuda REV_IN)
+            dead|=(clr<0.012)|(clr<(clr0-0.005).clamp(max=D_DEAD))|((v<0)&(s.clearance(x,y,th,s.w.edt_rev)<0.005))     # in known-traversable space (mppi_cuda REV_IN)
             ax=edt_at(s.edt,(y*100).long().clamp(0,s.w.H-1),(x*100).long().clamp(0,s.w.W-1)).float()
             cost+=dead.float()*50+20*torch.relu(0.06-clr)
             cost+=dt*(1.0*torch.exp(-clr/0.15)+2.0*(torch.relu(R_ROTATE-ax)/(R_ROTATE-R_PASS)).clamp(max=1))   # proximity + not-turnable
@@ -173,12 +176,12 @@ class MPPI:
         bi=torch.arange(B,device=s.dev)
         # chosen trajectory: rollout of the averaged plan; fall back to the best sample if it collides
         x,y,th,v,w=[state[:,i].clone() for i in range(5)]
-        ch=torch.empty(B,H,6,device=s.dev); clr=s.clearance(x[:,None],y[:,None],th[:,None])[:,0]
+        ch=torch.empty(B,H,6,device=s.dev); clr=s.clearance(x[:,None],y[:,None],th[:,None])[:,0]; c0=clr.clone()
         for t in range(H):
             vc=v_cap_clear(clr)
             x,y,th,v,w=s.step_dyn(x,y,th,v,w,s.U[:,t,0],s.U[:,t,1],dt,L,vc); clr=s.clearance(x[:,None],y[:,None],th[:,None])[:,0]
             ch[:,t]=torch.stack([x,y,th,v,w,vc],1)
-        dead1=(s.clearance(ch[...,0],ch[...,1],ch[...,2])<0.012).any(1)
+        cl1=s.clearance(ch[...,0],ch[...,1],ch[...,2]); dead1=((cl1<0.012)|(cl1<(c0[:,None]-0.005).clamp(max=D_DEAD))).any(1)
         fb=dead1&~dead[bi,best]
         s.U=torch.where(fb[:,None,None],U[bi,best],s.U)
         u0=s.U[:,0].clone()
