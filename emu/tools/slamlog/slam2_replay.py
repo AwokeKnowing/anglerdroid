@@ -12,10 +12,10 @@ def load(p):
         except EOFError: return J
 
 
-def replay(J, timing=True):
+def replay(J, timing=True, cls=None):
     from nav.slam2 import Slam2
     from nav.slam import GridMap
-    s = Slam2(GridMap(), match=True); s._run = False
+    s = (cls or Slam2)(GridMap(), match=True); s._run = False
     Ts = []; ms = []
     for j in J:
         Ts.append(tuple(s.T)); t0 = time.perf_counter(); s._step(*j[:6]); ms.append((time.perf_counter() - t0) * 1e3)
