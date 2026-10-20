@@ -25,19 +25,21 @@ def fixed_pixels(K, R, T, axle_h, H, W, rmin, rmax, n=N_PIX, seed=0):
     return np.sort(np.random.default_rng(seed).choice(ok, min(n, len(ok)), replace=False))
 
 
-def fit(P, axle_h, band=0.10):
-    """P: base-frame points (n,3).  Returns (a, b, c, s2, cov2x2(a,b), n) of the trimmed plane on the floor band, or None."""
+def fit(P, axle_h, band=0.10, T=None):
+    """P: base-frame points (n,3); T: camera position (for the range-dependent depth noise).  Returns
+    (a, b, c, s2, cov2x2(a,b), n, n_band, mean_r4) of the trimmed plane on the floor band, or None."""
     h = P[:, 2] + axle_h; k = np.abs(h) < band
+    rr = np.sum((P - (np.zeros(3) if T is None else T)) ** 2, 1)
     if k.sum() < 30: return None                       # degeneracy guard for a 3-parameter fit
-    A = np.c_[P[k, 0], P[k, 1], np.ones(k.sum())]; z = h[k]
+    A = np.c_[P[k, 0], P[k, 1], np.ones(k.sum())]; z = h[k]; r2 = rr[k]
     for _ in range(3):
         c, *_ = np.linalg.lstsq(A, z, rcond=None); e = A @ c - z; med = np.median(np.abs(e))
         keep = np.abs(e) < max(3 * 1.4826 * med, 1e-3)
         if keep.sum() < 30: return None
-        A, z = A[keep], z[keep]
+        A, z, r2 = A[keep], z[keep], r2[keep]
     c, *_ = np.linalg.lstsq(A, z, rcond=None); e = A @ c - z; n = len(z); s2 = float(e @ e / max(n - 3, 1))
     cov = s2 * np.linalg.inv(A.T @ A)[:2, :2]
-    return float(c[0]), float(c[1]), float(c[2]), s2, cov, n, int(k.sum())
+    return float(c[0]), float(c[1]), float(c[2]), s2, cov, n, int(k.sum()), float(np.mean(r2 * r2))
 
 
 class TiltKF:
@@ -60,8 +62,9 @@ class TiltKF:
     def update(self, f):
         """f = fit(...) or None.  Returns 'ok' | reason of rejection."""
         if f is None: self.n_rej[0] += 1; return "nofit"
-        a, b, c, s2, cov, n, nb = f
-        if (n - 3) * s2 / self.sn2 > chi2.ppf(1 - self.alpha, n - 3): self.n_rej[1] += 1; return "planarity"
+        a, b, c, s2, cov, n, nb, r4 = f
+        # stereo depth noise grows ~ range^2: expected residual variance = k2 * mean(range^4), k2 measured (sn2)
+        if (n - 3) * s2 / (self.sn2 * r4) > chi2.ppf(1 - self.alpha, n - 3): self.n_rej[1] += 1; return "planarity"
         z = np.array([math.atan(a), -math.atan(b)]); J = np.diag([1 / (1 + a * a), -1 / (1 + b * b)]); Rz = J @ cov @ J.T
         H = np.array([1.0, 1.0]); y = z - self.tilt(); S = np.diag([H @ self.P[i] @ H for i in range(2)]) + Rz
         if y @ np.linalg.solve(S, y) > self.g_inn: self.n_rej[2] += 1; return "innovation"
