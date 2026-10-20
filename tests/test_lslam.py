@@ -33,7 +33,7 @@ def test_rebuild_is_exact():
 
 
 def test_rejects_inconsistent_scan_and_recovers():
-    W = _room(); om = M.OdomModel(0.02, 1e-3, 0.02, 1e-3); R = np.diag([0.01 ** 2, 0.01 ** 2, math.radians(0.5) ** 2])
+    W = _room(); om = M.OdomModel(4e-4, 4e-4, 4e-4); R = np.diag([0.01 ** 2, 0.01 ** 2, math.radians(0.5) ** 2])
     s = LifelongSlam(om, R); x = np.zeros(3)
     for k in range(40):                                  # straight drive, perfect odom
         s.step(k * 0.1, x, _scan(x, W)); x = x + [0.02, 0, 0]

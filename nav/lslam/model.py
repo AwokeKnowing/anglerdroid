@@ -17,13 +17,14 @@ def gate(dof, alpha=ALPHA): return float(chi2.ppf(1 - alpha, dof))
 
 
 class OdomModel:
-    """Increment noise in the robot frame: sd_xy = a*dist + b, sd_th = c*|rot| + d*dist (+ e per second: gyro bias walk)."""
-    def __init__(self, a, b, c, d, e=0.0): self.a, self.b, self.c, self.d, self.e = a, b, c, d, e
+    """Random-walk increment noise in the robot frame (variance grows linearly with travel, as for independent errors):
+    var_xy = qxy * dist, var_th = qtr * |rot| + qtd * dist   [m^2/m, rad^2/rad, rad^2/m] -- fitted on multi-second windows
+    against GT (lslam_replay calib), the regression intercept (GT stamp jitter) is not odometry error and is dropped."""
+    def __init__(self, qxy, qtr, qtd, q0=1e-8): self.qxy, self.qtr, self.qtd, self.q0 = qxy, qtr, qtd, q0
 
     def Q(self, inc, dt):
         dist, rot = math.hypot(inc[0], inc[1]), abs(inc[2])
-        sxy = self.a * dist + self.b * (dist > 0 or rot > 0); sth = self.c * rot + self.d * dist + self.e * dt
-        return np.diag([sxy ** 2, sxy ** 2, sth ** 2])
+        return np.diag([self.qxy * dist + self.q0, self.qxy * dist + self.q0, self.qtr * rot + self.qtd * dist + self.q0])
 
     def predict(self, x, P, inc, dt):
         """x <- x o inc; P <- J P J^T + G Q G^T (first order)."""

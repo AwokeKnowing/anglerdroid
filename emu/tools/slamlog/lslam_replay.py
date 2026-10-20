@@ -27,17 +27,40 @@ class Scans:
         self.f2 = L.frames["rs2"][::EVERY]; f1 = L.frames["rs1"]; self.t1 = np.array([t for t, _ in f1]); self.f1 = f1
 
     def _cam(self, cam, f, fault, rng):
+        """depth -> base-frame points; heights are taken relative to THIS frame's fitted floor plane (body pitch/roll/
+        squat while driving: measured p95 1.4 deg / 1.5 deg / 10 mm in the sim), not the static mount."""
         z = self.L.depth(f)[::S, ::S]
         if fault == "corrupt": z = np.where(z > 0, rng.uniform(0.3, 4.0, z.shape), 0).astype(np.float32)
         elif fault == "rescale": z = z * 1.1
         m = (z > 0.15) & (z < 4.0); X = np.stack([self.rx[m] * z[m], self.ry[m] * z[m], z[m]], 1)
         R, T = self.L.ext[cam]; B = X @ R.T + T; h = B[:, 2] + G.AXLE_H_M; r = np.hypot(B[:, 0], B[:, 1])
-        return B[(h > 0.05) & (h < 1.6) & (r < 3.0), :2], h[(np.abs(h) < 0.1) & (r < 2.5)]
+        plane = floor_plane(B[:, 0], B[:, 1], h, r)
+        if plane is not None: h = h - (plane[0] * B[:, 0] + plane[1] * B[:, 1] + plane[2])
+        return B[(h > 0.05) & (h < 1.6) & (r < 3.0), :2], plane
 
     def get(self, i, fault=None, rng=None):
-        t, f = self.f2[i]; p2, fh = self._cam("rs2", f, fault, rng)
+        t, f = self.f2[i]; p2, pl2 = self._cam("rs2", f, fault, rng)
         p1, _ = self._cam("rs1", self.f1[int(np.argmin(np.abs(self.t1 - t)))][1], fault, rng)
-        return t, np.concatenate([p1, p2]).astype(np.float32), (float(np.median(fh)) if len(fh) > 50 else float("nan"))
+        return t, np.concatenate([p1, p2]).astype(np.float32), pl2
+
+
+def floor_plane(x, y, h, r, band=0.10, rmax=2.5):
+    """robust floor plane h = a x + b y + c from points within +-band of the nominal floor (2 trimming passes);
+    None if too few floor points.  Returns (a, b, c, residual sd)."""
+    k = (np.abs(h) < band) & (r < rmax)
+    if k.sum() < 200: return None
+    A = np.c_[x[k], y[k], np.ones(k.sum())]; hz = h[k]
+    for _ in range(3):
+        c = np.linalg.lstsq(A, hz, rcond=None)[0]; e = np.abs(A @ c - hz); keep = e < max(0.01, 3 * 1.4826 * np.median(e))
+        A, hz = A[keep], hz[keep]
+    if abs(c[0]) > 0.2 or abs(c[1]) > 0.2: return None       # > ~11 deg: not the floor (a wall foot / box top); same bound as nav.perceive._cliff
+    return (float(c[0]), float(c[1]), float(c[2]), float(np.std(A @ c - hz)))
+
+
+def floor_ok(pl, fl, g):
+    """sensor gate: the RS2 floor plane (tilt a, b and offset c) vs its measured spread, chi2(3) at ALPHA."""
+    if pl is None: return False
+    v = np.array(pl[:3]) - np.array(fl["mu"]); return float(v @ np.linalg.solve(np.array(fl["cov"]), v)) < g
 
 
 def odom_series(L, fault=None, t0=None):
@@ -60,16 +83,21 @@ def calib(log, out):
     E, D, RT, FH = [], [], [], []; prev = None
     gmap = GridMap(40.0, 0.02, (-20.0, -20.0)); scans = []
     for i in range(n):
-        t, pts, fh = sc.get(i); g = L.gt(t); g[2] = M.wrap(g[2]); o = od(t); FH.append(fh); scans.append((t, pts, g))
+        t, pts, pl = sc.get(i); g = L.gt(t); g[2] = M.wrap(g[2]); o = od(t); FH.append(pl[:3] if pl else [np.nan] * 3); scans.append((t, pts, g))
         if prev is not None:
             di = M.between(prev[1], o); dg = M.between(prev[0], g); e = M.innovation(di, dg)
             E.append(e); D.append(math.hypot(dg[0], dg[1])); RT.append(abs(dg[2]))
         prev = (g, o); gmap.integrate(tuple(g), pts, np.zeros((0, 2), np.float32))
-    E, D, RT = np.array(E), np.array(D), np.array(RT); exy = np.hypot(E[:, 0], E[:, 1]) / math.sqrt(2)
-    # sd_xy = a*dist + b, sd_th = c*rot + d*dist : least squares on |e| ~ half-normal (E|e| = sd*sqrt(2/pi))
-    k = math.sqrt(math.pi / 2)
-    a, b = np.linalg.lstsq(np.stack([D, np.ones_like(D)], 1), exy * k, rcond=None)[0]
-    c, d = np.linalg.lstsq(np.stack([RT, D], 1), np.abs(E[:, 2]) * k, rcond=None)[0]
+    # odom model on 3 s windows (30 processed frames): e^2 ~ q * (dist, rot) + intercept (GT stamp jitter, dropped)
+    T3 = [(sc.f2[i][0], od(sc.f2[i][0]), L.gt(sc.f2[i][0])) for i in range(n)]; W = 30; Y, X = [], []
+    for i in range(0, n - W, 5):
+        (ta, oa, ga), (tb, ob, gb) = T3[i], T3[i + W]; ga[2] = M.wrap(ga[2]); gb[2] = M.wrap(gb[2])
+        e = M.innovation(M.between(oa, ob), M.between(ga, gb)); g = np.unwrap([T3[k][2][2] for k in range(i, i + W + 1)])
+        dist = sum(math.hypot(*(T3[k + 1][2][:2] - T3[k][2][:2])) for k in range(i, i + W)); rot = float(np.abs(np.diff(g)).sum())
+        Y.append([e[0] ** 2 + e[1] ** 2, e[2] ** 2]); X.append([dist, rot])
+    Y, X = np.array(Y), np.array(X)
+    qxy = max(np.linalg.lstsq(np.c_[X[:, 0], np.ones(len(X))], Y[:, 0] / 2, rcond=None)[0][0], 1e-6)
+    qtr, qtd = np.maximum(np.linalg.lstsq(np.c_[X[:, 1], X[:, 0], np.ones(len(X))], Y[:, 1], rcond=None)[0][:2], 1e-7)
     # R under the ONLINE conditions: reference = the submap policy of nav/lslam/core.py, built at GT poses (an oracle
     # pose, so the error is the matcher's + the incomplete local map's, not drift); guess = GT + perturbation.
     from nav.lslam.submap import Submap
@@ -100,11 +128,11 @@ def calib(log, out):
                 outlier_err_th_p50_deg=float(np.degrees(np.median(np.abs(ER[~keep, 2])))) if (~keep).any() else None,
                 outlier_frac_ref_lt30=float(1 - keep[TAG[:, 1] < 30].mean()) if (TAG[:, 1] < 30).any() else None, outlier_frac_ref_ge30=float(1 - keep[TAG[:, 1] >= 30].mean()) if (TAG[:, 1] >= 30).any() else None)
     R_trim = np.cov(ER[keep].T)    # diagnostic only: trimming a heavy-tailed error collapses R (2026-10-19: 39 % 'outliers' with p50 2.8 cm)
-    ER = np.array(ER); R = np.cov(ER.T); FH = np.array(FH); FH = FH[np.isfinite(FH)]
-    p = dict(log=log, odom=dict(a=max(a, 1e-4), b=max(b, 1e-5), c=max(c, 1e-4), d=max(d, 1e-5)), R=R.tolist(),
+    ER = np.array(ER); R = np.cov(ER.T); FH = np.array(FH, float); FH = FH[np.isfinite(FH).all(1)]
+    p = dict(log=log, odom=dict(qxy=float(qxy), qtr=float(qtr), qtd=float(qtd)), odom_sd_at=dict(xy_m_per_sqrt_m=math.sqrt(qxy), th_deg_per_sqrt_rad=math.degrees(math.sqrt(qtr)), th_deg_per_sqrt_m=math.degrees(math.sqrt(qtd))), n_win=len(X), R=R.tolist(),
              R_sd=dict(x_m=float(math.sqrt(R[0, 0])), y_m=float(math.sqrt(R[1, 1])), th_deg=float(math.degrees(math.sqrt(R[2, 2])))),
              R_bias=dict(x_m=float(ER[:, 0].mean()), y_m=float(ER[:, 1].mean()), th_deg=float(math.degrees(ER[:, 2].mean()))),
-             floor=dict(mu=float(np.median(FH)), sd=float(1.4826 * np.median(np.abs(FH - np.median(FH))))), n_inc=len(E), n_match=len(ER), match_outlier_frac=out_frac, match_diag=diag, R_trim_sd=np.sqrt(np.diag(R_trim)).tolist(), n_submaps=len(subs))
+             floor=dict(mu=np.median(FH, 0).tolist(), cov=np.cov(FH.T).tolist(), sd=np.sqrt(np.diag(np.cov(FH.T))).tolist(), n=len(FH)), n_inc=len(E), n_match=len(ER), match_outlier_frac=out_frac, match_diag=diag, R_trim_sd=np.sqrt(np.diag(R_trim)).tolist(), n_submaps=len(subs))
     json.dump(p, open(out, "w"), indent=1); print(json.dumps(p, indent=1))
 
 
@@ -112,13 +140,13 @@ def run(log, params, out, fault="none", t0f=0.4):
     p = json.load(open(params)); L = Log(log); sc = Scans(L); n = int(os.environ.get("LSLAM_N", len(sc.f2)))
     tA, tB = sc.f2[0][0], sc.f2[n - 1][0]; t0 = tA + t0f * (tB - tA); dur = FAULTS.get(fault); t1 = t0 + dur if dur else tB
     od = odom_series(L, fault, t0); rng = np.random.default_rng(1)
-    om = M.OdomModel(**p["odom"]); fl = p["floor"]; gf = M.gate(1)
+    om = M.OdomModel(**p["odom"]); fl = p["floor"]; gf = M.gate(3)
     g0 = L.gt(tA); slam = LifelongSlam(om, p["R"], x0=(g0[0], g0[1], M.wrap(g0[2])))
     est, states = [], []; w0 = time.time()
     for i in range(n):
         t = sc.f2[i][0]; df = fault if fault in ("corrupt", "rescale") and t0 <= t <= t1 else None
-        t, pts, fh = sc.get(i, df, rng)
-        ok = math.isfinite(fh) and ((fh - fl["mu"]) / fl["sd"]) ** 2 < gf
+        t, pts, pl = sc.get(i, df, rng)
+        ok = floor_ok(pl, fl, gf)
         x, st = slam.step(t, od(t), pts, ok); est.append([t, *x]); states.append(st)
     wall = time.time() - w0; est = np.array(est); est[:, 3] = np.unwrap(est[:, 3])
     r = evaluate(est, L, with_map=False)

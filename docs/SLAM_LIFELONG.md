@@ -183,3 +183,14 @@ Next:
 - R = the untrimmed sample covariance (the code is changed; the re-calib + rerun is in progress);
 - consider a pitch-aware scan (floor-plane-referenced heights) so the error is smaller rather than just modelled;
 - then the L9–L11 runs and the fault matrix.
+
+### 10.1 Update 2026-10-19 20:00 PT
+- **Scans are levelled per frame:** a robust floor-plane fit on RS2 (and RS1) gives tilt and offset, and heights are taken from that plane.
+  The sensor gate is χ²(3) on the plane parameters vs their measured spread (L8: tilt sd 0.61° / 0.52°, offset 4.3 mm). A fit tilted > 11° counts as no floor.
+  - Effect on the match error (untrimmed, online submap policy): sd 15.9 / 17.6 mm, 0.79° → 8.6 / 14.7 mm, 0.35°.
+- **Submaps split by distance only:** splitting every 90° of rotation left new submaps with no overlap with the scan, so there was no reference.
+- **No score peak = unmapped view, not a rejection.** It is written only if the pose is within the local match window.
+- **The matcher step was too coarse:** lin/6 reached 10 cm against a 3 cm likelihood field, so most "flat" results were the matcher missing the peak.
+  Now steps are 3 cm / 1° as in kslam, the window is capped at 0.3 m / 8°, and beyond that the state is RELOCALIZING (5 cm / 2°).
+- **Odometry model is now random-walk:** variance grows with distance and rotation, fitted on 3 s windows; the intercept is GT stamp jitter and is dropped.
+  The per-0.1 s fit was inflated by GT jitter.

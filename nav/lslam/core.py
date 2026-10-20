@@ -14,12 +14,13 @@ from .journal import Journal
 from .submap import Submap
 
 TRACKING, DEAD_RECKONING, RELOCALIZING, ROLLBACK = "TRACKING", "DEAD_RECKONING", "RELOCALIZING", "ROLLBACK"
-SUBMAP_DIST, SUBMAP_ROT = 3.0, math.radians(90)          # submap extent (structural; docs §1)
+SUBMAP_DIST, SUBMAP_ROT = 3.0, math.radians(400)         # submap extent: distance only (a spin adds view, not drift; 90 deg split
+                                                         # left new submaps without overlap with the scan -> no reference, 2026-10-19)
 WRITE_DIST, WRITE_ROT = 0.04, math.radians(2.5)          # same as kslam: don't re-integrate while static
 MIN_REF_SCANS = 10                                       # a submap is a match reference once it has this many scans
 W_NIS = 20                                               # NIS window (accepted matches)
 CONFIRM = 3                                              # consecutive consistent fixes to leave DR/RELOC
-LIN_MAX, ANG_MAX = 0.6, math.radians(15)                 # local CSM search limit; beyond -> RELOCALIZING
+LIN_MAX, ANG_MAX = 0.3, math.radians(8)                  # local CSM search limit (steps 3 cm / 1 deg, as kslam); beyond -> RELOCALIZING
 RELOC_LIN, RELOC_ANG = 1.0, math.radians(30)
 
 
@@ -30,7 +31,7 @@ class LifelongSlam:
         self.state = TRACKING; self.j = Journal(); self.subs = [Submap(0, self.x)]
         self.last_odom = None; self.last_t = None; self.last_write = None; self.ok_run = 0
         self.win = deque(maxlen=W_NIS); self.cps = deque(maxlen=W_NIS + 1); self.trusted = None
-        self.g3, self.gw = M.gate(3), M.gate(3 * W_NIS); self.events = []; self.nis_rej = []; self.nis_acc = []; self.stats = dict(acc=0, rej=0, sensor_rej=0, writes=0, rollbacks=0)
+        self.g3, self.gw = M.gate(3), M.gate(3 * W_NIS); self.events = []; self.nis_rej = []; self.flat_dbg = []; self.nis_acc = []; self.stats = dict(acc=0, rej=0, sensor_rej=0, writes=0, rollbacks=0)
 
     # ---- helpers
     def _event(self, t, kind, **kw): self.events.append(dict(t=t, kind=kind, **kw))
@@ -42,10 +43,10 @@ class LifelongSlam:
         if a.n >= MIN_REF_SCANS: return a
         return self.subs[-2] if len(self.subs) > 1 else (a if a.n else None)
 
-    def _match(self, sub, pts, lin, ang, step):
+    def _match(self, sub, pts, lin, ang, step, astep):
         g = sub.lf(); guess = M.between(sub.anchor, self.x)
         P = pts[np.random.default_rng(0).choice(len(pts), 1000, replace=False)] if len(pts) > 1000 else pts
-        m = Matcher(g, lin=lin, lin_step=step, ang=ang, ang_step=max(math.radians(0.5), ang / 6), prior=0.0)
+        m = Matcher(g, lin=lin, lin_step=step, ang=ang, ang_step=astep, prior=0.0)
         best, bs, med, s0 = m.match(P, tuple(guess))
         return (M.compose(sub.anchor, np.array(best)) if bs > med else None), bs, med
 
@@ -65,11 +66,14 @@ class LifelongSlam:
             self._write(t, pts); return self.x.copy(), self.state
         ref = self._ref()
         if ref is None: return self.x.copy(), self.state
-        if self.state == RELOCALIZING: z, bs, med = self._match(ref, pts, RELOC_LIN, RELOC_ANG, 0.05)
+        if self.state == RELOCALIZING: z, bs, med = self._match(ref, pts, RELOC_LIN, RELOC_ANG, 0.05, math.radians(2.0))
         else:
             lin = min(LIN_MAX, max(0.12, 3 * sxy)); ang = min(ANG_MAX, max(math.radians(4), 3 * sd[2]))
-            z, bs, med = self._match(ref, pts, lin, ang, max(0.02, lin / 6))
-        if z is None: self._reject(t, "flat"); return self.x.copy(), self.state
+            z, bs, med = self._match(ref, pts, lin, ang, 0.03, math.radians(1.0))
+        if z is None:                                                   # no score peak: unmapped view, no evidence for/against
+            self.stats["no_overlap"] = self.stats.get("no_overlap", 0) + 1
+            if self.state == TRACKING and 3 * sxy < 0.12 and 3 * sd[2] < math.radians(4): self._write(t, pts)   # explore: pose within the local match window
+            return self.x.copy(), self.state
         v = M.innovation(z, self.x); S = self.P + self.R; q = M.nis(v, S)
         if q > self.g3: self._reject(t, "gate", nis=q); return self.x.copy(), self.state
         self.x, self.P, _ = M.fuse(self.x, self.P, z, self.R); self.stats["acc"] += 1; self.win.append(q); self.nis_acc.append(q); self.ok_run += 1
@@ -82,6 +86,7 @@ class LifelongSlam:
     def _reject(self, t, why, **kw):
         self.stats["rej"] += 1; self.ok_run = 0; self.stats["rej_" + why] = self.stats.get("rej_" + why, 0) + 1
         if "nis" in kw: self.nis_rej.append(kw["nis"])
+        if why == "flat" and len(self.flat_dbg) < 40: self.flat_dbg.append(kw)
         if self.state == TRACKING: self._set_state(t, DEAD_RECKONING, why)
         self._event(t, "reject", why=why, **kw)
 
