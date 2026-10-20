@@ -24,6 +24,7 @@ from . import lslam_replay as LR
 from nav.slam import GridMap, Matcher, transform
 from nav.lslam.model import compose, between, wrap
 
+HFOV = math.degrees(math.atan(424 / 433.0))      # RS2 depth half FOV (848 px, fx 433)
 RES = 0.05; MATCH_M = 0.5; NODE_R = 0.5; RR = float(G.R_CIRC)
 
 
@@ -139,15 +140,21 @@ def build(lg):
         if t < t0 or t > min(tn[-1], L.gt_t[-1]) or len(pts) < 50: continue
         frames.append((t, to_gt(P(t)), L.gt(t), pts))
     allp = np.array([f[1][:2] for f in frames]); origin = allp.min(0) - 4.0; size = allp.max(0) + 4.0 - origin
-    shape = (int(size[1] / RES) + 1, int(size[0] / RES) + 1); hit = np.zeros(shape, np.float32); fre = np.zeros(shape, np.float32)
+    shape = (int(size[1] / RES) + 1, int(size[0] / RES) + 1); hit = np.zeros(shape, np.float32); fre = np.zeros(shape, np.float32); foot = np.zeros(shape, np.uint8)
     for t, p, g, pts in frames:
+        pts = pts[np.hypot(pts[:, 0], pts[:, 1]) > RR]               # own body / mast inside the footprint circle
         W = transform(pts, tuple(p)); ij = np.floor((W - origin) / RES).astype(np.int32)
         np.add.at(hit, (ij[:, 1], ij[:, 0]), 1.0)
-        r = np.hypot(pts[:, 0], pts[:, 1]); s = np.arange(0.05, 3.0, RES)
-        F = (pts[:, None, :] / np.maximum(r, 1e-3)[:, None, None]) * s[None, :, None]; ok = s[None, :] < (r[:, None] - 0.10)
-        Fw = transform(F[ok].astype(np.float32), tuple(p)); ij = np.floor((Fw - origin) / RES).astype(np.int32)
-        np.add.at(fre, (ij[:, 1], ij[:, 0]), 1.0 / max(1, len(pts) // 200))
-    occ = hit > np.maximum(fre, 0.5); free = (fre > 0) & ~cv2.dilate(occ.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+        # free: RS2's view cone per 1 deg bearing bin up to the nearest obstacle return in that bin (none within the 3 m
+        # scan range = the floor was seen out to 3 m), 10 cm short of the return; plus the robot's own footprint
+        r = np.hypot(pts[:, 0], pts[:, 1]); b = np.degrees(np.arctan2(pts[:, 1], pts[:, 0]))
+        bins = np.arange(-HFOV, HFOV, 1.0); rmin = np.full(len(bins), 3.0); k = np.clip(((b + HFOV) // 1).astype(int), 0, len(bins) - 1)
+        np.minimum.at(rmin, k, r); s = np.arange(0.05, 3.0, RES); ang = np.radians(bins + 0.5)
+        ok = s[None, :] < (rmin[:, None] - 0.10); F = np.stack([np.cos(ang)[:, None] * s[None, :], np.sin(ang)[:, None] * s[None, :]], -1)[ok]
+        Fw = transform(F.astype(np.float32), tuple(p)); ij = np.floor((Fw - origin) / RES).astype(np.int32)
+        np.add.at(fre, (ij[:, 1], ij[:, 0]), 1.0)
+        cv2.circle(foot, (int((p[0] - origin[0]) / RES), int((p[1] - origin[1]) / RES)), int(RR / RES), 1, -1)
+    occ = hit > np.maximum(fre, 0.5); free = ((fre > 0) | (foot > 0)) & ~cv2.dilate(occ.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
     return L, frames, occ, free, origin
 
 
@@ -155,7 +162,7 @@ def reloc(L, frames, Gr):
     """node relocalization on revisits."""
     tr = np.array([f[1][:2] for f in frames]); out = []
     for k, d in Gr.nodes(data=True):
-        dist = np.hypot(*(tr - np.array(d["xy"])).T); inside = dist < NODE_R
+        dist = np.hypot(*(tr - np.array(d["xy"])).T); inside = dist < max(NODE_R, d["clear"])          # within the node's free disk
         if not inside.any(): continue
         # visits = maximal runs inside, separated by leaving > 2 m
         visits = []; cur = None; far = True
