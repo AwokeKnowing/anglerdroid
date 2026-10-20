@@ -10,6 +10,7 @@ _p = math.radians(27.0); R_RS2 = np.array([[0, -math.sin(_p), math.cos(_p)], [-1
 T_RS2 = np.array([-0.1301, 0.0, 0.3822])
 R_MAST = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])
 AXLE_H = 0.0856
+MAST_TRUE_SINCE = 1792259510      # 2026-10-17 10:51 PDT: emu/world.py started rendering the mast with the twin truth lens
 
 def depth_u16(base):
     """Depth frame (uint16 mm) for a log file stem: PNG16, or the raw .npy that sensorlog v4 (SENSORLOG_ENC=gpu) writes
@@ -44,6 +45,19 @@ class Log:
     def gt(self, t):
         t = np.asarray(t, float)
         return np.stack([np.interp(t, self.gt_t, self.gt_xy[:, 0]), np.interp(t, self.gt_t, self.gt_xy[:, 1]), np.interp(t, self.gt_t, self.gt_yaw)], -1)
+
+    def mast_lens(self):
+        """(K 3x3, dist [k1,k2,p1,p2]) of the mast camera.  New logs carry the twin truth lens in info (emu/world.py
+        mast_info_lens).  Logs recorded before 2026-10-20 have only the 100 deg pinhole belief in info although the sim
+        (realism, since 2026-10-17) rendered the truth lens -> use emu.realism.mast_truth for those (KEVIN_LOG_MAST_BELIEF=1
+        keeps the recorded belief)."""
+        m = self.info["mast"]
+        pre_truth = os.path.getmtime(os.path.join(self.d, "info.json")) < MAST_TRUE_SINCE   # recorded before the sim rendered the truth lens
+        if "dist" in m or os.environ.get("KEVIN_LOG_MAST_BELIEF") == "1" or pre_truth:
+            K, _ = self.K("mast"); return K, np.array(m.get("dist", [0, 0, 0, 0]), float)
+        from emu import realism
+        t = realism.mast_truth(m["intr"]["w"], m["intr"]["h"])
+        return np.array([[t["fx"], 0, t["cx"]], [0, t["fy"], t["cy"]], [0, 0, 1.0]]), np.array([t["k1"], t["k2"], 0, 0], float)
 
     def K(self, cam, stream="color"):
         s = self.info["mast"]["intr"] if cam == "mast" else self.streams[stream]

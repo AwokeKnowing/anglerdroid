@@ -53,7 +53,10 @@ RS1_POS = (-0.007, 0.0, 0.8619); RS1C_POS = (0.008, 0.0, 0.8619)
 MAST_POS = (0.0291, 0.0, 0.8905); MW, MH = 640, 480; MAST_HFOV = float(os.environ.get("KEVIN_MAST_HFOV", "100"))
 MAST_FOVY = math.degrees(2 * math.atan(math.tan(math.radians(MAST_HFOV) / 2) * MH / MW))   # robot's BELIEF (info)
 # realism: the mast is rendered with the twin TRUTH lens (realism.mast_truth: DFOV 118 spec, residual barrel) -> a wider
-# pinhole render remapped through the distortion; robot code keeps believing KEVIN_MAST_HFOV (written to info as before)
+# pinhole render remapped through the distortion.  2026-10-20 (James: the twin is the source of truth): info["mast"] now
+# carries that same lens (intr fx/fy/ppx/ppy + dist k1,k2,p1,p2 = 0), generated from realism.mast_truth, so every consumer
+# (slamlog.Log.K, maploc, TrackEverything, LightNav tooling) uses the true lens.  Setting KEVIN_MAST_HFOV explicitly
+# restores the old deliberately-wrong pinhole belief (self-calibration benchmarks, bench/slam/mastcal.py).
 MAST_TRUE = realism.mast_truth(MW, MH) if realism.REAL else None
 MAST_RK = realism.CamFX.render_K_for(MW, MH, [[MAST_TRUE["fx"], 0, MAST_TRUE["cx"]], [0, MAST_TRUE["fy"], MAST_TRUE["cy"]], [0, 0, 1]], (MAST_TRUE["k1"], MAST_TRUE["k2"])) if MAST_TRUE else None
 MAST_RENDER_FOVY = math.degrees(2 * math.atan((MH / 2) / MAST_RK[1][1])) if MAST_RK else MAST_FOVY
@@ -75,6 +78,17 @@ def _rs2_axes(vx, vy):
     rx = lambda v: (v[0], c * v[1] - s_ * v[2], s_ * v[1] + c * v[2])
     return "%g %g %g %g %g %g" % (rx(vx) + rx(vy))
 N_OBS = 6
+
+
+def mast_info_lens():
+    """info["mast"] lens fields.  Default (realism on, KEVIN_MAST_HFOV unset): the twin truth lens the sim renders with.
+    Else the pinhole KEVIN_MAST_HFOV belief (no distortion), as before."""
+    if MAST_TRUE and "KEVIN_MAST_HFOV" not in os.environ:
+        t = MAST_TRUE; fovy = math.degrees(2 * math.atan((MH / 2) / t["fy"]))
+        return dict(intr=dict(w=MW, h=MH, fx=t["fx"], fy=t["fy"], ppx=t["cx"], ppy=t["cy"]), dist=[t["k1"], t["k2"], 0.0, 0.0], dist_model="brown",
+                    hfov_deg=t["hfov_deg"], dfov_deg=t["dfov_deg"], fovy_deg=fovy, lens_source="twin truth (emu.realism.mast_truth)")
+    return dict(intr=_intr(MW, MH, MAST_FOVY), dist=[0.0, 0.0, 0.0, 0.0], dist_model="brown", hfov_deg=MAST_HFOV, fovy_deg=MAST_FOVY,
+                lens_source="KEVIN_MAST_HFOV pinhole belief")
 
 
 def _intr(w, h, fovy):
@@ -556,8 +570,7 @@ class World:
                        streams=dict(depth=st(di, [0, 0, 0]), color=st(ci, [-0.015, 0, 0]), ir1=st(di, [0, 0, 0]), ir2=st(di, [BASELINE, 0, 0]))),
             ser2: dict(name="Intel RealSense D435I", fps=FPS, shm="kevin_rs2", layout=[[n, list(s), d] for n, s, d in L2], imu="kevin_imu",
                        streams=dict(depth=st(di, [0, 0, 0]), color=st(ci, [-0.015, 0, 0]), ir1=st(di, [0, 0, 0]), ir2=st(di, [BASELINE, 0, 0])))},
-            "mast": dict(shm="kevin_mast", layout=[["color", [MH, MW, 3], "u1"]], intr=_intr(MW, MH, MAST_FOVY), hfov_deg=MAST_HFOV, fovy_deg=MAST_FOVY,
-                         pos=MAST_POS, pitch_deg=0.0, hz=MAST_HZ),
+            "mast": dict(shm="kevin_mast", layout=[["color", [MH, MW, 3], "u1"]], pos=MAST_POS, pitch_deg=0.0, hz=MAST_HZ, **mast_info_lens()),
             "env": self.env.name, "seed": self.a.seed, "places": self.env.places, "start": self.env.start, "tire": self.a.tire,
             "mounts": dict(rs1=RS1_POS, rs2=RS2_POS, rs2_imu=RS2_IMU, rs2_pitch_deg=math.degrees(RS2_PITCH), rs2_true=RS2_TRUE), "pid": os.getpid(), "t0": time.monotonic()}
         np.savez_compressed("/dev/shm/kevin_gt_map.npz", occ=self.env.gt, origin=np.array(self.env.gt_origin), res=envs.GT_RES)
