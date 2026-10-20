@@ -12,10 +12,13 @@ core's own rules with factor x the stopping distance and the core's own band rec
 (RS1 ego + RS2 + map memory: a superset of the core's RS1 ego + RS2).  On identical points a command it passes, the
 core passes (larger window => smaller 'fr'-cap and 'mn'; same sd0 and escape test; property test: 0/3000 random
 disagreements vs 53/3000 for the old rule); the 2x covers measured-speed and one-tick point-age differences.  Candidates, most to least of the planner's intent: the command scaled 1 .. 0.1, then the rotation
-alone (the core checks a pure rotation without the translation bands), then stop.  It only ever reduces."""
+alone (the core checks a pure rotation without the translation bands), then stop.  It only ever reduces.
+With SC_DECEL (sim default, see safety_core) every candidate is tested with the core's designed-decel rule instead, with
+factor x the reaction lead time."""
 from __future__ import annotations
 import numpy as np
-from nav.safety_core import sd, free_along, free_rotation, need_dist, need_angle, MARGIN
+from nav import limits as LIM
+from nav.safety_core import sd, free_along, free_rotation, need_dist, need_angle, MARGIN, SC_DECEL, T_R, brake_traj, decel_violates, decel_prep, traj_travel
 from twin_geometry import FOOTPRINT_SAFE
 
 R_FP = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())   # footprint radius about the axle
@@ -50,6 +53,23 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0):
         else: return True, 0.0
         return fr >= need2 or (sd0 < MARGIN and mn >= sd0 - 1e-3), need2
 
+    if SC_DECEL:
+        # mirror of the core's designed-decel rule (safety_core.decide_decel) with the PLANNER accel limits (safety / PLAN_MULT,
+        # nav/limits.py) and PLAN_MULT x the reaction lead, so the planner slows before the core would have to act; same
+        # margin, no band veto (the core has none in this mode)
+        factor = LIM.PLAN_MULT; aL, aT = LIM.PLAN_A_LONG, LIM.PLAN_A_LAT
+        sdP = sd(P) if len(P) else np.zeros(0); PREP = {}
+        def ok(vs, ws):
+            if abs(vs) < 1e-3 and abs(ws) < 1e-3: return True, 0.0
+            ve = vs if not (v_meas * vs > 0 and abs(v_meas) > abs(vs)) else v_meas
+            we = ws if not (w_meas * ws > 0 and abs(w_meas) > abs(ws)) else w_meas
+            poses, t_stop = brake_traj(ve, we, factor * T_R, aL, aT)
+            if not len(P): return True, t_stop
+            if "p" not in PREP:     # candidates once, for the largest travel of this call (full command, or measured if faster)
+                big = brake_traj(max(abs(v), abs(v_meas)), max(abs(w), abs(w_meas)), factor * T_R, aL, aT)[0]
+                PREP["p"] = decel_prep(P, sdP, max(traj_travel(big), traj_travel(poses)), MARGIN)
+            if PREP["p"] is None: return True, t_stop
+            return not decel_violates(P, sdP, poses, MARGIN, PREP["p"])[0], t_stop
     if abs(v) < 1e-3 and abs(w) < 1e-3: return 0.0, 0.0, 1.0, 0.0, "idle"
     for s in SCALES:
         g, n2 = ok(v * s, w * s)

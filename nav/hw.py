@@ -246,8 +246,15 @@ class Hardware:
     HB_HZ = 20.0; HB_FRESH_S = 0.3
 
     def drive(self, v, w):
+        # the ONLY path from any planner to the wheels: clamp to the PLANNER accel limits (nav/limits.py), so no plan can
+        # emit an out-of-range command (the safety core counts any that still exceed the SAFETY limits as planner bugs)
+        t = time.monotonic()
+        if not hasattr(self, "_lim"):
+            from nav import limits as LIM; import twin_geometry as _TG
+            self._lim = LIM.CmdLimiter(_TG.TRACK_M) if LIM.PLAN_LIMIT else None
+        if self._lim is not None: v, w = self._lim(v, w, t)
         if getattr(self, "core", False):
-            self.bus["cmd"].write(v=float(v), w=float(w), t=time.monotonic()); return
+            self.bus["cmd"].write(v=float(v), w=float(w), t=t); return
         if not self.wb: return
         with self._drv_lock:
             self._cmd = (float(v), float(w), time.monotonic()); self._hb_zeroed = False

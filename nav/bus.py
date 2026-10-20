@@ -102,7 +102,7 @@ def layouts(depth_shape):
         rs2pose=[("T", (3,), "f8"), ("R", (9,), "f8"), ("set", (1,), "i8")],
         cmd=[("v", (1,), "f8"), ("w", (1,), "f8"), ("t", (1,), "f8")],
         wheel=[("vl", (1,), "f8"), ("vr", (1,), "f8"), ("t", (1,), "f8"), ("il", (1,), "f8"), ("ir", (1,), "f8"), ("iage", (1,), "f8"), ("batt", (1,), "f8")],
-        state=[("f", (24,), "f8")],
+        state=[("f", (25,), "f8")],      # = len(safety_core.STATE_FIELDS)
         rs1info=[("f", (6,), "f8"), ("set", (1,), "i8")],
         viz=[("pts", (2000, 2), "f4"), ("n", (1,), "i8"), ("bands", (8,), "f8"), ("t", (1,), "f8")],
         # RS2 camera process (nav/camproc.py) -> brain: the full RS2 frame for SLAM/VLN, its intrinsics, and the IMU ring

@@ -40,8 +40,24 @@ RAMP_NORMAL, RAMP_MAX = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")), 5.0
 BRAKE = {RAMP_NORMAL: (0.0987, 2.47), RAMP_MAX: (0.0926, 4.26)}     # (lag s, decel m/s^2), fits above
 BAND = 0.05; MARGIN = SAFETY_MARGIN; H_MAX = 1.0
 STATE_FIELDS = ["t_dec", "period", "age1", "age2", "v_cmd", "w_cmd", "v_m", "w_m", "v_out", "w_out", "code", "ramp", "free",
-                "need", "sd0", "band_f", "band_r", "n_pts", "rt", "cpu", "t_sent", "cap1", "cap2", "brakes"]
-CODES = ["ok", "idle", "inop_age", "inop_cadence", "no_depth", "band_front", "band_rear", "brake", "cmd_stale", "escape"]
+                "need", "sd0", "band_f", "band_r", "n_pts", "rt", "cpu", "t_sent", "cap1", "cap2", "brakes", "plan_bugs"]
+CODES = ["ok", "idle", "inop_age", "inop_cadence", "no_depth", "band_front", "band_rear", "brake", "cmd_stale", "escape", "collide"]
+
+# ---- designed-deceleration rule (James 2026-10-20, t610-t613; docs/safety_time_to_intervene.md, emu/tools/scbench) ----
+# Pass a command untouched unless, were it passed this tick, a stop at the DESIGNED decel (friction ellipse 0.2 g long /
+# 0.1 g lat, wheel-rim limited) after the reaction lead (one tick + T_CMD + actuator lag) would bring the footprint
+# inside MARGIN of any obstacle; inside the margin, no obstacle (connected point cluster) may lose clearance.  Then zero,
+# braking at the designed decel.  No speed-independent band veto.  SIM ONLY by default: on when KEVIN_HAL=sim
+# (KEVIN_SC_DECEL=0/1 overrides); elsewhere the rule above (bands + brake + escape) is unchanged.
+SC_DECEL = os.environ.get("KEVIN_SC_DECEL", "1" if os.environ.get("KEVIN_HAL") == "sim" else "0") == "1"
+from nav import limits as LIM                   # ONE accel config (nav/limits.py): the core uses the SAFETY limits
+A_LONG, A_LAT = LIM.SAFETY_A_LONG, LIM.SAFETY_A_LAT
+LAG_D = 0.0987                                  # actuator lag of the measured ramp-3 stop fit (ASSUMED at the design ramp; measure)
+T_R = T_TICK + T_CMD + LAG_D                    # reaction lead: the command keeps running this long before decel starts
+RAMP_DESIGN = A_LONG / (2 * math.pi * WHEEL_R_M)    # ODrive vel_ramp_rate (turns/s^2) giving A_LONG at the rim (3.65 nominal)
+D_TOL = 1e-4                                    # numeric only (a 1 mm tolerance ratchets a slow drift into the margin)
+D_LINK = 0.03                                   # points closer than this belong to one obstacle
+D_CL_BAND = 0.5                                 # obstacles are labelled within this distance of the footprint
 
 
 def d_stop(v, ramp):
@@ -65,8 +81,12 @@ def _edges(poly):
 N_, C_ = _edges(FOOTPRINT_SAFE)
 
 
+N32, C32 = N_.T.astype(np.float32), C_.astype(np.float32)
+
+
 def sd(P):
-    return (P @ N_.T - C_).max(1) if len(P) else np.zeros(0)
+    """signed distance of each point to the footprint (float32 matmul: ~3x cheaper than float64 on 6-10k points)"""
+    return (np.asarray(P, np.float32) @ N32 - C32).max(1) if len(P) else np.zeros(0, np.float32)
 
 
 def pose_on_arc(s, sign, kappa):
@@ -159,9 +179,121 @@ class Bands:
         return [[self.x_front, -self.hw, self.x_front + BAND, self.hw], [self.x_rear - BAND, -self.hw, self.x_rear, self.hw]]
 
 
+D_STEP = 0.01                                   # sweep sample: every footprint point moves <= 1 cm between poses ...
+D_STEP_MIN = 0.002                              # ... finer for slow commands (<= a quarter of the lead travel, >= 2 mm), so
+                                                # the end rounding stays small; depends on the command only, not the horizon
+
+
+def brake_traj(v, w, t_lead=None, a_long=None, a_lat=None):
+    """poses (S, 3) of: hold (v, w) for t_lead, then a designed-decel stop along the same arc ((v, w) decay together;
+    rim decel <= a_long * sqrt(1 - (a_lat_now / a_lat)^2)).  The whole path is the constant-(v, w) arc for an
+    'equivalent time' tau in [0, t_lead + D] (D = integral of the decay), sampled on a FIXED grid tau_k = k * dtau
+    (footprint travel D_STEP per sample, end rounded up to the grid): two horizons of the same command (core and
+    governor) are sampled at the same poses, the longer one at a superset.  -> (poses, t_stop)"""
+    t_lead = T_R if t_lead is None else t_lead; a_long = A_LONG if a_long is None else a_long; a_lat = A_LAT if a_lat is None else a_lat
+    rim = abs(v) + abs(w) * TRACK_M / 2
+    if rim < 1e-9: return np.zeros((1, 3)), 0.0
+    u = 1.0; D = 0.0; t = t_lead; DT = 0.004; lat0 = abs(v * w)
+    if lat0 < 0.1 * a_lat:                                          # lateral never binds: closed form
+        T = rim / a_long; D = T / 2; t += T
+    else:
+        while u > 0:
+            r = a_long * math.sqrt(max(1.0 - (lat0 * u * u / a_lat) ** 2, 0.01)) / rim; du = min(u, r * DT); h = du / r
+            D += (u - du / 2) * h; u -= du; t += h
+    tau_end = t_lead + D; rate = abs(v) + abs(w) * R_FOOT; dtau = min(D_STEP, max(D_STEP_MIN, rate * T_R / 4)) / rate
+    tau = np.arange(0, int(math.ceil(tau_end / dtau - 1e-9)) + 1) * dtau
+    th = w * tau
+    if abs(w) < 1e-9: x, y = v * tau, np.zeros_like(tau)
+    else: x, y = v / w * np.sin(th), v / w * (1 - np.cos(th))
+    return np.stack([x, y, th], 1), t
+
+
+def _sd_matrix_T(P, poses):
+    """signed distance of every point to the footprint at every pose -> (N, S).  One float32 matmul with the footprint
+    normals rotated per pose (n . R^T (p - t) = (R n) . p - (R n) . t), edge-major so the max over the 12 edges runs
+    on contiguous (N, S) blocks."""
+    th = poses[:, 2]; c, s_ = np.cos(th)[None, :], np.sin(th)[None, :]
+    Mx = N_[:, 0, None] * c - N_[:, 1, None] * s_; My = N_[:, 0, None] * s_ + N_[:, 1, None] * c          # (E, S)
+    off = (Mx * poses[None, :, 0] + My * poses[None, :, 1] + C_[:, None]).astype(np.float32).ravel()
+    W = np.stack([Mx.ravel(), My.ravel()], 0).astype(np.float32)                                          # (2, E*S)
+    D = np.asarray(P, np.float32) @ W; D -= off; S_ = len(poses)
+    out = D[:, :S_].copy()
+    for e in range(1, len(N_)): np.maximum(out, D[:, e * S_:(e + 1) * S_], out=out)
+    return out
+
+
+try:
+    from scipy.ndimage import label as _nd_label
+except Exception:                       # pragma: no cover
+    _nd_label = None
+_K8 = np.ones((3, 3), bool)
+
+
+def _clusters(P, link=D_LINK):
+    """connected components (cells of size link, 8-connected) -> label per point"""
+    key = np.floor(P / link).astype(np.int64); k0 = key.min(0); key -= k0; shp = key.max(0) + 1
+    if _nd_label is not None and shp[0] * shp[1] <= 250000:
+        g = np.zeros(tuple(shp), bool); g[key[:, 0], key[:, 1]] = True
+        L, _ = _nd_label(g, structure=_K8); return L[key[:, 0], key[:, 1]]
+    cells, inv = np.unique(key, axis=0, return_inverse=True); inv = inv.ravel(); n = len(cells)
+    idx = {k: i for i, k in enumerate(zip(cells[:, 0].tolist(), cells[:, 1].tolist()))}; par = list(range(n))
+    def f(a):
+        while par[a] != a: par[a] = par[par[a]]; a = par[a]
+        return a
+    for (cx, cy), i in idx.items():
+        for dx, dy in ((1, -1), (1, 0), (1, 1), (0, 1)):
+            j = idx.get((cx + dx, cy + dy))
+            if j is not None:
+                ra, rb = f(i), f(j)
+                if ra != rb: par[ra] = rb
+    root = np.array([f(i) for i in range(n)]); return root[inv]
+
+
+def decel_prep(P, sdP, travel, margin=MARGIN):
+    """candidate points (those that can get within margin when every footprint point moves <= travel), grouped by
+    obstacle -> (Q (n, 2), order, group starts) or None"""
+    cand = sdP <= travel + margin + 0.005
+    if not cand.any(): return None
+    # obstacles are labelled on a FIXED band around the footprint (not on this trajectory's candidates), so the core and
+    # the governor (longer horizon -> more candidates) see the same obstacles; an obstacle's closest point is always a
+    # candidate when any of its points is, and its other points cannot reach the margin on this trajectory
+    band = sdP <= max(D_CL_BAND, travel + margin + 0.005); lab_all = _clusters(P[band])
+    lab = lab_all[cand[band]]; Q = P[cand]; o = np.argsort(lab, kind="stable"); ls = lab[o]
+    return Q[o], np.r_[0, np.nonzero(np.diff(ls))[0] + 1]
+
+
+def traj_travel(poses):
+    return float((np.hypot(poses[:, 0], poses[:, 1]) + np.abs(poses[:, 2]) * R_FOOT).max())
+
+
+def decel_violates(P, sdP, poses, margin=MARGIN, prep=None):
+    """per obstacle: clearance along 'poses' must stay >= min(its clearance now, margin).  Only points that can get
+    within margin on this trajectory are evaluated (|motion of any footprint point| <= |dxy| + |dth| R_FOOT).
+    prep: decel_prep() for a travel >= this trajectory's (reused across candidate commands).  -> (violates, min sd)"""
+    if not len(P): return False, np.inf
+    if prep is None: prep = decel_prep(P, sdP, traj_travel(poses), margin)
+    if prep is None: return False, float(sdP.min())
+    Q, st = prep; M = _sd_matrix_T(Q, poses); cm = np.minimum.reduceat(M, st, axis=0)       # (obstacles, S)
+    return bool((cm < np.minimum(cm[:, :1], margin) - D_TOL).any()), float(M.min())
+
+
+def decide_decel(P, bands, v_c, w_c, v_m, w_m, margin=MARGIN, t_lead=None, sdP=None):
+    """designed-decel rule; same returns as decide().  Called by decide() when SC_DECEL (idle/coast handled there)."""
+    if sdP is None: sdP = sd(P) if len(P) else np.zeros(0)
+    sd0 = float(sdP.min()) if len(P) else np.inf
+    bf, br = (bands.front(P), bands.rear(P)) if bands is not None else (False, False)     # logged only (no veto)
+    v_e = v_m if (v_m * v_c > 0 and abs(v_m) > abs(v_c)) else v_c
+    w_e = w_m if (w_m * w_c > 0 and abs(w_m) > abs(w_c)) else w_c
+    poses, t_stop = brake_traj(v_e, w_e, t_lead)
+    bad, mn = decel_violates(P, sdP, poses, margin)
+    if bad: return 0.0, 0.0, ("collide" if sd0 < margin else "brake"), RAMP_DESIGN, mn, t_stop, sd0, bf, br
+    return v_c, w_c, ("escape" if sd0 < margin else "ok"), RAMP_NORMAL, mn, t_stop, sd0, bf, br
+
+
 def decide(P, bands, v_c, w_c, v_m, w_m):
     """pure function of the tick's inputs -> (v_out, w_out, code, ramp, free, need, sd0, band_f, band_r)."""
-    sd0 = float(sd(P).min()) if len(P) else np.inf
+    sdP = sd(P) if len(P) else None; sd0 = float(sdP.min()) if len(P) else np.inf
+    if SC_DECEL and (abs(v_c) >= 1e-3 or abs(w_c) >= 1e-3): return decide_decel(P, bands, v_c, w_c, v_m, w_m, sdP=sdP)
     bf, br = bands.front(P), bands.rear(P)
     moving = abs(v_m) > 0.02 or abs(w_m) > 0.05
     if abs(v_c) < 1e-3 and abs(w_c) < 1e-3:
@@ -268,6 +400,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     gc.collect(); gc.freeze(); gc.disable()                       # no GC pauses inside the loop (refcounting still frees)
     s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}; n2 = 0; lat2 = None
     ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0; n_stuck = 0; errs = 0
+    lchk = LIM.LimitCheck(TRACK_M)                                 # brain commands beyond the SAFETY accel limits = planner bug
     while True:
         try:
             if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
@@ -284,7 +417,10 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
             else: v_c, w_c, t_c = float(c["v"][0]), float(c["w"][0]), float(c["t"][0])
             code = None
             if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
-            else: code_c = None
+            else:
+                code_c = None
+                if lchk(v_c, w_c, t_c) and (lchk.bugs <= 3 or lchk.bugs % 100 == 0):
+                    print("safety_core: PLANNER BUG #%d: command (v, w, t) %s exceeds the safety accel limits (%.2f / %.2f m/s^2)" % (lchk.bugs, lchk.last, A_LONG, A_LAT), flush=True)
             if new1:
                 tA = time.monotonic(); cap1 = clk1.capture(float(cam.depth_stamp), t_recv)
                 per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
@@ -349,11 +485,11 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
                 with wb.bus_lock:
                     for ax in (wb.left, wb.right): ax.write_property_nowait('axis0.controller.config.vel_ramp_rate', float(ramp))
                 ramp_now = ramp
-            if code in ("brake", "band_front", "band_rear", "inop_age", "inop_cadence", "no_depth") and (abs(v_c) > 1e-3 or abs(w_c) > 1e-3): brakes += 1
+            if code in ("brake", "collide", "band_front", "band_rear", "inop_age", "inop_cadence", "no_depth") and (abs(v_c) > 1e-3 or abs(w_c) > 1e-3): brakes += 1
             tD = time.monotonic(); wb.twist(v_o, w_o); t_sent = time.monotonic()
             period = None if t_prev is None else t_dec - t_prev; t_prev = t_dec
             f = [t_dec, period if period is not None else np.nan, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, CODES.index(code) if code in CODES else -1,
-                 ramp, free, need, sd0, bf, br, npts, 0, cpu, t_sent, cap1p or np.nan, cap2 or np.nan, brakes]
+                 ramp, free, need, sd0, bf, br, npts, 0, cpu, t_sent, cap1p or np.nan, cap2 or np.nan, brakes, lchk.bugs]
             B["state"].write(f=np.array(f, np.float64))
             if new1 and t_dec - viz_t > 0.2 and len(P):                                # 5 Hz snapshot for the viewer overlay
                 k = min(len(P), 2000); B["viz"].write(pts=P[:k].astype(np.float32), n=np.array([k]), bands=np.array(bands.rects(), np.float64).ravel(), t=np.array([t_dec]))
