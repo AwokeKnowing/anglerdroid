@@ -924,15 +924,16 @@ class World:
         mj = self.mj; m = self.m; dr = mj.MjData(m)
         Rc8 = mj.Renderer(m, DH, DW) if self.a.ir else None
         Rc = mj.Renderer(m, CH, CW)
-        Rm = mj.Renderer(m, MH, MW); t_mast = [0]
+        t_mast = [0]; MAST_THREAD = os.environ.get("KEVIN_EMU_MAST_THREAD", "1") == "1"
+        Rm = None if MAST_THREAD else mj.Renderer(m, MH, MW)
         Rd2 = None
         if not fast_rs2: Rd2 = mj.Renderer(m, DH, DW); Rd2.enable_depth_rendering()
         rng = np.random.default_rng(8); NB = 8
         irn = [rng.normal(0, 2.0, (DH, DW)).astype(np.float32) for _ in range(NB)]
         irn2 = [np.tile(b, (2, 2)) for b in irn]   # 2x banks: random window per frame instead of np.roll copies
         fpx = _intr(DW, DH, FOVY_D)["fx"]
-        def rgb(R, cam):
-            R.update_scene(dr, cam); return R.render()
+        def rgb(R, cam, d=None):
+            R.update_scene(dr if d is None else d, cam); return R.render()
         fx = {}
         if realism.REAL:      # camera pipeline: AE, vignetting, yaw motion blur, shot/read noise; mast also lens distortion
             ci, mt = _intr(CW, CH, FOVY_C), MAST_TRUE
@@ -955,6 +956,20 @@ class World:
                 try: self._view(dv, imgs)
                 except Exception as e: print("emu.world: view error %r" % e, flush=True)
         if VIEW: threading.Thread(target=view_loop, daemon=True, name="view").start()
+        # mast RGB (10 Hz, ~17-25 ms a frame) in its own thread with its own MjData + renderer (GL context created in that
+        # thread): inline it pushed every 3rd colour frame past 33 ms -> colour 27 Hz, 330 gaps >50 ms per 125 s log (L12,
+        # 2026-10-19).  KEVIN_EMU_MAST_THREAD=0 restores the inline render.
+        mcv = threading.Condition(); mjob = [None]
+        def mast_loop():
+            dm = mj.MjData(m); Rmt = mj.Renderer(m, MH, MW)
+            while True:
+                with mcv:
+                    while mjob[0] is None: mcv.wait()
+                    st_m, qp, mp, mq, wz_m = mjob[0]; mjob[0] = None
+                dm.qpos[:] = qp; dm.mocap_pos[:] = mp; dm.mocap_quat[:] = mq; mj.mj_kinematics(m, dm); mj.mj_camlight(m, dm)
+                try: self.bm.write(st_m, color=fxa("mast", rgb(Rmt, "mast_rgb", dm), wz_m))
+                except Exception as e: print("emu.world: mast error %r" % e, flush=True)
+        if MAST_THREAD: threading.Thread(target=mast_loop, daemon=True, name="mast").start()
         CHILD = os.environ.get("KEVIN_EMU_SLOW_CHILD") == "1"; t_rep = [time.perf_counter(), 0]
         last = None; TS = self.TS = dict(wait=0.0, col=0.0, ir=0.0, fx=0.0, write=0.0, mast=0.0, view=0.0); _pc = time.perf_counter
         while True:
@@ -997,7 +1012,10 @@ class World:
                 t_rep[1] = self._ncol
                 for k_ in TS: TS[k_] = 0.0
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
-                t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
+                t_mast[0] = st_ns
+                if MAST_THREAD:
+                    with mcv: mjob[0] = (st_ns, qpos, mocap, mquat, wz); mcv.notify()
+                else: self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
             _a = _pc(); TS["mast"] += _a - _b
             # third-person view: ~10 Hz by wall clock (its docstring rate); it costs ~40 ms a frame, every 2nd colour
             # frame it took 29 % of the slow lane and held colour at ~14 Hz
