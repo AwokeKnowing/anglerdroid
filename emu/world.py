@@ -188,6 +188,15 @@ def compose(env: envs.Env, tire: str) -> str:
     comp = root.find("compiler")
     comp.set("meshdir", os.path.join(TWIN, comp.get("meshdir", "assets"))); comp.set("texturedir", os.path.join(TWIN, comp.get("texturedir", "assets")))
     asset = root.find("asset"); wb = root.find("worldbody")
+    # Drive-tire contact: MuJoCo's cylinder-vs-floor contact sits on the rim EDGES (+-6 mm of the 12 mm tread) and hops
+    # between inner and outer edge, so the effective track wanders 0.350..0.374 m: pivot yaw rate ripple sd 0.03-0.05 rad/s
+    # (peaks +5 %) and a mean bias up to +1.5 % on carpet vs the twin's 0.362 m.  An ellipsoid with the same rolling radius
+    # and half-width touches at the tread centreline (measured +-0.1810 m, GT/kinematic w 1.0003, sd 0.008; straight-line
+    # speed unchanged).  KEVIN_EMU_TIRE_CONTACT=cylinder restores the old contact.  Sim-only; the twin XML is untouched.
+    if os.environ.get("KEVIN_EMU_TIRE_CONTACT", "ellipsoid") == "ellipsoid":
+        for g in root.iter("geom"):
+            if g.get("name") in ("wheel_left_tire", "wheel_right_tire") and g.get("type") == "cylinder":
+                r, hw = g.get("size").split()[:2]; g.set("type", "ellipsoid"); g.set("size", "%s %s %s" % (r, r, hw))
     tdir = envs.ensure_textures()
     if realism.REAL:      # CC0 photo textures (ambientCG) + per-material repeat/specular; procedural fallback per material
         tp = realism.prepare_textures(tdir)
