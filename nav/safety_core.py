@@ -249,16 +249,25 @@ def _clusters(P, link=D_LINK):
     root = np.array([f(i) for i in range(n)]); return root[inv]
 
 
+D_CELL = 0.002                                  # points are merged to the centres of D_CELL cells before the sweep (a box
+D_CELL_ERR = D_CELL / math.sqrt(2)              # face is ~10k RS2 points stacked in xy, ~5x fewer cells); |sd error| <= this,
+                                                # added to the margin (conservative) -- well under the depth noise (5-8 mm)
+
+
 def decel_prep(P, sdP, travel, margin=MARGIN):
-    """candidate points (those that can get within margin when every footprint point moves <= travel), grouped by
-    obstacle -> (Q (n, 2), order, group starts) or None"""
-    cand = sdP <= travel + margin + 0.005
-    if not cand.any(): return None
+    """candidate cells (those that can get within margin when every footprint point moves <= travel), grouped by
+    obstacle -> (Q (n, 2) cell centres, group starts) or None"""
+    reach = travel + margin + 0.005 + D_CELL_ERR
+    if not (sdP <= reach).any(): return None
     # obstacles are labelled on a FIXED band around the footprint (not on this trajectory's candidates), so the core and
     # the governor (longer horizon -> more candidates) see the same obstacles; an obstacle's closest point is always a
     # candidate when any of its points is, and its other points cannot reach the margin on this trajectory
-    band = sdP <= max(D_CL_BAND, travel + margin + 0.005); lab_all = _clusters(P[band])
-    lab = lab_all[cand[band]]; Q = P[cand]; o = np.argsort(lab, kind="stable"); ls = lab[o]
+    B = P[sdP <= max(D_CL_BAND, reach)]; k = np.floor(B / D_CELL).astype(np.int64)
+    u = np.unique((k[:, 0] + (1 << 20)) * (1 << 21) + (k[:, 1] + (1 << 20)))
+    C = (np.stack([u // (1 << 21) - (1 << 20), u % (1 << 21) - (1 << 20)], 1) + 0.5).astype(np.float32) * np.float32(D_CELL)
+    sdC = sd(C); cand = sdC <= reach
+    if not cand.any(): return None
+    lab = _clusters(C)[cand]; Q = C[cand]; o = np.argsort(lab, kind="stable"); ls = lab[o]
     return Q[o], np.r_[0, np.nonzero(np.diff(ls))[0] + 1]
 
 
@@ -273,8 +282,8 @@ def decel_violates(P, sdP, poses, margin=MARGIN, prep=None):
     if not len(P): return False, np.inf
     if prep is None: prep = decel_prep(P, sdP, traj_travel(poses), margin)
     if prep is None: return False, float(sdP.min())
-    Q, st = prep; M = _sd_matrix_T(Q, poses); cm = np.minimum.reduceat(M, st, axis=0)       # (obstacles, S)
-    return bool((cm < np.minimum(cm[:, :1], margin) - D_TOL).any()), float(M.min())
+    Q, st = prep[0], prep[1]; M = _sd_matrix_T(Q, poses); cm = np.minimum.reduceat(M, st, axis=0)       # (obstacles, S)
+    return bool((cm < np.minimum(cm[:, :1], margin + D_CELL_ERR) - D_TOL).any()), float(M.min()) - D_CELL_ERR
 
 
 def decide_decel(P, bands, v_c, w_c, v_m, w_m, margin=MARGIN, t_lead=None, sdP=None):

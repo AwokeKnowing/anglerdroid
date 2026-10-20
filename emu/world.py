@@ -525,7 +525,9 @@ class World:
         # keep the ride height relative to the GROUND at the target: teleports used to keep z, so tile (kitchen, 12 mm
         # below the carpet) -> start (carpet) put the wheels 12 mm into the carpet and MuJoCo ejected Kevin backwards at
         # ~1.5 m/s into the table at (2.6, 1.75) (5/5 live, 2026-10-20 11:08; 0/3 from carpet).
-        q = self.d.qpos; q[2] += self.floor_under(x, y) - self.floor_under(q[0], q[1])
+        # KEVIN_EMU_TELEPORT_KEEPZ=1 restores the old keep-z teleport (test only: recreates the L15 ejection wedge)
+        q = self.d.qpos
+        if os.environ.get("KEVIN_EMU_TELEPORT_KEEPZ") != "1": q[2] += self.floor_under(x, y) - self.floor_under(q[0], q[1])
         q[0], q[1] = x, y; q[3:7] = (math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))
         self.d.qvel[:] = 0
         # never drop Kevin onto the dog (2026-10-17 bench ta1: teleport into the dog -> 5.3 m/s contact, Kevin left
