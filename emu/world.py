@@ -27,6 +27,7 @@ TWO_PI = 2 * math.pi
 DW, DH, CW, CH = 848, 480, 640, 480
 FOVY_D, FOVY_C = 58.0, 42.0
 VIEW = os.environ.get("KEVIN_EMU_VIEW") == "1"; VIEW_DIR = os.environ.get("KEVIN_EMU_VIEW_DIR"); VIEW_W, VIEW_H = 960, 540
+VIEW_HZ = float(os.environ.get("KEVIN_EMU_VIEW_HZ", "10"))
 if VIEW_DIR: os.makedirs(VIEW_DIR, exist_ok=True)
 #  image slice depth(m), tex w,h, fovy, aspect, frustum line colour.  Viewer-only: the live image fills the frustum
 #  cross-section at the given depth (8-10 cm from the lens), plus thin translucent lines for the full FOV out to the near/far clip range (VIEW_CLIP).
@@ -728,7 +729,9 @@ class World:
                 # a slowdown can be located (2026-10-18: 1000 -> 640 Hz over ~3.5 h, restart restored it, cause unknown)
                 print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz  rtf %.3f  ms/s %s ncon %d" % (
                     s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / el, self._ncam / el, self._ncol / el, steps * self.dt / el,
-                    " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in TM.items()), int(self.d.ncon)), flush=True)
+                    " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in TM.items()), int(self.d.ncon)) +
+                      "  slow ms/s " + " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in getattr(self, "TS", {}).items()), flush=True)
+                for k_ in getattr(self, "TS", {}): self.TS[k_] = 0.0
                 if steps * self.dt / el < 0.95: print("emu.world: WARNING sim slower than real time (rtf %.2f): robot timing assumes 1.0" % (steps * self.dt / el), flush=True)
                 steps = 0; self._ncam = 0; self._ncol = 0; last_report = now
                 for k_ in TM: TM[k_] = 0.0
@@ -909,15 +912,28 @@ class World:
         from concurrent.futures import ThreadPoolExecutor
         pool = ThreadPoolExecutor(2)       # CamFX (cv2, GIL released) overlaps with the next renders
         cv2.setNumThreads(1)               # the sim is CPU-bound: no cv2 worker oversubscription
-        last = None
+        vcv = threading.Condition(); vjob = [None]
+        def view_loop():
+            dv = mj.MjData(m)
+            while True:
+                with vcv:
+                    while vjob[0] is None: vcv.wait()
+                    qp, mp, mq, imgs = vjob[0]; vjob[0] = None
+                dv.qpos[:] = qp; dv.mocap_pos[:] = mp; dv.mocap_quat[:] = mq; mj.mj_kinematics(m, dv); mj.mj_camlight(m, dv)
+                try: self._view(dv, imgs)
+                except Exception as e: print("emu.world: view error %r" % e, flush=True)
+        if VIEW: threading.Thread(target=view_loop, daemon=True, name="view").start()
+        last = None; TS = self.TS = dict(wait=0.0, col=0.0, ir=0.0, fx=0.0, write=0.0, mast=0.0, view=0.0); _pc = time.perf_counter
         while True:
+            _a = _pc()
             with cv:
                 while rq.get("slow") is None or rq["slow"] is last: cv.wait()
                 last = job = rq["slow"]
+            _b = _pc(); TS["wait"] += _b - _a
             st_ns, qpos, mocap, mquat, wz, _ = job
             dr.qpos[:] = qpos; dr.mocap_pos[:] = mocap; dr.mocap_quat[:] = mquat; mj.mj_kinematics(m, dr); mj.mj_camlight(m, dr)
             f1 = pool.submit(fxa, "rs1_color", rgb(Rc, "rs1_color"), wz); f2 = pool.submit(fxa, "rs2_color", rgb(Rc, "rs2_color"), wz)
-            o1, o2 = {}, {}
+            o1, o2 = {}, {}; _a = _pc(); TS["col"] += _a - _b
             if Rc8 is not None:
                 for dev, o in (("rs1", o1), ("rs2", o2)):
                     for nm in ("ir1", "ir2"):
@@ -929,7 +945,8 @@ class World:
                         oy, ox = int(rng.integers(DH)), int(rng.integers(DW))
                         g += irn2[int(rng.integers(NB))][oy:oy + DH, ox:ox + DW]
                         o[nm] = np.clip(g, 0, 255).astype(np.uint8)
-            o1["color"] = f1.result(); o2["color"] = f2.result()
+            _b = _pc(); TS["ir"] += _b - _a
+            o1["color"] = f1.result(); o2["color"] = f2.result(); _a = _pc(); TS["fx"] += _a - _b
             if Rd2 is not None:                                    # RS2 depth in the slow lane only if not fast
                 Rd2.update_scene(dr, "rs2_ir1"); Rd2.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0
                 o2["depth"] = (Rd2.render() * 1000.0).astype(np.uint16); o2["_st"] = st_ns
@@ -939,11 +956,18 @@ class World:
             else:
                 with lane["lock"]:
                     lane["pend1"] = o1; lane["pend2"] = o2
-            self._ncol += 1
+            self._ncol += 1; _b = _pc(); TS["write"] += _b - _a
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
                 t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
-            if VIEW and self._ncol % 2 == 0 and lane["d1"] is not None:
-                self._view(dr, {"rs1_depth": lane["d1"], "rs1_color": o1["color"], "rs2_ir1": lane["d2"] if lane["d2"] is not None else o2.get("depth"), "rs2_color": o2["color"]})
+            _a = _pc(); TS["mast"] += _a - _b
+            # third-person view: ~10 Hz by wall clock (its docstring rate); it costs ~40 ms a frame, every 2nd colour
+            # frame it took 29 % of the slow lane and held colour at ~14 Hz
+            # (own thread, own MjData + GL context: overlaps with the sensor renders instead of adding to them)
+            if VIEW and lane["d1"] is not None and time.monotonic() - getattr(self, "_t_view", 0.0) >= 1.0 / VIEW_HZ:
+                self._t_view = time.monotonic()
+                with vcv:
+                    vjob[0] = (qpos, mocap, mquat, {"rs1_depth": lane["d1"], "rs1_color": o1["color"], "rs2_ir1": lane["d2"] if lane["d2"] is not None else o2.get("depth"), "rs2_color": o2["color"]}); vcv.notify()
+            TS["view"] += _pc() - _a
 
 
 def main():
@@ -953,7 +977,8 @@ def main():
     ap.add_argument("--holes", type=float, default=0.004, help="random depth dropout fraction")
     ap.add_argument("--min-z", type=float, default=0.175, help="D435 min-Z at 848x480")
     ap.add_argument("--no-band", dest="band", action="store_false", help="disable the left invalid band")
-    ap.add_argument("--tire", default=os.environ.get("KEVIN_TIRE", "stock")); ap.add_argument("--ir", type=int, default=1)
+    ap.add_argument("--tire", default=os.environ.get("KEVIN_TIRE", "stock")); ap.add_argument("--ir", type=int, default=int(os.environ.get("KEVIN_EMU_IR", "0")),
+                    help="render the IR stereo pairs (4 x 848x480, 45 %% of the slow lane).  Only KEVIN_SLAM=cuv / scripts/bench stereo read them; default off")
     ap.add_argument("--rt", type=float, default=1.0, help="real-time factor (1.0 = wall clock; robot code assumes 1.0)")
     a = ap.parse_args()
     os.environ.setdefault("MUJOCO_GL", "egl")

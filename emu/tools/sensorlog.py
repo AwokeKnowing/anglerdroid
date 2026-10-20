@@ -35,6 +35,12 @@ def main():
     idx = open(os.path.join(d, "index.jsonl"), "w"); L = threading.Lock(); ex = ThreadPoolExecutor(4)
     S = collections.defaultdict(collections.Counter); saved = collections.defaultdict(list)
     t_end = time.monotonic() + T; min_dt = 0.9e9 / hz
+    # DEFER (default): keep the raw frames in RAM and encode after the recording ends -- encoding 60 jpg + 60 png a
+    # second took ~1 core and pushed the safety core's frame age past 100 ms (agewatch 17:59 PT).  ~1.7 MB/frame pair.
+    DEFER = os.environ.get("SENSORLOG_DEFER", "1") == "1"; Q = []
+    def put(path, img, prm, bgr):
+        if DEFER: Q.append((path, img, prm, bgr))
+        else: ex.submit(cv2.imwrite, path, img[..., ::-1].copy() if bgr else img, prm)
     def row(r):
         with L: idx.write(json.dumps(r) + "\n")
     def wait(b, last):
@@ -68,8 +74,8 @@ def main():
                     cv.wait(0.01)
             if dd is None: S[cam]["unpaired"] += 1; continue
             f = "%s/%d" % (cam, sc); last_saved = sc
-            ex.submit(cv2.imwrite, os.path.join(d, f + ".jpg"), c["color"][..., ::-1].copy(), [cv2.IMWRITE_JPEG_QUALITY, 90])
-            ex.submit(cv2.imwrite, os.path.join(d, f + ".png"), dd, [cv2.IMWRITE_PNG_COMPRESSION, 1])
+            put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True)
+            put(os.path.join(d, f + ".png"), dd, [cv2.IMWRITE_PNG_COMPRESSION, 1], False)
             row(dict(cam=cam, stamp_ns=sc, depth_stamp_ns=st, file=f)); S[cam]["saved"] += 1; saved[cam].append(sc)
     def mast_loop(b):
         last = b.seq
@@ -77,7 +83,7 @@ def main():
             last = b.seq; r = pread(b, ["color"])
             if r is None: continue
             st, _, a = r; f = "mast/%d" % st
-            ex.submit(cv2.imwrite, os.path.join(d, f + ".jpg"), a["color"][..., ::-1].copy(), [cv2.IMWRITE_JPEG_QUALITY, 90])
+            put(os.path.join(d, f + ".jpg"), a["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True)
             row(dict(cam="mast", stamp_ns=st, file=f)); S["mast"]["saved"] += 1
     def gt_loop():
         while time.monotonic() < t_end:
@@ -94,7 +100,9 @@ def main():
     th.append(threading.Thread(target=mast_loop, args=(shm.Block(info["mast"]["shm"], info["mast"]["layout"]),), daemon=True))
     for t in th: t.start()
     for t in th: t.join(T + 5)
-    ex.shutdown(); idx.close()
+    t_enc = time.monotonic()
+    for path, img, prm, bgr in Q: ex.submit(cv2.imwrite, path, img[..., ::-1].copy() if bgr else img, prm)
+    ex.shutdown(); idx.close(); print("sensorlog: encoded %d deferred images in %.1f s" % (len(Q), time.monotonic() - t_enc), flush=True)
     out = {c: dict(S[c]) for c in S}
     for c, v in saved.items():
         g = np.diff(np.sort(np.array(v, float))) * 1e-9
