@@ -183,7 +183,19 @@ def main():
             st, _, a = r; f = "mast/%d" % st
             if not put(os.path.join(d, f + ".jpg"), a["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True): continue
             row(dict(cam="mast", stamp_ns=st, file=f)); S["mast"]["saved"] += 1
+    GT_SRC = os.environ.get("SENSORLOG_GT", "udp")
     def gt_loop():
+        if GT_SRC == "shm":
+            # v5c: GT from the world's kevin_gt shm block (written every 10 ms, stamped with the sim-time monotonic clock)
+            # instead of 30 UDP 'state' requests/s that the world serves inside its physics loop
+            b = shm.Block("kevin_gt", [("pose", (12,), "f8")]); last = None
+            while time.monotonic() < t_end:
+                tq = time.monotonic(); r = pread(b, ["pose"])
+                if r is not None and r[0] != last:
+                    last = r[0]; q = r[2]["pose"]
+                    row(dict(gt=[float(q[1]), float(q[2]), float(q[3]), float(q[4]), float(q[5])], t_mono=r[0] * 1e-9, t_sim=float(q[0])))
+                time.sleep(max(0.0, 1 / 30 - (time.monotonic() - tq)))
+            return
         while time.monotonic() < t_end:
             tq = time.monotonic(); s = gt.state()
             row(dict(gt=[s["x"], s["y"], s["yaw"], s["v"], s["w"]], t_mono=(tq + time.monotonic()) / 2, t_sim=s["t"]))
