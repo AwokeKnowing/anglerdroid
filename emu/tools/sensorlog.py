@@ -29,6 +29,8 @@ def pread(b, keys):
 
 def main():
     d = sys.argv[1]; T = float(sys.argv[2]); hz = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
+    try: os.setpriority(os.PRIO_PROCESS, 0, int(os.environ.get("SENSORLOG_NICE", "19")))   # all threads (inherited)
+    except OSError: pass
     os.makedirs(d, exist_ok=True); info = shm.read_info(wait_s=2.0); json.dump(info, open(os.path.join(d, "info.json"), "w"))
     p = json.load(open("/dev/shm/kevin_depthcam.json")); from emu.depthcam import side_layout
     idx = open(os.path.join(d, "index.jsonl"), "w"); L = threading.Lock()
@@ -77,6 +79,7 @@ def main():
     if MODE == "gpu":
         if "SENSORLOG_ENC_THREADS" not in os.environ: NENC = 1
         encode_jpeg(torch.zeros((3, 8, 8), dtype=torch.uint8, device="cuda"))            # CUDA / nvjpeg init before t0
+    TEST = os.environ.get("SENSORLOG_TEST")         # jpg_only | png_only: cost A/B (frame age), not for real logs
     DFMT = os.environ.get("SENSORLOG_DEPTH_FMT", "png"); DEVERY = max(1, int(os.environ.get("SENSORLOG_DEPTH_EVERY", "3"))); kd = {}
     rate = 2 * min(hz, 30) * (85e3 + (816e3 if DFMT == "raw" else 280e3) / DEVERY) + 10 * 60e3   # bytes/s, measured sizes
     st_ = os.statvfs(d); free = st_.f_bavail * st_.f_frsize; fit = (free - DMIN) / rate
@@ -116,6 +119,7 @@ def main():
     t_df = [0.0, 1e18]
     def put(path, img, prm, bgr, cam="mast"):
         """prm None = depth PNG (compression chosen by the encoder from the backlog)."""
+        if TEST and path.endswith(".jpg" if TEST == "png_only" else ".png"): return True     # A/B: skip one stream
         if time.monotonic() - t_df[0] > 1.0:
             st = os.statvfs(d); t_df[:] = [time.monotonic(), st.f_bavail * st.f_frsize]
         if t_df[1] < DMIN: drop(cam, "disk_dropped"); return False
@@ -125,9 +129,17 @@ def main():
         drop(cam, "enc_dropped"); return False
     def row(r):
         with L: idx.write(json.dumps(r) + "\n")
+    # v5b: the A/B (2026-10-20 09:40, 8 x 120 s drives) showed even GPU-JPEG-only recording (~0.1 core) raising BOTH cameras'
+    # age together: emu.world's 1 kHz loop (which stamps the camera poses) shares cpus 0,1,4,5 with this process, and the
+    # 5 reader threads polling shm.wait_new every 0.5 ms (~10k wakeups/s at normal priority) preempt it.  So: every thread
+    # of the recorder runs at nice 19 (set before any thread starts; new threads inherit it) and polls every 3 ms (a
+    # frame is 33 ms; the copy only has to happen before the writer's next frame).
+    POLL = float(os.environ.get("SENSORLOG_POLL_MS", "3")) * 1e-3
     def wait(b, last):
         while time.monotonic() < t_end:
-            if b.wait_new(last, 0.1): return True
+            s0 = int(b.hdr[0])
+            if s0 != last and not (s0 & 1): return True
+            time.sleep(POLL)
         return False
     def depth_loop(cam, b, ring, cv):
         last = b.seq; lc = None
