@@ -101,8 +101,41 @@ def age_sampler(spec, rng):
 # footprint along the normal of its nearest edge; per tick, independently for the core and the brain/governor:
 # side edges u ~ N(0.78, 0.35) cm clipped [0, 1.87] (moving, n 1083), front/rear edges u ~ N(0.10, 0.03) cm (static)
 PERC = dict(none=None, measured=dict(side=(0.0078, 0.0035, 0.0187), front=(0.0010, 0.0003, 0.0016)))
+PERC.update(pt_sim=dict(pt="sim"), pt_real=dict(pt="real", subpix=0.2), pt_real_sun=dict(pt="real", subpix=0.4),
+            pt_static=dict(pt="sim", sig=0.0), pt_noise=dict(pt="sim", static=0.0), pt_noise01=dict(pt="sim", static=0.0, sig=0.0001), pt_static_n01=dict(pt="sim", sig=0.0001),
+            grid_sim=dict(q=0.0008), grid_real=dict(q=0.0021), grid_sun=dict(q=0.0042), grid_still=dict(q=0.0))
+# per-POINT models (pointnoise.py, live sim 2026-10-20, still + drifting beside a wall, core viz snapshots):
+#   side (RS1 mast ego grid): each world point under-reads by 0 or 1.01 cm (1 cm grid quantisation, ~half the points),
+#   STATIC (same every snapshot); per-point temporal sd median 0.01-0.02 cm, p90 0.06-0.08 cm.  Front (RS2 live): ~0.
+#   pt_sim : that static pattern + per tick N(0, 0.8 mm) per point (the p90 temporal sd, rounded up).
+#   pt_real: same static pattern + per tick the emulator's own D4xx stereo model at the TOP of its domain-rand range
+#            (emu/depthcam.py: RMS = Z^2 subpix / (f B), subpix 0.2 instead of 0.08), projected on the wall normal:
+#            RS1 (mast z 0.862 m, looking down): sigma_lat = Z r subpix/(f B), r = horizontal offset from the mast axis;
+#            RS2 (front): sigma = Z^2 subpix/(f B), Z = distance from RS2.  Applied fresh every tick to every point
+#            (an upper bound: a real ego grid would average it).  ASSUMED model, not measured on the real bot.
+_F_PX, _B = 240.0 / math.tan(math.radians(29.0)), 0.050       # D435 depth 848x480, VFOV 58 deg; baseline 50 mm
+def _grid_q(Pw, sig, off, rng):
+    """ego-grid model (pointnoise.py: the core's side points sit on 1 cm cell corners -> under-read 0 / 1.01 cm, static
+    for a still or parallel-drifting robot, temporal sd ~0.01-0.08 cm): each world point gets the depth noise N(0, sig)
+    (fresh per tick), then is reported at its 1 cm world-grid cell corner (floor, grid offset 'off')."""
+    Q = Pw + sig * rng.standard_normal(Pw.shape)
+    return (np.floor((Q - off) / 0.01) * 0.01 + off).astype(np.float32)
+_STATIC = {}
+def _static(n):
+    if n not in _STATIC: _STATIC[n] = np.where(np.random.default_rng(12345 + n).random(n) < 0.5, 0.0101, 0.0)
+    return _STATIC[n]
 def perceive(P, model, rng):
     if model is None or not len(P): return P
+    if "pt" in model:
+        D = P @ S.N_.T - S.C_; e = D.argmax(1); n = S.N_[e]; side = np.abs(n[:, 1]) > 0.7
+        u = np.where(side, _static(len(P)), 0.0) * model.get("static", 1.0)
+        if model["pt"] == "sim": sig = np.full(len(P), model.get("sig", 0.0008))
+        else:
+            sub = model.get("subpix", 0.2); r = np.hypot(P[:, 0] + 0.007, P[:, 1]); Z1 = 0.862
+            z2 = np.hypot(P[:, 0] + 0.130, P[:, 1])
+            sig = np.where(side, Z1 * r * sub / (_F_PX * _B), z2 * z2 * sub / (_F_PX * _B))
+        u = u + sig * rng.standard_normal(len(P))
+        return (P - u[:, None] * n).astype(np.float32)
     D = P @ S.N_.T - S.C_; e = D.argmax(1); n = S.N_[e]; side = np.abs(n[:, 1]) > 0.7
     us = float(np.clip(rng.normal(*model["side"][:2]), 0, model["side"][2])); uf = float(np.clip(rng.normal(*model["front"][:2]), 0, model["front"][2]))
     # per-point spread within a tick (ASSUMED, not measured separately): each point under-reads u * U(0.6, 1), so the
@@ -119,6 +152,7 @@ def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0, perc=None):
     t = 0.0; t_next = 0.0; v_m = w_m = 0.0; tgt = (0.0, 0.0, A_UP)
     log = dict(codes=collections.Counter(), interv=0, ticks=0, sd_min=np.inf, deepen=0.0, peak_dec=0.0, first_code=None)
     lab = PD.clusters(Pw); nc = lab.max() + 1
+    q_off = rng.uniform(0, 0.01, 2)                         # wall position within the 1 cm ego grid, per seed
     def cl_min(s): return np.array([s[lab == c].min() for c in range(nc)])
     c_start = cl_min(S.sd(to_robot(Pw, pose))); prev_wheels = (0.0, 0.0)
     # wired+gov runs the real command path: governor -> CmdLimiter (hw.drive) -> core, whose LimitCheck counts planner bugs
@@ -131,7 +165,10 @@ def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0, perc=None):
                 # what the core sees: points captured 'ag' ago (pose then), moved into NOW with the measured twist (as the core)
                 k = max(0, len(hist) - 1 - int(round(ag / DT_PLANT))); P = S.motion_comp(to_robot(Pw, hist[k][1]), v_m * (1 + odo), w_m * (1 + odo), ag)
             else: P = to_robot(Pw, pose)
-            v_c, w_c = sc["policy"](t, pose); Pg = perceive(P, perc, rng); P = perceive(P, perc, rng)
+            v_c, w_c = sc["policy"](t, pose)
+            if perc is not None and "q" in perc:      # ego-grid model on WORLD points, independent draws for governor and core
+                Pg, P = (to_robot(_grid_q(Pw, perc["q"], q_off, rng), pose) for _ in range(2))
+            else: Pg = perceive(P, perc, rng); P = perceive(P, perc, rng)
             if use_gov:
                 v0_, w0_ = v_c, w_c
                 if rule == "core": v_c, w_c = GOV.governor(Pg, v_c, w_c, v_m, w_m, bands.rects(), escape=sc.get("escape", False))[:2]

@@ -47,12 +47,13 @@ def run(name, T=40.0):
             if sq is not None and r['f'][0] != last: last = r['f'][0]; C.append(r['f'].copy())
             time.sleep(0.004)
     th = threading.Thread(target=poll); th.start(); time.sleep(0.3)
-    s0 = st(); ev0 = len(s0['events']); LV.cmd('forward 2'); t0 = time.monotonic(); modes = []
+    s0 = st(); ev0 = len(s0['events']); LV.cmd('forward 2'); t0 = time.monotonic(); modes = []; BR = []
     while time.monotonic() - t0 < T:
         s = st()
         if not modes or modes[-1] != s['mode']: modes.append(s['mode'])
+        BR.append((time.monotonic(), s['safety'].get('governor')))     # brain governor (v_in, w_in, v_out, w_out, need2, scale, near, n_pts, n_map)
         if s['mode'] == 'idle' and time.monotonic() - t0 > 2: break
-        time.sleep(0.25)
+        time.sleep(0.05)
     LV.cmd('stop'); time.sleep(0.5); go[0] = False; th.join(); s = st()
     G = np.array(G); C = np.array(C); cl = np.array([LV.clear(P, *g[:3]) for g in G[::2]])
     mv = C[(np.abs(C[:, F['v_cmd']]) > 1e-3) | (np.abs(C[:, F['w_cmd']]) > 1e-3)]
@@ -66,6 +67,9 @@ def run(name, T=40.0):
     for k in np.flatnonzero((iv & ((np.abs(C[:, F['v_cmd']]) > 1e-3) | (np.abs(C[:, F['w_cmd']]) > 1e-3))) | ib)[:12]:
         det.append(dict(k=int(k), bug=bool(ib[k]), code=S.CODES[int(C[k, F['code']])], sd0=round(100 * float(C[k, F['sd0']]), 2),
                         cmd=[round(float(C[k, F['v_cmd']]), 3), round(float(C[k, F['w_cmd']]), 3)], out=[round(float(C[k, F['v_out']]), 3), round(float(C[k, F['w_out']]), 3)],
+                        vm=[round(float(C[k, F['v_m']]), 3), round(float(C[k, F['w_m']]), 3)], free=round(float(C[k, F['free']]), 3), need=round(float(C[k, F['need']]), 3),
+                        age=[round(1000 * float(C[k, F['age1']]), 1), round(1000 * float(C[k, F['age2']]), 1)],
+                        brain=min(BR, key=lambda q: abs(q[0] - float(C[k, F['t_dec']])))[1:] if BR else None, brain_dt=round(min(abs(q[0] - float(C[k, F['t_dec']])) for q in BR), 3) if BR else None,
                         prev_cmd=[round(float(C[k - 1, F['v_cmd']]), 3), round(float(C[k - 1, F['w_cmd']]), 3)] if k else None))
     y_at_gap = None
     if name.startswith('gap'):
