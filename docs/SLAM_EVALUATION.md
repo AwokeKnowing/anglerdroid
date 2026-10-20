@@ -533,3 +533,37 @@ L8 results (ext metrics; coverage = fraction of frames with a pose):
 o3d_rgbd: Open3D reports success on 2015/2016 steps but drifts upward from frame ~100 and blows up by frame 600; a
 step must be gated against the wheel+gyro prior (and projected to planar motion) before it is usable.  Not committed yet.
 MASt3R dropped (James t596).
+
+### 2026-10-19 18:55 PT — L8 (70 s, 28.8 Hz, 2016 framesets): ORB-SLAM3 RGB-D, planar depth ICP, o3d_rgbd
+
+All offline on i777 with the sim off, CPU only (no GPU used by any of these). ATE = SE(2) vs GT, not aligned unless stated. RTF = log duration / wall time (>1 = faster than real time).
+
+| method | cams | ATE m | max m | worst heading ° | aligned ATE m | ms/frame | RTF | notes |
+|---|---|---|---|---|---|---|---|---|
+| kslam (live, nav record) | RS1+RS2 | **0.088** | **0.174** | **3.41** | 0.053 | live | 1 (live) | best |
+| odom (wheel+gyro, live) | - | 0.217 | 0.506 | 7.41 | 0.083 | - | - | |
+| depth_icp, stride 10 | RS2 | 0.515 | 0.831 | 8.12 | **0.034** | 16.3 | 2.1 | 1535 accepted / 480 rejected |
+| depth_icp, stride 10 | RS1+RS2 | 0.409 | 0.801 | 12.17 | 0.084 | 32.4 | 1.07 | |
+| depth_icp, stride 6 | RS1+RS2 | 0.495 | 0.929 | 12.58 | 0.080 | 85.7 | 0.40 | |
+| depth_icp, stride 10 | RS1 | 0.804 | 1.609 | 22.2 | 0.122 | 13.0 | 2.7 | RS1 looks at the floor; few wall points |
+| ORB-SLAM3 RGB-D | RS2 | 4.95 | 11.08 | 163.7 | 4.10 | 60.4 | 1.16 | lost tracking; 3 maps, 1 reset; 94 % coverage |
+| ORB-SLAM3 RGB-D | RS1 | 6.01 | 9.40 | 180.0 | 3.19 | 69.4 | 1.0 | 152° tilt p90: wrong map |
+| o3d_rgbd (no gating) | RS2 / RS1 | 316 km / 1.3 km | - | 180 | - | 326 | 0.1 | diverged |
+
+Tools: `scripts/bench/run_orb_rgbd.py <export> <out.txt>` (headless `sim/orbslam3/rgbd/rgbd_kevin`, built by `build.sh` from the
+existing ORB_SLAM3 build in under 1 min); `python -m emu.tools.slamlog.cand.depth_icp <log> <out.json> [cams] [stride]`.
+
+Depth ICP (measured, RS2, per keyframe step vs GT): ICP error p50 7.5 mm / 0.22°, p90 36 mm / 1.38°, mean yaw bias −0.20°/keyframe (RS1
+−0.41°). The sim's wheel+gyro odometry is better than that over the same steps (GT correction p50 0.9 mm / 0.10°), so ICP mostly
+adds noise and bias. The odometry gate (ASSUMED bound: 2 cm + 5 % distance, 1° + 5 % rotation) doesn't help, because the bias sits inside it.
+The best aligned ATE (RS2, 0.034 m) shows the local shape is good. The global error comes from heading drift. The bias's cause is
+not found (candidates: twin/sim extrinsic mismatch, depth noise model, rotation smear). A ±33 ms stamp probe changed the
+results in inconsistent directions, so this is not a time offset I can claim. Depth stamps are physics capture time.
+
+ORB-SLAM3 RGB-D loses tracking on the synthetic texture and fast spins (7.3°/frame max). It starts new maps, and the saved trajectory
+mixes their frames. It isn't usable here without an IMU/odom-aided mode. o3d_rgbd: the cheap fix (odom gating) was not attempted.
+At 326 ms/frame it is ~10× too slow for real time even if fixed.
+
+Recommendation: keep kslam. None of the established light methods beats it, or even odometry, on L8. If a depth-geometry
+term is wanted, the RS2 planar ICP is real time at stride 10 (16 ms/frame, one core). It should be a factor inside kslam,
+weighted by its measured covariance, not a standalone odometry, and only once the −0.2°/keyframe bias is explained.
