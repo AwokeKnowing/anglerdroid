@@ -70,8 +70,19 @@ def to_robot(P, pose):
     return S.to_body(P, pose[0], pose[1], pose[2])
 
 
-def run(name, rule, use_gov, age=0.0):
-    sc = SCENES[name]; Pw = sc["P"]; pose = sc["start"].copy(); bands = StubBands()
+AGE_ROUTE = (0.052, 0.012, 0.033, 0.116)     # measured frame age on the route (p50 ~52 ms, p99 75-87, max 95-116): mean, sd, min, max
+
+
+def age_sampler(spec, rng):
+    """None -> ideal; float -> fixed age (s); 'route' -> clipped normal fitted to the measured route frame ages."""
+    if spec in (None, 0, 0.0, "0"): return lambda: 0.0
+    if spec == "route": m, sdv, lo, hi = AGE_ROUTE; return lambda: float(np.clip(rng.normal(m, sdv), lo, hi))
+    a = float(spec); return lambda: a
+
+
+def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0):
+    sc = (scenes or SCENES)[name]; Pw = sc["P"]; pose = sc["start"].copy(); bands = StubBands()
+    rng = np.random.default_rng(seed); age_f = age_sampler(age, rng); hist = collections.deque(maxlen=400)   # (t, pose) 1 ms
     vl = vr = 0.0; q = collections.deque()                  # (t_apply, vl_tgt, vr_tgt, decel)
     t = 0.0; t_next = 0.0; v_m = w_m = 0.0; tgt = (0.0, 0.0, A_UP)
     log = dict(codes=collections.Counter(), interv=0, ticks=0, sd_min=np.inf, deepen=0.0, peak_dec=0.0, first_code=None)
@@ -81,12 +92,18 @@ def run(name, rule, use_gov, age=0.0):
     while t < sc["T"] - 1e-9:
         if t >= t_next - 1e-9:
             t_next += S.T_TICK; log["ticks"] += 1
-            P = to_robot(Pw, pose)
+            ag = age_f()
+            if ag > 0 and hist:
+                # what the core sees: points captured 'ag' ago (pose then), moved into NOW with the measured twist (as the core)
+                k = max(0, len(hist) - 1 - int(round(ag / DT_PLANT))); P = S.motion_comp(to_robot(Pw, hist[k][1]), v_m * (1 + odo), w_m * (1 + odo), ag)
+            else: P = to_robot(Pw, pose)
             v_c, w_c = sc["policy"](t, pose)
             if use_gov:
                 if rule == "core": v_c, w_c = GOV.governor(P, v_c, w_c, v_m, w_m, bands.rects())[:2]
                 else: v_c, w_c = PD.governor(P, v_c, w_c)[:2]
-            if rule == "core":
+            if ag > S.AGE_MAX_S:
+                vo, wo, code = 0.0, 0.0, "inop_age"; dec = S.BRAKE[S.RAMP_MAX][1] if rule == "core" else PD.A_LONG
+            elif rule == "core":
                 vo, wo, code, ramp = S.decide(P, bands, v_c, w_c, v_m, w_m)[:4]
                 dec = float(np.interp(ramp, [S.RAMP_NORMAL, S.RAMP_MAX], [S.BRAKE[S.RAMP_NORMAL][1], S.BRAKE[S.RAMP_MAX][1]]))
             else:
@@ -107,7 +124,7 @@ def run(name, rule, use_gov, age=0.0):
         prev_wheels = (vl, vr)
         v_m, w_m = 0.5 * (vl + vr), (vr - vl) / S.TRACK_M
         pose[0] += v_m * math.cos(pose[2] + w_m * DT_PLANT / 2) * DT_PLANT; pose[1] += v_m * math.sin(pose[2] + w_m * DT_PLANT / 2) * DT_PLANT
-        pose[2] += w_m * DT_PLANT; t += DT_PLANT
+        pose[2] += w_m * DT_PLANT; t += DT_PLANT; hist.append((t, pose.copy()))
         if int(round(t / DT_PLANT)) % 5 == 0:
             s = S.sd(to_robot(Pw, pose)); log["sd_min"] = min(log["sd_min"], float(s.min()))
             log["deepen"] = max(log["deepen"], float((np.minimum(c_start, S.MARGIN) - cl_min(s)).max()))  # worst per-obstacle clearance lost below min(start, margin)
@@ -123,7 +140,10 @@ def open_loop(name, rule):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("scenes", nargs="*"); ap.add_argument("--json"); a = ap.parse_args()
+    ap = argparse.ArgumentParser(); ap.add_argument("scenes", nargs="*"); ap.add_argument("--json")
+    ap.add_argument("--age", default=None, help="frame-age model: seconds, or 'route' (measured distribution)"); ap.add_argument("--seeds", type=int, default=1)
+    ap.add_argument("--odo", type=float, default=0.0, help="relative error of the twist used for motion compensation (-0.1: under-reads 10%%)")
+    a = ap.parse_args()
     names = a.scenes or list(SCENES); out = {}
     t0 = time.time()
     hdr = "%-18s | %-34s | %-34s" % ("scene", "CURRENT core (+gov)", "PROTOTYPE decel rule (+gov)")
@@ -132,11 +152,13 @@ if __name__ == "__main__":
         row = {}
         for rule in ("core", "proto"):
             for g in (False, True):
-                L = run(n, rule, g); L["open"] = open_loop(n, rule); row["%s%s" % (rule, "+gov" if g else "")] = L
+                Ls = [run(n, rule, g, a.age, sd_, odo=a.odo) for sd_ in range(a.seeds)]; L = min(Ls, key=lambda x: (x["ok"], x["sd_min"]))   # worst seed
+                L["n_ok"] = sum(x["ok"] for x in Ls); L["open"] = open_loop(n, rule); row["%s%s" % (rule, "+gov" if g else "")] = L
         def cell(L, Lg):
-            return "%s %-5s int%3d sd%+5.1f dp%4.1f | gov %s" % ("PASS" if L["ok"] else "FAIL", L["open"][:5], L["interv"], 100 * L["sd_min"], 100 * L["deepen"], "PASS" if Lg["ok"] else "FAIL")
+            return "%s%s %-5s int%3d sd%+5.1f dp%4.1f | gov %s" % ("PASS" if L["ok"] else "FAIL", "" if a.seeds == 1 else "%d/%d" % (L["n_ok"], a.seeds), L["open"][:5], L["interv"], 100 * L["sd_min"], 100 * L["deepen"], "PASS" if Lg["ok"] else "FAIL")
         print("%-18s | %-34s | %-34s" % (n, cell(row["core"], row["core+gov"]), cell(row["proto"], row["proto+gov"])))
         out[n] = {k: {kk: (dict(vv) if isinstance(vv, collections.Counter) else vv) for kk, vv in L.items()} for k, L in row.items()}
         out[n]["expect"] = SCENES[n]["expect"]
+    print("age model: %s, odometry error %+.0f%%, seeds %d (worst seed shown)" % (a.age, 100 * a.odo, a.seeds))
     print("(%.1f s)  cell: goal PASS/FAIL, first-tick code, interventions (ticks), min sd cm, max per-obstacle clearance lost below min(start, margin) cm | with governor" % (time.time() - t0))
     if a.json: json.dump(out, open(a.json, "w"), indent=1, default=float)
