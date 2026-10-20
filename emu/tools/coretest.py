@@ -62,4 +62,14 @@ elif mode == 'B':
     print('events', [e[1] for e in nst()['events'][-6:]])
     print(cmd('forward 1'))   # must be refused while alarmed / or accepted after recovery
     time.sleep(1); print('events', [e[1] for e in nst()['events'][-3:]]); print(cmd('stop'))
+elif mode == 'C':   # motion starts after idle (wheelbase idles axes after 5 s of zero): core tick period must stay < 33 ms
+    n = int(os.environ.get('NC', '6')); S = []
+    for i in range(n):
+        cmd('stop'); time.sleep(6.5)                     # > idle_zero_timeout_s (5 s): axes go IDLE, next motion re-engages
+        o = []; t0 = time.monotonic(); cmd('drive 0.2 0 1.0'); rec(2.5, o, ev='C%d' % i); R += o
+        td = np.array([x['t_dec'] for x in o]); per = np.diff(td) * 1000
+        mv = [x['t'] - t0 for x in o if x['v_out'] > 0.02]; gv = [x['t'] - t0 for x in o if x['gt_v'] is not None and x['gt_v'] > 0.02]
+        S.append(dict(i=i, ticks=len(td), per_max_ms=round(float(per.max()), 1), per_p50_ms=round(float(np.median(per)), 1), n_over_33=int((per > 33.4).sum()),
+                      t_vout_s=round(mv[0], 3) if mv else None, t_gtv_s=round(gv[0], 3) if gv else None)); print(S[-1], flush=True)
+    cmd('stop'); R.append(dict(summary=S))
 json.dump(R, open('/home/james/m1_backup/dbg/coretest_%s.json' % mode, 'w'))

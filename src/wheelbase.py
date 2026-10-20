@@ -19,6 +19,13 @@ from typing import Optional
 import glob as globmod
 
 import can
+import math as _math
+try:
+    from twin_geometry import limit_vw as _limit_vw
+except Exception:          # same rule as twin_geometry.limit_vw (pi/2, slow for 0.1 g lateral)
+    def _limit_vw(v, w):
+        w = max(-_math.pi / 2, min(_math.pi / 2, w))
+        return (_math.copysign(0.981 / abs(w), v) if abs(v * w) > 0.981 else v), w
 import inputs
 import simplegamepad
 from odrivecan import ODriveAxisCAN
@@ -76,6 +83,7 @@ class WheelBase:
         self.idle_thread = None
         self.stale_command_thread = None
         self._is_closed_loop = False
+        self._reengage_thread = None; self.reengage_s = None
         self._is_idle = True
         self._can_bus_failed = False  # Flag: CAN bus has failed, no further motion commands
         self._last_sent_left = None
@@ -757,6 +765,11 @@ class WheelBase:
         elif fwd < 0:
             fwd *= self._safety_bwd
         turn *= self._safety_ang
+        # shared dynamics limit for EVERY caller (core output, teleop/gamepad, tools): twin_geometry.limit_vw
+        # (|w| <= pi/2; slow down for 0.1 g lateral).  v = fwd*circ, w = 2*turn*circ/track
+        circ = 2 * _math.pi * self.wheel_radius_m; k_w = 2 * circ / self.wheelbase_m
+        v_l, w_l = _limit_vw(fwd * circ, turn * k_w)
+        fwd, turn = v_l / circ, w_l / k_w
         left_tps = fwd - turn
         right_tps = fwd + turn
 
@@ -771,24 +784,15 @@ class WheelBase:
         else:
             self._zero_vel_since = None
             if not self._is_closed_loop:
-                print("Re-engaging motors from idle...")
-                try:
-                    with self.bus_lock:
-                        self.left.clear_errors()
-                        self.right.clear_errors()
-                        self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
-                        self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
-                        self.left.set_velocity(0.0)
-                        self.right.set_velocity(0.0)
-                        self.left.enable_watchdog(5.0)
-                        self.right.enable_watchdog(5.0)
-                    self._is_closed_loop = True
-                    self._is_idle = False
-                    self._last_sent_left = None
-                    self._last_sent_right = None
-                except can.CanOperationError as e:
-                    self._handle_can_failure(e, "set_wheel_vels (re-engage)")
-                    raise RuntimeError("CAN bus failed during motor re-engage") from e
+                # Re-engage (clear_errors + CLOSED_LOOP + enable_watchdog, ~0.55 s of blocking CAN round trips) runs in
+                # its own thread so the caller (the 30 Hz safety-core tick) never blocks; until the axes are closed
+                # loop nothing is sent (axes idle = no torque = zero output).  James 2026-10-19 t595.
+                if self._reengage_thread is None or not self._reengage_thread.is_alive():
+                    self._reengage_thread = threading.Thread(target=self._reengage, daemon=True, name="wb-reengage")
+                    self._reengage_thread.start()
+                # latest request, sent by the re-engage thread if still fresh (< 0.3 s) once closed loop (one-shot callers)
+                self._pending = (-left_tps if self.invert_left else left_tps, right_tps, time.monotonic())
+                return
 
         actual_left = -left_tps if self.invert_left else left_tps
         actual_right = right_tps
@@ -800,16 +804,48 @@ class WheelBase:
         watchdog_due = (now - self._last_send_time) >= self.WATCHDOG_FEED_INTERVAL
 
         if vel_changed or watchdog_due:
+            # never wait on bus_lock here (re-engage / idle watcher may hold it): skip this send, retried next call
+            if not self.bus_lock.acquire(timeout=0.005):
+                self.lock_skips = getattr(self, "lock_skips", 0) + 1
+                return
             try:
-                with self.bus_lock:
+                try:
                     self.left.set_velocity(actual_left)
                     self.right.set_velocity(actual_right)
+                finally:
+                    self.bus_lock.release()
                 self._last_sent_left = actual_left
                 self._last_sent_right = actual_right
                 self._last_send_time = now
             except can.CanOperationError as e:
                 self._handle_can_failure(e, "set_wheel_vels (send)")
                 raise RuntimeError("CAN bus failed during velocity send") from e
+
+    def _reengage(self):
+        print("Re-engaging motors from idle (background)...")
+        t0 = time.monotonic()
+        try:
+            with self.bus_lock:
+                self.left.clear_errors()
+                self.right.clear_errors()
+                self.left.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
+                self.right.set_axis_state(ODriveAxisCAN.AXIS_STATE_CLOSED_LOOP_CONTROL)
+                self.left.set_velocity(0.0)
+                self.right.set_velocity(0.0)
+                self.left.enable_watchdog(5.0)
+                self.right.enable_watchdog(5.0)
+            self._last_sent_left = None
+            self._last_sent_right = None
+            self._is_idle = False
+            self._is_closed_loop = True
+            self.reengage_s = time.monotonic() - t0
+            pl = getattr(self, "_pending", None); self._pending = None
+            if pl is not None and time.monotonic() - pl[2] < 0.3 and self._last_sent_left is None:
+                with self.bus_lock:
+                    self.left.set_velocity(pl[0]); self.right.set_velocity(pl[1])
+                self._last_sent_left, self._last_sent_right, self._last_send_time = pl[0], pl[1], time.time()
+        except can.CanOperationError as e:
+            self._handle_can_failure(e, "re-engage (background)")
 
     def stop(self):
         self.set_wheel_vels(0.0, 0.0)
