@@ -100,7 +100,11 @@ def main():
     th.append(threading.Thread(target=mast_loop, args=(shm.Block(info["mast"]["shm"], info["mast"]["layout"]),), daemon=True))
     for t in th: t.start()
     for t in th: t.join(T + 5)
-    t_enc = time.monotonic()
+    t_enc = time.monotonic(); ex.shutdown()
+    if Q:      # after the recording: lowest priority, one thread, so the still-running sim keeps its frame age
+        try: os.nice(19)
+        except OSError: pass
+        cv2.setNumThreads(1); ex = ThreadPoolExecutor(int(os.environ.get("SENSORLOG_ENC_THREADS", "1")))
     for path, img, prm, bgr in Q: ex.submit(cv2.imwrite, path, img[..., ::-1].copy() if bgr else img, prm)
     ex.shutdown(); idx.close(); print("sensorlog: encoded %d deferred images in %.1f s" % (len(Q), time.monotonic() - t_enc), flush=True)
     out = {c: dict(S[c]) for c in S}

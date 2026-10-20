@@ -37,7 +37,8 @@ VIEW_CAMS = {"rs1_depth": (0.10, 212, 120, FOVY_D, DW / DH, (0.1, 0.9, 1.0)),   
              "rs2_color": (0.09, 160, 120, FOVY_C, CW / CH, (1.0, 0.85, 0.1))}  # forward D435i RGB
 VIEW_CLIP = (0.2, 1.2)   # drawn FOV range (m): D435 minimum depth ~0.2 m .. 1.2 m to keep the scene readable
 FPS = 30
-DEPTHPROC = os.environ.get("KEVIN_EMU_DEPTHPROC", "1") == "1"   # depth cameras in their own process (emu/depthcam.py)
+DEPTHPROC = os.environ.get("KEVIN_EMU_DEPTHPROC", "1") == "1"
+SLOWPROC = os.environ.get("KEVIN_EMU_SLOWPROC", "1") == "1"       # colour/IR/mast/viewer lane in its own process (with DEPTHPROC)   # depth cameras in their own process (emu/depthcam.py)
 CAMLOG = open(os.environ["KEVIN_EMU_CAMLOG"], "a", buffering=1 << 16) if os.environ.get("KEVIN_EMU_CAMLOG") else None
 # Mounts = twin URDF optical frames (urdf/kevin.urdf, base_link = axle centre, x fwd, y left, z up):
 #   realsense_d435_depth_optical  (-0.007, 0, 0.8619)  looking straight down, x_opt = robot-backward
@@ -728,12 +729,13 @@ class World:
                 # rtf = physics steps / (wall * 1/dt): robot code assumes 1.0.  Per-part loop time (ms per wall s) so
                 # a slowdown can be located (2026-10-18: 1000 -> 640 Hz over ~3.5 h, restart restored it, cause unknown)
                 print("emu.world: t=%.1f x=%.2f y=%.2f yaw=%.2f v=%.2f collisions=%d  physics %.0f Hz cam %.1f Hz color %.1f Hz  rtf %.3f  ms/s %s ncon %d" % (
-                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / el, self._ncam / el, self._ncol / el, steps * self.dt / el,
+                    s["t"], s["x"], s["y"], s["yaw"], s["v"], s["collisions"], steps / el, self._ncam / el, (self._ncol_sh.value - getattr(self, "_ncol_sh0", 0) if getattr(self, "_ncol_sh", None) is not None else self._ncol) / el, steps * self.dt / el,
                     " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in TM.items()), int(self.d.ncon)) +
                       "  slow ms/s " + " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in getattr(self, "TS", {}).items()), flush=True)
                 for k_ in getattr(self, "TS", {}): self.TS[k_] = 0.0
                 if steps * self.dt / el < 0.95: print("emu.world: WARNING sim slower than real time (rtf %.2f): robot timing assumes 1.0" % (steps * self.dt / el), flush=True)
                 steps = 0; self._ncam = 0; self._ncol = 0; last_report = now
+                if getattr(self, "_ncol_sh", None) is not None: self._ncol_sh0 = self._ncol_sh.value
                 for k_ in TM: TM[k_] = 0.0
             time.sleep(0.0008)
 
@@ -819,7 +821,10 @@ class World:
           SLOW (own thread + own GL contexts): RS1/RS2 colour, IR pairs, mast, viewer -- runs as fast as it can on the
                  newest pose (adaptive rate), never blocks the fast lane."""
         import cv2
-        mj = self.mj; m = self.m; dr = mj.MjData(m)
+        mj = self.mj; m = self.m
+        if DEPTHPROC and SLOWPROC:
+            return self._slow_proc(rq, cv)
+        dr = mj.MjData(m)
         Rd = mj.Renderer(m, DH, DW); Rd.enable_depth_rendering()
         rng = np.random.default_rng(7)
         NB = 8   # pre-generated noise banks (generating 400k normals per frame costs more than the render)
@@ -887,6 +892,33 @@ class World:
             if CAMLOG is not None:   # KEVIN_EMU_CAMLOG: per-frame stage stamps (monotonic ns) for the latency trace
                 CAMLOG.write("%d %d %d %d %d %d %d %d %d %d\n" % (st_ns, t_job, t_pick, t_r1, t_w1, t_r2, t_w2, s1, s2, int(bool(p1))))
 
+    def _slow_proc(self, rq, cv):
+        """KEVIN_EMU_SLOWPROC=1 (default with DEPTHPROC): the colour/IR/mast/viewer lane in its OWN PROCESS (forked before
+        any GL context exists here), so its Python work no longer shares the world's GIL with the 1 kHz physics loop that
+        publishes the depth poses.  Inputs: the per-tick job (pose) through a pipe, newest only; outputs: the same shm
+        blocks (side1/side2/mast) and /dev/shm/kevin_view.jpg as before."""
+        import multiprocessing as mp
+        ctx = mp.get_context("fork"); rx, tx = ctx.Pipe(duplex=False); self._ncol_sh = ctx.Value("l", 0, lock=False)
+        lane = {"pend1": {}, "pend2": {}, "d1": None, "d2": None, "lock": threading.Lock()}
+        def child():
+            os.environ["KEVIN_EMU_SLOW_CHILD"] = "1"; crq = {}; ccv = threading.Condition()
+            def feed():
+                while True:
+                    j = rx.recv()
+                    while rx.poll(): j = rx.recv()
+                    with ccv: crq["slow"] = j; ccv.notify_all()
+            threading.Thread(target=feed, daemon=True).start()
+            self._slow_lane(crq, ccv, lane, True)
+        pr = ctx.Process(target=child, daemon=True, name="emu-slowlane"); pr.start(); self._slow_pid = pr.pid
+        print("emu.world: slow lane (colour/IR/mast/view) in process %d" % pr.pid, flush=True)
+        with cv: rq["job"] = None
+        last = None
+        while True:
+            with cv:
+                while rq.get("slow") is None or rq["slow"] is last: cv.wait()
+                last = rq["slow"]
+            tx.send(last)
+
     def _slow_lane(self, rq, cv, lane, fast_rs2):
         import cv2
         mj = self.mj; m = self.m; dr = mj.MjData(m)
@@ -923,6 +955,7 @@ class World:
                 try: self._view(dv, imgs)
                 except Exception as e: print("emu.world: view error %r" % e, flush=True)
         if VIEW: threading.Thread(target=view_loop, daemon=True, name="view").start()
+        CHILD = os.environ.get("KEVIN_EMU_SLOW_CHILD") == "1"; t_rep = [time.perf_counter(), 0]
         last = None; TS = self.TS = dict(wait=0.0, col=0.0, ir=0.0, fx=0.0, write=0.0, mast=0.0, view=0.0); _pc = time.perf_counter
         while True:
             _a = _pc()
@@ -957,6 +990,12 @@ class World:
                 with lane["lock"]:
                     lane["pend1"] = o1; lane["pend2"] = o2
             self._ncol += 1; _b = _pc(); TS["write"] += _b - _a
+            if getattr(self, "_ncol_sh", None) is not None: self._ncol_sh.value += 1
+            if CHILD and _b - t_rep[0] > 10:
+                el = _b - t_rep[0]; t_rep[0] = _b
+                print("emu.world: slow lane pid %d  colour %.1f Hz  ms/s %s" % (os.getpid(), (self._ncol - t_rep[1]) / el, " ".join("%s=%.0f" % (k_, 1e3 * v_ / el) for k_, v_ in TS.items())), flush=True)
+                t_rep[1] = self._ncol
+                for k_ in TS: TS[k_] = 0.0
             if st_ns - t_mast[0] >= 1e9 / MAST_HZ:
                 t_mast[0] = st_ns; self.bm.write(st_ns, color=fxa("mast", rgb(Rm, "mast_rgb"), wz))
             _a = _pc(); TS["mast"] += _a - _b
