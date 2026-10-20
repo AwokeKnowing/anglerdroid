@@ -185,14 +185,17 @@ class Slam2:
                     while self._recq: pickle.dump(self._recq.popleft(), f, protocol=4)
                     f.flush(); time.sleep(0.2)
             threading.Thread(target=_w, daemon=True, name="slamrec").start()
-        threading.Thread(target=self._loop, daemon=True).start()
+        threading.Thread(target=self._loop, daemon=True, name="slam2").start()
 
     # -- API shared with nav.slam.Slam
     def pose(self): return compose(self.T, self.odom.pose)
     def set_pose(self, x, y, th): self.T = compose((x, y, th), inverse(self.odom.pose))
     def submit(self, t, obs_r, free_r, match_r=None, obs_h=None, rays=None):
         """rays: current depth returns [(origin, E, floor)] for free-space carving (nav.slam.carve_rays)."""
-        with self._cv: self._job = (t, self.odom.at(t), obs_r, free_r, obs_h, rays); self._cv.notify()
+        with self._cv:
+            st = self.stats; st["sub"] = st.get("sub", 0) + 1
+            if self._job is not None: st["drop"] = st.get("drop", 0) + 1    # worker still busy: latest job wins
+            self._job = (t, self.odom.at(t), obs_r, free_r, obs_h, rays); self._cv.notify()
     def relocalize(self, P, step=0.10, n_ang=72, keep=40):
         """Global search over the whole field (used after map load)."""
         self.seed_from_grid()
@@ -232,6 +235,7 @@ class Slam2:
                 t, podom, obs, free, obs_h, rays = self._job; self._job = None
             if self.frozen: continue
             if self._recq is not None: self._recq.append((t, podom, obs, free, obs_h, rays, tuple(self.T)))
+            self.stats["steps"] = self.stats.get("steps", 0) + 1
             try: self._step(t, podom, obs, free, obs_h, rays)
             except Exception as e: print("slam2 error: %r" % e)
 

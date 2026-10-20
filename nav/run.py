@@ -38,6 +38,16 @@ RS1_T = _TG.RS1_T
 HZ = 30.0
 
 
+
+def _thread_cpu():
+    """CPU seconds used by each live thread of this process, by thread name (profiling without ptrace)."""
+    out = {}
+    for t in threading.enumerate():
+        try: c = time.clock_gettime(time.pthread_getcpuclockid(t.ident))
+        except Exception: continue
+        out[t.name] = round(out.get(t.name, 0.0) + c, 3)
+    return out
+
 class Stats:
     def __init__(self, n=900): self.d = collections.defaultdict(lambda: collections.deque(maxlen=n))
     def add(self, k, v): self.d[k].append(v)
@@ -374,7 +384,7 @@ class Brain:
 
     def step(self):
         t_frame, verts = self.hw.wait_rs1(200)
-        t0 = time.monotonic()
+        t0 = time.monotonic(); self._sec0 = (time.perf_counter(), time.thread_time())
         if getattr(self.hw, "core", False) and not self._core_watch():
             self.mode = "idle"; self.goal = None; self.stats.add("core_alarm", 1)
             with self._cmd_lock: pend, self._pending = self._pending, []
@@ -406,9 +416,11 @@ class Brain:
             if ev: self._on_bump(ev)
         except Exception as e:
             self.stats.add("bump_err", 1)
-        lab = self.ego.update(verts)
+        self._sec("odom_bump")
+        lab = self.ego.update(verts); self._sec("ego")
         ego_obs = self.ego.obstacle_xy(max_n=1500); valid = self.ego.valid_fraction()
         if valid > 0: self.obs.update(self.navpose(), lab, self.ego.obs_mask, self.ego.body, t_frame)
+        self._sec("obslayer")
         snap = None
         seq, st = self.hw.rs2_seq, self.hw.rs2_stamp
         if seq != self._rs2_seq:
@@ -427,7 +439,11 @@ class Brain:
             if seq % 6 == 0 and getattr(self.slam.odom, "ekf", False):       # 5 Hz Manhattan heading (odom EKF, as kslam)
                 z4, nw = self.rs2.wall_z4(depth); self.slam.odom.observe_walls(st, z4, nw)
                 self.slam.stats['gyro_scale'] = round(self.slam.odom.scale, 5); self.slam.stats['walls'] = (self.slam.odom.n_wall, self.slam.odom.n_wall_rej, nw, round(abs(z4), 3), self.slam.odom.psi0 is not None)
-        if self.tick % 6 == 0 and abs(self.slam.odom.w) < 0.6:   # 5 Hz map/match update (skip fast spins: RS1/RS2/odom time skew)
+        self._sec("rs2")
+        # 5 Hz map/match update by the frame CLOCK (was every 6th brain tick: at the measured ~15 Hz brain rate that was
+        # 2.5 Hz -> slam2 processed 1.6 Hz in L14); skip fast spins: RS1/RS2/odom time skew
+        if t_frame - getattr(self, "_t_sub", -1e9) >= 0.2 - 1e-3 and abs(self.slam.odom.w) < 0.6:
+            self._t_sub = t_frame
             # RS2 points are ~1 frame old: express them at the RS1 stamp using odom (tiny correction, keeps scans rigid)
             po, pr = self.slam.odom.at(t_frame), self.slam.odom.at(self._rs2_t)
             from nav.slam import compose, inverse
@@ -467,7 +483,8 @@ class Brain:
                              self.slam.stats.get("reloc_ms", 0), "" if ok else " -- AMBIGUOUS, pose not changed; drive a bit and 'relocalize'"))
                 finally: self._reloc_busy = False
             threading.Thread(target=job, daemon=True).start()
-        self._feed_core()
+        self._sec("slam_submit")
+        self._feed_core(); self._sec("core_feed")
         self.pred.measured(t_od, vl, vr, self.slam.odom.pose, t_w)  # odom pose at its data time, wheel speeds at their read time
         with self._ctl_cv:
             self._snap = (t_frame, ego_obs, valid, vl, vr, gz); self._snap_n += 1; self._snap_t = time.monotonic(); self._ctl_cv.notify_all()
@@ -475,7 +492,7 @@ class Brain:
         tp = getattr(self, "_tpl", None); self._tpl = t0
         self.stats.add("percep_ms", (time.monotonic() - t0) * 1e3)
         if tp is not None: self.stats.add("percep_period_ms", (t0 - tp) * 1e3)
-        self._control()       # inline in both modes (see _control: a separate plan thread added ~60 ms, measured)
+        self._sec("snap"); self._control(); self._sec("control")       # inline in both modes (see _control: a separate plan thread added ~60 ms, measured)
 
     # -------------------------------------------------------------- control cycle
     def _fit_loop(self):
@@ -483,6 +500,12 @@ class Brain:
             time.sleep(1.0)
             try: tf = time.perf_counter(); self.pred.fit_latency(); self.stats.add("latfit_ms", (time.perf_counter() - tf) * 1e3)
             except Exception as e: self.stats.add("latfit_err", 1)
+
+    def _sec(self, name):
+        """per-section wall and thread-CPU time of the brain step (stats sec_*/cpu_* ms): wall - cpu = waiting
+        (GIL / CPU run queue / blocking calls)."""
+        w, c = time.perf_counter(), time.thread_time(); w0, c0 = getattr(self, "_sec0", (w, c)); self._sec0 = (w, c)
+        self.stats.add("sec_" + name + "_ms", (w - w0) * 1e3); self.stats.add("cpu_" + name + "_ms", (c - c0) * 1e3)
 
     def _feed_core(self):
         """the safety core's last tick (what it SENT the wheels) into the predictor's command history."""
@@ -821,7 +844,7 @@ class Brain:
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks,
                                 core=self.hw.core_state() if hasattr(self.hw, "core_state") else None, governor=getattr(self, "_gov", None)),
-                    timing=self.stats.summary(), plan_timing=None if p is None else p.timing, ctl=dict(mode=CTL_MODE, **self.pred.summary()),
+                    timing=self.stats.summary(), threads_cpu_s=_thread_cpu(), plan_timing=None if p is None else p.timing, ctl=dict(mode=CTL_MODE, **self.pred.summary()),
                     bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])
 
