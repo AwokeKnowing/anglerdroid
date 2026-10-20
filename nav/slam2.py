@@ -174,6 +174,17 @@ class Slam2:
         if torch is not None:             # CUDA/kernel warm-up now, not on the first scan (it held the GIL ~0.6 s)
             f = {sg: np.zeros((int(2 * WIN / RES) + 2,) * 2, np.float32) for sg in SIG}
             search(f, np.array([-WIN, -WIN]), np.zeros((10, 2), np.float32), (0.0, 0.0, 0.0), 0.24, 0.04, 0.07, 0.017)
+        # KEVIN_SLAM_REC=<file>: every job the worker PROCESSES (the exact replay input; submit() drops jobs while busy),
+        # plus T before it, streamed as pickle records by a writer thread (nav exits via os._exit: no atexit dump)
+        self._recq = None
+        if os.environ.get("KEVIN_SLAM_REC"):
+            import collections, pickle
+            self._recq = collections.deque(); f = open(os.environ["KEVIN_SLAM_REC"], "ab")
+            def _w():
+                while True:
+                    while self._recq: pickle.dump(self._recq.popleft(), f, protocol=4)
+                    f.flush(); time.sleep(0.2)
+            threading.Thread(target=_w, daemon=True, name="slamrec").start()
         threading.Thread(target=self._loop, daemon=True).start()
 
     # -- API shared with nav.slam.Slam
@@ -220,6 +231,7 @@ class Slam2:
                 while self._job is None: self._cv.wait()
                 t, podom, obs, free, obs_h, rays = self._job; self._job = None
             if self.frozen: continue
+            if self._recq is not None: self._recq.append((t, podom, obs, free, obs_h, rays, tuple(self.T)))
             try: self._step(t, podom, obs, free, obs_h, rays)
             except Exception as e: print("slam2 error: %r" % e)
 

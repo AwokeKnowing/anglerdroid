@@ -3,8 +3,11 @@
 Realism is emulated OFFLINE on the recorded clouds (exact for a rigid camera rotation, apart from FOV-edge coverage):
   miscal: each camera's real mount is rotated by a random (pitch, roll) offset, U(-MIS, MIS) per axis, seeded; nav still
           uses the nominal twin extrinsic.  MIS is an ASSUMED magnitude (James: the mast is not straight).
-  sway:   RS2 tip deflection s'' = -w0^2 s - 2 z w0 s' + kappa*accel (pitch from fore/aft, roll from lateral accel); w0, z,
-          kappa ASSUMED (no measurement of the real mast yet).  The IMU is the RS2 (D435i) IMU, so the gyro sees the sway.
+  sway:   RS1 (top-down, mast tip z 0.86 m; James 21:13: the twin is right) deflection s'' = -w0^2 s - 2 z w0 s' + kappa*accel
+          (pitch from fore/aft, roll from lateral accel); w0, z, kappa ASSUMED (no measurement of the real mast yet).  The
+          IMU is the RS2 (D435i) IMU on the low body mount: the gyro does NOT see the mast-tip sway.  RS2: no sway.
+RS1 is filtered two ways: 'kf' = gyro-propagated (body rate) and 'kf_fit' = floor-fit-driven dynamics (no gyro; OU sigma/tau
+measured from RS1's own fit series on the train half of that config, i.e. what the real bot can measure without GT).
 Train/test split in time: filter parameters (sigma_n, OU sigma_d / tau, gyro noise) are measured on the first half
 (unperturbed); errors are reported on the second half."""
 import sys, os, math, time, json
@@ -67,14 +70,14 @@ def main(lg, out, stride=3):
         P2 = np.stack([rc.rx[ok] * zz, rc.ry[ok] * zz, zz], 1) @ rc.R.T + rc.T; hmin = 0.03 + 0.012 * zz * zz
         r = dict(t=t, gt=g, sway=swt.tolist(), cfg=[])
         for name, sd, m1, m2, sway in cfgs:
-            true = {"rs1": np.array(m1), "rs2": np.array(m2) + (swt if sway else 0)}
+            true = {"rs1": np.array(m1) + (swt if sway else 0), "rs2": np.array(m2)}
             ent = dict(true={c: (np.array(g) + true[c]).tolist() for c in true})
             for cam, dd in (("rs1", d1), ("rs2", d2)):
                 cc = cams[cam]; z = dd.ravel()[cc["idx"]].astype(np.float32) * 1e-3; k = z > 0.1
                 t0 = time.perf_counter()
-                P = cc["ray"][k] * z[k, None] + cc["T"]; P = perturb(P, cc["T"], *true[cam]); fr = fit(P, AX)
+                P = cc["ray"][k] * z[k, None] + cc["T"]; P = perturb(P, cc["T"], *true[cam]); fr = fit(P, AX, T=cc["T"])
                 if name == "off": tcpu[cam].append(time.perf_counter() - t0)
-                ent[cam] = None if fr is None else (fr[0], fr[1], fr[3], fr[4].tolist(), fr[5], fr[6])
+                ent[cam] = None if fr is None else (fr[0], fr[1], fr[3], fr[4].tolist(), fr[5], fr[6], fr[7])
             # phantom candidates: RS2 points whose TRUE (attitude-levelled) height is floor but perceived height is an obstacle band
             Pp = perturb(P2, cams["rs2"]["T"], *true["rs2"]); hp = Pp[:, 2] + AX
             tp, trr = ent["true"]["rs2"]; htrue = hp - (math.tan(tp) * Pp[:, 0] - math.tan(trr) * Pp[:, 1])
@@ -82,21 +85,38 @@ def main(lg, out, stride=3):
             ent["php"] = np.c_[Pp[sel, :2], hp[sel], hmin[sel]].astype(np.float32)
             r["cfg"].append(ent)
         recs.append(r)
-    return recs, cfgs, tcpu, tmid, (ti, wb, tg, swr)
+    return recs, cfgs, tcpu, tmid, (ti, wb, tg, swr, sw)
 
 
-def run_kf(recs, cfgs, tmid, gyro, ci, cam, prm):
-    ti, wb, tg, swr = gyro; name, sd, m1, m2, sway = cfgs[ci]
-    kf = TiltKF(prm[cam]["sn2"], prm["sig_d"], prm["tau"], prm["sg2"]); outk = []; tl = None
+def fit_dyn(recs, ci, cam, tmid):
+    """OU sigma / tau of the camera's dynamic tilt from its own accepted-looking fits (train half): no GT needed."""
+    Z = []; tt = []; Rm = []
+    for r in recs:
+        f = r["cfg"][ci][cam]
+        if r["t"] >= tmid or f is None: continue
+        Z.append([math.atan(f[0]), -math.atan(f[1])]); tt.append(r["t"]); Rm.append(np.diag(np.array(f[3])))
+    Z = np.array(Z); Z = Z - np.median(Z, 0); dt = float(np.median(np.diff(tt))); sd = []; tau = []
+    for k in range(2):
+        x = Z[:, k]; x = x[np.abs(x) < 5 * 1.4826 * np.median(np.abs(x)) + 1e-9]     # outlier fits (clutter) out
+        v = max(np.var(x) - np.mean(np.array(Rm)[:, k]), 1e-10); sd.append(math.sqrt(v))
+        c = [np.mean(x[:-j] * x[j:]) / np.mean(x * x) for j in range(1, 60)]
+        tau.append(next((j for j, q in enumerate(c, 1) if q < math.exp(-1)), 60) * dt)
+    return sd, tau
+
+
+def run_kf(recs, cfgs, tmid, gyro, ci, cam, prm, mode="gyro"):
+    ti, wb, tg, swr, sw = gyro; name, sd, m1, m2, sway = cfgs[ci]
+    if mode == "fit": s_d, tau = fit_dyn(recs, ci, cam, tmid); kf = TiltKF(prm[cam]["sn2"], s_d, tau, [0.0, 0.0])
+    else: kf = TiltKF(prm[cam]["sn2"], prm["sig_d"], prm["tau"], prm["sg2"])
+    outk = []; tl = None
     gy = gyro_only = np.zeros(2)
     for r in recs:
         t = r["t"]
         if tl is not None:
             m = (ti > tl) & (ti <= t); w = wb[m].mean(0) if m.any() else np.zeros(3)
-            ws = np.array([np.interp(t, tg, swr[:, 0]), np.interp(t, tg, swr[:, 1])]) if sway else np.zeros(2)
-            wp, wr = w[1] + ws[0], w[0] + ws[1]; kf.predict(t - tl, wp, wr); gyro_only = gyro_only + np.array([wp, wr]) * (t - tl)
+            wp, wr = (w[1], w[0]) if mode == "gyro" else (0.0, 0.0); kf.predict(t - tl, wp, wr); gyro_only = gyro_only + np.array([wp, wr]) * (t - tl)
         tl = t; e = r["cfg"][ci]; f = e[cam]
-        res = kf.update(None if f is None else (f[0], f[1], 0.0, f[2], np.array(f[3]), f[4], f[5]))
+        res = kf.update(None if f is None else (f[0], f[1], 0.0, f[2], np.array(f[3]), f[4], f[5], f[6]))
         outk.append(dict(t=t, est=kf.tilt().tolist(), res=res, true=e["true"][cam], gyro=gyro_only.tolist(), nb=None if f is None else f[5]))
     return outk
 
@@ -107,7 +127,7 @@ def stats(err):
 
 if __name__ == "__main__":
     lg, out = sys.argv[1], sys.argv[2]; stride = int(sys.argv[3]) if len(sys.argv) > 3 else 3
-    recs, cfgs, tcpu, tmid, gyro = main(lg, out, stride); ti, wb, tg, swr = gyro
+    recs, cfgs, tcpu, tmid, gyro = main(lg, out, stride); ti, wb, tg, swr, sw = gyro
     tr = [r for r in recs if r["t"] < tmid]; te_i = [i for i, r in enumerate(recs) if r["t"] >= tmid]
     # ---- parameters measured on the train half, off config
     gt = np.array([r["gt"] for r in tr]); tt = np.array([r["t"] for r in tr])
@@ -118,10 +138,10 @@ if __name__ == "__main__":
     sg2 = np.array([np.var(wb[ti < ti[0] + 1.0, 1]), np.var(wb[ti < ti[0] + 1.0, 0])])   # first second: robot still (drive starts after 2 s)
     prm = dict(sig_d=sig_d.tolist(), tau=ac, sg2=sg2.tolist())
     for cam in ("rs1", "rs2"):
-        s2 = [r["cfg"][0][cam][2] for r in tr if r["cfg"][0][cam] is not None]; prm[cam] = dict(sn2=float(np.median(s2)))
+        s2 = [r["cfg"][0][cam][2] / r["cfg"][0][cam][6] for r in tr if r["cfg"][0][cam] is not None]; prm[cam] = dict(sn2=float(np.median(s2)))
     O = dict(log=lg, stride=stride, n_frames=len(recs), n_test=len(te_i), params_measured_train_half=dict(
         sig_d_deg=np.degrees(sig_d).tolist(), tau_s=ac, gyro_sd_dps=np.degrees(np.sqrt(sg2)).tolist(),
-        sigma_n_mm={c: 1e3 * math.sqrt(prm[c]["sn2"]) for c in ("rs1", "rs2")}),
+        sigma_n_mm_at_1m={c: 1e3 * math.sqrt(prm[c]["sn2"]) for c in ("rs1", "rs2")}),
         assumed=dict(miscal_deg=math.degrees(MIS), sway_f0_hz=W0 / 2 / math.pi, sway_zeta=ZETA, sway_deg_per_mps2=math.degrees(KAPPA)),
         cpu_ms_single_thread={c: dict(p50=round(1e3 * float(np.median(v)), 3), p95=round(1e3 * float(np.percentile(v, 95)), 3), points=N_PIX) for c, v in tcpu.items()})
     nb2 = np.array([recs[i]["cfg"][0]["rs2"][5] if recs[i]["cfg"][0]["rs2"] else 0 for i in te_i]); low = nb2 <= np.percentile(nb2, 10)
@@ -129,6 +149,7 @@ if __name__ == "__main__":
     res = {}
     for ci, (name, sd, m1, m2, sway) in enumerate(cfgs):
         ks = {cam: run_kf(recs, cfgs, tmid, gyro, ci, cam, prm) for cam in ("rs1", "rs2")}
+        kfit = [run_kf(recs, cfgs, tmid, gyro, ci, "rs1", prm, "fit")[i] for i in te_i]
         R = {}
         for cam in ("rs1", "rs2"):
             k = [ks[cam][i] for i in te_i]; tru = np.array([x["true"] for x in k])
@@ -138,6 +159,10 @@ if __name__ == "__main__":
             if cam == "rs2":
                 R[cam]["little_floor"] = dict(accept=round(float(np.mean([k[i]["res"] == "ok" for i in np.flatnonzero(low)])), 3),
                                                kf=stats((np.array([x["est"] for x in k])[:, 0] - tru[:, 0])[low]), n=int(low.sum()))
+        tru1 = np.array([x["true"] for x in kfit]); e1 = np.array([x["est"] for x in kfit])
+        R["rs1"]["kf_fit"] = stats(e1[:, 0] - tru1[:, 0]); R["rs1"]["kf_fit_roll"] = stats(e1[:, 1] - tru1[:, 1])
+        R["rs1"]["kf_fit_accept"] = round(float(np.mean([x["res"] == "ok" for x in kfit])), 3)
+        R["rs1"]["sway_true_pitch"] = stats(np.array([recs[i]["sway"][0] for i in te_i])) if sway else None
         # RS1 estimate transferred to RS2 (one estimate for both cameras) and gyro-only from the starting point
         k1 = [ks["rs1"][i] for i in te_i]; k2 = [ks["rs2"][i] for i in te_i]; tru2 = np.array([x["true"] for x in k2])
         R["rs2"]["rs1_transfer"] = stats(np.array([x["est"] for x in k1])[:, 0] - tru2[:, 0])
