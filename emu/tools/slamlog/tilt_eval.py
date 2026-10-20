@@ -13,7 +13,7 @@ Train/test split in time: filter parameters (sigma_n, OU sigma_d / tau, gyro noi
 import sys, os, math, time, json
 import numpy as np, cv2
 import twin_geometry as G
-from .log import Log
+from .log import Log, depth_u16
 from nav.tilt import fixed_pixels, fit, TiltKF, N_PIX
 from nav.perceive import Rs2Cloud
 
@@ -62,8 +62,8 @@ def main(lg, out, stride=3):
     # ---- pass 1: per frame, load + fits for every config (store results; KFs need params measured on the train half)
     recs = []; tcpu = {"rs1": [], "rs2": []}
     for t, f in frames:
-        i1 = int(np.argmin(np.abs(t1 - t))); d1 = cv2.imread(L.d + "/" + f1[i1][1] + ".png", cv2.IMREAD_UNCHANGED)
-        d2 = cv2.imread(L.d + "/" + f + ".png", cv2.IMREAD_UNCHANGED)
+        i1 = int(np.argmin(np.abs(t1 - t))); d1 = depth_u16(L.d + "/" + f1[i1][1])
+        d2 = depth_u16(L.d + "/" + f)
         g = (np.interp(t, tc, gp), np.interp(t, tc, gr)); swt = np.array([np.interp(t, tg, sw[:, 0]), np.interp(t, tg, sw[:, 1])])
         # RS2 obstacle cloud (as nav sees it) for phantom counting
         zz = d2[::rc.s, ::rc.s].ravel().astype(np.float32) * 1e-3; ok = (zz > 0.2) & (zz < rc.max_range); zz = zz[ok]

@@ -11,6 +11,12 @@ T_RS2 = np.array([-0.1301, 0.0, 0.3822])
 R_MAST = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])
 AXLE_H = 0.0856
 
+def depth_u16(base):
+    """Depth frame (uint16 mm) for a log file stem: PNG16, or the raw .npy that sensorlog v4 (SENSORLOG_ENC=gpu) writes
+    while recording (emu/tools/sensorlog_pack.py turns those into PNG later)."""
+    if os.path.exists(base + ".png"): return cv2.imread(base + ".png", cv2.IMREAD_UNCHANGED)
+    return np.load(base + ".npy")
+
 def wrap(a): return (np.asarray(a) + np.pi) % (2 * np.pi) - np.pi
 
 class Log:
@@ -42,7 +48,7 @@ class Log:
         return np.array([[s["fx"], 0, s["ppx"]], [0, s["fy"], s["ppy"]], [0, 0, 1.0]]), (s.get("w", 640), s.get("h", 480))
 
     def rgb(self, f): return cv2.imread(os.path.join(self.d, f + ".jpg"))[..., ::-1]
-    def depth(self, f): return cv2.imread(os.path.join(self.d, f + ".png"), cv2.IMREAD_UNCHANGED).astype(np.float32) * 1e-3
+    def depth(self, f): return depth_u16(os.path.join(self.d, f)).astype(np.float32) * 1e-3
 
     def depth_in_color(self, f):
         """RS depth (848x480, depth optical frame) re-projected into the colour camera (640x480, x offset -15 mm), z-buffered."""

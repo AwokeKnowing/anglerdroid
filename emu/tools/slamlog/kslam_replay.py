@@ -6,7 +6,7 @@
 Scans: emu.tools.slamlog.lslam_replay.Scans (both depths, floor-levelled); odom: nav's recorded odom (incl. Manhattan)."""
 import sys, os, json, math, time
 import numpy as np
-from .log import Log
+from .log import Log, depth_u16
 from .metrics import evaluate
 from . import lslam_replay as LR
 from nav.slam import Slam, GridMap, compose, wrap
@@ -34,7 +34,7 @@ def replay(log, headkf=None, record=False):
     for i, (t, f) in enumerate(fr):
         o = tuple(od(t))
         if i % 6 == 0:
-            obs, flo = rc.points(cv2.imread(L.d + "/" + f + ".png", cv2.IMREAD_UNCHANGED))
+            obs, flo = rc.points(depth_u16(L.d + "/" + f))
             if len(obs) > 100:
                 m0 = s.do_match; s.do_match = abs(np.interp(t, N["t_od"], w_od)) < 0.6
                 k0 = len(rec); acc0 = s.stats["accepted"]

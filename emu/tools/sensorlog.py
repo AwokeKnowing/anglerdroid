@@ -52,7 +52,29 @@ def main():
     PNG_FULL = [cv2.IMWRITE_PNG_COMPRESSION, 1, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_SUB]
     PNG_FAST = [cv2.IMWRITE_PNG_COMPRESSION, 0, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_NONE]
     QC = threading.Condition(); Q = collections.deque(); qb = [0, 0]; redo = []; done = [False]; warned = set()
-    def enc(path, img, prm, bgr): cv2.imwrite(path, img[..., ::-1].copy() if bgr else img, prm)
+    # v4 (2026-10-20): SENSORLOG_ENC = gpu (default when torch+CUDA import) | cpu (v3 above) | null (read + discard, to
+    # measure the reader cost).  CPU encoding at SCHED_IDLE still raised core frame age (L17 max 122 ms): the encoder shares
+    # hyperthreads / memory bandwidth with the sim even when it only gets idle CPU.  gpu: colour JPEG on the RTX (nvjpeg via
+    # torchvision, ~0.35 ms/frame), depth written RAW (.npy, uint16 mm, a memcpy -- no zlib on the CPU).  The raw depth is
+    # packed to the usual PNG16 later by emu/tools/sensorlog_pack.py, which only runs while the sim is stopped
+    # (emu/tools/offline_gate.sh); readers (slamlog.log.depth_u16) accept either file.  Raw depth is 49 MB/s for both
+    # cameras (6 GB per 120 s): the SENSORLOG_DISK_MIN_GB guard drops (counted) once the disk gets that full.
+    MODE = os.environ.get("SENSORLOG_ENC", "gpu")
+    if MODE == "gpu":
+        try:
+            import torch; from torchvision.io import encode_jpeg; assert torch.cuda.is_available()
+        except Exception as e:
+            print("sensorlog: no GPU encoder (%s) -> cpu" % e, file=sys.stderr); MODE = "cpu"
+    if MODE == "gpu":
+        if "SENSORLOG_ENC_THREADS" not in os.environ: NENC = 1
+        encode_jpeg(torch.zeros((3, 8, 8), dtype=torch.uint8, device="cuda"))            # CUDA / nvjpeg init before t0
+    def enc(path, img, prm, bgr):
+        if MODE == "null": return
+        if MODE == "gpu":
+            if path.endswith(".npy"): np.save(path, img, allow_pickle=False); return     # raw depth
+            t = torch.from_numpy(np.ascontiguousarray(img)).cuda(non_blocking=False).permute(2, 0, 1)
+            open(path, "wb").write(encode_jpeg(t if bgr else t.flip(0), quality=prm[1]).cpu().numpy().tobytes()); return
+        cv2.imwrite(path, img[..., ::-1].copy() if bgr else img, prm)
     def encoder():
         try: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))      # this thread only (Linux: 0 = caller tid)
         except (OSError, AttributeError): os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
@@ -61,7 +83,7 @@ def main():
             with QC:
                 while not Q and not done[0]: QC.wait(0.2)
                 if not Q: return
-                path, img, prm, bgr = Q.popleft(); fast = prm is None and not done[0] and (LIVE == "fast" or (LIVE == "auto" and qb[0] > MEM / 4)); qb[0] -= img.nbytes
+                path, img, prm, bgr = Q.popleft(); fast = MODE == "cpu" and prm is None and not done[0] and (LIVE == "fast" or (LIVE == "auto" and qb[0] > MEM / 4)); qb[0] -= img.nbytes
             enc(path, img, (PNG_FAST if fast else PNG_FULL) if prm is None else prm, bgr)
             with QC:
                 S["enc"]["written"] += 1
@@ -78,11 +100,11 @@ def main():
         """prm None = depth PNG (compression chosen by the encoder from the backlog)."""
         if time.monotonic() - t_df[0] > 1.0:
             st = os.statvfs(d); t_df[:] = [time.monotonic(), st.f_bavail * st.f_frsize]
-        if t_df[1] < DMIN: return drop(cam, "disk_dropped")
+        if t_df[1] < DMIN: drop(cam, "disk_dropped"); return False
         with QC:
             if qb[0] + img.nbytes <= MEM:
-                Q.append((path, img, prm, bgr)); qb[0] += img.nbytes; qb[1] = max(qb[1], qb[0]); QC.notify(); return
-        drop(cam, "enc_dropped")
+                Q.append((path, img, prm, bgr)); qb[0] += img.nbytes; qb[1] = max(qb[1], qb[0]); QC.notify(); return True
+        drop(cam, "enc_dropped"); return False
     def row(r):
         with L: idx.write(json.dumps(r) + "\n")
     def wait(b, last):
@@ -116,8 +138,9 @@ def main():
                     cv.wait(0.01)
             if dd is None: S[cam]["unpaired"] += 1; continue
             f = "%s/%d" % (cam, sc); last_saved = sc
-            put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True, cam)
-            put(os.path.join(d, f + ".png"), dd, None, False, cam)
+            ok1 = put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True, cam)
+            ok2 = put(os.path.join(d, f + (".npy" if MODE == "gpu" else ".png")), dd, None, False, cam)
+            if not (ok1 and ok2): continue                               # dropped (counted): not indexed, not 'saved'
             row(dict(cam=cam, stamp_ns=sc, depth_stamp_ns=st, file=f)); S[cam]["saved"] += 1; saved[cam].append(sc)
     def mast_loop(b):
         last = b.seq
@@ -125,7 +148,7 @@ def main():
             last = b.seq; r = pread(b, ["color"])
             if r is None: continue
             st, _, a = r; f = "mast/%d" % st
-            put(os.path.join(d, f + ".jpg"), a["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True)
+            if not put(os.path.join(d, f + ".jpg"), a["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True): continue
             row(dict(cam="mast", stamp_ns=st, file=f)); S["mast"]["saved"] += 1
     def gt_loop():
         while time.monotonic() < t_end:
@@ -140,6 +163,7 @@ def main():
                threading.Thread(target=colour_loop, args=(cam, shm.Block(v["shm"] + "_side", side_layout(p)), ring, cv), daemon=True)]
     os.makedirs(os.path.join(d, "mast"), exist_ok=True)
     th.append(threading.Thread(target=mast_loop, args=(shm.Block(info["mast"]["shm"], info["mast"]["layout"]),), daemon=True))
+    t_end = time.monotonic() + T                                  # after the (GPU) encoder init
     for t in th: t.start()
     for t in th: t.join(T + 5)
     t_enc = time.monotonic(); backlog = len(Q); done[0] = True
@@ -156,7 +180,7 @@ def main():
     S["enc"].update(queue_peak_mb=round(qb[1] / 2 ** 20, 1), backlog_at_end=backlog, drain_s=round(t_rc - t_enc, 1), recompress_s=round(time.monotonic() - t_rc, 1))
     print("sensorlog: wrote %d images (%d depth fast, recompressed after in %.1f s), RAM queue peak %.0f MB, backlog at end %d (drained in %.1f s)"
           % (S["enc"]["written"], len(redo), time.monotonic() - t_rc, qb[1] / 2 ** 20, backlog, t_rc - t_enc), flush=True)
-    out = {c: dict(S[c]) for c in S}
+    out = {c: dict(S[c]) for c in S}; out.setdefault("enc", {})["mode"] = MODE
     for c, v in saved.items():
         g = np.diff(np.sort(np.array(v, float))) * 1e-9
         if len(g): out[c].update(gap_max_s=round(float(g.max()), 3), gap_p99_s=round(float(np.percentile(g, 99)), 3), gaps_over_50ms=int((g > 0.05).sum()))

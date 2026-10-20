@@ -266,10 +266,10 @@ class Brain:
         # the same goal again (LightNav re-sends its receding-horizon waypoint every prediction, ~1.7 s): keep the
         # running plan, the controller and the progress watchdog.  Re-planning reset the 'no progress' clock each time,
         # so a wedged robot never got to retreat (live 07:01: 90 x "going to point (-3.82, -0.61)", cmd 0 0).
-        same = (cmd and self.mode in ("path", "turn", "backout") and getattr(self, "goal_req", None) is not None and label == self.goal_label
+        same = (cmd and self.mode in ("path", "turn", "backout", "escape") and getattr(self, "goal_req", None) is not None and label == self.goal_label
                 and float(np.hypot(*(xy - np.asarray(self.goal_req, float)))) < GOAL_SAME_M)
         if same: self.goal_heading = heading; self.stats.add("goal_same", 1.0); return
-        cont = cmd and self.mode in ("path", "turn", "backout") and getattr(self, "_prog", None) is not None    # new goal mid-route
+        cont = cmd and self.mode in ("path", "turn", "backout", "escape") and getattr(self, "_prog", None) is not None    # new goal mid-route
         keep = (self._prog, self._stuck, self._best_d, self._best_t, self.goal_t0) if cont else None
         g = GP.plan(self.navgrid, pose[:2], xy, self.obs)
         if g is None:
@@ -335,6 +335,64 @@ class Brain:
         self.log("%s: retreating along the way in (%.2f m) to %s" % (why, math.hypot(tgt[0] - x, tgt[1] - y),
                  "the last spot with room to turn around" if rot else "the start of the trail (no room to turn on it)"))
         return True
+
+    # -------------------------------------------------------------- footprint escape (nav/escape.py)
+    def _escape_start(self, goal_for, why):
+        """Wedged where Kevin cannot spin (axle clearance < R_ROTATE) and MPPI makes no progress: search a short sequence
+        of in-place turns / 4 cm moves that the governor (same rule as the speed limiter, 2x the core's) passes at creep
+        speed and whose swept footprint keeps 2 cm clear, ending where Kevin can spin (nav/escape.py; L15 kitchen stall).
+        The search runs off the control loop (robot held still); no plan -> the caller's retreat."""
+        gi = getattr(self, "_gov_in", None)
+        if gi is None or self.planner is None or os.environ.get("KEVIN_ESCAPE", "0") != "1": return False   # default OFF until validated live (n>=3)
+        x, y, th = self.navpose()
+        if self.planner.clearance((x, y)) >= _TG.R_ROTATE: return False
+        pts, p0, bands = gi; Pw = transform(np.asarray(pts[:, :2], np.float32), p0)
+        self._esc = dict(state="search", t0=time.monotonic(), goal_for=goal_for, why=why, ep=self.epoch, segs=None, info=None)
+        self.mode = "escape"; self.v = self.w = 0.0
+        def job(E=self._esc, pose=(x, y, th)):
+            from nav import escape as ESC
+            try: E["segs"], E["info"] = ESC.plan(Pw, pose, bands=bands)
+            except Exception as e: E["segs"], E["info"] = None, dict(why="error %r" % e)
+            E["state"] = "found"
+        threading.Thread(target=job, daemon=True, name="escape").start(); return True
+
+    def _escape_end(self, ok, msg):
+        E = self._esc; self.v = self.w = 0.0; self._stuck_dump("escape_%s" % ("done" if ok else "fail")); xy, hd, lb = E["goal_for"]
+        k = self._stuck; self.stats.add("escape_ok" if ok else "escape_fail", 1.0); self.log(msg)
+        if ok or not self._retreat(E["goal_for"], E["why"]):
+            self._bo_fail = False; self._bo_retry = True; self._goto(xy, hd, lb); self._bo_retry = False
+            if self._bo_fail: self.mode = "idle"; self.log("unreachable: local planner found no path toward %s (after escaping)" % (lb or "point"))
+        self._stuck = k
+
+    def _escape_step(self, pose):
+        """Execute the escape plan: closed-loop on the nav pose, one segment at a time, creep speeds (the governor and
+        the core still filter every command).  A segment that does not complete in time (blocked) aborts to the retreat."""
+        from nav import escape as ESC
+        E = self._esc; x, y, th = pose; now = time.monotonic(); self.v = self.w = 0.0
+        if E["state"] == "search":
+            if now - E["t0"] > 6.0: E["state"] = "found"; E["segs"], E["info"] = None, dict(why="search timeout")
+            return
+        if E["state"] == "found":
+            if E["ep"] != self.epoch: self.mode = "idle"; return
+            if not E["segs"]: return self._escape_end(False, "%s: no footprint escape (%s)" % (E["why"], (E["info"] or {}).get("why")))
+            E.update(state="run", i=0, t_seg=now, p_seg=pose, done=0.0, th_prev=th)
+            self.log("%s: wedged (axle clearance %.2f m < %.2f to turn): footprint escape %s (%s ms search)" % (
+                E["why"], E["info"].get("axle0", 0), _TG.R_ROTATE, " ".join("%s %+.0f%s" % (k, math.degrees(a) if k == "rot" else a * 100, "deg" if k == "rot" else "cm") for k, a in E["segs"]), E["info"].get("ms")))
+        if E["state"] != "run": return
+        kind, a = E["segs"][E["i"]]
+        if kind == "rot":
+            E["done"] += wrap(th - E["th_prev"]); E["th_prev"] = th; rem = a - E["done"]; fin = abs(rem) < math.radians(3)
+            T = 3.0 + 2.0 * abs(a) / ESC.CREEP_W
+            if not fin: self.w = float(math.copysign(min(ESC.CREEP_W, max(0.25, 2.0 * abs(rem))), rem))
+        else:
+            p0 = E["p_seg"]; prog = (x - p0[0]) * math.cos(p0[2]) + (y - p0[1]) * math.sin(p0[2]); rem = a - prog; fin = abs(rem) < 0.008 or rem * a < 0
+            T = 3.0 + 2.0 * abs(a) / ESC.CREEP_V
+            if not fin: self.v = float(math.copysign(ESC.CREEP_V, rem)); self.w = float(np.clip(1.5 * wrap(p0[2] - th), -0.3, 0.3))
+        if fin:
+            E["i"] += 1; self.v = self.w = 0.0
+            if E["i"] >= len(E["segs"]): return self._escape_end(True, "escaped: room to turn here, planning again")
+            E.update(t_seg=now, p_seg=pose, done=0.0, th_prev=th)
+        elif now - E["t_seg"] > T: self._escape_end(False, "footprint escape blocked at step %d/%d (%s): retreating" % (E["i"] + 1, len(E["segs"]), kind))
 
     def _set_sub(self, pose):
         from nav import globalplan as GP
@@ -626,6 +684,7 @@ class Brain:
                         self._stuck += 1; self._stuck_dump("noprog%d" % self._stuck)
                         if self._stuck >= 4: self.mode = "idle"; self.goal = None; self.planner.cancel(); self.log("gave up: stuck (unreachable from here)")
                         elif self._face_path((x, y, th)): pass          # room to turn here: face the path (no retreat needed)
+                        elif self._escape_start((self.goal_req, self.goal_heading, self.goal_label), "no progress (%d)" % self._stuck): pass   # wedged: footprint escape
                         else:
                             self._bo_stuck = self._stuck
                             if not self._retreat((self.goal_req, self.goal_heading, self.goal_label), "no progress (%d)" % self._stuck):
@@ -642,6 +701,8 @@ class Brain:
                 elif getattr(self, "_bo_stuck", 0): self._stuck = self._bo_stuck; self._bo_stuck = 0   # keep the stuck count (gives up after 4)
             else:
                 a, al = r; self.v = integrate_v(vs, a, dt, L.v_min, L.v_max); self.w = float(np.clip(ws + al * dt, -L.w_max, L.w_max))
+        elif self.mode == "escape":
+            self._escape_step((x, y, th))
         elif self.mode == "drive":
             v, w, tend = self.drive_cmd
             if time.monotonic() > tend: self.v = self.w = 0.0; self.mode = "idle"; self.log("drive done")
@@ -700,6 +761,7 @@ class Brain:
                 # (RS1 ego + RS2 + map memory) are a superset of the core's sources (RS1 ego + RS2).
                 cv = self.hw.core_viz(); bands = cv[1] if cv is not None else None
                 v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w, bands=bands)
+                self._gov_in = (pts, (xm, ym, self.navpose()[2]), bands)     # nav/escape.py searches on this exact point set
             info = dict(state="ok" if gw in ("ok", "idle") else "governed", scale=sc, need2=need2, gov=gw, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
             if len(pts):
                 _d = self.env._sd(pts); _i = int(np.argmin(_d)); _near = [round(float(pts[_i, 0]), 3), round(float(pts[_i, 1]), 3), round(float(_d[_i]), 3)]
@@ -770,7 +832,7 @@ class Brain:
         self.stats.add("loop_ms", (t1 - t0) * 1e3); self.stats.add("frame_to_cmd_ms", (t1 - t_frame) * 1e3)
         if hasattr(self, "_tl"): self.stats.add("period_ms", (t0 - self._tl) * 1e3)
         self._tl = t0; self.last = dict(v=v, w=w, safety=info, valid=valid)
-        if STUCK_DUMP and self.mode in ("path", "backout", "turn"):     # last ~15 s of control decisions (for _stuck_dump)
+        if STUCK_DUMP and self.mode in ("path", "backout", "turn", "escape"):     # last ~15 s of control decisions (for _stuck_dump)
             pt = self.planner.timing if self.planner is not None else {}
             self.__dict__.setdefault("_ring", collections.deque(maxlen=450)).append(
                 (round(t0, 3), self.mode, round(x, 3), round(y, 3), round(th, 3), round(v_pre, 3), round(w_pre, 3), round(v_saf, 3), round(w_saf, 3),
@@ -834,7 +896,7 @@ class Brain:
         resume = None
         vln_on = self.vln is not None and getattr(self.vln, "text", None) is not None
         if vln_on: self.vln.cancel()
-        elif self.mode in ("path", "backout", "turn") and getattr(self, "goal_req", None) is not None:
+        elif self.mode in ("path", "backout", "turn", "escape") and getattr(self, "goal_req", None) is not None:
             self._goal_bumps = getattr(self, "_goal_bumps", 0) + 1
             if self._goal_bumps <= 2: resume = (self.goal_req, self.goal_heading, self.goal_label)
         with self._goal_lock: self.epoch += 1; self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
