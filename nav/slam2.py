@@ -40,6 +40,9 @@ DEG_R = 0.06; DEG_MIN = 15.0; DEG_TH = 0.004   # curvature gates (score/m^2; sco
 LOOP_MIN = 0.65
 MAX_W = 0.15                    # rad/s: no match/insert while turning faster (camera/odom time skew)
 LOST_SC = 0.6
+STILL_SKIP = os.environ.get("KEVIN_SLAM2_STILL_SKIP", "1") == "1"
+STILL_D, STILL_A = 0.04, math.radians(1.0)   # = the matcher's fine search step (search(..., 0.04 m, ..., 1 deg)): smaller motion is unresolvable
+# (skips the scan MATCH only; KEVIN_SLAM2_STILL_SKIP=0 matches every job)
 MATCH_TEST = os.environ.get("KEVIN_SLAM2_TEST", "chi2")   # chi2 (standard innovation test + Kalman gain) | gate (old)
 CHI2_99_3 = 11.34
 try: ODOM_ALPHA = json.load(open(os.path.join(os.path.dirname(__file__), "..", "src", "odom_noise.json")))["alpha"]
@@ -261,9 +264,18 @@ class Slam2:
         lp = getattr(self, "_lastjob", None); self._lastjob = (t, podom)
         if lp is not None and t > lp[0] and abs(wrap(podom[2] - lp[1][2])) / (t - lp[0]) > MAX_W:
             self.stats["skip_turn"] = self.stats.get("skip_turn", 0) + 1; return     # turning: scans skewed/smeared
+        # standing still: a scan from (within the matcher's resolution of) the last matched pose re-measures the same
+        # scene through the same noise -- a match adds no independent information (repeated Kalman updates on correlated
+        # scans would make the pose overconfident).  Gate the MATCH on the odometry delta since the last match.  The map
+        # update below still runs: while parked it only clears what the cameras see through now (w_hit 0), which is how
+        # a person/phantom that left the view is removed (L15 22:22: stuck 60 s with the whole step skipped).
+        q = getattr(self, "_last_proc", None)
+        still = STILL_SKIP and q is not None and math.hypot(podom[0] - q[0], podom[1] - q[1]) < STILL_D and abs(wrap(podom[2] - q[2])) < STILL_A
+        if still: self.stats["skip_still"] = self.stats.get("skip_still", 0) + 1
+        else: self._last_proc = podom
 
         obs = np.asarray(obs, np.float32); P = _voxel(obs[np.hypot(obs[:, 0], obs[:, 1]) < MAXR]) if len(obs) else obs
-        if self.do_match and (len(self.kfs) >= 3 or getattr(self, 'seeded', False)) and len(P) > 60:
+        if not still and self.do_match and (len(self.kfs) >= 3 or getattr(self, 'seeded', False)) and len(P) > 60:
             est, sc, s_g = search(self.field.fields(), self.field.origin, P, pm, 0.24, 0.04, math.radians(4), math.radians(1))
             raw, info = search.last_raw, search.last_info
             # odometry prior: how far may the scan pull us?  Wheel odom is good to ~3 % of distance + slip events,
