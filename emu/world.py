@@ -145,6 +145,7 @@ def _floor_model(root, asset, wb, env, level):
         inz = (xx >= a0) & (xx <= a1) & (yy >= b0) & (yy <= b1)
         if not inz.any(): continue
         top = float(h[inz].max()) + 0.0005; h[inz] = top - 0.0005; plates.append(((a0, b0, a1, b1), top))
+    env._floor = (x0, y0, res, h.copy())          # ground height (start-referenced) for World.teleport
     lo = float(h.min()); span = max(float(h.max()) - lo, 1e-4)
     hf = ET.SubElement(asset, "hfield", name="floor_hf", nrow=str(nr), ncol=str(nc),
                        size="%g %g %g %g" % ((x1 - x0) / 2, (y1 - y0) / 2, span, 0.05))
@@ -512,8 +513,20 @@ class World:
             b = self.m.body_parentid[b]
         return False
 
+    def floor_under(self, x, y, r=0.35):
+        """highest ground point under the footprint disc (r) at x, y -- the spawn rule of _floor_model (0 at the start)."""
+        f = getattr(self.env, "_floor", None)
+        if f is None: return 0.0
+        x0, y0, res, h = f; c, rr, k = int(round((x - x0) / res)), int(round((y - y0) / res)), int(r / res)
+        sub = h[max(rr - k, 0):rr + k + 1, max(c - k, 0):c + k + 1]
+        return float(sub.max()) if sub.size else 0.0
+
     def teleport(self, x, y, yaw):
-        q = self.d.qpos; q[0], q[1] = x, y; q[3:7] = (math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))
+        # keep the ride height relative to the GROUND at the target: teleports used to keep z, so tile (kitchen, 12 mm
+        # below the carpet) -> start (carpet) put the wheels 12 mm into the carpet and MuJoCo ejected Kevin backwards at
+        # ~1.5 m/s into the table at (2.6, 1.75) (5/5 live, 2026-10-20 11:08; 0/3 from carpet).
+        q = self.d.qpos; q[2] += self.floor_under(x, y) - self.floor_under(q[0], q[1])
+        q[0], q[1] = x, y; q[3:7] = (math.cos(yaw / 2), 0, 0, math.sin(yaw / 2))
         self.d.qvel[:] = 0
         # never drop Kevin onto the dog (2026-10-17 bench ta1: teleport into the dog -> 5.3 m/s contact, Kevin left
         # at z 0.20): a dog within its keep-distance of the target moves off first
