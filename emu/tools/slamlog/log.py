@@ -63,7 +63,8 @@ class Log:
             else:
                 R = []
                 for f in sorted(glob.glob(os.path.join(self.d, "nav", "*.npz"))):
-                    z = np.load(f); m = json.loads(str(z["meta"]))
+                    try: z = np.load(f); m = json.loads(str(z["meta"]))
+                    except Exception: continue            # a tick cut off when nav was stopped (truncated npz)
                     R.append([m["t"], m["vl"], m["vr"], m["gz"]] + list(z["gyro"]) + list(z["accel"]) + list(m["pose"]) + list(m["odom"]) + [m.get("imu_t") or m["t"], m.get("t_od", m["t"])])
                 R = np.array(R, float)
                 self._nav = dict(t=R[:, 0], vl=R[:, 1], vr=R[:, 2], gz=R[:, 3], gyro=R[:, 4:7], accel=R[:, 7:10], pose=R[:, 10:13], odom=R[:, 13:16], imu_t=R[:, 16], t_od=R[:, 17])

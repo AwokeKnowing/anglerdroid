@@ -38,7 +38,17 @@ class Scans:
         if plane is not None: h = h - (plane[0] * B[:, 0] + plane[1] * B[:, 1] + plane[2])
         return B[(h > 0.05) & (h < 1.6) & (r < 3.0), :2], plane
 
+    def cache(self, path):
+        """clean scans of every processed frame, computed once per log (regenerable; ~MBs): PNG decode dominated (70 ms/frame)."""
+        if os.path.exists(path):
+            z = np.load(path, allow_pickle=True); self._c = dict(pts=list(z["pts"]), pl=list(z["pl"])); return self
+        P, PL = [], []
+        for i in range(len(self.f2)): _, p, pl = self.get(i); P.append(p); PL.append(pl)
+        a = np.empty(len(P), object); a[:] = P; b = np.empty(len(PL), object); b[:] = PL
+        np.savez(path, pts=a, pl=b); self._c = dict(pts=P, pl=PL); return self
+
     def get(self, i, fault=None, rng=None):
+        if fault is None and getattr(self, "_c", None) is not None: return self.f2[i][0], self._c["pts"][i], self._c["pl"][i]
         t, f = self.f2[i]; p2, pl2 = self._cam("rs2", f, fault, rng)
         p1, _ = self._cam("rs1", self.f1[int(np.argmin(np.abs(self.t1 - t)))][1], fault, rng)
         return t, np.concatenate([p1, p2]).astype(np.float32), pl2
@@ -63,6 +73,9 @@ def floor_ok(pl, fl, g):
     v = np.array(pl[:3]) - np.array(fl["mu"]); return float(v @ np.linalg.solve(np.array(fl["cov"]), v)) < g
 
 
+def cache_path(log): return os.path.expanduser("~/slamlogs/res/lslam/scans_%s_e%d_s%d.npz" % (os.path.basename(os.path.normpath(log)), EVERY, S))
+
+
 def odom_series(L, fault=None, t0=None):
     N = L.nav(); t, od = N["t_od"], N["odom"].copy(); od[:, 2] = np.unwrap(od[:, 2])
     if fault in ("slip", "gyro"):
@@ -79,7 +92,7 @@ def odom_series(L, fault=None, t0=None):
 
 
 def calib(log, out):
-    L = Log(log); sc = Scans(L); od = odom_series(L); n = len(sc.f2); rng = np.random.default_rng(0)
+    L = Log(log); sc = Scans(L).cache(cache_path(log)); od = odom_series(L); n = len(sc.f2); rng = np.random.default_rng(0)
     E, D, RT, FH = [], [], [], []; prev = None
     gmap = GridMap(40.0, 0.02, (-20.0, -20.0)); scans = []
     for i in range(n):
@@ -137,7 +150,7 @@ def calib(log, out):
 
 
 def run(log, params, out, fault="none", t0f=0.4):
-    p = json.load(open(params)); L = Log(log); sc = Scans(L); n = int(os.environ.get("LSLAM_N", len(sc.f2)))
+    p = json.load(open(params)); L = Log(log); sc = Scans(L).cache(cache_path(log)); n = int(os.environ.get("LSLAM_N", len(sc.f2)))
     tA, tB = sc.f2[0][0], sc.f2[n - 1][0]; t0 = tA + t0f * (tB - tA); dur = FAULTS.get(fault); t1 = t0 + dur if dur else tB
     od = odom_series(L, fault, t0); rng = np.random.default_rng(1)
     om = M.OdomModel(**p["odom"]); fl = p["floor"]; gf = M.gate(3)

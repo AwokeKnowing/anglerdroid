@@ -277,12 +277,21 @@ class Matcher:
         return best, bs, med, s0
 
 
+def _head_kf():
+    """KEVIN_SLAM_HEAD_KF=<json>: measured heading variances {q_th_rot [rad^2/rad], q_th_dist [rad^2/m], r_th [rad^2]} ->
+    the matcher's heading correction is Kalman-weighted against the gyro instead of the fixed k=0.3 / 0.5 deg clamp.
+    Unset (default): unchanged kslam."""
+    p = os.environ.get("KEVIN_SLAM_HEAD_KF")
+    if not p: return None
+    import json; return json.load(open(p))
+
+
 class Slam:
     """Owns odom->map correction. Call step() each control tick; the matcher+mapper run in their own thread."""
     def __init__(self, grid: GridMap | None = None, match=True):
         self.grid = grid or GridMap(); self.odom = Odom(); self.T = (0.0, 0.0, 0.0)
         self.matcher = Matcher(self.grid); self.do_match = match; self.frozen = False
-        self._job = None; self._cv = threading.Condition(); self.stats = dict(matches=0, accepted=0, ms=0.0, score=0.0)
+        self._job = None; self._cv = threading.Condition(); self._pstate = (0.0, None, 0.0); self.head_kf = _head_kf(); self._p_th = 0.0; self._kf_odom = None; self.stats = dict(matches=0, accepted=0, ms=0.0, score=0.0)
         self._run = True; threading.Thread(target=self._loop, daemon=True, name="slam").start()
         import os
         self.rec = [] if os.environ.get("KEVIN_SLAM_REC") else None
@@ -335,40 +344,52 @@ class Slam:
         if self.rec is not None: self.rec.append(self._job)
 
     def _loop(self):
-        last_lf = 0.0; last_int = None; last_int_t = 0.0
         while self._run:
             with self._cv:
                 while self._job is None: self._cv.wait()
-                t, podom, obs, free, mpts, obs_h, rays = self._job; self._job = None
+                job = self._job; self._job = None
             if self.frozen: continue                                        # loaded map, not yet relocalized
-            t0 = time.perf_counter()
-            pmap = compose(self.T, podom)
-            moved = last_int is None or math.hypot(podom[0] - last_int[0], podom[1] - last_int[1]) > 0.04 \
-                or abs(wrap(podom[2] - last_int[2])) > math.radians(2.5)
-            if not moved and time.monotonic() - last_int_t < 3.0:
-                continue                                                  # static: no re-integration (prevents self-reinforcing creep)
-            mpts = mpts[np.hypot(mpts[:, 0], mpts[:, 1]) < 3.0]           # far D435 points are too noisy to match on
-            if self.do_match and self.grid.version > 40 and len(mpts) > 40 and moved:   # 40 scans of odom-only warm-up
-                P = mpts[np.random.default_rng().choice(len(mpts), 1000, replace=False)] if len(mpts) > 1000 else mpts
-                est, sc, med, s0 = self.matcher.match(P, pmap); self.stats["matches"] += 1; self.stats["score"] = sc
-                d = (est[0] - pmap[0], est[1] - pmap[1], wrap(est[2] - pmap[2]))
-                small = math.hypot(d[0], d[1]) < 0.06 and abs(d[2]) < math.radians(1.5)
-                # gated, partial correction: CSM only trims odometry (which is good to ~1 %); a wrong match can
-                # never move the pose by more than a few mm per scan, so one bad map region cannot run away
-                why = "low" if sc <= 0.5 else "flat" if sc <= med + 0.04 else "nogain" if sc <= (s0 or 0) + 0.02 else \
-                    "big" if not small and sc <= (s0 or 0) + 0.05 else None
-                if why: self.stats["rej_" + why] = self.stats.get("rej_" + why, 0) + 1
-                if why is None:
-                    # small: partial (k=0.3); large but clearly better (+0.05): clamped step (2 cm, 0.5 deg) so
-                    # accumulated gyro-yaw drift during long maneuvers is pulled back gradually instead of locked out
-                    k = 0.3; dx, dy, dth = k * d[0], k * d[1], k * d[2]
-                    if not small:
-                        n = math.hypot(dx, dy); f = min(1.0, 0.02 / n) if n > 1e-9 else 1.0
-                        dx, dy = dx * f, dy * f; dth = max(-math.radians(0.5), min(math.radians(0.5), dth))
-                        self.stats["clamped"] = self.stats.get("clamped", 0) + 1
-                    pmap = (pmap[0] + dx, pmap[1] + dy, wrap(pmap[2] + dth))
-                    self.T = compose(pmap, inverse(podom)); self.stats["accepted"] += 1
-            self.grid.integrate(pmap, obs, free, obs_h, carve_rays(rays, self.grid.res) if rays else None); last_int = podom; last_int_t = time.monotonic()
-            if time.monotonic() - last_lf > 0.4:
-                self.grid.refresh_likelihood(); last_lf = time.monotonic()
-            self.stats["ms"] = (time.perf_counter() - t0) * 1e3
+            self._process(job)
+
+    def _process(self, job):
+        """One scan: match (gated, partial correction) + integrate.  Called by the worker thread; offline replay calls it
+        directly (emu/tools/slamlog/kslam_replay.py)."""
+        t, podom, obs, free, mpts, obs_h, rays = job
+        last_lf, last_int, last_int_t = self._pstate
+        t0 = time.perf_counter()
+        pmap = compose(self.T, podom)
+        moved = last_int is None or math.hypot(podom[0] - last_int[0], podom[1] - last_int[1]) > 0.04 \
+            or abs(wrap(podom[2] - last_int[2])) > math.radians(2.5)
+        if self.head_kf and self._kf_odom is not None:     # heading variance since the last fix, measured gyro/odom model
+            hk = self.head_kf; self._p_th += hk["q_th_rot"] * abs(wrap(podom[2] - self._kf_odom[2])) + hk["q_th_dist"] * math.hypot(podom[0] - self._kf_odom[0], podom[1] - self._kf_odom[1])
+        self._kf_odom = podom
+        if not moved and t - last_int_t < 3.0:
+            return                                                    # static: no re-integration (prevents self-reinforcing creep)
+        mpts = mpts[np.hypot(mpts[:, 0], mpts[:, 1]) < 3.0]           # far D435 points are too noisy to match on
+        if self.do_match and self.grid.version > 40 and len(mpts) > 40 and moved:   # 40 scans of odom-only warm-up
+            P = mpts[np.random.default_rng().choice(len(mpts), 1000, replace=False)] if len(mpts) > 1000 else mpts
+            est, sc, med, s0 = self.matcher.match(P, pmap); self.stats["matches"] += 1; self.stats["score"] = sc
+            d = (est[0] - pmap[0], est[1] - pmap[1], wrap(est[2] - pmap[2]))
+            small = math.hypot(d[0], d[1]) < 0.06 and abs(d[2]) < math.radians(1.5)
+            # gated, partial correction: CSM only trims odometry (which is good to ~1 %); a wrong match can
+            # never move the pose by more than a few mm per scan, so one bad map region cannot run away
+            why = "low" if sc <= 0.5 else "flat" if sc <= med + 0.04 else "nogain" if sc <= (s0 or 0) + 0.02 else \
+                "big" if not small and sc <= (s0 or 0) + 0.05 else None
+            if why: self.stats["rej_" + why] = self.stats.get("rej_" + why, 0) + 1
+            if why is None:
+                # small: partial (k=0.3); large but clearly better (+0.05): clamped step (2 cm, 0.5 deg) so
+                # accumulated gyro-yaw drift during long maneuvers is pulled back gradually instead of locked out
+                k = 0.3; dx, dy, dth = k * d[0], k * d[1], k * d[2]
+                if not small:
+                    n = math.hypot(dx, dy); f = min(1.0, 0.02 / n) if n > 1e-9 else 1.0
+                    dx, dy = dx * f, dy * f; dth = max(-math.radians(0.5), min(math.radians(0.5), dth))
+                    self.stats["clamped"] = self.stats.get("clamped", 0) + 1
+                if self.head_kf:   # heading: Kalman weight of the match vs the gyro (measured variances, no fixed k / clamp)
+                    K = self._p_th / (self._p_th + self.head_kf["r_th"]); dth = K * d[2]; self._p_th *= (1 - K)
+                pmap = (pmap[0] + dx, pmap[1] + dy, wrap(pmap[2] + dth))
+                self.T = compose(pmap, inverse(podom)); self.stats["accepted"] += 1
+        self.grid.integrate(pmap, obs, free, obs_h, carve_rays(rays, self.grid.res) if rays else None); last_int = podom; last_int_t = t
+        if t - last_lf > 0.4:
+            self.grid.refresh_likelihood(); last_lf = t
+        self._pstate = (last_lf, last_int, last_int_t)
+        self.stats["ms"] = (time.perf_counter() - t0) * 1e3
