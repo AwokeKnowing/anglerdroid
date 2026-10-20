@@ -263,6 +263,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     finally: os.chdir(cwd)
     ego = Ego(); ego.intr = rs1_intr; rs2 = Rs2Cloud(rs2_intr); bands = Bands(ego)
     clk1, clk2 = FrameClock(), FrameClock()
+    EB = B.get("ego") if os.environ.get("KEVIN_SC_EGO_PUB", "1") == "1" else None; nfr = 0   # sc_ego: labels for the brain (nav.ego_shared)
     LOG = open(log_path, "a", buffering=1 << 16) if log_path else None
     gc.collect(); gc.freeze(); gc.disable()                       # no GC pauses inside the loop (refcounting still frees)
     s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}; n2 = 0; lat2 = None
@@ -288,6 +289,12 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
                 tA = time.monotonic(); cap1 = clk1.capture(float(cam.depth_stamp), t_recv)
                 per = None if cap1p is None else cap1 - cap1p; cap1p = cap1
                 ego.update(cam.verts); P1 = ego.obstacle_xy(max_n=1500); valid = ego.valid_fraction(); bands.learn(ego.lab); tB = time.monotonic()
+                nfr += 1
+                if EB is not None:     # publish what was just computed (seqlock single writer: never waits on readers)
+                    lm = ego.lab_map
+                    EB.write(lab=ego.lab, hgt=ego.hgt, lab_map=ego.lab if lm is None else lm, has_map=0 if lm is None else 1, obs_mask=ego.obs_mask,
+                             occluded=1 if getattr(ego, "occluded", False) else 0, stamp=cam.depth_stamp, t_cap=cap1, t_pub=time.monotonic(),
+                             frame=nfr, rs1_seq=B["rs1"].seq)
             else:
                 per = t_dec - (cap1p or t_dec); P1 = None; valid = 0.0; tA = tB = t_dec
             # RS2: of the frames not yet used, take the one captured nearest to this RS1 frame (the two cameras run

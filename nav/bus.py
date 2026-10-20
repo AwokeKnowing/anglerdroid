@@ -8,6 +8,7 @@ time.monotonic() seconds (CLOCK_MONOTONIC is system-wide, so both processes read
   sc_cmd    brain -> core       : desired v, w, t_sent (the core is the only writer to the wheels)
   sc_wheel  core -> brain       : vl, vr, t, i_l, i_r, i_age (nan = none), battery
   sc_state  core -> brain       : last decision (see safety_core.STATE_FIELDS)
+  sc_ego    core -> brain       : the core's RS1 ego labels per frame (nav.ego_shared.EgoShared reads them; KEVIN_EGO_SHARED)
   sc_viz    core -> brain/viewer: 5 Hz snapshot of the core's 2-D obstacle points (robot frame, now) + band rects
   sc_rs2img / sc_rs2info / sc_imu  RS2 camera process -> brain: full RS2 frame (depth, colour, IR pair), intrinsics, IMU ring
 """
@@ -20,6 +21,7 @@ HDR = 64
 PREFIX = os.environ.get("KEVIN_SC_PREFIX", "kevin_sc")
 MAX_VERTS = 480 * 848
 IMU_RING = 1024
+EGO_H, EGO_W = 240, 320   # robot_config FRAME_H, FRAME_W (nav.perceive.Ego label grid; checked in nav.ego_shared)
 RS2_RING = 2       # the core pairs each RS1 frame with the RS2 frame captured nearest to it, so it keeps the previous one too
 
 
@@ -108,6 +110,12 @@ def layouts(depth_shape):
                 ("stamp", (1,), "f8"), ("t_recv", (1,), "f8"), ("n", (1,), "i8")],
         rs2info=[("f", (6,), "f8"), ("set", (1,), "i8")],
         imu=[("t", (IMU_RING,), "f8"), ("g", (IMU_RING, 3), "f4"), ("a", (IMU_RING, 3), "f4"), ("w", (1,), "i8"), ("ok", (1,), "i8")],
+        # core -> brain: the RS1 ego labels the core computed for its own decision (one Ego, not two): labels, height,
+        # map labels (synthetic too-close/cliff obstacles excluded; has_map=0 -> same as lab), safety-grade obstacle mask,
+        # occlusion flag; camera stamp, capture time (core FrameClock, host monotonic), core frame counter, sc_rs1 seq
+        ego=[("lab", (EGO_H, EGO_W), "u1"), ("hgt", (EGO_H, EGO_W), "u1"), ("lab_map", (EGO_H, EGO_W), "u1"), ("has_map", (1,), "i8"),
+             ("obs_mask", (EGO_H, EGO_W), "u1"), ("occluded", (1,), "i8"), ("stamp", (1,), "f8"), ("t_cap", (1,), "f8"),
+             ("t_pub", (1,), "f8"), ("frame", (1,), "i8"), ("rs1_seq", (1,), "i8")],
     )
 
 

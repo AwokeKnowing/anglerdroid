@@ -1,5 +1,6 @@
 # sim-only fault injection for the safety core (copied from /tmp/coretest.py).  python emu/tools/coretest.py A|B
-"""safety-core fault injection (sim only). A: stuck RS2 writer (SIGSTOP camproc + seq left odd) 2 s.  B: kill -9 core."""
+"""safety-core fault injection (sim only). A: stuck RS2 writer (SIGSTOP camproc + seq left odd) 2 s.  B: kill -9 core.
+F: camera freeze (sim depth cameras SIGSTOPped 2 s).  C: motion start after idle (core tick period)."""
 import json, os, signal, sys, time, subprocess, urllib.request as u
 sys.path.insert(0, '/home/james/gits/awokeknowing/anglerdroid/src'); sys.path.insert(0, '/home/james/gits/awokeknowing/anglerdroid')
 from nav import bus
@@ -62,6 +63,22 @@ elif mode == 'B':
     print('events', [e[1] for e in nst()['events'][-6:]])
     print(cmd('forward 1'))   # must be refused while alarmed / or accepted after recovery
     time.sleep(1); print('events', [e[1] for e in nst()['events'][-3:]]); print(cmd('stop'))
+elif mode == 'F':   # camera freeze: the sim depth cameras (emu.depthcam: RS1 + RS2 lanes) SIGSTOPped 2 s while driving
+    dc = int(subprocess.check_output(['pgrep', '-f', 'emu.depthcam']).split()[0])
+    print(cmd('forward 2')); rec(1.0, R, 'pre')
+    for _ in range(40):
+        rec(0.1, R, 'pre')
+        if R and abs(R[-1]['v_out']) > float(os.environ.get('VMIN', '0.1')): break
+    print('moving: v_out %.2f' % R[-1]['v_out']); e0 = nst().get('ego_shared'); os.kill(dc, signal.SIGSTOP); t_inj = time.monotonic()
+    rec(2.0, R, 'stall'); n1 = nst(); os.kill(dc, signal.SIGCONT); t_rel = time.monotonic(); rec(3.0, R, 'post'); n2 = nst(); print(cmd('stop'))
+    st = [x for x in R if x['ev'] == 'stall']; first0 = next((x for x in st if abs(x['v_out']) < 1e-3), None)
+    print('core alive after:', os.path.exists('/proc/%d' % core), 'ticks during freeze', len(st), 'codes', sorted(set(x['code'] for x in st)))
+    if first0: print('first zero output %.0f ms after freeze (code %s, age1 %.0f ms)' % (1e3 * (first0['t'] - t_inj), first0['code'], 1e3 * first0['age1']))
+    print('v_out during freeze after 150 ms max %.3f' % max([abs(x['v_out']) for x in st if x['t'] - t_inj > 0.15] or [0]))
+    gv = [x['gt_v'] for x in st if x['gt_v'] is not None]; print('gt v during freeze', [round(v, 2) for v in gv[:12]])
+    print('brain ego_shared before/at end of freeze/after', e0, n1.get('ego_shared'), n2.get('ego_shared'), 'brain frame_timeout', n1['timing'].get('frame_timeout', {}).get('n'))
+    rec_ok = next((x for x in R if x['ev'] == 'post' and x['code'] not in ('inop_age', 'inop_cadence', 'no_depth')), None)
+    print('recovered: %s %.0f ms after release' % (rec_ok['code'] if rec_ok else None, 1e3 * (rec_ok['t'] - t_rel) if rec_ok else -1))
 elif mode == 'C':   # motion starts after idle (wheelbase idles axes after 5 s of zero): core tick period must stay < 33 ms
     n = int(os.environ.get('NC', '6')); S = []
     for i in range(n):

@@ -63,6 +63,13 @@ class Stats:
 class Brain:
     def __init__(self, hw: Hardware, match=True, plan=True):
         self.hw = hw; self.ego = Ego(); self.ego.intr = hw.rs1.depth_intrinsics() if hasattr(hw.rs1, "depth_intrinsics") else None; self.rs2 = Rs2Cloud(hw.rs2_intr)
+        # Option A (James 2026-10-20): with the safety core, read ITS ego labels (sc_ego) instead of a second Ego.update
+        # here.  Default on in the sim only (KEVIN_HAL=sim); KEVIN_EGO_SHARED=0/1 overrides.
+        self.ego_shared = (os.environ.get("KEVIN_EGO_SHARED", "1" if os.environ.get("KEVIN_HAL") == "sim" else "0") == "1"
+                           and getattr(hw, "core", False) and "ego" in getattr(hw, "bus", {}))
+        if self.ego_shared:
+            from nav.ego_shared import EgoShared
+            self.ego = EgoShared(hw.bus["ego"]); self.ego.intr = hw.rs1.depth_intrinsics(); print("[nav] ego labels from the safety core (sc_ego)", flush=True)
         self.rec = None; self.t0 = round(time.time(), 3)          # session id: the map frame is this run's start pose
         if os.environ.get("KEVIN_RECORD"):
             from nav.record import Recorder
@@ -383,7 +390,11 @@ class Brain:
         return False
 
     def step(self):
-        t_frame, verts = self.hw.wait_rs1(200)
+        if self.ego_shared:                        # the core's labels for its newest RS1 frame (fresh: age <= AGE_MAX_S)
+            t_frame, verts = self.ego.wait(0.2)      # verts = core frame id (EgoShared.update ignores it); None = no fresh frame
+            if t_frame is not None: self.stats.add("ego_age_ms", self.ego.age * 1e3)
+        else:
+            t_frame, verts = self.hw.wait_rs1(200)
         t0 = time.monotonic(); self._sec0 = (time.perf_counter(), time.thread_time())
         if getattr(self.hw, "core", False) and not self._core_watch():
             self.mode = "idle"; self.goal = None; self.stats.add("core_alarm", 1)
@@ -844,7 +855,7 @@ class Brain:
                     places=self.places.d, cmd=getattr(self, "last", {}), hb=getattr(self.hw, "hb_stats", None), vln=None if self.vln is None else self.vln.state(), slam=self.slam.stats,
                     safety=dict(last=getattr(self.env, "last", None), interventions=self.env.interventions, immobilised_ticks=self.env.immobilised, ticks=self.env.ticks,
                                 core=self.hw.core_state() if hasattr(self.hw, "core_state") else None, governor=getattr(self, "_gov", None)),
-                    timing=self.stats.summary(), threads_cpu_s=_thread_cpu(), plan_timing=None if p is None else p.timing, ctl=dict(mode=CTL_MODE, **self.pred.summary()),
+                    timing=self.stats.summary(), threads_cpu_s=_thread_cpu(), ego_shared=dict(frame=self.ego.frame, stale=self.ego.n_stale, gap=self.ego.n_gap, torn=self.ego.n_torn) if self.ego_shared else None, plan_timing=None if p is None else p.timing, ctl=dict(mode=CTL_MODE, **self.pred.summary()),
                     bump=dict(self.bump.state(), latched=self.bump_latched),
                     events=[(round(a, 2), b) for a, b in list(self.events)[-12:]])
 
