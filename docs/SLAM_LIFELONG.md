@@ -194,3 +194,43 @@ Next:
   Now steps are 3 cm / 1° as in kslam, the window is capped at 0.3 m / 8°, and beyond that the state is RELOCALIZING (5 cm / 2°).
 - **Odometry model is now random-walk:** variance grows with distance and rotation, fitted on 3 s windows; the intercept is GT stamp jitter and is dropped.
   The per-0.1 s fit was inflated by GT jitter.
+
+## 11. Topological roadmap (design, 2026-10-19 21:00 PT; James 20:58 / 21:00) — prototype offline, not live
+
+Idea: the metric map only has to be good LOCALLY.  Globally the robot keeps a graph that is only accurate enough to
+plan routes; drift is reset at every node by relocalizing against that node's own stored local submap.  Live view
+(RS1/RS2 + safety core, unchanged) does local planning and obstacle avoidance between nodes.
+
+**Nodes** = junctions, doorways and room centres.  **Edges** = driven paths between nodes, each storing approximate
+length, heading (snapped to the Manhattan frame when that is consistent with its uncertainty) and the pose covariance
+accumulated along it (lslam odometry model, §7).  Node payload:
+- local submap (lslam submap / occupancy patch, ±2.5 m) + its levelled scan — for scan relocalization on arrival;
+- a few key images chosen for distinctiveness and coverage (greedy: max min-descriptor-distance to already chosen keyframes,
+  across headings), with a global place descriptor each (DINOv2-SALAD, `~/.cache/torch/hub/checkpoints/dino_salad.ckpt`,
+  dinov2_vitb14 already on disk);
+- a bag of detected objects with counts (the detector LightNav/VLN already use; open-vocab if available), run on i777,
+  never in the safety loop.
+
+**Construction (offline prototype on L8–L12):**
+1. Occupancy grid from the lslam/kslam poses + levelled scans (hits + ray-carved free).
+2. Manhattan frame = dominant wall direction (orientation histogram of wall-cell gradients, mod 90°).
+3. Free space eroded by the robot radius → skeleton → spurs shorter than the local clearance pruned (standard skeleton
+   pruning; not a tuned length).  Junction = skeleton branch point (degree ≥ 3); doorway = clearance local minimum along an
+   edge that pinches below the clearance of both adjacent regions; room centre = clearance maximum per region.
+4. Edges = skeleton segments between nodes, kept only if driven (the trajectory passes along them).
+
+**Use:**
+- On arrival at a node (and for loop closure): candidate gate = place descriptor similarity (top-k nodes within the
+  pose-covariance ellipse), then scan-to-submap relocalization (lslam matcher, χ² gate at ALPHA, §2); the accepted correction
+  resets the pose to the node frame.
+- Natural requests ("go to the couch"): objects/places → node by bag-of-objects + text match → route = Dijkstra on the
+  graph (edge cost = length) → live local planner drives edge by edge.
+
+**Metrics (sim, against the casita ground truth: wall STL section + `envs.casita` places):**
+- graph correctness: nodes found vs the same pipeline on the GT wall grid (match within 0.5 m), wrong edges = edges
+  crossing GT walls;
+- relocalization at nodes: position/heading error before vs after, n / p50 / p95;
+- routes between random node pairs: valid (collision-free on the GT grid, inflated by the robot radius) fraction;
+- place recognition precision/recall at nodes on held-out drives; ~10 natural object/place queries, top-1 / top-3 correct node.
+
+Status: design only; results go in §11.1.
