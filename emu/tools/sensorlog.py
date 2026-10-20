@@ -14,7 +14,6 @@ waits on its seqlock and copies only what is saved; colour waits (<=100 ms) for 
 GT has its own thread.  The writer's frame counter (hdr[2]) makes every loss visible: stats.json counts source frames,
 reader misses, unpaired and saved per camera, plus the max gap between saved frames."""
 import json, os, sys, time, threading, collections
-from concurrent.futures import ThreadPoolExecutor
 import cv2, numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from emu import shm, gt
@@ -32,15 +31,58 @@ def main():
     d = sys.argv[1]; T = float(sys.argv[2]); hz = float(sys.argv[3]) if len(sys.argv) > 3 else 30.0
     os.makedirs(d, exist_ok=True); info = shm.read_info(wait_s=2.0); json.dump(info, open(os.path.join(d, "info.json"), "w"))
     p = json.load(open("/dev/shm/kevin_depthcam.json")); from emu.depthcam import side_layout
-    idx = open(os.path.join(d, "index.jsonl"), "w"); L = threading.Lock(); ex = ThreadPoolExecutor(4)
+    idx = open(os.path.join(d, "index.jsonl"), "w"); L = threading.Lock()
     S = collections.defaultdict(collections.Counter); saved = collections.defaultdict(list)
     t_end = time.monotonic() + T; min_dt = 0.9e9 / hz
-    # DEFER (default): keep the raw frames in RAM and encode after the recording ends -- encoding 60 jpg + 60 png a
-    # second took ~1 core and pushed the safety core's frame age past 100 ms (agewatch 17:59 PT).  ~1.7 MB/frame pair.
-    DEFER = os.environ.get("SENSORLOG_DEFER", "1") == "1"; Q = []
-    def put(path, img, prm, bgr):
-        if DEFER: Q.append((path, img, prm, bgr))
-        else: ex.submit(cv2.imwrite, path, img[..., ::-1].copy() if bgr else img, prm)
+    # Encoding (v3, 2026-10-20).  v2 kept ALL raw frames in RAM until the end (~100 MB/s of recording): the L15 recording
+    # was OOM-killed with the box.  Now memory is bounded and encoding streams DURING the recording:
+    #  * a byte-capped RAM queue (SENSORLOG_MEM_MB, default 1024) drained by SCHED_IDLE encoder threads (they only get CPU
+    #    nobody else wants).  Measured cost (idle robot, 2x60 s ABAB, core decision age p99 / max): none 63-65 / 73-88 ms,
+    #    streaming full 74-79 / 97-99, all-fast 74-79 / 79-102: ~+10-15 ms p99 from hyperthread / memory sharing, no
+    #    priority inversion.  300 s spin-heavy drive (L17): 7 of 1227 sampled decisions > 100 ms (max 122);
+    #  * depth PNG with the SUB filter (lossless, same file format; measured 15.9 vs 26.4 ms/frame for the adaptive filter at
+    #    the same size).  While the queue backlog is > 1/4 of the cap, depth is written as an UNCOMPRESSED PNG (2.8 ms, 816 KB)
+    #    and recompressed (lossless, in place) after the recording, so the encoder keeps up at ~0.3 core instead of ~1.6;
+    #  * a frame that does not fit the queue, or would leave less than SENSORLOG_DISK_MIN_GB (default 6) free on disk, is
+    #    DROPPED: counted per camera in stats.json (enc_dropped / disk_dropped) and printed at the first drop.  Never
+    #    unbounded, never silent.
+    MEM = float(os.environ.get("SENSORLOG_MEM_MB", "1024")) * 2 ** 20; DMIN = float(os.environ.get("SENSORLOG_DISK_MIN_GB", "6")) * 2 ** 30
+    NENC = int(os.environ.get("SENSORLOG_ENC_THREADS", "3")); ENC_CPUS = os.environ.get("SENSORLOG_ENC_CPUS")
+    LIVE = os.environ.get("SENSORLOG_DEPTH_LIVE", "auto")      # auto (above) | fast (always uncompressed while recording) | full
+    PNG_FULL = [cv2.IMWRITE_PNG_COMPRESSION, 1, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_SUB]
+    PNG_FAST = [cv2.IMWRITE_PNG_COMPRESSION, 0, cv2.IMWRITE_PNG_FILTER, cv2.IMWRITE_PNG_FILTER_NONE]
+    QC = threading.Condition(); Q = collections.deque(); qb = [0, 0]; redo = []; done = [False]; warned = set()
+    def enc(path, img, prm, bgr): cv2.imwrite(path, img[..., ::-1].copy() if bgr else img, prm)
+    def encoder():
+        try: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))      # this thread only (Linux: 0 = caller tid)
+        except (OSError, AttributeError): os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+        if ENC_CPUS: os.sched_setaffinity(0, [int(c) for c in ENC_CPUS.split(",")])
+        while True:
+            with QC:
+                while not Q and not done[0]: QC.wait(0.2)
+                if not Q: return
+                path, img, prm, bgr = Q.popleft(); fast = prm is None and not done[0] and (LIVE == "fast" or (LIVE == "auto" and qb[0] > MEM / 4)); qb[0] -= img.nbytes
+            enc(path, img, (PNG_FAST if fast else PNG_FULL) if prm is None else prm, bgr)
+            with QC:
+                S["enc"]["written"] += 1
+                if fast: redo.append(path); S["enc"]["depth_fast"] += 1
+    cv2.setNumThreads(1); encs = [threading.Thread(target=encoder, daemon=True, name="enc%d" % i) for i in range(NENC)]
+    for t in encs: t.start()
+    def drop(cam, why):
+        with QC: S[cam][why] += 1
+        if why not in warned:
+            warned.add(why); print("sensorlog: DROPPING frames (%s): %s -- counted in stats.json" % (why, "RAM queue %.0f MB full" % (MEM / 2 ** 20)
+                                   if why == "enc_dropped" else "disk free < %.1f GB" % (DMIN / 2 ** 30)), file=sys.stderr, flush=True)
+    t_df = [0.0, 1e18]
+    def put(path, img, prm, bgr, cam="mast"):
+        """prm None = depth PNG (compression chosen by the encoder from the backlog)."""
+        if time.monotonic() - t_df[0] > 1.0:
+            st = os.statvfs(d); t_df[:] = [time.monotonic(), st.f_bavail * st.f_frsize]
+        if t_df[1] < DMIN: return drop(cam, "disk_dropped")
+        with QC:
+            if qb[0] + img.nbytes <= MEM:
+                Q.append((path, img, prm, bgr)); qb[0] += img.nbytes; qb[1] = max(qb[1], qb[0]); QC.notify(); return
+        drop(cam, "enc_dropped")
     def row(r):
         with L: idx.write(json.dumps(r) + "\n")
     def wait(b, last):
@@ -74,8 +116,8 @@ def main():
                     cv.wait(0.01)
             if dd is None: S[cam]["unpaired"] += 1; continue
             f = "%s/%d" % (cam, sc); last_saved = sc
-            put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True)
-            put(os.path.join(d, f + ".png"), dd, [cv2.IMWRITE_PNG_COMPRESSION, 1], False)
+            put(os.path.join(d, f + ".jpg"), c["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True, cam)
+            put(os.path.join(d, f + ".png"), dd, None, False, cam)
             row(dict(cam=cam, stamp_ns=sc, depth_stamp_ns=st, file=f)); S[cam]["saved"] += 1; saved[cam].append(sc)
     def mast_loop(b):
         last = b.seq
@@ -100,13 +142,20 @@ def main():
     th.append(threading.Thread(target=mast_loop, args=(shm.Block(info["mast"]["shm"], info["mast"]["layout"]),), daemon=True))
     for t in th: t.start()
     for t in th: t.join(T + 5)
-    t_enc = time.monotonic(); ex.shutdown()
-    if Q:      # after the recording: lowest priority, one thread, so the still-running sim keeps its frame age
+    t_enc = time.monotonic(); backlog = len(Q); done[0] = True
+    with QC: QC.notify_all()
+    for t in encs: t.join()                                       # drain the RAM queue (still SCHED_IDLE, full compression)
+    idx.close(); t_rc = time.monotonic()
+    if redo:       # recompress the fast (uncompressed) depth PNGs: lossless, same file, nice 19, after the recording
         try: os.nice(19)
         except OSError: pass
-        cv2.setNumThreads(1); ex = ThreadPoolExecutor(int(os.environ.get("SENSORLOG_ENC_THREADS", "1")))
-    for path, img, prm, bgr in Q: ex.submit(cv2.imwrite, path, img[..., ::-1].copy() if bgr else img, prm)
-    ex.shutdown(); idx.close(); print("sensorlog: encoded %d deferred images in %.1f s" % (len(Q), time.monotonic() - t_enc), flush=True)
+        from concurrent.futures import ThreadPoolExecutor as TPE
+        def rc(path):
+            im = cv2.imread(path, cv2.IMREAD_UNCHANGED); tmp = path + ".tmp.png"; cv2.imwrite(tmp, im, PNG_FULL); os.replace(tmp, path)
+        with TPE(NENC) as ex: list(ex.map(rc, redo))
+    S["enc"].update(queue_peak_mb=round(qb[1] / 2 ** 20, 1), backlog_at_end=backlog, drain_s=round(t_rc - t_enc, 1), recompress_s=round(time.monotonic() - t_rc, 1))
+    print("sensorlog: wrote %d images (%d depth fast, recompressed after in %.1f s), RAM queue peak %.0f MB, backlog at end %d (drained in %.1f s)"
+          % (S["enc"]["written"], len(redo), time.monotonic() - t_rc, qb[1] / 2 ** 20, backlog, t_rc - t_enc), flush=True)
     out = {c: dict(S[c]) for c in S}
     for c, v in saved.items():
         g = np.diff(np.sort(np.array(v, float))) * 1e-9
