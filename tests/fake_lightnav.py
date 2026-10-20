@@ -20,12 +20,15 @@ def lightnav(port, delay=0.05, stop_after=None):
 
 class FakeBrain:
     def __init__(self, pose=(1.0, 2.0, math.pi / 2)):
-        self._pose = list(pose); self.cmds = []; self.logs = []
+        self._pose = list(pose); self.cmds = []; self.logs = []; self.epoch = 0; self.ecmds = []
         b = self
         class HW:
             def rs2_snapshot(self): return (0, 0.0, np.zeros((48, 64), np.uint16), np.full((48, 64, 3), 128, np.uint8), None, None)
         class Slam:
             def pose(self): return tuple(b._pose)
         self.hw = HW(); self.slam = Slam()
-    def command(self, t): self.cmds.append(t)
+    def navpose(self): return tuple(self._pose)
+    def command(self, t, frame=None, epoch=None): self.cmds.append(t); self.ecmds.append((t, epoch))
+    def stop(self, vln):                 # = Brain._apply('stop'): new goal epoch, cancel the VLN
+        self.epoch += 1; vln.cancel(); self.cmds.append("stop(user)")
     def log(self, s): self.logs.append(s)

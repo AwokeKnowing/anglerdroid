@@ -70,7 +70,7 @@ class VLN:
     def __init__(self, url, brain, lookahead=None, connect=None):
         self.url = url; self.b = brain; self.text = None; self.stats = dict(calls=0, last_ms=0.0, mean_ms=0.0, errors=0)
         self.last = None; self.sets = collections.deque(maxlen=5); self.error = None; self._ev = threading.Event(); self._lock = threading.Lock()
-        self._connect = connect; self._log = None; self.cam = MastCam(brain.hw); self.fps = 0.0
+        self._connect = connect; self._log = None; self.inflight = None; self.cam = MastCam(brain.hw); self.fps = 0.0
         threading.Thread(target=self._loop, daemon=True, name="vln").start()
 
     def instruct(self, text):
@@ -78,9 +78,15 @@ class VLN:
 
     def cancel(self): self.text = None
 
+    # Stop vs late answer (2026-10-20): every prediction request is tagged with the brain's goal epoch at the moment it is
+    # SENT (Brain.epoch, bumped by every stop / bump / core-alarm cancel).  An answer whose request predates the latest
+    # stop is dropped here, and the command it would have issued carries the same epoch so Brain._apply drops it too if a
+    # stop lands between this check and the command being applied (the brain's pending queue).  No timeout involved.
+    def _epoch(self): return getattr(self.b, "epoch", 0)
+
     def state(self):
         with self._lock:
-            return dict(url=self.url, camera=self.cam.kind, camera_err=self.cam.err, fps=round(self.fps, 2), target_fps=FPS, instruction=self.text, active=bool(self.text), error=self.error, stats=dict(self.stats),
+            return dict(url=self.url, camera=self.cam.kind, camera_err=self.cam.err, fps=round(self.fps, 2), target_fps=FPS, instruction=self.text, active=bool(self.text), inflight=self.inflight, epoch=self._epoch(), error=self.error, stats=dict(self.stats),
                         last=self.last, sets=list(self.sets))
 
     def _jsonl(self, rec):
@@ -124,9 +130,9 @@ class VLN:
                         jpg, pose, tcap = q.popleft(); seq += 1; instr = self.text
                         if q:                                                     # a newer frame is waiting: buffer only
                             rq("next", dict(seq=seq, image=base64.b64encode(jpg.tobytes()).decode(), instruction="")); self.stats["buffered"] = self.stats.get("buffered", 0) + 1; continue
-                        t0 = time.monotonic()
+                        t0 = time.monotonic(); ep = self._epoch(); self.inflight = (seq, ep)
                         d = rq("next", dict(seq=seq, image=base64.b64encode(jpg.tobytes()).decode(), instruction=instr))
-                        ms = (time.monotonic() - t0) * 1e3
+                        ms = (time.monotonic() - t0) * 1e3; self.inflight = None
                         if d.get("rc", 0) != 0: raise RuntimeError("lightnav rc=%s %s" % (d.get("rc"), d.get("msg")))
                         raw = (d.get("actions") or {}).get("actions") or []
                         wp = np.asarray(raw, float); wp = wp.reshape(-1, wp.shape[-1]) if wp.size else np.zeros((0, 2))
@@ -140,7 +146,11 @@ class VLN:
                             self.stats["calls"] += 1; self.stats["last_ms"] = round(ms, 1); self.stats["period_s"] = round(period, 3)
                             self.stats["mean_ms"] = round(self.stats["mean_ms"] + (ms - self.stats["mean_ms"]) / self.stats["calls"], 1)
                             self.last = rec; self.sets.append(dict(seq=seq, t=rec["t"], wp_map=wmap, goal=goal, stop=stop, commit=None if stop else wmap[k]))
+                        late = ep != self._epoch(); rec["late"] = late
                         self._jsonl(rec)
+                        if late:                       # issued before the latest stop: never acted on (not even the model's stop)
+                            with self._lock: self.stats["late_dropped"] = self.stats.get("late_dropped", 0) + 1
+                            self.b.log("VLN: dropped a late answer (seq %d, request epoch %d < %d)" % (seq, ep, self._epoch())); continue
                         if stop:
                             self.b.command("stop"); self.b.log("VLN: model says stop"); self.text = None; break
                         # proposal only (planner + MPPI + safety unchanged).  Receding horizon: the goal is the chunk pose
@@ -148,8 +158,8 @@ class VLN:
                         # there; a turn-in-place prefix (translation < 0.15 m) becomes 'face' so the turn is not lost.
                         f, l, yw = (list(wp[k]) + [0.0, 0.0, 0.0])[:3]; hd = math.degrees(pose[2] + yw); gk = wmap[k]
                         if math.hypot(f, l) < 0.15:
-                            if abs(yw) > 0.2: self.b.command("face %.1f" % hd)
-                        else: self.b.command("go to %.3f %.3f %.1f" % (gk[0], gk[1], hd), frame="nav")
+                            if abs(yw) > 0.2: self.b.command("face %.1f" % hd, epoch=ep)
+                        else: self.b.command("go to %.3f %.3f %.1f" % (gk[0], gk[1], hd), frame="nav", epoch=ep)
                     finally: run[0] = False
             except Exception as e:
                 with self._lock: self.stats["errors"] += 1; self.error = repr(e)[:200]

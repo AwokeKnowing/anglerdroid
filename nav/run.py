@@ -113,15 +113,18 @@ class Brain:
         self._ctl_cv = threading.Condition(); self._t_iss = 0.0; self._snap = None; self._snap_n = 0; self._latched_g = None
         self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
+        self._goal_lock = threading.RLock()   # stop/cancel vs the async global replan committing a goal
+        self.epoch = 0      # goal epoch: +1 on every stop/cancel; async producers (VLN) tag commands with the epoch of their request
         self.running = True
         if self.planner: threading.Thread(target=self._plan_loop, daemon=True, name="plan").start()
         if CTL_MODE == "cmd":                      # frame (default) = the previous loop; only the predictor's scoring runs
             threading.Thread(target=self._fit_loop, daemon=True, name="latfit").start()
 
     # -------------------------------------------------------------- commands (any thread)
-    def command(self, text, frame=None):
+    def command(self, text, frame=None, epoch=None):
         c = G.parse(text)     # frame="nav": coordinates are already in the nav (odom) frame (LightNav waypoints), not the map frame
         if frame: c["frame"] = frame
+        if epoch is not None: c["epoch"] = epoch   # issued for a request made at this goal epoch; stale after any later stop
         with self._cmd_lock: self._pending.append(c)
         with self._ctl_cv: self._ctl_cv.notify_all()
         return c
@@ -203,13 +206,19 @@ class Brain:
             if c["kind"] == "goto_xy": c = dict(c, frame="nav"); c["x"], c["y"], c["heading"] = self._odom_to_nav(c["x"], c["y"], c["heading"])
             elif c["kind"] == "face": c = dict(c, frame="nav"); c["rad"] = self._odom_to_nav(0.0, 0.0, c["rad"])[2]
         k = c["kind"]; x, y, th = self.navpose()
+        if c.get("epoch") is not None and c["epoch"] != self.epoch:      # requested before the latest stop: drop
+            self.late_dropped = getattr(self, "late_dropped", 0) + 1
+            self.log("dropped late '%s' (request epoch %d, now %d)" % (k, c["epoch"], self.epoch)); return
         if self.core_alarm is not None and k not in ("stop", "where", "places", "label", "forget"):
             self.log("refused '%s': %s" % (k, self.core_alarm)); return
         if k not in ("where", "places", "label", "forget"): self._goal_bumps = 0; self._bump_resume = None
         if self.bump_latched is not None and k not in ("where", "places", "label", "forget"):
             self.bump_latched = None                                       # a new command acknowledges the bump latch
-        if k == "stop" and self.vln: self.vln.cancel()
-        if k == "stop": self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel(); self.log("stopped")
+        if k == "stop":
+            with self._goal_lock:
+                self.epoch += 1; self.vln and self.vln.cancel()
+                self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
+            self.log("stopped")
         elif k == "where": self.log("pose %.2f %.2f %.0f°" % (x, y, math.degrees(th)))
         elif k == "places": self.log("places: " + ", ".join("%s(%.1f,%.1f)" % (n, p[0], p[1]) for n, p in self.places.d.items()) or "none")
         elif k == "label":
@@ -344,6 +353,7 @@ class Brain:
             try:
                 pose = self.navpose()
                 self.planner.refresh(pose[:2]); self.stats.add("map_refresh_ms", self.planner.timing["refresh_ms"])
+                ep = self.epoch          # a replan computed across a stop must not resurrect the goal (commit below)
                 if self.mode == "path" and self.goal is not None:
                     if n % 3 == 0:                                    # global replan ~every 2.4 s on the grown map
                         g = GP.plan(self.navgrid, pose[:2], self.goal_req, self.obs)
@@ -355,10 +365,15 @@ class Brain:
                                 g = gc
                         if g is not None: self.stats.add("global_ms", g["ms"])
                         if CTL_MODE == "cmd": self._latched_g = (g,); continue      # taken at the next cycle start
-                        if g is not None:
+                    if CTL_MODE == "cmd":
+                        if n % 3 != 0: self._latched_g = (None,)
+                        continue
+                    with self._goal_lock:
+                        if self.epoch != ep or self.mode != "path" or self.goal is None:
+                            self.stats.add("replan_dropped", 1.0); continue
+                        if n % 3 == 0 and g is not None:
                             self.gpath = g; self.goal = np.asarray(g["goal"], float); self.goal_last = self.goal.tolist()
-                    if CTL_MODE == "cmd": self._latched_g = (None,); continue
-                    if not self._set_sub(pose): self.log("local replan failed")
+                        if not self._set_sub(pose): self.log("local replan failed")
             except Exception as e:
                 self.log("planner error: %r" % e)
 
@@ -822,7 +837,7 @@ class Brain:
         elif self.mode in ("path", "backout", "turn") and getattr(self, "goal_req", None) is not None:
             self._goal_bumps = getattr(self, "_goal_bumps", 0) + 1
             if self._goal_bumps <= 2: resume = (self.goal_req, self.goal_heading, self.goal_label)
-        self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
+        with self._goal_lock: self.epoch += 1; self.mode = "idle"; self.goal = None; self.planner and self.planner.cancel()
         self.log("BUMP %s: %s -- stopped, obstacle marked in the map%s" % (ev["dir"], ev["why"], "; planning around it" if resume else ""))
         if resume: self._bump_resume = (time.monotonic() + 0.6, resume)
 
