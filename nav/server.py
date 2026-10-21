@@ -1,10 +1,13 @@
 """Tiny command/telemetry server (stdlib only).  GET / page, GET /api/state, GET /api/map.png,
-POST /api/command {"text": "..."}  <- the hook a conversational layer will call later."""
+POST /api/command {"text": "..."}  <- the hook a conversational layer will call later.
+POST /api/say {"text": "...", "lang": "en"|"es"} -> forwarded to the voice service (nav/voice.py, KEVIN_VOICE_PORT 8092)."""
 from __future__ import annotations
-import json, math, threading
+import json, math, os, threading
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import numpy as np
 import cv2
+
+VOICE_PORT = int(os.environ.get("KEVIN_VOICE_PORT", "8092"))
 
 PAGE = r"""<!doctype html><meta charset=utf-8><title>Kevin</title>
 <style>body{font:14px system-ui;margin:0;display:flex;height:100vh;background:#111;color:#ddd}
@@ -81,6 +84,14 @@ def serve(brain, port=8080):
             self._send(b"{}", code=404)
 
         def do_POST(self):
+            if self.path.split("?")[0] == "/api/say":                  # TTS: forwarded to the voice service (nav/voice.py, own process)
+                import urllib.request, urllib.error
+                body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                try:
+                    req = urllib.request.Request("http://127.0.0.1:%s/say" % VOICE_PORT, body, {"Content-Type": "application/json"})
+                    with urllib.request.urlopen(req, timeout=120) as r: return self._send(r.read(), code=r.status)
+                except urllib.error.HTTPError as e: return self._send(e.read() or b"{}", code=e.code)
+                except Exception as e: return self._send(json.dumps(dict(ok=False, error="voice service not reachable: %s" % e.__class__.__name__)).encode(), code=503)
             if self.path != "/api/command": return self._send(b"{}", code=404)
             n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
             fr = d.get("frame")                                      # optional: "nav" = coordinates already in the nav frame (scripts/pilot.py)
