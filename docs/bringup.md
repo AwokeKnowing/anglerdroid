@@ -16,10 +16,11 @@ Order matters; stop at the first FAIL. Physical e-stop (mast) within reach the w
    - `scripts/bringup_run.sh` checks CUDA on Jetson Orin before starting nav (exits if GPU unavailable)
    - `nav/run.py` refuses to start with `--no-plan` not set if CUDA is unavailable on real hardware
 
-1. **USB 3 for both RealSenses (blocker found 2026-10-14):** both cameras currently enumerate at USB 2.1 (480M hub
-   chain with the wifi dongle + CANable) -> 848x480 depth fails, D435i IMU "not available", RS1 delivered no frames.
-   Plug the D435 + D435i into the Orin's 10 Gb/s port (or a USB 3 hub on it), short USB-C 3.x cables.
-   `lsusb -t` must show them under `Bus 002 ... 10000M`.
+1. **USB 3 for both RealSenses (blocker found 2026-10-14, fixed 2026-10-20):** both cameras used to enumerate at USB 2.1
+   (480M hub chain with the wifi dongle + CANable). Since 2026-10-20 both plug straight into the Orin's USB-A ports
+   (James: top-down D435 in the TOP port = usb 2-1.1, forward D435i in the BOTTOM port = usb 2-1.2), USB 3.2 at 5000M.
+   `lsusb -t` must show both RealSense `uvcvideo` entries under `Bus 002 ... 10000M` at `5000M`. Ports do not matter to the
+   code (roles by serial / product); a swap of the two plugs is harmless.
 2. **Pre-flight (read-only, never moves motors):** `cd ~/anglerdroid && KEVIN_ROBOT=kevin001 ~/.venv-kevinnav/bin/python scripts/bringup_check.py`
    — loads `robots/kevin001/inventory.json` for camera serials/CAN; checks roles (product name + depth probe), USB 3, RS1/RS2 30 Hz, 
    IMU gravity + stamps, ODrive CAN heartbeats (both axes, no errors), safety envelope unit checks, calibration.json sanity. All PASS before going on.

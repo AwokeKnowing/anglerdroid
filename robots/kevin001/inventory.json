@@ -5,17 +5,19 @@
   "can_iface": "can1",
   "cameras": [
     {
+      "serial": "815412070676",
+      "role": "RS1",
+      "product": "Intel RealSense D435",
+      "firmware": "5.15.0.2",
+      "notes": "Top-down mast safety camera (no IMU). 2026-10-20 22:00 check: direct on the Orin (James: TOP USB-A port) = usb 2-1.1, USB 3.2 at 5000M; depth looks down (flat ~0.9 m)."
+    },
+    {
       "serial": "944622074292",
       "role": "RS2",
       "product": "Intel RealSense D435I",
-      "notes": "Forward-facing, FW 5.15.1, IMU working after RSUSB build"
-    },
-    {
-      "serial": null,
-      "role": "RS1",
-      "product": "Intel RealSense D435 (expected)",
-      "notes": "Top-down mast camera, not present at 2026-10-15 snapshot"
+      "firmware": "5.15.1",
+      "notes": "Forward-facing, pitched down (IMU 25.8 deg, twin 27). 2026-10-20 22:00 check: direct on the Orin (James: BOTTOM USB-A port) = usb 2-1.2, USB 3.2 at 5000M."
     }
   ],
-  "notes": "Live jetbot Orin NX, JetPack 7.2, 40W power mode. USB3 required (cameras currently on USB2). See docs/orin_setup.md."
+  "notes": "Live jetbot Orin NX, JetPack 7.2, 40W power mode. 2026-10-20: both RealSenses moved off the USB 2 hub chain onto the Orin's own USB 3 ports (bus 2, shared 5 Gb/s carrier hub USB5744): both 848x480 depth + colour (+RS2 IR1/IR2) at 30.00 Hz, 0 drops. Roles are resolved by serial/product (src/twin_geometry.realsense_roles), not USB port. See docs/orin_setup.md."
 }
