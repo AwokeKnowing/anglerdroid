@@ -11,7 +11,7 @@
           python -m nav.voice --wav file.wav [--no-post]
 
 Env: KEVIN_VOICE_PORT (8092), KEVIN_SPEAK_VOL (0.75), KEVIN_SPEAK_SINK, KEVIN_LISTEN_SRC, KEVIN_WHISPER ("base"),
-     KEVIN_VOICE_THREADS (2), KEVIN_VOICE_EN ("am_michael"), KEVIN_VOICE_ES ("em_alex"), KEVIN_VOICE_POST (1).
+     KEVIN_VOICE_THREADS (4), KEVIN_VOICE_EN ("am_michael"), KEVIN_VOICE_ES ("em_alex"), KEVIN_VOICE_POST (1).
 """
 from __future__ import annotations
 import argparse, collections, json, os, re, subprocess, sys, tempfile, threading, time, unicodedata
@@ -21,12 +21,12 @@ import numpy as np
 E = os.environ
 PORT = int(E.get("KEVIN_VOICE_PORT", "8092"))
 VOL = max(0.0, min(1.0, float(E.get("KEVIN_SPEAK_VOL", "0.75"))))
-THREADS = int(E.get("KEVIN_VOICE_THREADS", "2"))
+THREADS = int(E.get("KEVIN_VOICE_THREADS", "4"))     # nice 10 on cores 0-5; 2 threads: ASR 3.1 s, 4: 2.0 s
 VOICES = {"en": E.get("KEVIN_VOICE_EN", "am_michael"), "es": E.get("KEVIN_VOICE_ES", "em_alex")}
 KOKORO_LANG = {"en": "en-us", "es": "es"}
 MODEL_DIR = os.path.expanduser("~/.kevin/models/kokoro")
 HINTS = ("SEEED_ReSpeaker", "ReSpeaker", "ArrayUAC10")
-WAKE = re.compile(r"\b(kevin|kevins|keven|kevan|kevim|kelvin)\b")
+WAKE = re.compile(r"\b(kevin|kevins|keven|kevan|kevim|kelvin|kebin|quevin|que vin)\b")   # + how whisper writes a Spanish "Kevin"
 SR = 16000
 REPLY_CMD = ("echo '{\"text\": \"<reply>\", \"lang\": \"%s\"}' | ssh james@i777 \"ssh jetbot@jetbot.local "
              "'curl -s -X POST -H Content-Type:application/json --data-binary @- http://127.0.0.1:8080/api/say'\"")
@@ -156,7 +156,7 @@ def addressed(text):
 
 def transcribe(audio):
     t0 = time.time()
-    segs, info = whisper().transcribe(audio, language=None, beam_size=1, vad_filter=False, condition_on_previous_text=False)
+    segs, info = whisper().transcribe(audio, language=None, beam_size=1, vad_filter=False, condition_on_previous_text=False, hotwords="Kevin")
     text = " ".join(s.text.strip() for s in segs).strip()
     return text, info.language, float(info.language_probability), time.time() - t0
 

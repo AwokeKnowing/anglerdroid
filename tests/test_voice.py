@@ -5,9 +5,9 @@ from nav import voice as V
 
 
 def test_addressed():
-    for t in ["Kevin, what time is it?", "Oye Kevin, ¿qué hora es?", "KEVÍN ven aquí", "hey kevin.", "Kelvin, stop"]:
+    for t in ["Kevin, what time is it?", "Oye Kevin, ¿qué hora es?", "KEVÍN ven aquí", "hey kevin.", "Kelvin, stop", "Oye qué vin, cómo estás"]:
         assert V.addressed(t), t
-    for t in ["", "what time is it", "Kevinator is a word", "the kevlar vest"]:
+    for t in ["", "what time is it", "Kevinator is a word", "the kevlar vest", "que vino ayer"]:
         assert not V.addressed(t), t
 
 
