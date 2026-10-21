@@ -43,6 +43,8 @@ def depth_model(mj, m, Rd, p, seed):
         sub = sub * 2.0
         sunm = [envs._smooth(rng, (DH, DW), 40) > rng.uniform(0.25, 0.45) for _ in range(NB)]
     t_render = [0]
+    if os.environ.get("KEVIN_EMU_DEPTH_FAST", "1") == "1":
+        return _depth_fast(mj, m, Rd, p, rng, zn, drop, NB, SUN, sunm if SUN else None, fpx, B, sub, cols, t_render)
     def depth(dr, cam):
         Rd.update_scene(dr, cam); Rd.scene.flags[mj.mjtRndFlag.mjRND_SHADOW] = 0   # depth needs no shading passes
         z = Rd.render(); t_render[0] = time.monotonic_ns(); i = k[0] = (k[0] + 1) % NB
@@ -57,6 +59,45 @@ def depth_model(mj, m, Rd, p, seed):
         smin = np.minimum.accumulate(xr[:, ::-1], axis=1)[:, ::-1]                 # min over c' >= c
         bad[:, :-1] |= smin[:, 1:] <= xr[:, :-1] - 0.5                             # something to the right lands left of us
         zz *= 1000.0; zz[bad] = 0
+        return zz.astype(np.uint16)
+    depth.t_render = t_render
+    return depth
+
+
+def _depth_fast(mj, m, Rd, p, rng, zn, drop, NB, SUN, sunm, fpx, B, sub, cols, t_render):
+    """Same D4xx model and the same float32 operations as depth() above, cheaper (KEVIN_EMU_DEPTH_FAST=1, default):
+      - metric depth from the depth buffer in float32 (mujoco Renderer.render does it in float64: astype + divide +
+        astype back, ~7 ms of the ~10 ms 'render' on i777); same reversed-Z formula, constants in float32, same row flip
+      - preallocated buffers and out= ufuncs (no per-frame temporaries); np.copyto(where=) instead of boolean indexing.
+    Noise draws, banks, holes, band and occlusion rule are unchanged (emu/tools/depthfast_ab.py: A/B on identical frames)."""
+    DH, DW = p["DH"], p["DW"]; k = [0]
+    extent = m.stat.extent; zfar = np.float32(m.vis.map.zfar * extent); znear = np.float32(m.vis.map.znear * extent)
+    c_coef = -(zfar + znear) / (zfar - znear); d_coef = -(np.float32(2) * zfar * znear) / (zfar - znear)
+    c32 = np.float32(np.float32(-0.5) * c_coef - np.float32(0.5)); d32 = np.float32(np.float32(-0.5) * d_coef)
+    raw = np.empty((DH, DW), np.float32); z = np.empty_like(raw); disp = np.empty_like(raw); zz = np.empty_like(raw)
+    xr = np.empty_like(raw); smin = np.empty_like(raw); tmp = np.empty_like(raw)
+    bad = np.empty((DH, DW), bool); tb = np.empty_like(bad)
+    kz = np.float32(sub / (fpx * B)); fB = np.float32(fpx * B); min_z = np.float32(p["min_z"])
+    SEG, IDC, SHD = mj.mjtRndFlag.mjRND_SEGMENT, mj.mjtRndFlag.mjRND_IDCOLOR, mj.mjtRndFlag.mjRND_SHADOW
+    def depth(dr, cam):
+        Rd.update_scene(dr, cam); fl = Rd._scene.flags; fl[SHD] = 0; f0 = fl.copy(); fl[SEG] = 1; fl[IDC] = 1   # as Renderer.render
+        if Rd._gl_context: Rd._gl_context.make_current()
+        mj.mjr_render(Rd._rect, Rd._scene, Rd._mjr_context); mj.mjr_readPixels(None, raw, Rd._rect, Rd._mjr_context); np.copyto(fl, f0)
+        np.add(raw[::-1], c32, out=z); np.divide(d32, z, out=z)                            # GL rows bottom-up; reversed-Z -> metres
+        t_render[0] = time.monotonic_ns(); i = k[0] = (k[0] + 1) % NB
+        np.maximum(z, np.float32(1e-3), out=disp); np.divide(fB, disp, out=disp)          # disparity (px)
+        np.multiply(z, z, out=zz); np.multiply(zz, kz, out=zz); np.multiply(zz, zn[i], out=zz); np.add(zz, z, out=zz)
+        np.less(z, min_z, out=bad); np.greater(z, np.float32(8.0), out=tb); np.logical_or(bad, tb, out=bad)
+        if p["holes"] > 0: np.logical_or(bad, drop[i], out=bad)
+        if SUN: np.logical_or(bad, sunm[i], out=bad); np.logical_or(bad, rng.random(z.shape) < 0.03, out=bad)
+        if p["band"]: np.less(cols, disp, out=tb); np.logical_or(bad, tb, out=bad)                             # left invalid band
+        np.subtract(cols, disp, out=xr)                                                    # right-image column
+        np.minimum.accumulate(xr.T[::-1], axis=0, out=smin.T[::-1])                        # min over c' >= c (column-wise sweep: 2.0 vs 3.3 ms)
+        # occlusion shadow on flat contiguous views (2.1 -> 0.3 ms): pixel j vs smin of pixel j+1; the last column's
+        # comparison would wrap into the next row, so it is cleared (the original never tests the last column)
+        np.subtract(xr, np.float32(0.5), out=tmp); np.less_equal(smin.ravel()[1:], tmp.ravel()[:-1], out=tb.ravel()[:-1])
+        tb[:, -1] = False; np.logical_or(bad, tb, out=bad)
+        np.multiply(zz, np.float32(1000.0), out=zz); np.logical_not(bad, out=bad); np.multiply(zz, bad, out=zz)   # invalid -> 0
         return zz.astype(np.uint16)
     depth.t_render = t_render
     return depth
