@@ -80,6 +80,13 @@ def _rs2_axes(vx, vy):
 N_OBS = 6
 
 
+def _rug_look(rng, k):
+    """Rug appearance.  The rgba draw is always consumed so the floor RNG stream (and thus the physics) is identical
+    across texture sets; v2 (realism.TEX) uses a patterned rug material instead of the flat colour."""
+    rgba = "%g %g %g 1" % tuple(rng.uniform(0.25, 0.6, 3))
+    return dict(material="m_rug%d" % (k % 3)) if realism.REAL and realism.TEX != "v1" else dict(rgba=rgba)
+
+
 def mast_info_lens():
     """info["mast"] lens fields.  Default (realism on, KEVIN_MAST_HFOV unset): the twin truth lens the sim renders with.
     Else the pinhole KEVIN_MAST_HFOV belief (no distortion), as before."""
@@ -187,7 +194,7 @@ def _floor_model(root, asset, wb, env, level):
             hx, hy, t = rng.uniform(0.6, 1.0), rng.uniform(0.45, 0.8), rng.uniform(0.003, 0.005)
             zc = float(h[np.clip(int((py - y0) / res), 0, nr - 1), np.clip(int((px - x0) / res), 0, nc - 1)]) + t
             ET.SubElement(wb, "geom", name="floor_rug%d" % i, type="box", size="%g %g %g" % (hx, hy, t), pos="%g %g %g" % (px, py, zc),
-                          euler="0 0 %g" % rng.uniform(0, 3.14), rgba="%g %g %g 1" % tuple(rng.uniform(0.25, 0.6, 3)),
+                          euler="0 0 %g" % rng.uniform(0, 3.14), **_rug_look(rng, nrug),
                           contype="1", conaffinity="3", condim="6", friction="1.0 0.005 %g" % rng.uniform(0.01, 0.03))
             nrug += 1
     for i, (x, y, bh) in enumerate(getattr(env, "blades", [])):                # grass tufts: seen by depth, not by wheels
@@ -235,7 +242,11 @@ def compose(env: envs.Env, tire: str) -> str:
             # visual walls: per-room OBJ with planar UVs (already in world coords); collision = wall_occ boxes below
             for k, (obj, wm) in enumerate(realism.casita_wall_objs(g.mesh, g.size[0], np.array(g.pos))):
                 ET.SubElement(asset, "mesh", name="envmesh%d_%d" % (i, k), file=obj)
-                ET.SubElement(wb, "geom", type="mesh", mesh="envmesh%d_%d" % (i, k), name="env%d_%d" % (i, k), material="m_" + wm, contype="0", conaffinity="0", group="0")
+                mn = "m_" + wm
+                if realism.TEX != "v1":       # v2: own material (texuniform off: UVs already in metres)
+                    mn = "mw_" + wm
+                    if asset.find("material[@name='%s']" % mn) is None: ET.SubElement(asset, "material", name=mn, texture="t_" + wm, **realism.wall_mat_attrs(wm))
+                ET.SubElement(wb, "geom", type="mesh", mesh="envmesh%d_%d" % (i, k), name="env%d_%d" % (i, k), material=mn, contype="0", conaffinity="0", group="0")
         elif g.kind == "mesh":
             ET.SubElement(asset, "mesh", name="envmesh%d" % i, file=g.mesh, scale="%g %g %g" % g.size)
             if hasattr(env, "wall_occ"): a.update(contype="0", conaffinity="0")   # MuJoCo meshes collide as convex hulls
@@ -282,8 +293,13 @@ def compose(env: envs.Env, tire: str) -> str:
         b = ET.SubElement(wb, "body", name="obs%d" % k, mocap="true", pos="0 0 -5")
         ET.SubElement(b, "geom", type="box", size="0.15 0.15 0.35", pos="0 0 0.35", material="m_dark", contype="1", conaffinity="2")
     if realism.REAL and hasattr(env, "decor"):
+        merged = realism.merge_decor(env.decor) if realism.TEX != "v1" else {}
+        for (mat, grp), obj in sorted(merged.items()):   # v2: unit-mapped wall/ceiling items, one mesh per material (draw calls)
+            ET.SubElement(asset, "mesh", name="decormesh_%s_%s" % (mat, grp), file=obj)
+            ET.SubElement(wb, "geom", type="mesh", mesh="decormesh_%s_%s" % (mat, grp), name="decorm_%s_%s" % (mat, grp), material="m_" + mat,
+                          contype="0", conaffinity="0", group=grp)
         for k, (kind, pos, size, yaw, mat, col) in enumerate(env.decor):     # decor: visual geoms (colliders are env geoms)
-            if col is True: continue
+            if col is True or (mat, "1" if col == "ceiling" else "0") in merged and kind == "box": continue
             ET.SubElement(wb, "geom", name="decor%d" % k, type=kind, size=" ".join("%g" % v for v in size), pos="%g %g %g" % pos,
                           quat="%g 0 0 %g" % (math.cos(yaw / 2), math.sin(yaw / 2)), material="m_" + mat, contype="0", conaffinity="0",
                           group="1" if col == "ceiling" else "0")

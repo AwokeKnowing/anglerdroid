@@ -22,7 +22,8 @@ import glob, io, json, math, os, zipfile
 import numpy as np
 
 CACHE = os.path.join(os.environ.get("KEVIN_EMU_CACHE", os.path.expanduser("~/.cache/kevin_emu")))
-SRC = os.path.join(CACHE, "pbr_src"); OUT = os.path.join(CACHE, "tex_real")
+TEX = os.environ.get("KEVIN_EMU_TEX", "v2")       # texture set: v2 = feature-realistic (emu/texture_v2.py, default 2026-10-20); v1 = tinted scans (2026-10-17)
+SRC = os.path.join(CACHE, "pbr_src"); OUT = os.path.join(CACHE, "tex_real" if TEX == "v1" else "tex_real_" + TEX)
 REAL = os.environ.get("KEVIN_EMU_REAL", "1") == "1"
 SHADOW = int(os.environ.get("KEVIN_EMU_SHADOW", "4096"))      # sun shadow-map size; 0 disables shadows (live-rate knob)
 #  material: (ambientCG id, tint rgb (None = as scanned), texrepeat per metre, specular, shininess)
@@ -39,7 +40,7 @@ PBR = {
     "tile":     ("Tiles107", None, 1.0, 0.45, 0.6), "carpet": ("Carpet016", None, 1.2, 0.0, 0.0),
     "marble":   ("Marble012", None, 1.0, 0.5, 0.7), "wallpaper": ("Wallpaper001A", None, 1.0, 0.05, 0.1),
 }
-EXTRA_MATS = ["plaster4", "ceiling", "woodfloor", "marble", "wallpaper", "art0", "art1", "art2", "art3", "book", "leaf", "lampshade", "screen"]
+EXTRA_MATS = ["plaster4", "ceiling", "woodfloor", "marble", "wallpaper", "art0", "art1", "art2", "art3", "book", "leaf", "lampshade", "screen"] + (["rug0", "rug1", "rug2", "outlet", "switch", "poster0", "poster1", "poster2", "grille", "clock", "smoke", "blinds", "cabinet"] if TEX != "v1" else [])
 
 
 def fetch_pbr(ids=None):
@@ -82,8 +83,25 @@ def prepare_textures(proc_dir):
             im = cv2.resize(im, (1024, 1024), interpolation=cv2.INTER_AREA)
             if tint is not None:          # keep the scan's detail, set its mean colour to the paint/fabric tint
                 im = im / (im.reshape(-1, 3).mean(0) + 1e-6) * np.array(tint[::-1], np.float32)
+            if TEX != "v1":               # v2: normal bake, wear, real-scale detail (emu/texture_v2.py)
+                from emu import texture_v2
+                nf = glob.glob(os.path.join(SRC, aid, "*_NormalGL.jpg"))
+                nrm = cv2.resize(cv2.imread(nf[0]), (1024, 1024), interpolation=cv2.INTER_AREA)[..., ::-1].astype(np.float32) / 127.5 - 1 if nf else None
+                im = texture_v2.make(name, im, nrm, PBR[name][2], seed=sum(map(ord, name)))
             cv2.imwrite(p, (np.clip(im, 0, 1) * 255).astype(np.uint8))
         paths[name] = p
+    if TEX != "v1":                       # v2: patterned rugs (were flat rgba)
+        from emu import texture_v2
+        for k, pal in enumerate(texture_v2.RUG_PALETTES):
+            p = os.path.join(OUT, "rug%d.png" % k)
+            if not os.path.exists(p): cv2.imwrite(p, (np.clip(texture_v2.rug(1024, np.random.default_rng(k), [c[::-1] for c in pal]), 0, 1) * 255).astype(np.uint8))
+            paths["rug%d" % k] = p
+        T = None
+        for nm in texture_v2.ITEMS:
+            p = os.path.join(OUT, nm + ".png")
+            if not os.path.exists(p):
+                T = T or texture_v2.item_textures(); cv2.imwrite(p, (np.clip(T[nm][..., ::-1], 0, 1) * 255).astype(np.uint8))
+            paths[nm] = p
     rng = np.random.default_rng(42)
     for k in range(4):
         p = os.path.join(OUT, "art%d.png" % k)
@@ -109,17 +127,21 @@ def prepare_textures(proc_dir):
 def mat_attrs(name):
     if name in PBR:
         _, _, rep, spec, shin = PBR[name]; return dict(texrepeat="%g %g" % (rep, rep), texuniform="true", specular="%g" % spec, shininess="%g" % shin)
-    if name.startswith("art") or name in ("book", "screen"):
+    if name.startswith("art") or name.startswith("rug") or name.startswith("poster") or name in ("book", "screen", "outlet", "switch", "grille", "clock", "smoke", "blinds", "cabinet"):
         return dict(texrepeat="1 1", texuniform="false", specular="0.3" if name == "screen" else "0.1", shininess="0.6" if name == "screen" else "0.2")
     return dict(texrepeat="2 2", texuniform="true", specular="0.1", shininess="0.1")
 
 
 # ------------------------------------------------------------------ casita walls with UVs, per-room paint
+def wall_mat_attrs(name):
+    """Material for the casita wall OBJs, whose UVs are already in metres: texuniform off (with it on MuJoCo rescales
+    the mesh UVs and the paint stretched ~20x along the wall: horizontal streaks, visible once v2 gave paint detail)."""
+    a = mat_attrs(name); a["texuniform"] = "false"; return a
 CASITA_ROOMS = [  # (x0, y0, x1, y1, material) in world metres; first match wins; default = plaster
     (3.4, 3.0, 7.2, 7.3, "plaster3"),    # kitchen
     (4.6, 7.3, 7.2, 8.5, "white"),       # laundry
     (-0.5, 9.0, 3.6, 15.5, "plaster2"),  # bedroom 1 (NW)
-    (3.6, 9.0, 7.6, 15.5, "plaster4"),   # bedroom 2 (NE)
+    (3.6, 9.0, 7.6, 15.5, "plaster4" if TEX == "v1" else "wallpaper"),   # bedroom 2 (NE); v2: patterned wallpaper
 ]
 
 
@@ -127,8 +149,8 @@ def casita_wall_objs(stl, scale, off):
     """Wall STL -> one OBJ per paint region, per-face planar UVs in metres (u along the wall, v = height)."""
     import trimesh
     d = os.path.join(CACHE, "casita_walls"); os.makedirs(d, exist_ok=True)
-    tag = "%d_%g" % (int(os.path.getmtime(stl)), scale)
-    done = sorted(glob.glob(os.path.join(d, tag + "_*.obj")))
+    tag = "%d_%g" % (int(os.path.getmtime(stl)), scale) + ("" if TEX == "v1" else "_" + TEX)
+    done = [p for p in sorted(glob.glob(os.path.join(d, tag + "_*.obj"))) if "_" not in os.path.basename(p)[len(tag) + 1:-4]]   # not another set's
     if done: return [(p, os.path.basename(p)[len(tag) + 1:-4]) for p in done]
     m = trimesh.load(stl); V = m.vertices * scale + off; F = m.faces; N = m.face_normals
     C = V[F].mean(1) + 0.06 * N                   # sample just in front of the face: inner side picks its room
@@ -151,6 +173,37 @@ def casita_wall_objs(stl, scale, off):
     return out
 
 
+def merge_decor(decor):
+    """v2: the ~160 visual-only boxes with unit-mapped textures (outlets, switches, posters, photos, clocks, books,
+    grilles, blinds) -> one OBJ per (material, group), 24 verts/box with each face carrying the full texture (as MuJoCo
+    maps texuniform=false boxes).  Same geometry, ~10 draw calls instead of ~160 (colour-render cost).  {(mat, grp): obj}"""
+    import hashlib
+    G = {}
+    for kind, pos, size, yaw, mat, col in decor:
+        if kind != "box" or col is True or mat == "blinds" or mat_attrs(mat)["texuniform"] != "false": continue
+        G.setdefault((mat, "1" if col == "ceiling" else "0"), []).append((pos, size, yaw))
+    d = os.path.join(CACHE, "decor_" + TEX); os.makedirs(d, exist_ok=True); out = {}
+    for key, boxes in G.items():
+        if len(boxes) < 2: continue
+        V, T, F = [], [], []
+        for pos, h, yaw in boxes:
+            c = np.array(pos, float); E = [np.array([math.cos(yaw), math.sin(yaw), 0.0]), np.array([-math.sin(yaw), math.cos(yaw), 0.0]), np.array([0.0, 0.0, 1.0])]
+            for a in range(3):
+                for sg in (-1, 1):
+                    b1, b2, f = ((1, 2, sg), (0, 2, -sg), (0, 1, sg))[a]   # u horizontal / v up on side faces, t1 x t2 = outward
+                    t1 = E[b1] * h[b1] * f; t2 = E[b2] * h[b2]
+                    fc = c + sg * h[a] * E[a]; k = len(V)
+                    for u, v in ((0, 0), (1, 0), (1, 1), (0, 1)):
+                        V.append(fc + (2 * u - 1) * t1 + (2 * v - 1) * t2); T.append((1 - u, v))   # MuJoCo's box map runs u the other way
+                    F += [(k, k + 1, k + 2), (k, k + 2, k + 3)]
+        txt = "\n".join(["v %.5f %.5f %.5f" % tuple(p) for p in V] + ["vt %g %g" % t for t in T] +
+                         ["f %d/%d %d/%d %d/%d" % (a + 1, a + 1, b + 1, b + 1, c2 + 1, c2 + 1) for a, b, c2 in F]) + "\n"
+        p = os.path.join(d, "%s_%s_%s.obj" % (key[0], key[1], hashlib.md5(txt.encode()).hexdigest()[:10]))
+        if not os.path.exists(p): open(p, "w").write(txt)
+        out[key] = p
+    return out
+
+
 # ------------------------------------------------------------------ decor (visual-only), lights
 def _wall_hit(env, x, y, z, ang):
     """First wall-STL hit from (x, y, z) along heading ang (world, m) -> (hx, hy) or None."""
@@ -166,9 +219,15 @@ def casita_decor(env):
     inside the room (so they sit 3 mm proud of the real wall face); collide=True items (plant pots, lamp base) are
     real obstacles: envs.build adds them to the geoms, so they are in the GT map and in MuJoCo collision."""
     P = math.pi; D = []
-    def wall_box(x, y, ang, z, depth, w, h, mat):
+    def wall_box(x, y, ang, z, depth, w, h, mat, maxd=None):
         hit = _wall_hit(env, x, y, z, ang)
-        if hit is None: return
+        if hit is None or (maxd is not None and math.hypot(hit[0] - x, hit[1] - y) > maxd): return
+        if maxd is not None and z - h / 2 < 1.3:   # v2 items in the depth cameras' band: the wall must continue past both edges
+            d0 = math.hypot(hit[0] - x, hit[1] - y); px, py = -math.sin(ang), math.cos(ang)
+            for sg in (-1, 1):
+                for zz in (z - h / 2, z + h / 2):
+                    o = (w / 2 + 0.03) * sg; hh = _wall_hit(env, x + px * o, y + py * o, zz, ang)
+                    if hh is None or abs(math.hypot(hh[0] - x - px * o, hh[1] - y - py * o) - d0) > 0.03: return
         cx, cy = hit[0] - math.cos(ang) * (depth + 0.003), hit[1] - math.sin(ang) * (depth + 0.003)
         D.append(("box", (cx, cy, z), (depth, w / 2, h / 2), ang, mat, False))
     # framed pictures (1.6 cm deep frames), z = centre height
@@ -180,7 +239,7 @@ def casita_decor(env):
     for (x, y, a) in ((2.7, 2.0, -P / 2), (2.5, 11.2, P)):                         # wall shelves with books
         wall_box(x, y, a, 1.84, 0.12, 1.1, 0.024, "wood"); wall_box(x, y, a, 1.96, 0.09, 1.0, 0.2, "book")
     for (x, y, a, w) in ((5.6, 6.6, 0.0, 1.8), (5.0, 6.8, P / 2, 1.6)):           # kitchen: upper cabinets + tiled band
-        wall_box(x, y, a, 1.82, 0.17, w, 0.66, "white"); wall_box(x, y, a, 1.2, 0.004, w, 0.6, "tile")
+        wall_box(x, y, a, 1.82, 0.17, w, 0.66, "white" if TEX == "v1" else "cabinet"); wall_box(x, y, a, 1.2, 0.004, w, 0.6, "tile")
     # floor-standing (collide): plant pots + floor lamp base in free corners; foliage / shade / pole visual only
     for (x, y) in ((1.2, 0.42), (0.45, 10.45), (6.7, 10.35)):
         D.append(("cylinder", (x, y, 0.16), (0.14, 0.16), 0.0, "concrete", True))
@@ -192,6 +251,9 @@ def casita_decor(env):
           ("cylinder", (2.95, 1.9, 0.55), (0.05, 0.13), 0.0, "white", False), ("cylinder", (2.95, 1.9, 0.75), (0.12, 0.08), 0.0, "lampshade", False),
           ("cylinder", (5.6, 6.2, 0.78), (0.15, 0.03), 0.0, "white", False), ("sphere", (5.6, 6.2, 0.88), (0.1,), 0.0, "leaf", False),
           ("cylinder", (5.3, 6.0, 0.8), (0.04, 0.05), 0.0, "fabric2", False), ("box", (2.4, 13.4, 0.77), (0.2, 0.14, 0.012), 0.2, "dark", False)]
+    if TEX != "v1":     # v2: everyday wall/ceiling fixtures (outlets, switches, posters, clocks, light fixtures, vents)
+        from emu import texture_v2
+        texture_v2.casita_items(env, wall_box, D)
     # ceiling (group 1 -> hidden in the third-person viewer), just above the 2.28 m wall tops
     x0, y0, x1, y1 = env.extent
     D.append(("box", ((x0 + x1) / 2, (y0 + y1) / 2, 2.30), ((x1 - x0) / 2 + 0.3, (y1 - y0) / 2 + 0.3, 0.01), 0.0, "ceiling", "ceiling"))
