@@ -52,7 +52,10 @@ def apply_exposure(profile, serial):
     card, RS2: the floor), fixed white balance cam_rgb_white_balance_k.  legacy: the pre-2026-10-21 manual settings
     (depth 15 ms / gain 64, colour 200 / gain 96) -- they saturate the IR in daylight (scripts/rs_exposure_eval.py)."""
     import robot_params as _RP
-    V = _RP.V; mode = V.get("cam_exposure_mode", "legacy"); o = rs.option
+    V = _RP.V; mode = V.get("cam_exposure_mode", "legacy")
+    class _Opt:                                   # an option this librealsense build (or the sim stub) lacks -> None -> skipped
+        def __getattr__(self, k): return getattr(rs.option, k, None)
+    o = _Opt()
     role = "rs1" if serial == V.get("cam_rs1_serial") else "rs2" if serial == V.get("cam_rs2_serial") else None
     try:
         dev = profile.get_device(); ds = dev.first_depth_sensor()
@@ -60,6 +63,7 @@ def apply_exposure(profile, serial):
     except Exception as e:
         print("cameras: %s exposure setup skipped (%s)" % (serial, e), flush=True); return
     def s(sens, k, v):
+        if k is None: return False
         try:
             if sens.supports(k): sens.set_option(k, v); return True
         except Exception as e:
