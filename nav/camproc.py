@@ -22,7 +22,10 @@ def cam_main(serial, stereo, parent_pid, cpus):
     from cameras import RS_DEPTH_H, RS_DEPTH_W
     B = bus.open_all((RS_DEPTH_H, RS_DEPTH_W), create=False)
     cam = RSCamera(serial, compute_pointcloud=False, capture_ir=stereo, emitter=not stereo)
-    imu = IMUPipeline(serial)
+    # IMU = motion sensor of the device the video pipeline already runs (a second pipeline on it fails on the Orin's
+    # RSUSB build and wedges the IMU until a hardware reset).  KEVIN_IMU_SHARED=0: old separate pipeline.
+    shared = os.environ.get("KEVIN_IMU_SHARED", "1") == "1" and getattr(cam, "profile", None) is not None
+    imu = IMUPipeline(serial, device=cam.profile.get_device() if shared else None)
     i = cam.depth_intrinsics()
     B["rs2info"].write(f=np.array([i["fx"], i["fy"], i["ppx"], i["ppy"], i["width"], i["height"]], float), set=1)
     print("rs2cam: pid %d cpus %s, %s, IMU %s" % (os.getpid(), sorted(os.sched_getaffinity(0)), serial, "ok" if imu.ok else "off"), flush=True)

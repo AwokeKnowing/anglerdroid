@@ -49,11 +49,15 @@ class IMUPipeline:
     is a no-op. Check .ok before using .gyro / .accel.
     """
     
-    def __init__(self, serial: str):
+    def __init__(self, serial: str, device=None):
         """Open IMU pipeline for the specified D435i serial.
         
         Args:
             serial: D435i serial number (e.g. "944622074292")
+            device: the rs.device of an already running video pipeline on this camera (RSCamera.profile.get_device()).
+                Given: the motion sensor of THAT device is opened directly (sensor API, callback).  Needed on the
+                Orin RSUSB build: a second pipeline on a device whose video pipeline is running fails with
+                "No device connected" and leaves the IMU HID wedged (0 samples) until a hardware reset (2026-10-20).
         """
         self.serial = serial
         self.ok = False
@@ -73,6 +77,13 @@ class IMUPipeline:
         if not HAS_RS:
             print(f"imu: pyrealsense2 not available (serial {serial})")
             return
+        self._sensor = None; self._grab_w = 0
+        if device is not None:
+            try:
+                self._open_sensor(device); return
+            except Exception as e:                       # e.g. the sim shim has no sensor API: separate pipeline
+                self.ok = False; self._sensor = None
+                print(f"imu: motion sensor of the running device not usable on {serial} ({e}); trying a separate pipeline")
         
         try:
             cfg = rs.config()
@@ -107,6 +118,34 @@ class IMUPipeline:
             print(f"imu: Motion Module not available on {serial}: {e}")
             print(f"     → graceful degradation: IMU fusion disabled")
     
+    def _open_sensor(self, device):
+        """Motion sensor of a running device: gyro GYRO_HZ + accel ACCEL_HZ into the same ring, from a callback."""
+        m = [x for x in device.query_sensors() if x.is_motion_sensor()]
+        if not m: raise RuntimeError("no motion sensor on this device")
+        m = m[0]; want = {rs.stream.gyro: GYRO_HZ, rs.stream.accel: ACCEL_HZ}; sel = {}
+        for pr in m.get_stream_profiles():
+            if want.get(pr.stream_type()) == pr.fps(): sel[pr.stream_type()] = pr
+        if len(sel) != 2: raise RuntimeError("gyro %d Hz / accel %d Hz profiles not offered" % (GYRO_HZ, ACCEL_HZ))
+        m.open(list(sel.values())); m.start(self._on_motion); self._sensor = m; self.ok = True
+        print(f"imu: motion sensor of the running device {self.serial} started "
+              f"(gyro {GYRO_HZ} Hz, accel {ACCEL_HZ} Hz, sensor API)")
+
+    def _on_motion(self, f):
+        """librealsense callback thread: one ring sample per gyro or accel frame (latest of both, sensor stamp)."""
+        try:
+            d = f.as_motion_frame().get_motion_data(); now = time.monotonic()
+            try: ts = float(f.get_timestamp()) * 1e-3
+            except Exception: ts = now
+            with self._ring_lock:
+                if f.get_profile().stream_type() == rs.stream.gyro: self.gyro[0], self.gyro[1], self.gyro[2] = d.x, d.y, d.z
+                else: self.accel[0], self.accel[1], self.accel[2] = d.x, d.y, d.z
+                self.timestamp = ts if abs(ts - now) < 1.0 else now
+                i = self._ring_w % self._ring_n
+                self._ring_g[i] = self.gyro; self._ring_a[i] = self.accel; self._ring_t[i] = self.timestamp; self._ring_w += 1
+        except Exception as e:
+            if not hasattr(self, '_cb_err_logged'):
+                print(f"imu: motion callback error (continuing): {e}"); self._cb_err_logged = True
+
     def grab(self) -> bool:
         """Poll for latest IMU frame and update gyro/accel.
         
@@ -115,6 +154,10 @@ class IMUPipeline:
         Returns:
             True if new data available, False if no new frame or error.
         """
+        if self.ok and self._sensor is not None:          # sensor API: the callback fills the ring
+            with self._ring_lock:
+                got = self._ring_w != self._grab_w; self._grab_w = self._ring_w
+            return got
         if not self.ok or not self._pipe:
             return False
         
@@ -165,6 +208,10 @@ class IMUPipeline:
     
     def stop(self):
         """Stop the IMU pipeline and release resources."""
+        if getattr(self, "_sensor", None) is not None:
+            try: self._sensor.stop(); self._sensor.close()
+            except Exception: pass
+            self._sensor = None
         if self._pipe:
             try:
                 self._pipe.stop()

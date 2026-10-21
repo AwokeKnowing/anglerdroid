@@ -62,7 +62,8 @@ class Hardware:
             self.rs2 = camproc.Rs2Bus(self.bus); self.imu = camproc.ImuBus(self.bus)
         else:
             self.rs2 = RSCamera(ser[1], compute_pointcloud=False, capture_ir=stereo, emitter=not stereo)
-            self.imu = IMUPipeline(ser[1])
+            _sh = os.environ.get("KEVIN_IMU_SHARED", "1") == "1" and getattr(self.rs2, "profile", None) is not None   # see nav/camproc.py
+            self.imu = IMUPipeline(ser[1], device=self.rs2.profile.get_device() if _sh else None)
         self.rs2_intr = self.rs2.depth_intrinsics()
         if self.core:
             from nav import bus

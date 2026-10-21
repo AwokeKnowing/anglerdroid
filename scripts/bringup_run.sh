@@ -22,5 +22,14 @@ if [ "$KEVIN_HAL" = "real" ] && [ -f /etc/nv_tegra_release ]; then
     echo
 fi
 
+# Orin CPU layout (2026-10-20 stationary soaks, emu/tools/scbench/REALTEST_2026-10-21.md): safety core alone on cpu 7
+# (KEVIN_SC_CPU, its own default) at nice -10 (needs /etc/security/limits.d/99-kevin-rt.conf; SCHED_FIFO measured worse),
+# RS2 camera process on cpu 6, brain + its threads on 0-5.  Override: KEVIN_NAV_CPUS / KEVIN_RS2CAM_CPUS ('' = unpinned).
+NAVPIN=()
+if [ "$KEVIN_HAL" = real ] && [ -f /etc/nv_tegra_release ]; then
+    export KEVIN_SC_CPU=${KEVIN_SC_CPU:-7} KEVIN_RS2CAM_CPUS=${KEVIN_RS2CAM_CPUS-6}; NAV_CPUS=${KEVIN_NAV_CPUS-0-5}
+    [ -n "$NAV_CPUS" ] && NAVPIN=(taskset -c "$NAV_CPUS")
+    [ "$(ulimit -e)" -lt 30 ] && echo "WARN: nice limit $(ulimit -e) -> safety core cannot get nice -10 (install deploy/orin/99-kevin-rt.conf, re-login)"
+fi
 mkdir -p "$KEVIN_RECORD"; echo "hal=$KEVIN_HAL vmax=$KEVIN_VMAX wmax=$KEVIN_WMAX autocal=$KEVIN_AUTOCAL log=$KEVIN_RECORD"
-scripts/kevin-hal "$PY" -m nav.run --port $PORT 2>&1 | tee "$KEVIN_RECORD/nav.log"
+"${NAVPIN[@]}" scripts/kevin-hal "$PY" -m nav.run --port $PORT 2>&1 | tee "$KEVIN_RECORD/nav.log"
