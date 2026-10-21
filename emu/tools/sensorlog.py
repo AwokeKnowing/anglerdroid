@@ -5,7 +5,7 @@ colour the slow lane last produced (rendered at an older pose -- up to ~80 ms ap
 Saves RS1/RS2 colour (jpg) + depth (png16, mm) and mast colour at <hz> (default 30 = every camera frame; mast at its own
 10 Hz) with the camera stamp (ns, monotonic = sim capture time), and ground truth (emu ctl 'state') at ~30 Hz with the
 monotonic time of the query.  Wheel speeds / gyro / commands come from nav's KEVIN_RECORD (same monotonic clock).
-index.jsonl rows: {"cam", "stamp_ns", "file"} or {"gt": [x, y, yaw, v, w], "t_mono", "t_sim"}.  info.json: shm info.
+index.jsonl rows: {"cam", "stamp_ns", "file"} or {"gt": [x, y, yaw, v, w], "t_mono", "t_sim"[, "dog": [x, y, heading]]}.  info.json: shm info.
 
 v2 (2026-10-19): L3/L4 had 0.13-0.6 s holes during spins (20-56 deg between saved frames).  The old single loop did a
 blocking GT round trip, copied whole camera blocks (depth+colour+IR, ~2.5 MB) for both cameras and kept only the LATEST
@@ -184,6 +184,13 @@ def main():
             if not put(os.path.join(d, f + ".jpg"), a["color"], [cv2.IMWRITE_JPEG_QUALITY, 90], True): continue
             row(dict(cam="mast", stamp_ns=st, file=f)); S["mast"]["saved"] += 1
     GT_SRC = os.environ.get("SENSORLOG_GT", "udp")
+    # v6: the wandering dog's GT (world x, y, heading) rides on the gt rows as "dog" (moving-object benches, e.g. dynamic-point
+    # classification).  udp: from the same 'state' reply (same sim time as the pose).  shm: the world's /dev/shm/kevin_sim.json
+    # (written at the hub rate, read at <=10 Hz -> may lag the pose by up to ~0.1 s + the hub period).
+    dog_t, dog_now = [0.0], [None]
+    def sim_dog():
+        try: dg = json.load(open("/dev/shm/kevin_sim.json")).get("dog"); return [float(v) for v in dg[:3]] if dg else None
+        except Exception: return None
     def gt_loop():
         if GT_SRC == "shm":
             # v5c: GT from the world's kevin_gt shm block (written every 10 ms, stamped with the sim-time monotonic clock)
@@ -193,12 +200,14 @@ def main():
                 tq = time.monotonic(); r = pread(b, ["pose"])
                 if r is not None and r[0] != last:
                     last = r[0]; q = r[2]["pose"]
-                    row(dict(gt=[float(q[1]), float(q[2]), float(q[3]), float(q[4]), float(q[5])], t_mono=r[0] * 1e-9, t_sim=float(q[0])))
+                    if time.monotonic() - dog_t[0] > 0.1: dog_t[0] = time.monotonic(); dog_now[0] = sim_dog()
+                    row(dict(gt=[float(q[1]), float(q[2]), float(q[3]), float(q[4]), float(q[5])], t_mono=r[0] * 1e-9, t_sim=float(q[0]), **({"dog": dog_now[0]} if dog_now[0] else {})))
                 time.sleep(max(0.0, 1 / 30 - (time.monotonic() - tq)))
             return
         while time.monotonic() < t_end:
             tq = time.monotonic(); s = gt.state()
-            row(dict(gt=[s["x"], s["y"], s["yaw"], s["v"], s["w"]], t_mono=(tq + time.monotonic()) / 2, t_sim=s["t"]))
+            dg = s.get("dog"); dg = [dg["x"], dg["y"], dg["th"]] if dg else None
+            row(dict(gt=[s["x"], s["y"], s["yaw"], s["v"], s["w"]], t_mono=(tq + time.monotonic()) / 2, t_sim=s["t"], **({"dog": dg} if dg else {})))
             time.sleep(max(0.0, 1 / 30 - (time.monotonic() - tq)))
     th = [threading.Thread(target=gt_loop, daemon=True)]
     for k, v in info["devices"].items():

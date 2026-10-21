@@ -23,10 +23,12 @@ def wrap(a): return (np.asarray(a) + np.pi) % (2 * np.pi) - np.pi
 class Log:
     def __init__(self, d):
         self.d = d; self.info = json.load(open(os.path.join(d, "info.json")))
-        g, fr = [], {}
+        g, fr, dg = [], {}, []
         for l in open(os.path.join(d, "index.jsonl")):
             r = json.loads(l)
-            if "gt" in r: g.append([r["t_mono"]] + r["gt"][:3] + [r["t_sim"]])
+            if "gt" in r:
+                g.append([r["t_mono"]] + r["gt"][:3] + [r["t_sim"]])
+                if "dog" in r: dg.append([len(g) - 1] + list(r["dog"][:3]))
             else:
                 if r.get("depth", True): fr.setdefault(r["cam"], {})[r["stamp_ns"]] = r["file"]     # colour + depth pairs
                 if r["cam"] != "mast": fr.setdefault(r["cam"] + "_rgb", {})[r["stamp_ns"]] = r["file"]   # all colour (v5: 30 Hz)
@@ -36,6 +38,8 @@ class Log:
         off = g[:, 0] - g[:, 4]; ch = np.floor((g[:, 4] - g[0, 4]) / 5.0); cx, cy = [], []
         for c in np.unique(ch): m = ch == c; i = np.argmin(off[m]); cx.append(g[m, 4][i]); cy.append(off[m][i])
         self.gt_t = g[:, 4] + (np.polyval(np.polyfit(cx, cy, 1), g[:, 4]) if len(cx) > 2 else off.min())
+        # dog GT (sensorlog v6+): world x, y, heading on the GT clock; None if the log has none
+        self.dog_t = self.gt_t[[int(r[0]) for r in dg]] if dg else None; self.dog_xyh = np.array([r[1:] for r in dg]) if dg else None
         self.frames = {c: sorted((s * 1e-9, f) for s, f in v.items()) for c, v in fr.items()}
         mast = self.info["mast"]; T_m = np.array(mast["pos"], float); T_m[2] -= AXLE_H   # mast pos is floor-relative
         self.ext = dict(rs1=(R_RS1, T_RS1), rs2=(R_RS2, T_RS2), mast=(R_MAST, T_m))
@@ -45,6 +49,12 @@ class Log:
     def gt(self, t):
         t = np.asarray(t, float)
         return np.stack([np.interp(t, self.gt_t, self.gt_xy[:, 0]), np.interp(t, self.gt_t, self.gt_xy[:, 1]), np.interp(t, self.gt_t, self.gt_yaw)], -1)
+
+    def dog(self, t):
+        """Dog GT (x, y, heading) at monotonic t (interpolated), or None for logs recorded before sensorlog v6."""
+        if self.dog_t is None: return None
+        t = np.asarray(t, float); h = np.unwrap(self.dog_xyh[:, 2])
+        return np.stack([np.interp(t, self.dog_t, self.dog_xyh[:, 0]), np.interp(t, self.dog_t, self.dog_xyh[:, 1]), np.interp(t, self.dog_t, h)], -1)
 
     def mast_lens(self):
         """(K 3x3, dist [k1,k2,p1,p2]) of the mast camera.  New logs carry the twin truth lens in info (emu/world.py
