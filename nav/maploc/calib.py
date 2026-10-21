@@ -1,9 +1,9 @@
 """Fix-information calibration per log: at GT (truth) with a weak prior, c = median(d' Hm d) / median(chi2_3)."""
 from harness import *
 CALF = os.environ.get("ML_CALF", "calib.json")
-L = make_loc(); out = json.load(open(CALF)) if os.path.exists(CALF) else {}
+out = json.load(open(CALF)) if os.path.exists(CALF) else {}
 for n in sys.argv[1:]:
-    z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"]); idx = np.linspace(5, len(z["t"]) - 5, 60).astype(int); q = []
+    L = make_loc(n); z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"]); idx = np.linspace(5, len(z["t"]) - 5, 60).astype(int); q = []
     for i in idx:
         P0 = np.diag([0.3 ** 2, 0.3 ** 2, math.radians(10) ** 2])
         p, P, info = L.update(gray(n, z["files"][i]), z["gt"][i], P0, yaw_rate=yr[i])

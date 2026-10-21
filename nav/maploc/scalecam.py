@@ -1,14 +1,14 @@
 """Pose fixed at GT; scale the map about the CAMERA by s (pure range/size bias test); robust cost grid -> s*. true 1."""
 from harness import *
 from maploc import lsd_segments, associate
-L = make_loc(); hub = 3.0 / S if False else L.hub; out = []
+out = []
 grid = np.exp(np.linspace(-0.12, 0.12, 49))
 ZSEL = os.environ.get("ML_ZSEL", "all")
 for n in sys.argv[1:]:
-    z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"])
+    L = make_loc(n); hub = L.hub; z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"])
     for i in np.linspace(5, len(z["t"]) - 5, 40).astype(int):
         if abs(yr[i]) > 0.5: continue
-        g = z["gt"][i]; c2w = se2(*g) @ Tbc; im = gray(n, z["files"][i]); X, th = L.ge.visible(c2w, K, W, H)
+        g = z["gt"][i]; c2w = se2(*g, z=L.zb) @ L.Tbc; im = gray(n, z["files"][i]); X, th = L.ge.visible(c2w, K, W, H)
         if ZSEL == "nofloor": k = X[:, 2] > 0.05; X, th = X[k], th[k]
         if ZSEL == "noceil": k = X[:, 2] < 2.2; X, th = X[k], th[k]
         if ZSEL == "nohoriz": k = (X[:, 2] > 0.05) & (X[:, 2] < 2.2); X, th = X[k], th[k]

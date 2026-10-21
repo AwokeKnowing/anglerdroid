@@ -1,7 +1,6 @@
 from harness import *
-L = Localizer(smap, K, W, H, Tbc)
 for n in sys.argv[1:]:
-    z = load(n); idx = np.linspace(0, len(z["t"]) - 1, 40).astype(int); D = []
+    L = Localizer(smap, K, W, H, tbc(n), axle_h=log_axle(n)); z = load(n); idx = np.linspace(0, len(z["t"]) - 1, 40).astype(int); D = []
     for i in idx:
         p, P, info = L.update(gray(n, z["files"][i]), z["gt"][i], np.diag([0.1**2, 0.1**2, math.radians(5)**2]))
         if info.get("ok"): D.append(rel(z["gt"][i], p))

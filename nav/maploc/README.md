@@ -22,7 +22,11 @@ Only the forward mast RGB camera is used.
 - The mast lens is the twin truth lens: DFOV 118 deg, f 240.34 px, k1 -0.05, k2 0.008, from `emu/realism.mast_truth`.
   `emu/world.py` now writes it into info["mast"] (`intr` + `dist`), and `emu/tools/slamlog/log.py: Log.mast_lens()` reads it.
   For logs recorded before this change, `Log.mast_lens()` falls back to the truth lens the sim rendered with. `export.py` writes it to mlx/mast.json.
-- The camera is at base_link + twin `frames.rgb.xyz`, with base_link 0.08565 m above the floor. That puts the camera 0.976 m up (stock tyre).
+- The camera is at base_link + twin `frames.rgb.xyz`, with base_link at the axle = the tyre profile's loaded wheel radius
+  (`src/tire_profiles.json`): stock 0.08565 m -> camera 0.976 m; soft_v3_2 0.10065 m -> camera 0.991 m (soft tyres, 7fcec63).
+  Picked per log: `export.py` copies the log's info["tire"] into poses.npz; a log (or older export) without it predates the
+  soft tyres and uses stock (`harness.log_tire / log_axle / tbc(n)`, `make_loc(n)`). `ML_BASE_Z` overrides the base height.
+  Live use (`maploc.AXLE_H`) follows the active profile (KEVIN_TIRE, else the json default).
   v1-v3 subtracted the axle height twice, so the camera sat 8.6 cm too low. That was the main cause of their ~-2.5 % scale and forward bias.
 - **The real bot still needs a one-time checkerboard calibration of the mast camera:** intrinsics + distortion, and the mount pitch/height.
   In sim, scale is sensitive to the mount: 0.2 deg of pitch moves the scale ~0.8 %, and 5 mm of height moves it ~0.5 %.

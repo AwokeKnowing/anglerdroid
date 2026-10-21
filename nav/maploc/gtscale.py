@@ -1,6 +1,6 @@
 """At GT pose: per-frame fix error and single-frame scale estimate (weak priors). python gtscale.py L13 [N]"""
 from harness import *
-L = make_loc(); n = sys.argv[1]; N = int(sys.argv[2]) if len(sys.argv) > 2 else 40; z = load(n)
+n = sys.argv[1]; L = make_loc(n); N = int(sys.argv[2]) if len(sys.argv) > 2 else 40; z = load(n)
 yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"]); idx = np.linspace(5, len(z["t"]) - 5, N).astype(int)
 ST = float(os.environ.get("ML_TRUE_SCALE", 1.0)); out = []; ms = []
 for i in idx:

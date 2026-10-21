@@ -33,7 +33,7 @@ if __name__ == "__main__":
     for n in names:
         # leave-one-out: the fix-information scale comes from the OTHER logs
         cs = [CAL[m] for m in CAL if m != n]; cinf = float(np.exp(np.mean(np.log(cs)))) if cs and os.environ.get("ML_CAL", "1") == "1" else 1.0
-        L = make_loc(info_scale=cinf)
+        L = make_loc(n, info_scale=cinf); print("%s: tyre %s, base_link %.5f m" % (n, log_tire(n), log_axle(n)))
         z = dict(load(n)); z["odom"] = perturb(z["odom"]); g = z["gt"]; yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"]); od = anchor(z["odom"], g[0]); s2 = anchor(z["slam2"], g[0])
         SC = os.environ.get("ML_SCALE")       # estimate global map scale: initial value (e.g. 1.0); synthetic true scale via ML_MAP_TRUE
         p = g[0].copy(); P = np.diag([0.02 ** 2, 0.02 ** 2, math.radians(1) ** 2])

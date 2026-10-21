@@ -12,15 +12,43 @@ Default (v4, LocalizerSeg; established model-based edge tracking, RAPiD / Drummo
   4. gating: Mahalanobis (chi2 99 %) + inlier fraction must not drop; no fix under yaw-rate motion blur.
 Localizer (v3: pixel render + directional chamfer DT) is kept for comparison.
 z, roll, pitch come from the twin (mast extrinsics); only x, y, yaw (+ map scale) are estimated."""
-import math, numpy as np, cv2, trimesh
+import math, os, json, numpy as np, cv2, trimesh
 
-AXLE_H = 0.08565      # base_link origin above the floor (twin, stock tyre: rgb height_above_floor 0.97615 - xyz z 0.8905)
+# base_link (= wheel axle) height above the floor = the tyre profile's loaded wheel radius (src/tire_profiles.json,
+# single source of truth; read directly, not via src/tire_profile.py, whose module name clashes with the twin's).
+# stock 0.08565 (twin rgb height_above_floor 0.97615 - xyz z 0.8905); soft_v3_2 0.10065 (+15 mm, commit 7fcec63).
+_TPJ = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tire_profiles.json")))
+AXLE_H_STOCK = float(_TPJ["profiles"]["stock"]["wheel_r_loaded_m"])
+
+
+def tire_name(tire=None):
+    """profile name: tire (name or alias) if given, else the ACTIVE profile (KEVIN_TIRE env, else the json default)."""
+    n = (tire if tire is not None else os.environ.get(_TPJ["env"], "")).strip() or _TPJ["default"]
+    n = _TPJ["aliases"].get(n, n)
+    if n not in _TPJ["profiles"]: raise ValueError("unknown tire profile %r; use one of %s" % (n, list(_TPJ["profiles"])))
+    return n
+
+
+def axle_height(tire=None):
+    """base_link above the floor (m) for tyre profile `tire`; None = the active profile (use log_axle_height for logs)."""
+    return float(_TPJ["profiles"][tire_name(tire)]["wheel_r_loaded_m"])
+
+
+def log_axle_height(info):
+    """per log: the tyre its info.json records (info["tire"], world.py / realmastlog.py); a log without it predates the
+    soft tyres (7fcec63) -> stock."""
+    t = (info or {}).get("tire")
+    return axle_height(t) if t else AXLE_H_STOCK
+
+
+AXLE_H = axle_height()   # active profile (live / new recordings); offline harness picks per log (harness.log_axle)
 R_MAST = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])     # optical -> base (twin)
 CREASE_DEG = 30.0
 CHI2_3_99 = 11.345
 
 
-def se2(x, y, yaw, z=AXLE_H):
+def se2(x, y, yaw, z=None):
+    if z is None: z = AXLE_H
     B = np.eye(4); c, s = math.cos(yaw), math.sin(yaw); B[:2, :2] = [[c, -s], [s, c]]; B[:3, 3] = [x, y, z]; return B
 
 
@@ -123,15 +151,16 @@ def bilinear(img, u, v):
 
 
 class Localizer:
-    def __init__(self, smap, K, w, h, T_bc, huber_px=2.0, sigma_px=1.5, inlier_px=2.0, info_scale=1.0, exposure_s=0.015):
+    def __init__(self, smap, K, w, h, T_bc, huber_px=2.0, sigma_px=1.5, inlier_px=2.0, info_scale=1.0, exposure_s=0.015, axle_h=None):
         """info_scale: calibration of the fix information (pixel residuals are correlated, so J'WJ is over-confident);
         set from held-out data so the fix NEES matches chi2(3) (see calibrate()).  exposure_s: no fix while the
         yaw-rate motion blur |w| * exposure * fx exceeds the Huber scale (edges smeared beyond the residual model)."""
         self.m, self.K, self.w, self.h, self.Tbc = smap, K, w, h, T_bc
+        self.zb = AXLE_H if axle_h is None else float(axle_h)   # base_link height (T_bc is relative to it)
         self.hub, self.spx, self.inl, self.cinfo, self.exp = huber_px, sigma_px, inlier_px, info_scale, exposure_s
 
     def project(self, X, p):
-        c2w = se2(*p) @ self.Tbc; Xc = (X - c2w[:3, 3]) @ c2w[:3, :3]
+        c2w = se2(*p, z=self.zb) @ self.Tbc; Xc = (X - c2w[:3, 3]) @ c2w[:3, :3]
         ok = Xc[:, 2] > 0.15; u = Xc[:, 0] / np.maximum(Xc[:, 2], 1e-3) * self.K[0, 0] + self.K[0, 2]; v = Xc[:, 1] / np.maximum(Xc[:, 2], 1e-3) * self.K[1, 1] + self.K[1, 2]
         ok &= (u >= 1) & (u < self.w - 2) & (v >= 1) & (v < self.h - 2); return u, v, ok
 
@@ -140,7 +169,7 @@ class Localizer:
         if abs(yaw_rate) * self.exp * self.K[0, 0] > self.hub: return p_pred, P_pred, dict(ok=False, why="blur")
         ns = len(p_pred)            # 3: (x, y, yaw); 4: (x, y, yaw, ln map-scale)
         s0 = math.exp(p_pred[3]) if ns == 4 else 1.0
-        X, _ = self.m.edge_points(se2(*p_pred[:3]) @ self.Tbc, self.K, self.w, self.h, scale=s0)
+        X, _ = self.m.edge_points(se2(*p_pred[:3], z=self.zb) @ self.Tbc, self.K, self.w, self.h, scale=s0)
         if len(X) < 30: return p_pred, P_pred, dict(ok=False, why="few_map_edges", n=len(X))
         if directional:
             D, _ = image_dt_dir(gray); b = ((self.m.last_theta / math.pi * NBIN + 0.5).astype(int)) % NBIN
@@ -281,15 +310,15 @@ def Ry(a):
 
 class LocalizerSeg(Localizer):
     """v4: GeoEdges + LSD point-to-line residuals; same prior / IRLS / gating / scale state as Localizer."""
-    def __init__(self, smap, K, w, h, T_bc, huber_px=3.0, sigma_px=1.5, inlier_px=3.0, info_scale=1.0, exposure_s=0.015, assoc_px=15.0):
-        super().__init__(smap, K, w, h, T_bc, huber_px, sigma_px, inlier_px, info_scale, exposure_s)
+    def __init__(self, smap, K, w, h, T_bc, huber_px=3.0, sigma_px=1.5, inlier_px=3.0, info_scale=1.0, exposure_s=0.015, assoc_px=15.0, axle_h=None):
+        super().__init__(smap, K, w, h, T_bc, huber_px, sigma_px, inlier_px, info_scale, exposure_s, axle_h)
         self.ge = smap.geo if hasattr(smap, "geo") else GeoEdges(smap); smap.geo = self.ge; self.assoc = assoc_px
 
     def update(self, gray, p_pred, P_pred, iters=8, yaw_rate=0.0, **kw):
         if abs(yaw_rate) * self.exp * self.K[0, 0] > self.hub: return p_pred, P_pred, dict(ok=False, why="blur")
         # state: x, y, yaw [, ln map-scale [, static mast pitch (rad, + = nose down, about base y)]]
         ns = len(p_pred); s0 = math.exp(p_pred[3]) if ns >= 4 else 1.0; pt0 = p_pred[4] if ns >= 5 else 0.0
-        X, th = self.ge.visible(se2(*p_pred[:3]) @ Ry(pt0) @ self.Tbc, self.K, self.w, self.h, scale=s0)
+        X, th = self.ge.visible(se2(*p_pred[:3], z=self.zb) @ Ry(pt0) @ self.Tbc, self.K, self.w, self.h, scale=s0)
         if len(X) < 30: return p_pred, P_pred, dict(ok=False, why="few_map_edges", n=len(X))
         S, Sth = lsd_segments(gray)
         # capture range: when the prior yaw sd is large (e.g. after a blur-skipped spin with a turn-scale error) the
@@ -304,7 +333,7 @@ class LocalizerSeg(Localizer):
             best = min(np.arange(-3 * syaw, 3 * syaw + 1e-9, step), key=lambda dy: cost(np.r_[p_pred[:2], p_pred[2] + dy, p_pred[3:]]))
             if best != 0.0:
                 p_start[2] += best
-                X, th = self.ge.visible(se2(*p_start[:3]) @ Ry(pt0) @ self.Tbc, self.K, self.w, self.h, scale=s0)
+                X, th = self.ge.visible(se2(*p_start[:3], z=self.zb) @ Ry(pt0) @ self.Tbc, self.K, self.w, self.h, scale=s0)
                 if len(X) < 30: return p_pred, P_pred, dict(ok=False, why="few_map_edges", n=len(X))
         nrm = np.stack([-(S[:, 3] - S[:, 1]), S[:, 2] - S[:, 0]], -1); nrm /= np.linalg.norm(nrm, axis=1, keepdims=True) + 1e-9
         Ip = np.linalg.inv(P_pred); p = p_start.copy(); eps = np.full(ns, 1e-4)
@@ -338,7 +367,7 @@ class LocalizerSeg(Localizer):
         info["ok"] = True; return p, P, info
 
     def project(self, X, p, pitch=0.0):
-        c2w = se2(*p) @ Ry(pitch) @ self.Tbc; Xc = (X - c2w[:3, 3]) @ c2w[:3, :3]
+        c2w = se2(*p, z=self.zb) @ Ry(pitch) @ self.Tbc; Xc = (X - c2w[:3, 3]) @ c2w[:3, :3]
         ok = Xc[:, 2] > 0.15; zz = np.maximum(Xc[:, 2], 1e-3)
         u = Xc[:, 0] / zz * self.K[0, 0] + self.K[0, 2]; v = Xc[:, 1] / zz * self.K[1, 1] + self.K[1, 2]
         ok &= (u >= 1) & (u < self.w - 2) & (v >= 1) & (v < self.h - 2); return u, v, ok

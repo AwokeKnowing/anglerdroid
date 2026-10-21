@@ -1,12 +1,12 @@
 """At GT: signed residual (image edge - map edge, px, + = further from image centre) by edge class."""
 from harness import *
 from maploc import lsd_segments, associate
-L = make_loc(); R = {}
+R = {}
 for n in sys.argv[1:]:
-    z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"])
+    L = make_loc(n); z = load(n); yr = np.gradient(np.unwrap(z["odom"][:, 2]), z["t"])
     for i in np.linspace(5, len(z["t"]) - 5, 40).astype(int):
         if abs(yr[i]) > 0.5: continue
-        g = z["gt"][i]; im = gray(n, z["files"][i]); X, th = L.ge.visible(se2(*g) @ Tbc, K, W, H); u, v, ok = L.project(X, g)
+        g = z["gt"][i]; im = gray(n, z["files"][i]); X, th = L.ge.visible(se2(*g, z=L.zb) @ L.Tbc, K, W, H); u, v, ok = L.project(X, g)
         S, Sth = lsd_segments(im); j, d = associate(u, v, th, S, Sth, 6); m = ok & (j >= 0)
         a, b = S[j[m], :2], S[j[m], 2:]; t = b - a; nr = np.stack([-t[:, 1], t[:, 0]], -1); nr /= np.linalg.norm(nr, axis=1, keepdims=True)
         p = np.stack([u[m], v[m]], -1); r = ((a - p) * nr).sum(1)       # image line minus map point along normal
