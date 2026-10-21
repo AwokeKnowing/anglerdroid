@@ -8,7 +8,7 @@ no wear.  v2, per material, all tileable (periodic FFT noise, wrap-around drawin
   * normal-map bake into the albedo (standard bake for renderers without normal mapping; key light 45 deg elevation,
     shading normalised to mean 1 -> the material's mean colour/tint is unchanged);
   * colour / brightness mottling at 10-60 cm (paint and floor wear, sun fading);
-  * real-scale detail 5-30 cm where real surfaces have it: scuffs and marks on paint, carpet loop pattern + stains,
+  * real-scale detail 5-30 cm where real surfaces have it: scuffs and marks on paint, beige cut-pile carpet (fibre scan) + faint marks,
     upholstery seams, brushed metal + scratches, leather creases/stitching, patterned wallpaper (damask), patterned rugs.
 Geometry, collision and depth are untouched (albedo only)."""
 import math
@@ -138,11 +138,14 @@ def make(name, im, nrm, rep, seed):
         im *= (_marks(n, ppm, rng, 3.0, (0.01, 0.05), (0.10, 0.30), (1.5, 5.0))                 # scuffs, smudges
                * _marks(n, ppm, rng, 2.0, (0.004, 0.008), (0.35, 0.6), (1.0, 1.3), soft=False)   # nail / screw holes
                * _lines(n, ppm, rng, 0.8, (0.05, 0.25), 2, (0.10, 0.25)))[..., None]              # scrapes
-    elif name == "carpet":      # loop-pile pattern (diamond lattice, 7 cm) + heather + traffic stains
-        y, x = np.mgrid[0:n, 0:n] / ppm; P = 0.07 * 1024 / ppm * ppm / 1024
-        lat = (np.abs(((x + y) / 0.07) % 1 - 0.5) < 0.12) | (np.abs(((x - y) / 0.07) % 1 - 0.5) < 0.12)
-        im = bake(im, nrm, 1.0) * (1 - 0.14 * lat + _noise(n, rng, 0.012 * ppm, 0.07) + _noise(n, rng, 0.4 * ppm, 0.05))[..., None]
-        im *= _marks(n, ppm, rng, 0.8, (0.08, 0.3), (0.08, 0.2), (1.0, 2.0))[..., None]
+    elif name == "carpet":      # beige cut pile (James t630): the scan's fibre structure (luminance + baked normals) on a
+        # beige base, scan chroma kept at 25 % (fibre heather), low-frequency shading / traffic mottle (tileable, subtle)
+        lum = im.mean(-1); L = (lum - lum.mean()) / (lum.std() + 1e-6)
+        sh = bake(np.ones_like(im), nrm, 1.0)[..., 0] if nrm is not None else one; sh = (sh - sh.mean()) / (sh.std() + 1e-6)
+        chroma = im - lum[..., None]; chroma = (chroma - chroma.reshape(-1, 3).mean(0)) * 0.25
+        beige = np.array((0.588, 0.698, 0.769), np.float32)       # BGR of sRGB (196, 178, 150)
+        im = beige * (1 + 0.10 * L + 0.06 * sh + _noise(n, rng, 0.12 * ppm, 0.008) + _noise(n, rng, 0.03 * ppm, 0.01))[..., None] + chroma
+        im *= _marks(n, ppm, rng, 0.5, (0.08, 0.3), (0.04, 0.10), (1.0, 2.0))[..., None]     # faint traffic / spill marks
     elif name in ("fabric", "fabric2"):     # upholstery: weave check 2.5 cm + piping seams every tile + wear
         y, x = np.mgrid[0:n, 0:n] / ppm
         chk = ((np.floor(x / 0.025) + np.floor(y / 0.025)) % 2) * 0.07

@@ -37,7 +37,10 @@ PBR = {
     "fabric":   ("Fabric026", (0.45, 0.50, 0.60), 2.0, 0.02, 0.05), "fabric2": ("Fabric061", (0.75, 0.45, 0.40), 2.0, 0.02, 0.05),
     "metal":    ("Metal049A", None, 2.0, 0.6, 0.7), "white": ("Plaster002", (0.97, 0.97, 0.96), 1.0, 0.3, 0.5),
     "dark":     ("Leather037", (0.25, 0.25, 0.27), 2.0, 0.2, 0.3), "concrete": ("Concrete034", None, 0.5, 0.05, 0.1),
-    "tile":     ("Tiles107", None, 1.0, 0.45, 0.6), "carpet": ("Carpet016", None, 1.2, 0.0, 0.0),
+    "tile":     ("Tiles107", None, 1.0, 0.45, 0.6),
+    # v2 carpet (James t630): beige cut pile from the Carpet011 fibre scan (recoloured, emu/texture_v2.make), 0.5 m tile
+    # = the scan's ~0.5 mm/px fibre scale (tufts 2-4 mm, as seen by RS1 at 0.2-1 m); v1 keeps the near-flat Carpet016
+    "carpet":   ("Carpet016", None, 1.2, 0.0, 0.0) if TEX == "v1" else ("Carpet011", None, 2.0, 0.0, 0.0),
     "marble":   ("Marble012", None, 1.0, 0.5, 0.7), "wallpaper": ("Wallpaper001A", None, 1.0, 0.05, 0.1),
 }
 EXTRA_MATS = ["plaster4", "ceiling", "woodfloor", "marble", "wallpaper", "art0", "art1", "art2", "art3", "book", "leaf", "lampshade", "screen"] + (["rug0", "rug1", "rug2", "outlet", "switch", "poster0", "poster1", "poster2", "grille", "clock", "smoke", "blinds", "cabinet"] if TEX != "v1" else [])
@@ -75,9 +78,12 @@ def prepare_textures(proc_dir):
     import cv2
     os.makedirs(OUT, exist_ok=True); paths = {}
     for name, (aid, tint, *_r) in PBR.items():
-        p = os.path.join(OUT, name + ".png")
+        p = os.path.join(OUT, name + (".png" if TEX == "v1" or name != "carpet" else "_" + aid + ".png"))   # source in the cache key
         if not os.path.exists(p):
             src = glob.glob(os.path.join(SRC, aid, "*_Color.jpg"))
+            if not src and TEX != "v1":
+                try: fetch_pbr([aid]); src = glob.glob(os.path.join(SRC, aid, "*_Color.jpg"))
+                except Exception as e: print("emu.realism: fetch %s failed (%s), procedural fallback" % (aid, e))
             if not src: continue
             im = cv2.imread(src[0]).astype(np.float32) / 255.0
             im = cv2.resize(im, (1024, 1024), interpolation=cv2.INTER_AREA)
