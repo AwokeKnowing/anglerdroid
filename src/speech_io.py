@@ -365,9 +365,10 @@ def _play(text: str, voice: str) -> None:
         sf.write(path, samples, sr)
         try:
             import robot_params as _RP
-            _on = bool(_RP.V.get("audio_enabled", False))
+            _on = _RP.V.get("audio_enabled") is True
         except Exception:
             _on = False
+        _on = _on or os.environ.get("KEVIN_AUDIO_ENABLED") == "1"
         if os.environ.get("KEVIN_MUTE") == "1" or not _on:          # speaker muted until James enables audio.enabled
             print("speech: MUTED (audio.enabled false / KEVIN_MUTE=1): not played, wav at %s" % path)
             return

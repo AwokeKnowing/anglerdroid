@@ -102,14 +102,16 @@ MUTED_DIR = os.path.expanduser("~/kevin_bench/voice_muted")
 
 
 def muted():
-    """True unless James enabled the speaker (resolved audio_enabled, default false); KEVIN_MUTE=1 always mutes."""
+    """Hard mute.  Audio plays ONLY if explicitly enabled: env KEVIN_AUDIO_ENABLED=1 or the resolved audio_enabled is True
+    (robot.json audio.enabled, default false).  KEVIN_MUTE=1 always mutes; an unreadable config mutes."""
     if E.get("KEVIN_MUTE") == "1": return True
+    if E.get("KEVIN_AUDIO_ENABLED") == "1": return False
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
         import robot_params as RP
-        return not bool(RP.V.get("audio_enabled", False))
+        return RP.V.get("audio_enabled") is not True
     except Exception:
-        return True                                                 # config unreadable -> silent
+        return True
 
 
 def play(path, secs):
@@ -254,7 +256,13 @@ def serve(port):
             if p != "/say": return self._send({}, 404)
             text = str(d.get("text") or "").strip()[:1000]
             if not text: return self._send(dict(ok=False, error="empty text"), 400)
-            res = say(text, str(d.get("lang") or "en").lower()[:2], d.get("voice"), d.get("speed", 1.0), bool(d.get("wait")))
+            lang = str(d.get("lang") or "en").lower()[:2]
+            if muted():                                             # refuse to play; synthesize to a file only (offline check)
+                res = say(text, lang, d.get("voice"), d.get("speed", 1.0), wait=True)
+                return self._send(dict(ok=False, refused="audio disabled: Kevin's speaker is muted until James enables it "
+                                       "(robot.json audio.enabled / KEVIN_AUDIO_ENABLED=1); nothing was played", file=res.get("file"),
+                                       synth_s=res.get("synth_s"), audio_s=res.get("audio_s"), lang=lang), 403)
+            res = say(text, lang, d.get("voice"), d.get("speed", 1.0), bool(d.get("wait")))
             self._send(dict(res, ok=res.get("ok", True)))
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     threading.Thread(target=srv.serve_forever, daemon=True, name="voice-http").start()

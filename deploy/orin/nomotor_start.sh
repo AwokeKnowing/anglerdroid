@@ -5,7 +5,7 @@ cd "${KEVIN_REPO:-$HOME/anglerdroid}"
 export PATH=$HOME/.venv-kevinnav/bin:$PATH KEVIN_HAL=real KEVIN_ROBOT=kevin001 KEVIN_AUTOCAL=0 KEVIN_RGB_DEV=${KEVIN_RGB_DEV:-none}
 export KEVIN_SC_DECEL=${KEVIN_SC_DECEL:-1} KEVIN_PLAN_LIMIT=${KEVIN_PLAN_LIMIT:-1} KEVIN_PLAN_CLEARANCE=${KEVIN_PLAN_CLEARANCE:-1} KEVIN_EGO_SHARED=${KEVIN_EGO_SHARED:-1}
 mkdir -p ~/kevin_bench; LOG=~/kevin_bench/nav_$(date +%H%M%S).log; ln -sfn $LOG ~/kevin_bench/nav_latest.log
-if [ "${KEVIN_VOICE:-1}" = "1" ] && ! pgrep -f "python -m nav.voice" >/dev/null; then   # nav/voice.py: TTS :8092 (nav /api/say forwards), ReSpeaker ears -> webhook; own process, low priority
+if [ "${KEVIN_VOICE:-0}" = "1" ] && ! pgrep -f "python -m nav.voice" >/dev/null; then   # off by default (James 2026-10-21: no sound); nav/voice.py: TTS :8092 (hard-muted unless audio.enabled / KEVIN_AUDIO_ENABLED=1) (nav /api/say forwards), ReSpeaker ears -> webhook; own process, low priority
   setsid nohup taskset -c ${KEVIN_VOICE_CPUS:-0-5} nice -n 10 $HOME/.venv-kevinnav/bin/python -m nav.voice >> ~/kevin_bench/voice.out 2>&1 < /dev/null &
   echo started voice $! log ~/kevin_bench/voice.log
 fi

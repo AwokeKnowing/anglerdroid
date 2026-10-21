@@ -30,6 +30,9 @@ def test_muted_by_default_plays_nothing(tmp_path=None):
     os.environ.pop("KEVIN_AUDIO_ENABLED", None)
     assert V.muted()
     os.environ["KEVIN_MUTE"] = "1"; assert V.muted(); os.environ.pop("KEVIN_MUTE")
+    os.environ["KEVIN_AUDIO_ENABLED"] = "1"; assert not V.muted()
+    os.environ["KEVIN_MUTE"] = "1"; assert V.muted(); os.environ.pop("KEVIN_MUTE"); os.environ.pop("KEVIN_AUDIO_ENABLED")
+    os.environ["KEVIN_AUDIO_ENABLED"] = "true"; assert V.muted(); os.environ.pop("KEVIN_AUDIO_ENABLED")   # only exactly "1" enables
     calls = []; real = subprocess.run
     subprocess.run = lambda *a, **k: calls.append(a) or real(["true"])
     try:
