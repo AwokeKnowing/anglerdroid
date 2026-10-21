@@ -36,7 +36,8 @@ PAIR_WAIT_S = float(os.environ.get("KEVIN_SC_PAIR_WAIT", "0.010"))   # max wait 
 CMD_STALE_S = 0.3
 ERR_MAX = 30          # consecutive failing ticks (1 s) before the core zeroes the wheels and exits loudly
 T_CMD = 0.010                         # core decision -> CAN frame on the wire (assumed; measured: see log t_sent - t_dec)
-RAMP_NORMAL, RAMP_MAX = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")), 5.0
+import twin_geometry as _TGR                    # 2026-10-21 PARAMETER (James approval): ramps in turns follow the tyre, rim m/s^2 kept
+RAMP_NORMAL, RAMP_MAX = _TGR.VEL_RAMP_TPS2, _TGR.VEL_RAMP_MAX_TPS2       # stock 3.0 / 5.0 turns/s^2 (unchanged); soft 2.553 / 4.255
 BRAKE = {RAMP_NORMAL: (0.0987, 2.47), RAMP_MAX: (0.0926, 4.26)}     # (lag s, decel m/s^2), fits above
 BAND = 0.05; MARGIN = SAFETY_MARGIN; H_MAX = 1.0
 STATE_FIELDS = ["t_dec", "period", "age1", "age2", "v_cmd", "w_cmd", "v_m", "w_m", "v_out", "w_out", "code", "ramp", "free",

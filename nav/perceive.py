@@ -112,7 +112,10 @@ class Ego:
     # than the local floor plane is a drop.  The floor plane is fitted per frame (robust, 2 passes) so body
     # pitch/roll on slopes and carpet/threshold bumps are not mistaken for drops; potholes < CLIFF_DZ are drivable.
     # Persistent (CLIFF_FRAMES) blobs >= CLIFF_MIN_PX are re-inserted along their rays at TC_Z -> OBSTACLE.
-    CLIFF_Z0, CLIFF_DZ, CLIFF_FRAMES, CLIFF_MIN_PX, LEVEL = 0.946, 0.05, 2, 40, True
+    # CLIFF_Z0 = expected RS1 depth to the floor (fallback plane + fit window): stock 0.946; follows the tyre ride height
+    # (2026-10-21 soft tyres +15 mm -> 0.961; SAFETY PARAMETER, James approval).  Same rule as perception/ego_rs1 TD_FLOOR_CLIP.
+    from tire_profile import RIDE_DZ_M as _RDZ
+    CLIFF_Z0, CLIFF_DZ, CLIFF_FRAMES, CLIFF_MIN_PX, LEVEL = 0.946 + _RDZ, 0.05, 2, 40, True
     def _cliff(self, v, ok):
         self.cliff_px = 0
         if self._shape is None: return v

@@ -186,10 +186,13 @@ class WheelBase:
 
         # vel ramp (turns/s^2) applies to braking too: 3.0 = 1.61 m/s^2 at the 85.65 mm wheel.  KEVIN_VEL_RAMP overrides
         # (experiments only; default unchanged).  See docs: stopping-distance budget 2026-10-17.
-        ramp = float(os.environ.get("KEVIN_VEL_RAMP", "3.0"))
+        # 2026-10-21: the turn values follow the tyre so the rim m/s^2 and m/s stay the stock-wheel ones
+        # (src/twin_geometry.py VEL_RAMP_TPS2 / VEL_LIMIT_TPS: 3.0 / 4.0 stock, 2.553 / 3.404 on the 100.65 mm soft tyre).
+        import twin_geometry as _TGW
+        ramp = _TGW.VEL_RAMP_TPS2
         for axis in (self.left, self.right):
             axis.set_vel_ramp_rate(ramp)
-            axis.set_vel_limit(4.0)
+            axis.set_vel_limit(_TGW.VEL_LIMIT_TPS)
 
         for _ in range(20):
             self.left.set_velocity(0.0)

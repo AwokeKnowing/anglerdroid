@@ -132,6 +132,13 @@ def _hull(P):
 # out ~3 cm beyond the SIL12 rear diagonals (URDF collision geometry is inside SIL12; the MuJoCo lite deck is not).
 # TODO(twin): reconcile kevin_lite deck with the URDF; until then guard the larger of the two.
 FOOTPRINT_SAFE = _hull(np.vstack([SIL12, [[-0.1995, -0.15], [-0.1995, 0.15]]]))
+# 2026-10-21 (soft TPU tyres, free R 103.8 mm): the drive tyres' plan view (x +-free R, y 0.1567..0.2033: wheel frame
+# y 0.1515 + STL tread z 5.2..51.8 mm) sticks out of SIL12 by up to 12.7 mm at the front/rear diagonals of the wheel
+# (stock tyre: 1.9 mm inside).  The tyre corners join the safety hull.  SAFETY PARAMETER (James approval): stock unchanged.
+import tire_profile as _TPF
+TIRE_R_FREE_M = float(_TPF.P.get("wheel_r_free_m", _G["wheel_r_m"]))
+TIRE_Y_OUT_M = 0.2033
+FOOTPRINT_SAFE = _hull(np.vstack([FOOTPRINT_SAFE] + [[[sx * TIRE_R_FREE_M, sy * TIRE_Y_OUT_M]] for sx in (-1, 1) for sy in (-1, 1)]))
 
 
 # ---- turn-aware planning radii (axle-centred; a diff-drive robot spins about the axle midpoint) ---------------------
