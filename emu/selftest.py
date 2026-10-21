@@ -5,12 +5,15 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import numpy as np
 from emu import world as W
 
-class A: env = sys.argv[1] if len(sys.argv) > 1 else "apartment"; seed = 0; tire = "stock"; ir = 1; rt = 1.0
+from emu import world as W
+TP = W._robot_tire_profile()
+class A: env = sys.argv[1] if len(sys.argv) > 1 else "apartment"; seed = 0; tire = TP.NAME; ir = 1; rt = 1.0
+R_W = TP.WHEEL_R_LOADED_M
 w = W.World(A()); m, d = w.m, w.d
 s0 = w.state(); print("start", {k: round(v, 3) for k, v in s0.items()})
 for _ in range(1000): w.step(time.monotonic())
 s1 = w.state(); print("after 1 s idle", {k: round(v, 3) for k, v in s1.items()})
-for n in w.nodes: n.state = n.CLOSED; n.ax.input_vel = n.dir * 0.3 / (2 * math.pi * 0.08565)   # 0.3 m/s forward
+for n in w.nodes: n.state = n.CLOSED; n.ax.input_vel = n.dir * 0.3 / (2 * math.pi * R_W)   # 0.3 m/s forward
 t = time.perf_counter()
 for _ in range(2000): w.step(time.monotonic())
 dt = time.perf_counter() - t
@@ -18,7 +21,7 @@ s2 = w.state(); print("after 2 s @0.3 m/s cmd", {k: round(v, 3) for k, v in s2.i
 print("dist %.3f m (expect ~0.55: ramp 3 turn/s^2)" % math.hypot(s2['x'] - s1['x'], s2['y'] - s1['y']))
 for n in w.nodes: n.ax.input_vel = n.dir * 0.0
 for _ in range(1000): w.step(time.monotonic())
-for n in w.nodes: n.ax.input_vel = -n.dir * 0.3 / (2 * math.pi * 0.08565) * (1 if n.id == 0 else -1) * -1
+for n in w.nodes: n.ax.input_vel = -n.dir * 0.3 / (2 * math.pi * R_W) * (1 if n.id == 0 else -1) * -1
 y0 = w.state()['yaw']
 for _ in range(1000): w.step(time.monotonic())
 print("spin: yaw %.2f -> %.2f, w=%.2f rad/s" % (y0, w.state()['yaw'], w.state()['w']))

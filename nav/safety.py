@@ -17,7 +17,7 @@ import math, time
 import numpy as np
 
 import nav  # noqa (src on path)
-from twin_geometry import SIL12, FOOTPRINT_SAFE, SAFETY_MARGIN, WHEEL_R_M                    # twin footprint polygon (+ sim deck corners)
+from twin_geometry import VEL_RAMP_TPS2 as _TG_VR, SIL12, FOOTPRINT_SAFE, SAFETY_MARGIN, WHEEL_R_M                    # twin footprint polygon (+ sim deck corners)
 
 import os
 
@@ -26,7 +26,7 @@ import os
 #   braking: ODrive vel_ramp 3 turns/s^2 (src/wheelbase.py) -> 3 * 2 pi * 0.08565 = 1.614 m/s^2 at the wheel
 #   T_ACT 0.04 s: stop command -> wheel decel (CAN/UDP 0-7 ms + velocity-loop lag ~31 ms)
 #   reaction per tick = (now - frame capture) + one frame interval + T_ACT; stale > 0.25 s
-A_BRAKE_MEAS = float(os.environ.get("KEVIN_VEL_RAMP", "3.0")) * 2 * math.pi * WHEEL_R_M
+A_BRAKE_MEAS = _TG_VR * 2 * math.pi * WHEEL_R_M
 T_ACT = 0.04
 MEASURED = os.environ.get("KEVIN_SAFETY_MEASURED", "0") == "1"
 

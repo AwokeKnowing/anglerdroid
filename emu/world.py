@@ -206,6 +206,16 @@ def _floor_model(root, asset, wb, env, level):
         "outdoor" if outdoor else "indoor", level, nc, nr, span * 1e3, mu, roll, len(getattr(env, "thresholds", [])) if level else 0, nrug, len(getattr(env, "blades", []))), flush=True)
 
 
+def _robot_tire_profile():
+    """the robot's src/tire_profile.py under its own module name: the twin's kevin_drive imports ITS tire_profile
+    (same module name, different API) from TWIN, so the robot copy must not take the 'tire_profile' slot."""
+    import importlib.util
+    if "_robot_tire_profile" not in sys.modules:
+        sp = importlib.util.spec_from_file_location("_robot_tire_profile", os.path.join(REPO, "src", "tire_profile.py"))
+        mod = importlib.util.module_from_spec(sp); sp.loader.exec_module(mod); sys.modules["_robot_tire_profile"] = mod
+    return sys.modules["_robot_tire_profile"]
+
+
 def compose(env: envs.Env, tire: str) -> str:
     kind = os.environ.get("KEVIN_EMU_MODEL", "lite")              # 'full' = full-detail twin (video / viewer)
     fn = "kevin_%s.xml" % kind if tire == "stock" else "kevin_%s_%s.xml" % (kind, tire)
@@ -535,7 +545,22 @@ class World:
         if self.dog and float(os.environ.get("KEVIN_EMU_DOG_KEEPOUT", "0") or 0) > 0:
             self.dog.keep_out = [(float(self.env.start[0]), float(self.env.start[1]), float(os.environ["KEVIN_EMU_DOG_KEEPOUT"]))]
             self.dog.clear_of(self.dog.keep_out)
+        self._ripple_init(a.tire)
         self._setup_io()
+
+    def _ripple_init(self, tire):
+        """spoke ripple (2026-10-21, James: the printed TPU tyres may be lumpy spoke to spoke): each drive tyre's contact
+        radius follows r0 + A cos(N theta + phi) with theta the wheel joint angle, N = n_spokes (20 in the STL), so the
+        axle height (ride, pitch, roll and every camera pose) ripples at N x wheel rev/s.  A = KEVIN_EMU_RIPPLE (m),
+        default the profile's spoke_ripple_m (an estimate); 0 = off.  Sim only; the twin XML is untouched."""
+        P = _robot_tire_profile().PROFILES[tire]; self.rip_n = int(P.get("n_spokes", 0))
+        self.rip_a = float(os.environ.get("KEVIN_EMU_RIPPLE", P.get("spoke_ripple_m", 0.0)))
+        self.rip = []
+        if self.rip_n <= 0 or self.rip_a <= 0: return
+        for nm, j, ph in (("wheel_left_tire", self.jl, 0.0), ("wheel_right_tire", self.jr, 1.3)):   # spokes not phase-locked L/R
+            g = self.m.geom(nm).id; r0 = float(self.m.geom_size[g][0]); k = 2 if int(self.m.geom_type[g]) == int(self.mj.mjtGeom.mjGEOM_ELLIPSOID) else 1
+            self.m.geom_rbound[g] += self.rip_a; self.rip.append((g, int(j.qposadr[0]), r0, ph, k))
+        print("emu.world: spoke ripple +-%.2f mm x %d spokes per wheel (KEVIN_EMU_RIPPLE=0 disables)" % (self.rip_a * 1e3, self.rip_n), flush=True)
 
     def _under(self, b, root):
         while b > 0:
@@ -668,6 +693,8 @@ class World:
         d = self.d
         for n, j, a, sg in ((self.nodes[0], self.jl, self.al, self.sg[0]), (self.nodes[1], self.jr, self.ar, self.sg[1])):
             d.ctrl[a] = sg * n.torque(sg * d.qvel[j.dofadr[0]] / TWO_PI, self.dt, now)
+        for g, qa, r0, ph, k in self.rip:                # spoke ripple: contact radius follows the wheel angle
+            self.m.geom_size[g][:k] = r0 + self.rip_a * math.cos(self.rip_n * d.qpos[qa] + ph)
         self.mj.mj_step(self.m, d)
         self._acc_sum = getattr(self, "_acc_sum", 0.0) + d.sensordata[self.acc:self.acc + 3]; self._acc_n = getattr(self, "_acc_n", 0) + 1
 
@@ -1087,7 +1114,8 @@ def main():
     ap.add_argument("--holes", type=float, default=0.004, help="random depth dropout fraction")
     ap.add_argument("--min-z", type=float, default=0.175, help="D435 min-Z at 848x480")
     ap.add_argument("--no-band", dest="band", action="store_false", help="disable the left invalid band")
-    ap.add_argument("--tire", default=os.environ.get("KEVIN_TIRE", "stock")); ap.add_argument("--ir", type=int, default=int(os.environ.get("KEVIN_EMU_IR", "0")),
+    _TP = _robot_tire_profile()                       # default = src/tire_profiles.json (soft_v3_2 since 2026-10-21)
+    ap.add_argument("--tire", default=_TP.NAME, type=_TP.resolve); ap.add_argument("--ir", type=int, default=int(os.environ.get("KEVIN_EMU_IR", "0")),
                     help="render the IR stereo pairs (4 x 848x480, 45 %% of the slow lane).  Only KEVIN_SLAM=cuv / scripts/bench stereo read them; default off")
     ap.add_argument("--rt", type=float, default=1.0, help="real-time factor (1.0 = wall clock; robot code assumes 1.0)")
     a = ap.parse_args()

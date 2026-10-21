@@ -32,6 +32,15 @@ def frame(name):
 
 WHEEL_R_M = _G["wheel_r_m"] * CALIB.get("wheel_r_scale", 1.0)
 TRACK_M = _G["track_m"] * CALIB.get("track_scale", 1.0)
+# ODrive limits are set in TURNS (vel_ramp_rate turns/s^2, vel_limit turns/s).  The values were chosen on the stock
+# 85.65 mm wheel; the rim (m/s, m/s^2) values are kept for every tyre (2026-10-21, soft tyres R 100.65 mm):
+#   ramp 3.0 turns/s^2 = 1.614 m/s^2, ramp_max 5.0 = 2.691 m/s^2, vel_limit 4.0 turns/s = 2.153 m/s on the stock wheel.
+# KEVIN_VEL_RAMP (turns/s^2) still overrides the normal ramp.  Stock profile: exactly 3.0 / 5.0 / 4.0 as before.
+WHEEL_R_STOCK_M = 0.08565                            # twin stock tyre (src/tire_profiles.json 'stock')
+TPS_SCALE = WHEEL_R_STOCK_M / WHEEL_R_M              # turns per stock turn for the same rim speed (1.0 stock, 0.851 soft)
+VEL_RAMP_TPS2 = float(os.environ["KEVIN_VEL_RAMP"]) if os.environ.get("KEVIN_VEL_RAMP") else 3.0 * TPS_SCALE
+VEL_RAMP_MAX_TPS2 = 5.0 * TPS_SCALE
+VEL_LIMIT_TPS = 4.0 * TPS_SCALE
 # Angular velocity limit (James 2026-10-19): exactly 90 deg/s, for every w cap (planner, nav command cap, LightNav
 # follower via the planner, wheelbase/teleop clamp).  KEVIN_WMAX may only LOWER it.  At 30 Hz = 3 deg per camera frame.
 W_MAX_RADS = min(math.pi / 2, float(os.environ.get("KEVIN_WMAX", math.pi / 2)))

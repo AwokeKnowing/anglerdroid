@@ -9,7 +9,7 @@ import sys as _sys
 _SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src')
 if _SRC_DIR not in _sys.path: _sys.path.append(_SRC_DIR)
 from twin_geometry import WHEEL_R_M as _WHEEL_R, SAFETY_MARGIN as _SAFETY_MARGIN, R_CIRC as _R_CIRC, W_MAX_RADS as _W_MAX, A_LON as _A_LON, A_LAT as _A_LAT, ALPHA_MAX as _ALPHA_MAX   # noqa: E402
-VEL_RAMP_TPS2 = float(os.environ.get("KEVIN_VEL_RAMP", "3.0"))   # same knob/default as src/wheelbase.py set_vel_ramp_rate
+from twin_geometry import VEL_RAMP_TPS2   # noqa: E402  same knob/default as src/wheelbase.py set_vel_ramp_rate (KEVIN_VEL_RAMP; rim m/s^2 kept per tyre)
 
 class Limits:
     v_max=min(0.6, float(os.environ.get("KEVIN_VMAX", "0.6"))); v_min=-0.2;   # KEVIN_VMAX: bring-up speed cap   # reverse capped at 0.2 m/s (James 2026-10-13: too much reversing)

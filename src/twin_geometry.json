@@ -362,10 +362,10 @@
    "twin_urdf": "urdf/kevin.urdf"
   },
   "soft_v3_2": {
-   "wheel_r_m": 0.1,
-   "ride_dz_m": 0.01435,
+   "wheel_r_m": 0.10065,
+   "ride_dz_m": 0.015,
    "track_m": 0.362,
-   "axle_height_m": 0.1,
+   "axle_height_m": 0.10065,
    "rs2_pitch_down_deg": 27.0,
    "frames": {
     "rs1_depth": {
@@ -391,7 +391,7 @@
        -1.0
       ]
      ],
-     "height_above_floor": 0.961945
+     "height_above_floor": 0.962595
     },
     "rs1_color": {
      "xyz": [
@@ -416,7 +416,7 @@
        -1.0
       ]
      ],
-     "height_above_floor": 0.961945
+     "height_above_floor": 0.962595
     },
     "rs1_ir1": {
      "xyz": [
@@ -441,7 +441,7 @@
        -1.0
       ]
      ],
-     "height_above_floor": 0.961945
+     "height_above_floor": 0.962595
     },
     "rs1_ir2": {
      "xyz": [
@@ -466,7 +466,7 @@
        -1.0
       ]
      ],
-     "height_above_floor": 0.961945
+     "height_above_floor": 0.962595
     },
     "rs2_depth": {
      "xyz": [
@@ -491,7 +491,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.482213
+     "height_above_floor": 0.482863
     },
     "rs2_color": {
      "xyz": [
@@ -516,7 +516,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.482213
+     "height_above_floor": 0.482863
     },
     "rs2_ir1": {
      "xyz": [
@@ -541,7 +541,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.482213
+     "height_above_floor": 0.482863
     },
     "rs2_ir2": {
      "xyz": [
@@ -566,7 +566,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.482213
+     "height_above_floor": 0.482863
     },
     "rs2_imu": {
      "xyz": [
@@ -591,7 +591,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.492087
+     "height_above_floor": 0.492737
     },
     "rs2_gyro": {
      "xyz": [
@@ -616,7 +616,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.492087
+     "height_above_floor": 0.492737
     },
     "rs2_accel": {
      "xyz": [
@@ -641,7 +641,7 @@
        -0.45399
       ]
      ],
-     "height_above_floor": 0.492087
+     "height_above_floor": 0.492737
     },
     "rgb": {
      "xyz": [
@@ -666,7 +666,7 @@
        0.0
       ]
      ],
-     "height_above_floor": 0.9905
+     "height_above_floor": 0.99115
     },
     "wheel_left": {
      "xyz": [
@@ -691,7 +691,7 @@
        1.0
       ]
      ],
-     "height_above_floor": 0.1
+     "height_above_floor": 0.10065
     },
     "wheel_right": {
      "xyz": [
@@ -716,7 +716,7 @@
        1.0
       ]
      ],
-     "height_above_floor": 0.1
+     "height_above_floor": 0.10065
     }
    },
    "twin_urdf": "urdf/kevin_soft_v3_2.urdf"

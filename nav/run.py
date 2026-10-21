@@ -109,7 +109,7 @@ class Brain:
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
         self._cmd_lock = threading.Lock(); self._pending = []
         from nav.predict import CmdPredictor
-        self.pred = CmdPredictor(float(os.environ.get("KEVIN_VEL_RAMP", "3.0")))
+        self.pred = CmdPredictor(_TG.VEL_RAMP_TPS2)
         self._ctl_cv = threading.Condition(); self._t_iss = 0.0; self._snap = None; self._snap_n = 0; self._latched_g = None
         self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
@@ -832,10 +832,26 @@ class Brain:
                                     None if info.get("age") is None else round(info["age"], 4)]) + "\n")
         if self.rec is not None:
             r1 = getattr(self.hw.rs1, "depth", None); r2 = getattr(self.hw.rs2, "depth", None); im = getattr(self.hw, "imu", None)
+            # 2026-10-21 spoke-ripple test: RS1 (top-down) floor depth per frame.  When the safety core owns RS1 the brain
+            # has no RS1 depth image to record, so log the mean camera z (m, sub-mm unlike a median of mm depth) of the floor points (0.85-1.2 m: the floor
+            # sits at ~0.96 m; the robot's own deck below the lens and obstacles are nearer): rs1_zc, rs1_zn points
+            _V = None; rs1_zc = rs1_zn = None
+            if r1 is None and getattr(self.hw, "bus", None) is not None:
+                try:                                   # own read buffer: never touches the brain's RS1 reader state
+                    from nav.safety_core import _read_rs1
+                    _, _, self._rec_rs1 = _read_rs1(self.hw.bus["rs1"], getattr(self, "_rec_rs1", {})); _V = self._rec_rs1["verts"]
+                except Exception: _V = None
+            if r1 is None and _V is not None and len(_V):
+                _c = _V[(_V[:, 2] > 0.85) & (_V[:, 2] < 1.2)]
+                rs1_zn = int(len(_c)); rs1_zc = float(_c[:, 2].mean()) if len(_c) else None
             self.rec.put(t=t_frame, t_od=getattr(self, "_t_od", t_frame), v=v, w=w, vl=vl, vr=vr, gz=gz, intr=self.hw.rs2_intr, pose=list(self.navpose()), odom=list(self.slam.odom.pose), mode=self.mode, safety=getattr(self, "_last_safety", None),
                          rs1=None if r1 is None else r1.copy(), rs2=None if r2 is None else r2.copy(),
                          accel=None if im is None else np.array(im.accel, np.float32), gyro=None if im is None else np.array(im.gyro, np.float32),
-                         imu_t=None if im is None else getattr(im, "timestamp", None))
+                         imu_t=None if im is None else getattr(im, "timestamp", None),
+                         rs1_zc=rs1_zc, rs1_zn=rs1_zn,
+                         # 2026-10-21: every RS2 IMU sample since the last tick (~7 gyro / 8 accel per tick; spoke-ripple test)
+                         **({} if getattr(self.hw, "imu_batch", None) is None else dict(imu_g=self.hw.imu_batch[0], imu_a=self.hw.imu_batch[1], imu_ts=self.hw.imu_batch[2])))
+            self.hw.imu_batch = None
         t1 = time.monotonic()
         self.stats.add("loop_ms", (t1 - t0) * 1e3); self.stats.add("frame_to_cmd_ms", (t1 - t_frame) * 1e3)
         if hasattr(self, "_tl"): self.stats.add("period_ms", (t0 - self._tl) * 1e3)

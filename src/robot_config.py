@@ -21,7 +21,7 @@ if _TIRE_WHEEL_D_CM is not None:
 # (scripts/gen_twin_geometry.py, per KEVIN_TIRE profile) + src/calibration.json (reality->model hook).
 # Was: WHEEL_DIAMETER_CM 17.0 (tape), WHEEL_HALFTRACK_CM 17.7 -> track 0.354.
 import twin_geometry as _TG  # noqa: E402
-WHEEL_DIAMETER_CM = 200.0 * _TG.WHEEL_R_M          # stock 17.13 (R 0.08565); soft_v3_2 20.0
+WHEEL_DIAMETER_CM = 200.0 * _TG.WHEEL_R_M          # stock 17.13 (R 0.08565); soft_v3_2 20.13 (R 0.10065, 2026-10-21)
 WHEEL_HALFTRACK_CM = 50.0 * _TG.TRACK_M            # 18.1 (tire contact centre; twin track 0.362)
 WHEELBASE_CM = 2.0 * WHEEL_HALFTRACK_CM            # 36.2
 WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0         # 0.08565

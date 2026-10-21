@@ -223,6 +223,7 @@ class Hardware:
                 gs, acs, ts, self._ring_since = self.imu.drain_ring(getattr(self, "_ring_since", 0), max_n=400)
                 if len(gs):
                     G = gs.astype(float); A = acs.astype(float); ts = np.asarray(ts, float)
+                    self.imu_batch = (gs, acs, ts)            # raw full-rate samples since last tick (KEVIN_RECORD imu_g/imu_a/imu_ts)
                     t_prev = getattr(self, "_gyro_tlast", None)
                     dts = np.diff(np.r_[ts[0] if t_prev is None else t_prev, ts])
                     if np.all(dts >= 0) and dts.max() < 0.25:

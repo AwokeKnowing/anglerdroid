@@ -1,8 +1,12 @@
 {
- "_doc": "Kevin tire profiles: single source of truth (mirrored byte-identical in anglerdroid src/tire_profiles.json and kevin-urdf-twin simready/tire_profiles.json). Select with env KEVIN_TIRE=stock|soft_v3_2 (twin: also --tire flag / ?tire= URL param). Default stock until James confirms the soft tires are installed. See docs/tire_profiles.md.",
+ "_doc": "Kevin tire profiles: single source of truth (mirrored byte-identical in anglerdroid src/tire_profiles.json and kevin-urdf-twin simready/tire_profiles.json). Select with env KEVIN_TIRE=stock|soft_v3_2 (twin: also --tire flag / ?tire= URL param). Default soft_v3_2 since 2026-10-21 (James fitted the tyres 2026-10-20; KEVIN_TIRE=stock = old tyres). See docs/tire_profiles.md.",
  "env": "KEVIN_TIRE",
- "default": "stock",
- "aliases": {"soft": "soft_v3_2", "stock": "stock", "botwheel": "stock"},
+ "default": "soft_v3_2",
+ "aliases": {
+  "soft": "soft_v3_2",
+  "stock": "stock",
+  "botwheel": "stock"
+ },
  "profiles": {
   "stock": {
    "label": "ODrive BotWheel stock rubber tire",
@@ -14,30 +18,55 @@
    "ride_dz_m": 0.0,
    "caster_spacer_m": 0.0,
    "radial_k_n_per_mm": null,
-   "mj_tire_solref": [0.004, 1],
-   "mj_tire_solimp": [0.95, 0.99, 0.001],
-   "tire_friction": [0.9, 0.005, 0.0001],
+   "mj_tire_solref": [
+    0.004,
+    1
+   ],
+   "mj_tire_solimp": [
+    0.95,
+    0.99,
+    0.001
+   ],
+   "tire_friction": [
+    0.9,
+    0.005,
+    0.0001
+   ],
    "twin_urdf": "urdf/kevin.urdf",
    "suffix": "",
    "status": "measured (twin geometry); robot_config keeps James's tape value 17.0 cm"
   },
   "soft_v3_2": {
    "label": "KevinFlex soft over-tire v3.2 (95A TPU, 20 spokes)",
-   "wheel_r_loaded_m": 0.100,
+   "wheel_r_loaded_m": 0.10065,
    "wheel_r_free_m": 0.1038,
-   "robot_wheel_diameter_cm": 20.0,
+   "robot_wheel_diameter_cm": 20.13,
    "wheel_mass_kg": 2.37,
    "tire_extra_mass_kg": 0.17,
-   "ride_dz_m": 0.01435,
-   "caster_spacer_m": 0.01435,
-   "radial_k_n_per_mm": 14.0,
-   "mj_tire_solref": [0.0446, 1],
-   "mj_tire_solimp": [0.5, 0.5, 0.001],
-   "_mj_note": "solref/solimp calibrated in kevin_full_soft: 3.8 mm static sink at 49 N/wheel = 12.9 N/mm, free R 103.8 -> loaded 100.0 mm; bounce ~7 Hz",
-   "tire_friction": [0.9, 0.005, 0.0001],
+   "ride_dz_m": 0.015,
+   "caster_spacer_m": 0.015,
+   "radial_k_n_per_mm": 15.6,
+   "mj_tire_solref": [
+    0.0282,
+    1
+   ],
+   "mj_tire_solimp": [
+    0.5,
+    0.5,
+    0.001
+   ],
+   "_mj_note": "v311 (2026-10-21): solref 0.0282 -> axle settles at 0.10066 m, pitch -0.066 deg (stock -0.062) on the twin floor: free R 103.8 (STL) -> loaded 100.65 mm = stock 85.65 + 15 (James), 3.15 mm sink (~15.6 N/mm at ~49 N/wheel). v308 solref 0.0446 settled at 0.0966 on the twin floor (its 0.0999 note was measured with a different floor).",
+   "tire_friction": [
+    0.9,
+    0.005,
+    0.0001
+   ],
    "twin_urdf": "urdf/kevin_soft_v3_2.urdf",
    "suffix": "_soft_v3_2",
-   "status": "NOMINAL design values - re-measure loaded radius (roll 10 turns) and ride height after install; friction unmeasured (stock value kept)"
+   "status": "FITTED 2026-10-20 (James). Loaded R = stock + 15 mm per James (design +14.35 loaded / +18.15 free); caster lowered 15 mm by James (chassis level). Re-measure loaded radius (roll 10 turns: distance / 20 pi) and ride height; friction unmeasured (stock value kept).",
+   "n_spokes": 20,
+   "spoke_ripple_m": 0.0002,
+   "_ripple_note": "per-wheel axle-height ripple at n_spokes x wheel angle: +-0.2 mm ESTIMATED (stiffness ripple ~+-6 % of the 3.15 mm sink as the 32 mm spoke pitch passes under a ~50 mm contact patch); unmeasured: REALTEST item measures it. emu: KEVIN_EMU_RIPPLE (m, 0 = off)."
   }
  }
 }
