@@ -25,7 +25,7 @@ class ODriveAxisCAN:
     CMD_SET_INPUT_TORQUE = 0x0e
     CMD_CLEAR_ERRORS = 0x18
 
-    DEFAULT_VEL_RAMP_RATE = 3.0
+    DEFAULT_VEL_RAMP_RATE = 3.0   # stock-wheel values; the __main__ bench below uses the resolved ones (robot_params)
     DEFAULT_VEL_LIMIT = 4.0
     DEFAULT_WATCHDOG_TIMEOUT_S = 2.5
 
@@ -90,6 +90,13 @@ class ODriveAxisCAN:
             is_extended_id=False
         ))
         time.sleep(0.005)
+
+    def write_property_nowait(self, property: str, value):
+        """write_property without the 5 ms settle sleep (safety core: brake ramp change in the same tick)."""
+        if property not in self.endpoints: return
+        ep_id = self.endpoints[property]['id']; fmt = self.format_lookup[self.endpoints[property]['type']]
+        self._safe_send(can.Message(arbitration_id=(self.node_id << 5 | self.CMD_RX_SDO),
+                                    data=struct.pack('<BHB' + fmt, 0x01, ep_id, 0, value), is_extended_id=False))
 
     def read_property(self, property: str) -> Optional[Union[int, float, bool]]:
         if property not in self.endpoints:
@@ -200,17 +207,31 @@ class ODriveAxisCAN:
             return None
 
     @staticmethod
-    def poll_encoder_vels(bus, node_ids=(0, 1), timeout=0.04):
+    def poll_encoder_vels(bus, node_ids=(0, 1), timeout=0.04, iq_out=None):
         """One recv window for cyclic Get_Encoder_Estimates on several nodes.
 
         Sequential per-axis waits drop the other wheel's 100 Hz frames and
         look like encoder failure. Returns dict node_id -> vel (missing=None).
+        iq_out: optional dict; cyclic Get_Iq (0x14, s1-odrive-config iq_msg_rate_ms=10) frames seen in the same
+        window store iq_out[node_id] = (Iq_measured A, time.monotonic()).  Read-only: nothing is sent.
         """
+        iq_ids = {(int(n) << 5 | 0x14): int(n) for n in node_ids} if iq_out is not None else {}
         want = {int(n): None for n in node_ids}
         ids = {(int(n) << 5 | ODriveAxisCAN.CMD_GET_ENCODER_ESTIMATES): int(n)
                for n in node_ids}
         deadline = time.time() + float(timeout)
         try:
+            # Drain what is already queued and keep the NEWEST value per node. The S1 streams ~600 frames/s/node
+            # (s1-odrive-config: encoder/iq/torque/error/temp/vbus @10 ms); reading 2 frames per 70 ms cycle from the
+            # head of the socket queue returned values 1-5 s stale (found in the Jetson emulator, docs/fullstack.md).
+            while True:
+                msg = bus.recv(timeout=0)
+                if msg is None:
+                    break
+                if (not msg.is_remote_frame and len(msg.data) >= 8 and msg.arbitration_id in ids):
+                    want[ids[msg.arbitration_id]] = struct.unpack_from('<ff', msg.data)[1]
+                elif iq_ids and not msg.is_remote_frame and len(msg.data) >= 8 and msg.arbitration_id in iq_ids:
+                    iq_out[iq_ids[msg.arbitration_id]] = (struct.unpack_from('<ff', msg.data)[1], time.monotonic())
             while time.time() < deadline and any(v is None for v in want.values()):
                 msg = bus.recv(timeout=0.015)
                 if (not msg or msg.is_remote_frame or len(msg.data) < 8
@@ -283,10 +304,11 @@ if __name__ == "__main__":
         time.sleep(0.8)
 
         # Apply ramp rate
-        left.set_vel_ramp_rate(ODriveAxisCAN.DEFAULT_VEL_RAMP_RATE)
-        right.set_vel_ramp_rate(ODriveAxisCAN.DEFAULT_VEL_RAMP_RATE)
-        left.set_vel_limit(ODriveAxisCAN.DEFAULT_VEL_LIMIT)
-        right.set_vel_limit(ODriveAxisCAN.DEFAULT_VEL_LIMIT)
+        import robot_params as _RP   # resolved: the selected wheels' turn limits (same rim m/s as the stock 3.0 / 4.0)
+        left.set_vel_ramp_rate(_RP.V["vel_ramp_tps2"])
+        right.set_vel_ramp_rate(_RP.V["vel_ramp_tps2"])
+        left.set_vel_limit(_RP.V["vel_limit_tps"])
+        right.set_vel_limit(_RP.V["vel_limit_tps"])
 
         # === SHARED BURST FEEDING (both nodes fed together) ===
         print("Joint burst-feeding zero velocity to BOTH nodes (3 seconds)...")

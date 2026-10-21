@@ -71,12 +71,12 @@ def ppo(net, opt, buf, clip=0.2, entropy=0.015, epochs=3, minibatch=2048, gamma=
 
 
 def maybe_advance(env, st):
-    cover = st.get("cover", 0.0)
+    rewards = st.get("rewards", st.get("cover", 0.0))
     crash = st["crash_frac"]
     need = (0.32, 0.45, 0.55, 0.65, 0.72)
     if env.stage >= 5:
         return
-    if crash < 0.25 and cover >= need[env.stage]:
+    if crash < 0.25 and rewards >= need[env.stage]:
         env.set_curriculum(env.stage + 1)
         print("curriculum → stage %d movers=%d"
               % (env.stage, env.n_movers_hp),
@@ -159,9 +159,9 @@ def main():
             except OSError:
                 print("ckpt skip", e, flush=True)
     print(
-        "rl_nav train N=%d horizon=%d ep=%.0fs tour=%.0fs crash=%.2f stall=%.3f "
+        "rl_nav train %s N=%d horizon=%d ep=%.0fs tour=%.0fs crash=%.2f stall=%.3f "
         "yaw=%.3f ent=%.3f eval/%dM"
-        % (env.n, horizon, K.EP_S, K.T_TOUR_S, env.crash_coef, env.stall_coef,
+        % (K.BEHAVIOR, env.n, horizon, K.EP_S, K.T_TOUR_S, env.crash_coef, env.stall_coef,
            env.yaw_coef, ent_coef, EVAL_EVERY // 1_000_000),
         flush=True,
     )
@@ -204,12 +204,13 @@ def main():
                 print(
                     "upd %d step=%d sps=%.0f ent=%.3f gpu=%.0fMiB hits=%.2f path=%.2f "
                     "crash=%.2f clear=%.2f liveh=%.2f px=%.2f stg=%d ep=%d "
-                    "loss=%.3f ret=%.3f ceil=%.2f cover=%.3f"
+                    "loss=%.3f ret=%.3f ceil=%.2f rewards=%.3f contact=%.1f cfrac=%.3f stuck_s=%.1f"
                     % (n_upd, step, sps_ema, ent, used, st["mean_hits"], st["mean_path"],
                        st["crash_frac"], st["clear_frac"], st.get("live_hits", 0.0),
                        st["mean_plus_x"], st["stage"], st["n_ep"],
                        last_loss, st.get("mean_ret", 0.0), st.get("ceil", 1.0),
-                       st.get("cover", 0.0)),
+                       st.get("rewards", st.get("cover", 0.0)), st.get("contact", 0.0),
+                       st.get("contact_frac", 0.0), st.get("contact_s", 0.0)),
                     flush=True,
                 )
                 rec = {
@@ -227,7 +228,11 @@ def main():
                     "ret": st.get("mean_ret", 0.0),
                     "ceil": st.get("ceil", 1.0),
                     "ret_ceil": st.get("ret_ceil", 2.0),
-                    "cover": st.get("cover", 0.0),
+                    "rewards": st.get("rewards", st.get("cover", 0.0)),
+                    "cover": st.get("rewards", st.get("cover", 0.0)),
+                    "contact": st.get("contact", 0.0),
+                    "contact_frac": st.get("contact_frac", 0.0),
+                    "stuck_s": st.get("contact_s", 0.0),
                     "ent_coef": ent_coef,
                     "crash_coef": env.crash_coef,
                     "stall_coef": env.stall_coef,

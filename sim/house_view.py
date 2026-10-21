@@ -75,6 +75,40 @@ def _box_mesh(cx, cy, cz, hx, hy, hz, yaw=0.0, rgba=(0.85, 0.80, 0.70, 1.0)):
     return pos, col
 
 
+def pixel_to_floor_xy(sx, sy, width, height, eye=(0.12, -2.6, 21.0),
+                      target=(0.12, 0.4, 0.0), up=(0.0, 0.0, 1.0), fov_deg=50.0):
+    """Unproject a pyglet window pixel (origin bottom-left) onto z=0."""
+    aspect = float(width) / max(1.0, float(height))
+    tan_y = math.tan(math.radians(float(fov_deg)) * 0.5)
+    ndc_x = (2.0 * float(sx) / max(1.0, float(width))) - 1.0
+    ndc_y = (2.0 * float(sy) / max(1.0, float(height))) - 1.0
+    eye = np.asarray(eye, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    up = np.asarray(up, dtype=np.float64)
+    fwd = target - eye
+    fn = np.linalg.norm(fwd)
+    if fn < 1e-9:
+        return float(target[0]), float(target[1])
+    fwd = fwd / fn
+    right = np.cross(fwd, up)
+    rn = np.linalg.norm(right)
+    if rn < 1e-9:
+        right = np.array((1.0, 0.0, 0.0))
+    else:
+        right = right / rn
+    cam_up = np.cross(right, fwd)
+    direction = fwd + right * (ndc_x * tan_y * aspect) + cam_up * (ndc_y * tan_y)
+    dn = np.linalg.norm(direction)
+    if dn < 1e-9 or abs(direction[2]) < 1e-9:
+        return float(target[0]), float(target[1])
+    direction = direction / dn
+    t = -eye[2] / direction[2]
+    if t <= 0.0:
+        return float(target[0]), float(target[1])
+    hit = eye + t * direction
+    return float(hit[0]), float(hit[1])
+
+
 def _disk_mesh(cx, cy, z, radius, rgba, n=18):
     pos = []
     col = []
@@ -142,6 +176,10 @@ class HouseView:
             x=self.w * 0.5, y=self.h - 44, anchor_x="center", anchor_y="top",
             color=(255, 230, 120, 255),
         )
+        self.on_click = None
+        self.last_click = None
+        self.goal_xy = None
+        self.win.push_handlers(on_mouse_press=self._on_mouse_press)
 
         x0, x1, y0, y1 = floor_aabb
         pos, col = [], []
@@ -183,6 +221,34 @@ class HouseView:
             flush=True,
         )
 
+    def _on_mouse_press(self, mx, my, button, modifiers):
+        from pyglet.window import mouse
+        if button in (mouse.RIGHT, mouse.MIDDLE):
+            self.last_click = None
+            self.goal_xy = None
+            print("house click clear", flush=True)
+            cb = self.on_click
+            if cb:
+                cb(None, None)
+            return
+        if button != mouse.LEFT:
+            return
+        wx, wy = pixel_to_floor_xy(mx, my, self.win.width, self.win.height)
+        self.last_click = (wx, wy)
+        self.goal_xy = (wx, wy)
+        print("house click (%.2f, %.2f)" % (wx, wy), flush=True)
+        cb = self.on_click
+        if cb:
+            cb(wx, wy)
+
+    def poll_events(self):
+        if self.closed:
+            return
+        try:
+            self.win.dispatch_events()
+        except Exception:
+            self.close()
+
     def close(self):
         if self.closed:
             return
@@ -214,6 +280,7 @@ class HouseView:
     def present(self, pos_xy, yaw, trail=None, people=None, chat="", note="", rt=0.0, min_dt=1.0 / 20.0):
         if self.closed:
             return
+        self.poll_events()
         now = time.monotonic()
         if now - self.last < min_dt:
             return
@@ -235,6 +302,11 @@ class HouseView:
         p, c = _box_mesh(nx, ny, 0.16, 0.04, 0.05, 0.04, yaw=float(yaw), rgba=(0.95, 0.85, 0.20, 1.0))
         pos.extend(p)
         col.extend(c)
+        mark = self.goal_xy or self.last_click
+        if mark is not None:
+            p, c = _disk_mesh(float(mark[0]), float(mark[1]), 0.05, 0.18, (0.95, 0.35, 0.20, 1.0))
+            pos.extend(p)
+            col.extend(c)
         for pe in (people if people is not None else self._people):
             mood = bool(pe.get("mood", True))
             rgba = (0.35, 0.85, 0.45, 1.0) if mood else (0.75, 0.45, 0.45, 1.0)
@@ -275,7 +347,11 @@ class HouseView:
         self.win.clear()
         self.win.dispatch_events()
         self.batch.draw()
-        self._status.text = "rt=%.1fx  (%.2f, %.2f)  %s" % (float(rt), px, py, note or "")
+        g = self.goal_xy or self.last_click
+        gtxt = "goal=(%.2f,%.2f)" % (g[0], g[1]) if g is not None else "L-click pin  R-click clear"
+        self._status.text = "rt=%.1fx  (%.2f, %.2f)  %s  %s" % (
+            float(rt), px, py, gtxt, note or "",
+        )
         self._status.y = self.win.height - 18
         self._status.draw()
         self._bubble.text = chat or ""

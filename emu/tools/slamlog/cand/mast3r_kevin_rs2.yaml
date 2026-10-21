@@ -1,0 +1,4 @@
+width: 640
+height: 480
+# Kevin RS2 colour (sim twin, no distortion): fx, fy, cx, cy
+calibration: [625.2213755265124, 625.2213755265124, 319.5, 239.5]

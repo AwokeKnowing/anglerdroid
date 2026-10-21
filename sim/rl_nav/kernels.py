@@ -2,13 +2,15 @@
 """Warp kernels for a map-free Kevin explorer.
 
 Sensing matches live ego: RS1 top-down rectangle union RS2 80° / 2.5 m cone.
-Objective is fog-of-war floor coverage: ~0.4 m tiles stamped in a body
-disk with wall LOS (no paint through walls). Not coin-chasing, not FOV
-flood. Ego is occupancy only. Persistence is a 64-byte memory. Cover
-fraction is in the vector — never painted on the ego raster.
+Objective is a behavior-specific reward. ExhaustiveExplore treated every
+walkable ~0.4 m tile as a reward (go everywhere). WanderAround only mints
+tiles ≥50 cm from obstacles; claiming one deletes others within 2 m, so
+max rewards ≈ open-floor area / (2 m)² — not every tile.
 
-Throttle air-gap is 30% of live SafetyGuard (70% smaller vs touching):
-50% v then hard stop, then footprint hit = crash.
+Throttle matches live SafetyGuard (`src/safety.py`): smoothstep 1→30 cm
+from the FOOT scan edges, lateral 2→9 cm, escape-spin floor when the
+nose/tail is pinned. Hull contact rejects the step (reverse/yaw still
+legal). Episode does not end on a wall — Kevin does not.
 """
 from __future__ import annotations
 
@@ -26,7 +28,7 @@ N_W = 8
 # Live 320×240 @ 1 cm → 80×60 @ 4 cm (hard to tell from the bag downsample).
 EGO_H = 60
 EGO_W = 80
-N_FOOT = 8
+N_FOOT = 8  # unused; contact is HULL_NX×HULL_NY + wall corners
 N_SUB = 4
 # Fog tiles (~0.40 m). Painted in a body disk with wall LOS — not FOV,
 # not 2.4 m view cells (those were farmed by weaving a column edge).
@@ -35,32 +37,94 @@ SEC_NY = 37
 SEC_N = SEC_NX * SEC_NY
 PAINT_R = 0.90
 PAINT_WIN = 7
-# vec: v, w, plus_x, t, cover, v_scale, w_scale. No goal / hint bearing.
+# WanderAround: reward tiles live only in the open (50 cm from furniture),
+# and collecting one deletes LOS tiles within 2 m (no extra reward; walls
+# keep the far room available).
+TILE_CLEAR_M = 0.50
+DELETE_R = 2.00
+DELETE_WIN = 6
+BEHAVIOR = "WanderAround"
+# General rewards metric: collected / packing-budget.
+#   REWARD_CELL_M2 = 0 → one reward per valid tile (ExhaustiveExplore)
+#   REWARD_CELL_M2 > 0 → max rewards = open area / this many m²
+#   WAYPOINT_REWARD = 1 → a paint with nnew>0 counts as one claim
+REWARD_CELL_M2 = DELETE_R * DELETE_R
+WAYPOINT_REWARD = 1
+# Tile flags in `seen`: 0 free, 1 paid paint, 2 LOS-suppressed (no reward).
+SEEN_PAINT = 1
+SEEN_SUPPRESS = 2
+# vec: v, w, plus_x, t, rewards, v_scale, w_scale. No goal / hint bearing.
 VEC_N = 7
 
 FLOOR_X0, FLOOR_X1 = -3.55, 3.75
 FLOOR_Y0, FLOOR_Y1 = -7.45, 7.45
 WALL_T = 0.08
 WALL_H = 2.15
-TRACK_M = 0.34
-NOSE = 0.15
+TRACK_M = 0.354
+NOSE = 0.18
 V_MAX = 0.25
 W_MAX = 0.80
 V_REV = -0.20
 A_MAX = 1.61
 ALPHA_MAX = 4.0
+# Carpet plant from wander_5min_pilot 5 s twist_for (safety 1, no collision):
+#   0.10 m/s → 0.392 / 0.379 m vs 0.50  → slip_v 0.784 / 0.758 (median 0.77)
+#   0.25 rad/s → 70.4° vs 71.6°          → slip_w 0.98
+# Pose integrates slipped v/w. Reported v/w stay the slewed command (live vec).
+# One 5 Hz tick of cmd delay (infer → wheels), not the 1 s twist_for ramp.
+SLIP_V = 0.77
+SLIP_W = 0.98
+DELAY_STEPS = 1
 
-# Live BRAKE_START ≈ 0.30 m. Old 8 cm only fired on the crash frame.
-# Policy sees the mark; motion scales the same way as Kevin fwd/bwd/ang.
-THROT_M = 0.28
-STOP_M = 0.04
-THROT_SIDE_M = 0.18
-STOP_SIDE_M = 0.04
-THROT_BWD_M = 0.20
-STOP_BWD_M = 0.04
+# Live SafetyGuard (`src/safety.py` + `robot_config.FOOT_*`), metres.
+# Tape 2026-09-17: front 180 mm, body aft 180 mm, caster 200 mm,
+# half-track 177 mm, wheel r 85 mm. Wander keep-clear 250 mm from axle.
+# Live scans are STRIPS the width of the FOOT, not centre rays:
+#   fwd  FOOT_X1:+X  across y ∈ ±FOOT_LAT
+#   bwd  FOOT_X0:−X  across y ∈ ±FOOT_LAT
+#   lat  FOOT_Y :±Y  across x ∈ ±half-diagonal
+# One ang_scale = f(min(left,right)) — a wall on one side kills BOTH
+# yaw signs. Independent L/R scales let sim spin the far corner into
+# the wall (rectangle, not a circle).
+# fwd/bwd: MIN_CLEARANCE 1 cm → 0, BRAKE_START 30 cm → 1, smoothstep.
+# Lateral: LAT_HARD 2 cm → 0, LAT_SAFE 9 cm → 1, linear.
+# Escape floors ang when the nose/tail is pinned (same numbers as live).
+# Rectangle contact still rejects a yaw that would sweep a corner in —
+# that is why real Kevin has to reverse before turning.
+SCAN_FWD_LX = 0.18
+SCAN_BWD_LX = -0.20
+SCAN_SIDE_LY = 0.25
+SCAN_FACE_HALF = 0.25
+N_STRIP = 9
+# Physical hull (body ±180 mm, caster to 200 mm, wheels at ±177 mm
+# hub + 50 mm self-mask tread). Rotated AABB; corners included.
+HULL_X0 = -0.20
+HULL_X1 = 0.18
+HULL_Y0 = -0.227
+HULL_Y1 = 0.227
+HULL_NX = 6
+HULL_NY = 6
+STOP_M = 0.01
+THROT_M = 0.30
+STOP_BWD_M = 0.01
+THROT_BWD_M = 0.30
+LAT_HARD_M = 0.02
+LAT_SAFE_M = 0.09
+THROT_SIDE_M = LAT_SAFE_M
+STOP_SIDE_M = LAT_HARD_M
+ESCAPE_FWD = 0.20
+ESCAPE_BWD = 0.08
+ESCAPE_ANG_FLOOR = 0.45
+ESCAPE_ANG_HARD = 0.30
+CONTACT_PEN = 0.05
+# WanderAround: axle within 40 cm of furniture/walls. Small vs a claim (~1.0).
+# 0.005/step → a full 20 min hug ≈ 30; typical 20% near ≈ 6 (about one claim).
+NEAR_CLEAR_M = 0.40
+NEAR_PEN = 0.005
 THROT_MARK = 0.20
 MOVER_R = 0.28
-BODY_R = 0.18
+BODY_R = 0.20
+WANDER_CLEAR_R = 0.25
 
 # RS1 rectangle in body metres (x forward, y left). Live bbox after
 # TD_X_OFFSET; painting uses the bag-baked FOV stencil, not this AABB.
@@ -123,16 +187,17 @@ _VIEW_SY = (FLOOR_Y1 - FLOOR_Y0) / 6.0
 SEC_PITCH = 0.5 * (_VIEW_SX + _VIEW_SY)
 T_TOUR_S = 17.0 * SEC_PITCH / V_MAX
 # Discovery: ~438 free 0.40 m tiles, walk ≈ 0.56 → ~61 m².
+# WanderAround packing: that area / 4 m² ≈ 8–10 claims, not 438 tiles.
 # Hamiltonian lawnmower ≥ 175 m → 12 min at V_MAX=0.25. 20 min is enough
 # to get the big rooms and still have leftover time — not to vacuum
-# every last tile. Last-tile jackpot is off; paint tapers after 70%.
+# every last tile. Last-reward jackpot is off; paint tapers after 70%.
 EP_S = 1200.0
 EP_STEPS = int(round(EP_S / DT_POLICY))
 SEC_SX = (FLOOR_X1 - FLOOR_X0) / float(SEC_NX)
 SEC_SY = (FLOOR_Y1 - FLOOR_Y0) / float(SEC_NY)
 PAINT_N = max(1.0, math.pi * PAINT_R * PAINT_R / (SEC_SX * SEC_SY))
 PAINT_REW = 1.0 / PAINT_N
-# Full credit until this cover fraction, then fade to PAINT_TAIL.
+# Full credit until this rewards fraction, then fade to PAINT_TAIL.
 COVER_GAIN = 0.70
 PAINT_TAIL = 0.25
 
@@ -305,46 +370,59 @@ def aabb_inside(
 
 
 @wp.func
+def in_hull_local(lx: float, ly: float, pad: float) -> int:
+    if lx >= HULL_X0 - pad and lx <= HULL_X1 + pad and ly >= HULL_Y0 - pad and ly <= HULL_Y1 + pad:
+        return 1
+    return 0
+
+
+@wp.func
 def foot_ok(
     x: float, y: float, yaw: float, boxes: wp.array3d(dtype=wp.float32), e: int, pad: float, t: float
 ) -> int:
-    if x < FLOOR_X0 + 0.20 or x > FLOOR_X1 - 0.20 or y < FLOOR_Y0 + 0.20 or y > FLOOR_Y1 - 0.20:
+    if (x < FLOOR_X0 + WANDER_CLEAR_R or x > FLOOR_X1 - WANDER_CLEAR_R
+            or y < FLOOR_Y0 + WANDER_CLEAR_R or y > FLOOR_Y1 - WANDER_CLEAR_R):
         return 0
     c = wp.cos(yaw)
     s = wp.sin(yaw)
-    fx = wp.float32(0.15)
-    fy = wp.float32(0.0)
-    for k in range(N_FOOT):
-        if k == 0:
-            fx = 0.15
-            fy = 0.0
-        elif k == 1:
-            fx = 0.15
-            fy = 0.16
-        elif k == 2:
-            fx = 0.15
-            fy = -0.16
-        elif k == 3:
-            fx = 0.0
-            fy = 0.16
-        elif k == 4:
-            fx = 0.0
-            fy = -0.16
-        elif k == 5:
-            fx = 0.0
-            fy = 0.0
-        elif k == 6:
-            fx = -0.18
-            fy = 0.0
-        else:
-            fx = -0.26
-            fy = 0.0
-        wx = x + c * fx - s * fy
-        wy = y + s * fx + c * fy
-        if aabb_inside(wx, wy, boxes, e, pad) == 1:
-            return 0
-        if blob_occ(wx, wy, e, t, x, y) == 1:
-            return 0
+    nx = float(HULL_NX - 1)
+    ny = float(HULL_NY - 1)
+    for iy in range(HULL_NY):
+        fy = HULL_Y0 + (HULL_Y1 - HULL_Y0) * (float(iy) / ny)
+        for ix in range(HULL_NX):
+            fx = HULL_X0 + (HULL_X1 - HULL_X0) * (float(ix) / nx)
+            wx = x + c * fx - s * fy
+            wy = y + s * fx + c * fy
+            if aabb_inside(wx, wy, boxes, e, pad) == 1:
+                return 0
+            if blob_occ(wx, wy, e, t, x, y) == 1:
+                return 0
+    # Thin walls can sit between hull samples. If any box corner is inside
+    # the rotated hull, that is also contact (rectangle vs rectangle).
+    for b in range(MAX_B):
+        hx0 = float(boxes[e, b, 3])
+        if hx0 <= 0.0:
+            continue
+        cx = float(boxes[e, b, 0])
+        cy = float(boxes[e, b, 1])
+        hy0 = float(boxes[e, b, 4])
+        byaw = float(boxes[e, b, 6])
+        cb = wp.cos(byaw)
+        sb = wp.sin(byaw)
+        hx = hx0 + pad
+        hy = hy0 + pad
+        for syi in range(2):
+            sly = -hy + float(syi) * 2.0 * hy
+            for sxi in range(2):
+                slx = -hx + float(sxi) * 2.0 * hx
+                wx = cx + cb * slx - sb * sly
+                wy = cy + sb * slx + cb * sly
+                dx = wx - x
+                dy = wy - y
+                rlx = c * dx + s * dy
+                rly = -s * dx + c * dy
+                if in_hull_local(rlx, rly, 0.0) == 1:
+                    return 0
     return 1
 
 
@@ -559,19 +637,45 @@ def blob_occ(wx: float, wy: float, e: int, t: float, rx: float, ry: float) -> in
 
 @wp.func
 def in_self_body(lx: float, ly: float) -> int:
-    # One hull covering body + 10 cm wheels + mast. Not a CAD wheel schematic.
-    if lx >= -0.16 and lx <= 0.20 and wp.abs(ly) <= 0.22:
+    # Body ±180 mm, caster to 200 mm, wheels to ±227 mm.
+    if lx >= HULL_X0 and lx <= HULL_X1 and wp.abs(ly) <= HULL_Y1:
         return 1
     return 0
 
 
 @wp.func
 def gap_scale(d: float, stop_m: float, throt_m: float) -> float:
+    # Live `_clearance_scale`: 0 at stop, 1 at brake, smoothstep between.
     if d <= stop_m:
         return 0.0
     if d >= throt_m:
         return 1.0
-    return (d - stop_m) / (throt_m - stop_m)
+    t = (d - stop_m) / (throt_m - stop_m)
+    return t * t * (3.0 - 2.0 * t)
+
+
+@wp.func
+def lat_scale(d: float) -> float:
+    if d <= LAT_HARD_M:
+        return 0.0
+    if d >= LAT_SAFE_M:
+        return 1.0
+    return (d - LAT_HARD_M) / (LAT_SAFE_M - LAT_HARD_M)
+
+
+@wp.func
+def pet_hit(px: float, py: float, mx: wp.array2d(dtype=wp.float32),
+            my: wp.array2d(dtype=wp.float32), n_movers: int, e: int) -> int:
+    nm = n_movers
+    lim = (MOVER_R + BODY_R) * (MOVER_R + BODY_R)
+    for m in range(MAX_M):
+        if m >= nm:
+            break
+        dx = px - float(mx[e, m])
+        dy = py - float(my[e, m])
+        if dx * dx + dy * dy < lim:
+            return 1
+    return 0
 
 
 @wp.func
@@ -596,6 +700,26 @@ def body_clear(
     if d > 8.0:
         d = 8.0
     return d
+
+
+@wp.func
+def strip_clear(
+    px: float, py: float, yaw: float,
+    ax: float, ay: float, bx: float, by: float,
+    ux: float, uy: float,
+    boxes: wp.array3d(dtype=wp.float32), e: int, t: float,
+) -> float:
+    # Min ray distance along the FOOT face from (ax,ay) to (bx,by).
+    dmin = float(8.0)
+    n = float(N_STRIP - 1)
+    for i in range(N_STRIP):
+        u = float(i) / n
+        lx = ax + (bx - ax) * u
+        ly = ay + (by - ay) * u
+        d = body_clear(px, py, yaw, lx, ly, ux, uy, boxes, e, t)
+        if d < dmin:
+            dmin = d
+    return dmin
 
 
 @wp.func
@@ -631,7 +755,7 @@ def in_fov(lx: float, ly: float) -> int:
 def clip_vw(v: float, w: float, vmax: float, wmax: float):
     # 40 lb: a little less yaw at speed, not a hard wheel diamond.
     # Old |v|+|w|·track/2 with budget=vmax left zero yaw at vmax — too big.
-    # At vmax keep 85% of wmax; slow down to get the rest (or crash).
+    # At vmax keep 85% of wmax; slow down to get the rest.
     vv = wp.clamp(v, V_REV, vmax)
     ww = wp.clamp(w, -wmax, wmax)
     denom = vmax
@@ -676,7 +800,7 @@ def sec_id(x: float, y: float) -> int:
 @wp.func
 def sec_is_valid(s: int, boxes: wp.array3d(dtype=wp.float32), e: int) -> int:
     cx, cy = sec_center(s)
-    if aabb_inside(cx, cy, boxes, e, 0.12) == 1:
+    if aabb_inside(cx, cy, boxes, e, TILE_CLEAR_M) == 1:
         return 0
     return 1
 
@@ -733,8 +857,82 @@ def paint_disk(
                 continue
             if clear_to(x, y, cx, cy, boxes, e) == 0:
                 continue
-            seen[e, s] = 1
+            seen[e, s] = SEEN_PAINT
             nnew = nnew + 1
+    return nnew
+
+
+@wp.func
+def suppress_disk(
+    x: float,
+    y: float,
+    boxes: wp.array3d(dtype=wp.float32),
+    e: int,
+    seen: wp.array2d(dtype=wp.int32),
+    valid: wp.array2d(dtype=wp.int32),
+) -> int:
+    # Mark remaining reward tiles within DELETE_R as claimed (no extra
+    # reward). Walls block this — same LOS as paint_disk. A tile on the
+    # other side of a wall stays available.
+    n = int(0)
+    r2 = DELETE_R * DELETE_R
+    sid = sec_id(x, y)
+    ix0 = sid % SEC_NX
+    iy0 = (sid - ix0) / SEC_NX
+    for dj in range(-DELETE_WIN, DELETE_WIN + 1):
+        for di in range(-DELETE_WIN, DELETE_WIN + 1):
+            ix = ix0 + di
+            iy = iy0 + dj
+            if ix < 0 or iy < 0 or ix >= SEC_NX or iy >= SEC_NY:
+                continue
+            s = iy * SEC_NX + ix
+            if seen[e, s] != 0:
+                continue
+            cx, cy = sec_center(s)
+            dx = cx - x
+            dy = cy - y
+            if dx * dx + dy * dy > r2:
+                continue
+            if clear_to(x, y, cx, cy, boxes, e) == 0:
+                continue
+            seen[e, s] = SEEN_SUPPRESS
+            if valid[e, s] != 0:
+                n = n + 1
+    return n
+
+
+@wp.func
+def pack_budget(
+    e: int,
+    seen: wp.array2d(dtype=wp.int32),
+    valid: wp.array2d(dtype=wp.int32),
+    boxes: wp.array3d(dtype=wp.float32),
+) -> int:
+    # Greedy 2 m LOS packing of valid tiles — area/4 ignored walls and
+    # over-counted a single open floor. This is what the HUD denominator is.
+    n = int(0)
+    for s in range(SEC_N):
+        if valid[e, s] == 0 or seen[e, s] != 0:
+            continue
+        n = n + 1
+        cx, cy = sec_center(s)
+        suppress_disk(cx, cy, boxes, e, seen, valid)
+    return n
+
+
+@wp.func
+def reward_budget(n_tiles: int) -> int:
+    if n_tiles < 1:
+        return 1
+    return n_tiles
+
+
+@wp.func
+def reward_claim(nnew: int) -> int:
+    if nnew <= 0:
+        return 0
+    if WAYPOINT_REWARD == 1:
+        return 1
     return nnew
 
 
@@ -800,6 +998,7 @@ def k_reset(
     n_free: wp.array(dtype=wp.int32),
     n_movers_hp: int,
     stage: int,
+    n_contact: wp.array(dtype=wp.int32),
 ):
     e = wp.tid()
     if mask[e] == 0:
@@ -810,7 +1009,7 @@ def k_reset(
     sy = float(y[e])
     syaw = (frand(seed, 200) - 0.5) * 6.28318530718
     found = int(0)
-    if foot_ok(sx, sy, 0.0, boxes, e, 0.34, 0.0) == 1:
+    if foot_ok(sx, sy, 0.0, boxes, e, WANDER_CLEAR_R, 0.0) == 1:
         found = 2
     for k in range(24):
         if found >= 2:
@@ -818,7 +1017,7 @@ def k_reset(
         tx = FLOOR_X0 + 0.55 + (FLOOR_X1 - FLOOR_X0 - 1.10) * frand(seed, 210 + k)
         ty = FLOOR_Y0 + 0.55 + (FLOOR_Y1 - FLOOR_Y0 - 1.10) * frand(seed, 240 + k)
         tyaw = (frand(seed, 270 + k) - 0.5) * 6.28318530718
-        if foot_ok(tx, ty, tyaw, boxes, e, 0.34, 0.0) == 1:
+        if foot_ok(tx, ty, tyaw, boxes, e, WANDER_CLEAR_R, 0.0) == 1:
             px = ray_aabb_2d(tx, ty, wp.cos(tyaw), wp.sin(tyaw), boxes, e, 0.01)
             if px >= 0.55:
                 sx = tx
@@ -852,8 +1051,17 @@ def k_reset(
             continue
         valid[e, s] = 1
         nf = nf + 1
-    n_free[e] = nf
-    hits[e] = paint_disk(sx, sy, boxes, e, seen, valid)
+    npack = pack_budget(e, seen, valid, boxes)
+    if npack < 1:
+        npack = 1
+    n_free[e] = npack
+    for s in range(SEC_N):
+        seen[e, s] = 0
+    nnew = paint_disk(sx, sy, boxes, e, seen, valid)
+    ndel = int(0)
+    if nnew > 0:
+        ndel = suppress_disk(sx, sy, boxes, e, seen, valid)
+    hits[e] = reward_claim(nnew)
 
     nm = n_movers_hp
     if nm < 0:
@@ -908,10 +1116,11 @@ def k_reset(
     v_scale[e] = wp.float32(0.40 + 0.80 * frand(seed, 800))
     a_scale[e] = wp.float32(0.70 + 0.60 * frand(seed, 801))
     w_scale[e] = wp.float32(0.65 + 0.60 * frand(seed, 802))
-    delay_n[e] = int(frand(seed, 803) * 2.0)
+    delay_n[e] = int(DELAY_STEPS)
     held_v[e] = wp.float32(0.0)
     held_w[e] = wp.float32(0.0)
     plus_x[e] = wp.float32(8.0)
+    n_contact[e] = 0
     ep[e] = ep[e] + 1
 
 
@@ -954,6 +1163,8 @@ def k_step(
     n_free: wp.array(dtype=wp.int32),
     crash_coef: float,
     stall_coef: float,
+    n_contact: wp.array(dtype=wp.int32),
+    contact: wp.array(dtype=wp.int32),
 ):
     e = wp.tid()
     if done[e] != 0:
@@ -1009,38 +1220,61 @@ def k_step(
     tnow = float(t_sim[e])
     r = float(0.0)
     crashed = int(0)
+    hit = int(0)
     for _s in range(N_SUB):
         c = wp.cos(pyaw)
         s = wp.sin(pyaw)
-        cf = body_clear(px, py, pyaw, 0.19, 0.0, 1.0, 0.0, boxes, e, tnow)
-        cb = body_clear(px, py, pyaw, -0.16, 0.0, -1.0, 0.0, boxes, e, tnow)
-        cl = body_clear(px, py, pyaw, 0.03, 0.22, 0.0, 1.0, boxes, e, tnow)
-        cr = body_clear(px, py, pyaw, 0.03, -0.22, 0.0, -1.0, boxes, e, tnow)
+        half = float(SCAN_FACE_HALF)
+        cf = strip_clear(
+            px, py, pyaw,
+            SCAN_FWD_LX, -half, SCAN_FWD_LX, half,
+            1.0, 0.0, boxes, e, tnow,
+        )
+        cb = strip_clear(
+            px, py, pyaw,
+            SCAN_BWD_LX, -half, SCAN_BWD_LX, half,
+            -1.0, 0.0, boxes, e, tnow,
+        )
+        cl = strip_clear(
+            px, py, pyaw,
+            -half, SCAN_SIDE_LY, half, SCAN_SIDE_LY,
+            0.0, 1.0, boxes, e, tnow,
+        )
+        cr = strip_clear(
+            px, py, pyaw,
+            -half, -SCAN_SIDE_LY, half, -SCAN_SIDE_LY,
+            0.0, -1.0, boxes, e, tnow,
+        )
         plus_x[e] = wp.float32(cf)
-        stop_f = wp.max(STOP_M, 1.25 * vmax * DT_POLICY)
-        stop_b = wp.max(STOP_BWD_M, 1.25 * vmax * DT_POLICY)
-        stop_s = wp.max(STOP_SIDE_M, 1.25 * wmax * 0.12)
-        throt_f_m = wp.max(THROT_M, stop_f + (THROT_M - STOP_M))
-        throt_b_m = wp.max(THROT_BWD_M, stop_b + (THROT_BWD_M - STOP_BWD_M))
-        throt_s_m = wp.max(THROT_SIDE_M, stop_s + (THROT_SIDE_M - STOP_SIDE_M))
-        sf = gap_scale(cf, stop_f, throt_f_m)
-        sb = gap_scale(cb, stop_b, throt_b_m)
-        sl = gap_scale(cl, stop_s, throt_s_m)
-        sr = gap_scale(cr, stop_s, throt_s_m)
+        sf = gap_scale(cf, STOP_M, THROT_M)
+        sb = gap_scale(cb, STOP_BWD_M, THROT_BWD_M)
+        sl = lat_scale(cl)
+        sr = lat_scale(cr)
+        # Live: one ang_scale from min(left, right). A side wall kills yaw
+        # both ways — turning the other way still drives a corner in.
+        sw = sl
+        if sr < sw:
+            sw = sr
+        if sf < ESCAPE_FWD or sb < ESCAPE_BWD:
+            min_lat = cl
+            if cr < min_lat:
+                min_lat = cr
+            floor = ESCAPE_ANG_FLOOR
+            if min_lat <= LAT_HARD_M:
+                floor = ESCAPE_ANG_HARD
+            if sw < floor:
+                sw = floor
         throt_f[e] = wp.float32(1.0 - sf)
         throt_b[e] = wp.float32(1.0 - sb)
-        throt_l[e] = wp.float32(1.0 - sl)
-        throt_r[e] = wp.float32(1.0 - sr)
+        throt_l[e] = wp.float32(1.0 - sw)
+        throt_r[e] = wp.float32(1.0 - sw)
         vt = v_cmd
         wt = w_cmd
         if vt > 0.0:
             vt = vt * sf
         elif vt < 0.0:
             vt = vt * sb
-        if wt > 0.0:
-            wt = wt * sl
-        elif wt < 0.0:
-            wt = wt * sr
+        wt = wt * sw
         max_dv = av * dt
         max_dw = aw * dt
         if wp.abs(vt - pv) > max_dv:
@@ -1057,20 +1291,34 @@ def k_step(
                 pw = pw - max_dw
         else:
             pw = wt
-        nx = px + pv * c * dt
-        ny = py + pv * s * dt
-        nyaw = wrap_pi(pyaw + pw * dt)
-        if foot_ok(nx, ny, nyaw, boxes, e, 0.04, tnow) == 0:
-            crashed = 1
+        nx = px + pv * wp.float32(SLIP_V) * c * dt
+        ny = py + pv * wp.float32(SLIP_V) * s * dt
+        nyaw = wrap_pi(pyaw + pw * wp.float32(SLIP_W) * dt)
+        nm = int(n_movers[e])
+        blocked = int(0)
+        if foot_ok(nx, ny, nyaw, boxes, e, 0.0, tnow) == 0:
+            blocked = 1
+        if pet_hit(nx, ny, mx, my, nm, e) == 1:
+            blocked = 1
+        if blocked == 1:
+            hit = 1
             pv = 0.0
-            pw = 0.0
-            break
+            nx = px
+            ny = py
+            if foot_ok(px, py, nyaw, boxes, e, 0.0, tnow) == 1:
+                if pet_hit(px, py, mx, my, nm, e) == 0:
+                    pyaw = nyaw
+                else:
+                    pw = 0.0
+                    nyaw = pyaw
+            else:
+                pw = 0.0
+                nyaw = pyaw
         dist = wp.sqrt((nx - px) * (nx - px) + (ny - py) * (ny - py))
         path_m[e] = path_m[e] + wp.float32(dist)
         px = nx
         py = ny
         pyaw = nyaw
-        nm = int(n_movers[e])
         for m in range(MAX_M):
             if m >= nm:
                 continue
@@ -1091,18 +1339,20 @@ def k_step(
             else:
                 mx[e, m] = wp.float32(ox)
                 my[e, m] = wp.float32(oy)
-            dx = px - float(mx[e, m])
-            dy = py - float(my[e, m])
-            if dx * dx + dy * dy < (MOVER_R + BODY_R) * (MOVER_R + BODY_R):
-                crashed = 1
     x[e] = wp.float32(px)
     y[e] = wp.float32(py)
     yaw[e] = wp.float32(pyaw)
     v[e] = wp.float32(pv)
     w[e] = wp.float32(pw)
     nnew = int(0)
+    ndel = int(0)
     if crashed == 0:
         nnew = paint_disk(px, py, boxes, e, seen, valid)
+        # Clear the 2 m LOS neighborhood only when a reward actually paid.
+        # Running suppress every step made a 2 m bubble follow the robot and
+        # eat upcoming tiles before paint (0.9 m) could collect them.
+        if nnew > 0:
+            ndel = suppress_disk(px, py, boxes, e, seen, valid)
     nf0 = int(n_free[e])
     if nf0 < 1:
         nf0 = 1
@@ -1117,12 +1367,22 @@ def k_step(
         if u > 1.0:
             u = 1.0
         mult = 1.0 - (1.0 - PAINT_TAIL) * u
-    hits[e] = hits[e] + nnew
+    hits[e] = hits[e] + reward_claim(nnew)
+    if hits[e] > n_free[e]:
+        n_free[e] = hits[e]
     r = r + float(nnew) * wp.float32(PAINT_REW) * mult
     stall = float(0.0)
     if crashed == 0 and pv < 0.06:
         stall = stall_coef
     r = r - stall
+    if (aabb_inside(px, py, boxes, e, NEAR_CLEAR_M) == 1
+            or px < FLOOR_X0 + NEAR_CLEAR_M or px > FLOOR_X1 - NEAR_CLEAR_M
+            or py < FLOOR_Y0 + NEAR_CLEAR_M or py > FLOOR_Y1 - NEAR_CLEAR_M):
+        r = r - wp.float32(NEAR_PEN)
+    contact[e] = hit
+    if hit == 1:
+        n_contact[e] = n_contact[e] + 1
+        r = r - CONTACT_PEN
     nf = int(n_free[e])
     left = nf - int(hits[e])
     if left < 0:

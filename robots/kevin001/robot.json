@@ -1,0 +1,22 @@
+{
+ "_doc": "kevin001 robot configuration: the ONE place the robot's selectable parts and targets are set. src/robot_params.py resolve() turns this + the selected profiles (src/tire_profiles.json, src/twin_geometry.json, src/calibration.json) into one flat resolved table (value, units, source); every process reads only that. Inspect: python -m src.robot_params show [--wheels X] [--diff stock] [--json]. Override the wheels with env KEVIN_WHEELS (KEVIN_TIRE = legacy alias).",
+ "robot": "kevin001",
+ "wheels": "soft_v3_2",
+ "drive": {
+  "_doc": "rim targets; the ODrive turn limits are derived per wheel (turns = m/s / (2 pi R)). Values = the 2026-09 ODrive settings 4.0 turns/s, 3.0 / 5.0 turns/s^2 on the 85.65 mm stock wheel (James approved keeping the rim values per tyre, a4224de).",
+  "vel_limit_mps": 2.152619286239726,
+  "vel_ramp_mps2": 1.6144644646797948,
+  "vel_ramp_max_mps2": 2.690774107799658
+ },
+ "perception": {
+  "_doc": "cliff_z0_ref_m: expected RS1 floor depth at ride_dz 0 (stock); resolved = ref + the wheels' ride_dz. td_obstacle_h_m: RS1 obstacle threshold above the floor; td_floor_clip_m = rs1_height_m - td_obstacle_h_m (one clip everywhere, James 2026-10-21).",
+  "cliff_z0_ref_m": 0.946,
+  "td_obstacle_h_m": 0.041
+ },
+ "body": {
+  "_doc": "twin body outline in the axle frame (m): SIL12 polygon (kplan/MuJoCo) + simready lite deck corners. FOOTPRINT_SAFE = hull(sil12 + deck_corners + the wheels' tread corners (+-wheel_r_free, +-tread_y_out)).",
+  "sil12": [[-0.27371, -0.01022], [-0.16869, -0.15427], [-0.08009, -0.20998], [0.08319, -0.20998], [0.12372, -0.15418], [0.12629, -0.13818], [0.12629, 0.13818], [0.12372, 0.15418], [0.08319, 0.20998], [-0.08009, 0.20998], [-0.16869, 0.15427], [-0.27371, 0.01022]],
+  "deck_corners": [[-0.1995, -0.15], [-0.1995, 0.15]],
+  "safety_margin_m": 0.035
+ }
+}

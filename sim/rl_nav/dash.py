@@ -36,8 +36,8 @@ _EGO_LUT = np.array(
 _SELF_BGR = np.array((220, 90, 40), dtype=np.uint8)
 _THROT_BGR = np.array((0, 210, 255), dtype=np.uint8)
 # Same hull as kernels.in_self_body (meters, axle frame).
-_SELF_LX0, _SELF_LX1 = -0.16, 0.20
-_SELF_LY = 0.22
+_SELF_LX0, _SELF_LX1 = K.HULL_X0, K.HULL_X1
+_SELF_LY = K.HULL_Y1
 
 
 def _shape_pts(cx, cy, hx, hy, yaw, n, w, h):
@@ -70,8 +70,11 @@ def _occupancy(snap, w, h):
     s = np.asarray(seen[:n]).reshape(ny, nx)
     g = np.full((ny, nx, 3), 22, dtype=np.uint8)
     walk = v != 0
-    g[walk & (s == 0)] = (28, 28, 32)
-    g[walk & (s != 0)] = (38, 88, 52)
+    # 2 m LOS clear is a real disk (suppress marks floor tiles, not just
+    # the 50 cm-inset reward cells). Paid paint sits on top, brighter.
+    g[s == int(K.SEEN_SUPPRESS)] = (52, 150, 88)
+    g[walk & (s == 0)] = (62, 78, 58)
+    g[s == int(K.SEEN_PAINT)] = (70, 230, 95)
     inner = cv2.resize(g[::-1], (max(w - 16, 1), max(h - 16, 1)), interpolation=cv2.INTER_NEAREST)
     img[8:8 + inner.shape[0], 8:8 + inner.shape[1]] = inner
     return img
@@ -135,11 +138,13 @@ def _topdown(snap, w=400, h=500, trail=None, furn=None):
             cv2.line(img, a, b, (50, 190, 230), 2)
     rx, ry = _xy(snap["x"], snap["y"], w, h)
     yaw = float(snap["yaw"])
-    cv2.circle(img, (rx, ry), 7, (0, 255, 255), -1)
+    hit = int(snap.get("contact", 0) or 0)
+    bot = (0, 32, 255) if hit else (0, 255, 255)
+    cv2.circle(img, (rx, ry), 11 if hit else 7, bot, -1)
     cv2.line(
         img, (rx, ry),
-        (int(rx + 18 * np.cos(yaw)), int(ry - 18 * np.sin(yaw))),
-        (0, 255, 255), 2,
+        (int(rx + 22 * np.cos(yaw)), int(ry - 22 * np.sin(yaw))),
+        bot, 3 if hit else 2,
     )
     return img
 
@@ -214,11 +219,14 @@ def _end_info(snap, ended=False):
         "cut": cut,
         "hits": hits,
         "n_free": nf,
+        "rewards": float(hits) / float(nf),
         "cover": float(hits) / float(nf),
         "path": float(snap.get("path_m", 0.0) or 0.0),
         "t": float(snap.get("t_sim", 0.0) or 0.0),
         "plus_x": float(snap.get("plus_x", 0.0) or 0.0),
         "n_movers": int(snap.get("n_movers", 0) or 0),
+        "n_contact": int(snap.get("n_contact", 0) or 0),
+        "contact": int(snap.get("contact", 0) or 0),
     }
 
 
@@ -245,11 +253,32 @@ def _stamp_end(hud, info, ended=False):
     cv2.rectangle(hud, (0, y0), (w, h), (12, 12, 12), -1)
     cv2.rectangle(hud, (0, y0), (8, h), col, -1)
     cv2.putText(hud, how, (18, y0 + 38), cv2.FONT_HERSHEY_SIMPLEX, 1.05, col, 3, cv2.LINE_AA)
-    cover = "cover %d/%d (%.0f%%)" % (info["hits"], info["n_free"], 100.0 * info["cover"])
-    line2 = "%s   path %.1fm   t %.0fs" % (cover, info["path"], info["t"])
+    nh = int(info["hits"])
+    nf = max(int(info["n_free"]), 1)
+    if nh > nf:
+        nf = nh
+    frac = min(1.0, float(nh) / float(nf))
+    rewards = "rewards %d/%d (%.0f%%)" % (nh, nf, 100.0 * frac)
+    line2 = "%s   path %.1fm   t %.0fs   hit %d" % (
+        rewards, info["path"], info["t"], info.get("n_contact", 0),
+    )
+    if info.get("contact"):
+        line2 += "   CONTACT"
     if how == "CRASH":
         line2 += "   gap %.2fm   pets %d" % (info["plus_x"], info["n_movers"])
     cv2.putText(hud, line2, (210, y0 + 36), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
+    if info.get("contact") or info.get("contact_hold"):
+        cv2.rectangle(hud, (0, 0), (w - 1, h - 1), (0, 0, 255), 14)
+        cv2.rectangle(hud, (8, 8), (w - 9, 72), (0, 0, 40), -1)
+        cv2.putText(
+            hud, "CONTACT", (20, 58),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 0, 255), 4, cv2.LINE_AA,
+        )
+        n = int(info.get("n_contact", 0) or 0)
+        cv2.putText(
+            hud, "hit %d" % n, (320, 58),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (80, 80, 255), 3, cv2.LINE_AA,
+        )
     return hud
 
 
@@ -497,9 +526,12 @@ def _compose_pack(head, mid, tail, st, sps, note, ended=True):
         _draw_boxes(furn, seed["boxes"], 400, 500)
     last = _last_snap(tail, mid, head)
     end = _end_info(last, ended=ended) if last is not None else None
+    hold = 0
 
     def one(snap, label, dup):
-        nonlocal trail
+        nonlocal trail, hold
+        if int(snap.get("contact", 0) or 0):
+            hold = 8
         if trail:
             dx = snap["x"] - trail[-1][0]
             dy = snap["y"] - trail[-1][1]
@@ -508,10 +540,15 @@ def _compose_pack(head, mid, tail, st, sps, note, ended=True):
         trail.append((snap["x"], snap["y"]))
         if len(trail) > 80:
             trail = trail[-80:]
+        info = dict(end or _end_info(snap, ended=ended) or {})
+        info["contact"] = int(snap.get("contact", 0) or 0)
+        info["n_contact"] = int(snap.get("n_contact", 0) or 0)
+        info["contact_hold"] = 1 if hold > 0 else 0
         hud = compose_hud(
             snap, st=st, note=note, sps=sps, trail=trail, furn=furn,
-            end=end, ended=ended,
+            end=info, ended=ended,
         )
+        hold = max(0, hold - 1)
         _stamp_speed(hud, label)
         return hud, dup
 
@@ -567,7 +604,13 @@ class EpisodeRecorder:
         else:
             self.ring.append(snap)
             if (self.n - _HEAD_N) % _MID_STRIDE == 0:
-                self.mid.append(snap)
+                window = list(self.ring)[-_MID_STRIDE:]
+                pick = snap
+                for s in window:
+                    if int(s.get("contact", 0) or 0):
+                        pick = s
+                        break
+                self.mid.append(pick)
         if not done:
             return
         tail = list(self.ring)
@@ -654,19 +697,21 @@ class EpisodeRecorder:
             "enc_s": time.time() - t0,
             "how": info.get("how", ""),
             "cut": info.get("cut", 0),
-            "cover": info.get("cover", 0.0),
+            "rewards": info.get("rewards", info.get("cover", 0.0)),
+            "cover": info.get("rewards", info.get("cover", 0.0)),
             "hits": info.get("hits", 0),
             "n_free": info.get("n_free", 0),
             "path": info.get("path", 0.0),
             "plus_x": info.get("plus_x", 0.0),
             "n_movers": info.get("n_movers", 0),
+            "n_contact": info.get("n_contact", 0),
         }
         (self.out / "watch_meta.json").write_text(json.dumps(meta))
         print(
-            "episode mp4 %s cover=%.2f t=%.1fs path=%.1fm gap=%.2f pets=%d "
+            "episode mp4 %s rewards=%.2f t=%.1fs path=%.1fm gap=%.2f pets=%d "
             "head=%d mid=%d tail=%d vid_frames=%d enc=%.2fs"
             % (
-                info.get("how", "?"), info.get("cover", 0.0), t_sim,
+                info.get("how", "?"), info.get("rewards", info.get("cover", 0.0)), t_sim,
                 info.get("path", 0.0), info.get("plus_x", 0.0),
                 info.get("n_movers", 0), len(head), len(mid), len(tail),
                 n_ep, time.time() - t0,

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Emulated `ip` for the Jetson emulator: CAN links are always up (the bus is emu/world.py's UDP socket).
+case "$*" in
+  *link*show*can*) dev=$(echo "$*" | grep -o 'can[0-9]*'); echo "5: $dev: <NOARP,UP,LOWER_UP,ECHO> mtu 16 qdisc pfifo_fast state UP mode DEFAULT group default qlen 10"; echo "    link/can  promiscuity 0 can state ERROR-ACTIVE (berr-counter tx 0 rx 0) restart-ms 0 bitrate 250000"; exit 0;;
+  *link*set*can*) exit 0;;
+esac
+exec /usr/sbin/ip "$@" 2>/dev/null || exec /sbin/ip "$@"

@@ -5,6 +5,7 @@ main.py - 30 fps loop: frames + tool calls; optional rerun. Entrypoint for angle
 import os
 import time
 import argparse
+import speech_io
 import tools
 import vision as vision_mod
 import navigator
@@ -14,6 +15,7 @@ import people_live as people_live_mod
 
 from rerun_log import KevinRerunLogger, available as rerun_available
 from loop_timing import FrameBudget
+from cameras import WAIT_FRAME_MS
 
 
 TARGET_FPS = 30
@@ -47,6 +49,9 @@ def main():
                         help="Brain server URL (e.g. http://192.168.1.50:8090). Uses local vLLM instead of Gemini.")
     parser.add_argument("--slam", default="self", choices=["self", "cuvslam"],
                         help="SLAM backend: 'self' (wheel+visual odom) or 'cuvslam' (NVIDIA cuVSLAM)")
+    parser.add_argument("--orbslam3-host", default="",
+                        help="i777 host for ORB-SLAM3 stereo IR (TCP). "
+                             "Also KEVIN_ORBSLAM3_HOST. Does not replace --slam.")
     parser.add_argument("--wheel-imu-prior", action="store_true",
                         help="EXPERIMENT: Use wheel+IMU prediction prior (for self-slam-wheel-imu-prior-v0)")
     parser.add_argument("--auto-local", action="store_true",
@@ -56,10 +61,16 @@ def main():
                         help="LocalExecutive backend: vfh, mppi, neural_rl, or insect (5 Hz v,w + visit doughnut)")
     parser.add_argument("--wander", action="store_true",
                         help="With --auto-local, start continuous ~1m wander immediately")
+    parser.add_argument("--record-raw", default="",
+                        help="Directory for 30 Hz raw RS z16 + IMU + encoders + 80x60 labels")
+    parser.add_argument("--quit-after", type=float, default=0.0,
+                        help="Stop after this many seconds (0 = run until Ctrl+C)")
     parser.add_argument("--house-bot", action="store_true",
                         help="Curious look-before-leap + local speak")
     parser.add_argument("--people", action="store_true",
                         help="Face greet + name-call/dirs (speech only; auto with --house-bot)")
+    parser.add_argument("--no-drive", action="store_true",
+                        help="Never command wheels (loop / inference smoke)")
     args = parser.parse_args()
 
     gemini_key = args.gemini_key or os.environ.get("GEMINI_KEY", "")
@@ -78,7 +89,7 @@ def main():
         elif args.rerun_connect:
             # connect_grpc + rr.save() replaces the sink — skip file when streaming to a viewer
             save_kw["save_path"] = None
-        # else: module default ~/.kevin/rerun/live.rrd
+        # else: no sink. Logger refuses rr.init's in-memory buffer (OOM).
         rerun_logger = KevinRerunLogger(
             enabled=True,
             connect_url=args.rerun_connect or None,
@@ -102,13 +113,10 @@ def main():
     if not rs1 or not rs2:
         try:
             import pyrealsense2 as _rs
-            _serials = [d.get_info(_rs.camera_info.serial_number)
-                        for d in _rs.context().devices]
-            _serials.sort()
-            if not rs1 and len(_serials) >= 1:
-                rs1 = _serials[0]
-            if not rs2 and len(_serials) >= 2:
-                rs2 = _serials[1]
+            import twin_geometry as _TGm                   # role by product: D435 = RS1 top-down, D435i = RS2 forward
+            _r1, _r2 = _TGm.realsense_roles(_rs)
+            rs1 = rs1 or _r1 or ""
+            rs2 = rs2 or _r2 or ""
             print("main: RealSense serials rs1=%s rs2=%s"
                   % (rs1 or "(none)", rs2 or "(none)"))
         except Exception as e:
@@ -130,9 +138,17 @@ def main():
         rgb1_device_id=rgb1,
         slam_backend=args.slam,
         use_wheel_imu_prior=args.wheel_imu_prior,
+        orbslam3_host=(args.orbslam3_host or os.environ.get("KEVIN_ORBSLAM3_HOST", "")).strip(),
     )
     vis.set_wheelbase(wb)
     vis.start()
+    raw_bag = None
+    if args.record_raw:
+        from raw_record import RawBag
+        raw_bag = RawBag(args.record_raw, seconds=args.quit_after or 300.0)
+        vis.set_raw_bag(raw_bag)
+        print("main: raw bag %s quit_after=%.1fs" % (
+            args.record_raw, args.quit_after or 0.0))
 
     # UI (web server + Gemini)
     from ui import UI
@@ -148,13 +164,20 @@ def main():
     u.start()
 
     tools.init(wheelbase_instance=wb, vision_instance=vis, ui_instance=u)
+    try:
+        speech_io.apply_speak_sink(persist=True)
+        speech_io.start_say_server()
+    except Exception as e:
+        print("main: speech sink/say-server skip: %s" % e)
     if args.auto_local:
         local_executive.set_planner(args.local_planner)
         print("main: LocalExecutive ENABLED (mailbox: goto_xy / wander)")
         print("main: local planner armed: %s" % args.local_planner)
-        if args.wander:
+        if args.wander and not args.no_drive:
             local_executive.set_wander()
             print("main: wander started (%s)" % args.local_planner)
+        elif args.wander and args.no_drive:
+            print("main: --wander ignored (--no-drive)")
     hb = None
     if args.house_bot:
         hb = house_bot_mod.HouseBot(vis, enabled=True)
@@ -162,25 +185,54 @@ def main():
     elif not args.auto_local:
         local_executive.clear()
     people = None
-    if args.people or args.house_bot:
+    if args.record_raw and not args.people and not args.house_bot:
+        print("main: record-raw wander skips face chat")
+    elif os.environ.get("KEVIN_NO_PEOPLE", "").strip() in ("1", "true", "yes"):
+        print("main: people skipped (KEVIN_NO_PEOPLE)")
+    elif args.people or args.house_bot or args.wander:
+        if args.wander and not args.people and not args.house_bot:
+            print("main: --wander implies face chat (--people)")
         people = people_live_mod.PeopleLive(vis, enabled=True)
         people.start()
 
-    print("AnglerDroid v2 main loop (30 fps). Ctrl+C to quit.")
+    if args.no_drive:
+        try:
+            tools.stop()
+        except Exception:
+            pass
+        print("main: --no-drive (wheels idle)")
+    print("AnglerDroid v2 main loop (30 fps, camera-clocked). Ctrl+C to quit.")
     print("  budget=%.1f ms/frame | shed threshold=%.0f%% | every 90 frames: fps, avg process_ms, stage breakdown, sheds" % (BUDGET_MS, SHED_THRESHOLD * 100))
     frame_id = 0
     last_report = time.monotonic()
+    quit_after = float(args.quit_after or 0.0)
+    t_run0 = last_report
     last_slam_status = time.monotonic()
     process_sum = 0.0
     wait_sum = 0.0
+    last_cap = 0
+    wait_s = WAIT_FRAME_MS * 1e-3
     
     # Frame budget for per-stage timing and shedding
     budget = FrameBudget(budget_ms=BUDGET_MS, shed_threshold=SHED_THRESHOLD)
     
     try:
         while True:
+            t_wait0 = time.monotonic()
+            got = vis.wait_capture(last_cap, timeout_s=wait_s)
+            wait_ms = (time.monotonic() - t_wait0) * 1000.0
+            if got is not None:
+                last_cap = got
             loop_start = time.monotonic()
+            if quit_after > 0.0 and (loop_start - t_run0) >= quit_after:
+                print("main: quit-after %.1fs reached" % quit_after, flush=True)
+                break
+            if raw_bag is not None and raw_bag.done():
+                print("main: raw bag complete n=%d" % raw_bag.n, flush=True)
+                break
             budget.reset_frame()
+            if raw_bag is not None:
+                vis._offer_raw_bag(loop_start)
             
             # Periodic SLAM lock status (every 10 seconds)
             if loop_start - last_slam_status >= 10.0:
@@ -285,6 +337,8 @@ def main():
                         left_tps = left_norm * 0.5
                         right_tps = right_norm * 0.5
                     gamepad_active = abs(left_tps) > 0 or abs(right_tps) > 0
+                    if args.no_drive:
+                        gamepad_active = False
 
                     if gamepad_active:
                         wb.cancel_twist_for()
@@ -296,6 +350,11 @@ def main():
                                 print(f"main: {e} — shutting down")
                                 break
                             raise
+                    elif args.no_drive:
+                        try:
+                            tools.twist(0.0, 0.0)
+                        except Exception:
+                            pass
                     elif not wb.is_twist_for_active():
                         twist = None
                         if args.auto_local and local_executive.is_active():
@@ -403,13 +462,9 @@ def main():
                                     break
                                 raise
 
-            # Throttle to 30 fps
+            # Clock is vis.wait_capture at the top (camera / capture seq).
             process_sec = time.monotonic() - loop_start
             process_ms = process_sec * 1000.0
-            sleep_time = LOOP_DT - process_sec
-            if sleep_time > 0:
-                time.sleep(sleep_time)
-            wait_ms = sleep_time * 1000.0 if sleep_time > 0 else 0.0
             process_sum += process_ms
             wait_sum += wait_ms
             frame_id += 1

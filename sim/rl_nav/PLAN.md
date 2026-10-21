@@ -153,9 +153,25 @@ Do not match sim to Kevin. Kevin moves to the sim tensor.
 
 James 2026-09-13 evening: do **not** start overnight until the look is approved. Obstacles are **static top-down** footprints (`world_occ` + unknown behind first hit). Floor in FOV/cone is clear — no 1 px dirt. Domain rand is **rare ephemeral blobs** (~24 cm, ~1.4 s life, `BLOB_P=0.006`). Same hash in paint + `foot_ok` + throttle rays — they are real obstacles, not a tell to ignore. Show/hide across frames is intended; the policy should slow down and use the 64-byte memory. No per-frame flicker carpet. Coverage objective unchanged.
 
-SELF at 80×60 is **one hull** (36×44 cm) covering body + 10 cm wheels + mast — strips tire returns without CAD wheel ears. Live 1 cm `fast_ego80` still uses the four `robot_config` boxes.
+Throttle is **live SafetyGuard**, not a 30%-smaller cousin. Scans are
+**FOOT-width strips** (not centre rays): fwd +18 cm, aft −20 cm (caster),
+sides ±25 cm (wander-clear), each sampled across the face. fwd/bwd: 0 at
+1 cm, 1 at 30 cm, smoothstep. Lateral: 0 at 2 cm, 1 at 9 cm. **One**
+`ang_scale = f(min(left,right))` — a wall on one side kills yaw both
+ways (rectangle; turning the other way still drives a corner in). Escape
+floors ang when the nose/tail is pinned (0.45 / 0.30), same as live, but
+a yaw that would sweep a hull corner into a wall is still rejected.
+Contact hull is the rotated body+wheels+caster AABB (−20..+18 × ±22.7 cm).
+Contact **rejects the step**, increments `n_contact`, costs `CONTACT_PEN`,
+and does **not** end the episode. Spawn / insect wander inflate a **25 cm
+disk** from the axle so the robot does not enter a gap it cannot turn in
+(clean turn r = 20 cm).
 
-Throttle source is **on the ego pixels** the policy sees: front / back / left-wheel / right-wheel of the hull go to `THROT_MARK=0.20` when that side’s clearance is inside the live-ish pinch band (`THROT_M=0.28` fwd, 0.18 side, 0.20 back). HUD stamps those sectors amber. Same scales pinch `+v` / `−v` / `+w` / `−w`. On Kevin, stamp the same sectors from `fwd_scale` / `bwd_scale` / `ang_scale` + nearest obs side.
+Tape 2026-09-17 (axle origin): half-track 177 mm (hub-to-hub 354 mm),
+wheel r 85 mm, body ±180 mm, caster to 200 mm aft.
+
+SELF at 80×60 is **one hull** (38×45.4 cm, cx −1 cm) covering that AABB.
+Live 1 cm `fast_ego80` still uses the `robot_config` boxes (body, wheels, caster, mast).
 
 Remaining tell was partly a **buggy bag rebuild**: RS2 phys_h used `25.6-90` (=64.4° down). Floor in the wedge looked like OBS (side-view slope ~20°). Fit 2026-09-14: **27.0° down from horizontal**, `cam_h=0.475`. BEV `FW_ROTATION` still uses 25.6-90.
 
@@ -181,6 +197,10 @@ python -u main.py --slam self --wheel-imu-prior --no-rerun \
 ```
 
 Do not commit bags, `out/ckpt.pt`, or overnight dumps.
+
+The 2026-09-14 overnight train still has the old die-at-4 cm physics.
+Restart train from the current ckpt (or scratch) to learn escape under
+this SafetyGuard match.
 
 ## Related
 

@@ -1,0 +1,2479 @@
+<?xml version="1.0"?>
+<!--
+  Kevin MakerBeam XL differential-drive robot (v1 digital twin)
+  Units: meters. Beams: MakerBeam XL 0.015 x 0.015 m, STOCK LENGTHS ONLY
+  (0.300, 0.200, 0.150, 0.100, 0.050 m). Frame: x forward, y left, z up (REP-103).
+
+  Base geometry (James hard constraints):
+  - Frame width 300 mm (front/rear cross beams = 300 mm stock along Y)
+  - Wheel mount faces at y = +/- 0.153 (track at hubs ~306 mm; tire centers outboard)
+  - Longitudinal sides = 100 mm + 150 mm end-to-end (total 250 mm)
+  - Four sets of 150+100: left/right on lower AND upper tiers (8 beams)
+  - Orientation assumption (easy to flip): along +X, 100 mm FORWARD of axle
+    join, 150 mm AFT of axle join. Axle at the 100|150 join (x = 0).
+  - 150+100 rails are SANDWICHED BETWEEN the front & rear 300 mm end-caps
+    (butt against inner faces). Join style: 300s = outside end-caps.
+  - Inner span (rail length) = 250 mm; outer length = 250 + 2*15 = 280 mm.
+  - Front outer face ≈ +0.115 m; rear outer face ≈ -0.165 m.
+  - Front inner face / rail front end = +0.100 m; rear inner = -0.150 m.
+  - Mast (James): 3x300 mm = 900 mm on aft 300 centerline (x=-0.150, y=0);
+    150 mm top bar beside mast (tops flush, +7.5mm forward vs centered-on-top); T-bracket center hole on mast top center; tip plumb with drive-wheel centerline (x=0).
+
+  Wheel mounts (v4 — James photo bracket orientation):
+  - MakerBeam XL flat L-brackets (James drawing, NOT 10mm MakerBeam):
+      legs 15 mm wide, long ~60 mm UP (3 holes: small / M6 / small), short ~30 mm
+      on rail (2 T-slot bolts); plate thickness 1.5 mm (James).
+  - Orientation: LONG leg vertical (up); SHORT leg horizontal on outer face of
+      side rail, pointing AWAY from pair partner along beam (X). Verticals toward
+      pair center, parallel. Big (M6) holes on uprights bolt to BotWheel flange.
+  - Two L-brackets per wheel; M6 centers 36 mm apart (opposite BotWheel holes / PCD Ø36)
+      BotWheel T/B diamond stay on x=0 at z=±0.018 (36 mm PCD) — see README.
+  - BotWheel hub motor: Ø171 x ~0.052 m tire bulk sits OUTBOARD of mount face.
+      Mount face / tire inner ≈ ±0.153 (clears beam+bracket).
+      Left tire world Y: +0.153 .. +0.205; right: −0.153 .. −0.205.
+  - beam_axle_top: 300 mm cross member one hole above top-diamond (z=+0.033) via T-brackets.
+  - Bracket plates sit in stand-off gap: beam outer ±0.150 → plate → tire inner ±0.153.
+-->
+<!-- Visual: all beam_* boxes shortened 1mm on long axis (0.5mm/end) for visible seams; centers stay on true stock grid. -->
+<robot name="kevin">
+
+  <material name="beam_black"><color rgba="0.12 0.12 0.14 1"/></material>
+  <material name="bracket_silver"><color rgba="0.72 0.74 0.76 1"/></material>
+  <material name="wheel_tire"><color rgba="0.15 0.15 0.15 1"/></material>
+  <material name="wheel_hub"><color rgba="0.35 0.38 0.42 1"/></material>
+  <material name="battery_green"><color rgba="0.15 0.55 0.25 1"/></material>
+  <material name="seeed_green"><color rgba="0.25 0.72 0.35 1"/></material>
+  <material name="odrive_clear"><color rgba="0.75 0.85 0.95 0.55"/></material>
+  <material name="odrive_board"><color rgba="0.08 0.08 0.09 1"/></material>
+  <material name="hs_alum"><color rgba="0.72 0.74 0.76 1"/></material>
+  <material name="aluminium"><color rgba="0.75 0.75 0.78 1"/></material>
+  <material name="hs_black"><color rgba="0.12 0.12 0.13 1"/></material>
+  <material name="odrive_pad"><color rgba="0.2 0.2 0.22 1"/></material>
+  <material name="odrive_cap"><color rgba="0.72 0.74 0.76 1"/></material>
+  <material name="odrive_term"><color rgba="0.22 0.62 0.28 1"/></material>
+  <material name="odrive_housing"><color rgba="0.55 0.55 0.58 0.90"/></material>
+  <material name="odrive_white"><color rgba="0.92 0.92 0.94 0.90"/></material>
+  <material name="pc_black"><color rgba="0.08 0.08 0.1 1"/></material>
+  <material name="heatsink"><color rgba="0.55 0.58 0.62 1"/></material>
+  <material name="estop_red"><color rgba="0.9 0.15 0.1 1"/></material>
+  <material name="respeaker"><color rgba="0.12 0.12 0.14 1"/></material>
+  <material name="speaker"><color rgba="0.08 0.08 0.09 1"/></material>
+  <material name="holder_black"><color rgba="0.10 0.10 0.12 1"/></material>
+  <material name="screen_bezel"><color rgba="0.06 0.06 0.07 1"/></material>
+  <material name="screen_panel"><color rgba="0.12 0.18 0.28 1"/></material>
+  <material name="rs_aluminum"><color rgba="0.48 0.48 0.50 1"/></material>
+  <material name="rs_ir_lens"><color rgba="0.05 0.05 0.06 1"/></material>
+  <material name="rs_rgb_lens"><color rgba="0.08 0.10 0.14 1"/></material>
+  <material name="rs_projector"><color rgba="0.15 0.12 0.05 1"/></material>
+  <material name="rs_imu_badge"><color rgba="0.2 0.45 0.85 1"/></material>
+  <material name="whibal_grey"><color rgba="0.46 0.46 0.46 1"/></material>
+  <material name="whibal_white"><color rgba="0.95 0.95 0.95 1"/></material>
+  <material name="whibal_black"><color rgba="0.05 0.05 0.05 1"/></material>
+  <material name="gate_caster_tread"><color rgba="0.42 0.42 0.44 1"/></material>
+  <material name="gate_caster_rim"><color rgba="0.92 0.92 0.94 1"/></material>
+  <material name="gate_caster_hub"><color rgba="0.55 0.32 0.18 1"/></material>
+  <material name="estop_orange"><color rgba="0.95 0.45 0.1 1"/></material>
+  <material name="caster_wheel"><color rgba="0.2 0.2 0.22 1"/></material>
+  <material name="caster_bracket"><color rgba="0.65 0.65 0.68 1"/></material>
+  <material name="mount_hole"><color rgba="0.05 0.05 0.06 1"/></material>
+  <material name="spoke_metal"><color rgba="0.45 0.48 0.52 1"/></material>
+  <material name="anker_matte"><color rgba="0.04 0.04 0.05 1"/></material>
+  <material name="anker_gloss"><color rgba="0.04 0.04 0.05 1"/></material>
+  <material name="usb_blue"><color rgba="0.15 0.35 0.85 1"/></material>
+  <material name="led_green"><color rgba="0.15 0.85 0.25 1"/></material>
+  <material name="anker_white"><color rgba="0.92 0.92 0.94 1"/></material>
+  <material name="canable_case"><color rgba="0.06 0.06 0.07 1"/></material>
+  <material name="canable_clear"><color rgba="0.82 0.88 0.94 0.90"/></material>
+  <material name="canable_usb"><color rgba="0.72 0.74 0.76 1"/></material>
+  <material name="pcb_brown"><color rgba="0.18 0.10 0.06 1"/></material>
+  <material name="lens_black"><color rgba="0.06 0.06 0.07 1"/></material>
+  <material name="lens_glass"><color rgba="0.18 0.08 0.28 1"/></material>
+  <material name="jst_white"><color rgba="0.92 0.92 0.94 1"/></material>
+  <material name="velcro_black"><color rgba="0.08 0.08 0.09 1"/></material>
+
+  <!-- base_link: origin at drive-wheel rotation center (between middle M6s), axle join at x=0; beams at z=-0.015 -->
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.01 0.01 0.01"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.05"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+
+  <!-- Cage: 4x100 mm posts. Front at x=-0.015 (flush with aft face of beam_axle_top; ~130 mm ahead of rear posts); rear at x=-0.1425 (fully on side bars, clear of rear 300) (end of side bars, 15 mm forward of base outer back, flush with sides y=±0.1425) so rear base 300 stays clear for the mast. -->
+  <!-- ========== BASE CAGE — LOWER TIER (z=0) ========== -->
+  <!-- 300 mm front/rear = OUTSIDE end-caps (define 300 mm width along Y). -->
+  <!-- 100(fwd)+150(aft) rails SANDWICHED between inner faces of those 300s. -->
+  <!-- Side beam centers at y = +/- 0.1425 (outer face-to-face width 0.300 m). -->
+  <!-- Rail X span (inner): -0.150 .. +0.100 ; axle join at x=0. -->
+  <!-- Outer X: rear face -0.165 .. front face +0.115 (280 mm overall). -->
+
+  <!-- Lower left: 100 mm forward of axle -->
+  <link name="beam_base_left_fwd">
+    <visual>
+      <geometry><box size="0.099 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00004"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_left_fwd_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_left_fwd"/>
+    <origin xyz="0.05 0.1425 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Lower left: 150 mm aft of axle -->
+  <link name="beam_base_left_aft">
+    <visual>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_left_aft_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_left_aft"/>
+    <origin xyz="-0.075 0.1425 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Lower right: 100 mm forward -->
+  <link name="beam_base_right_fwd">
+    <visual>
+      <geometry><box size="0.099 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00004"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_right_fwd_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_right_fwd"/>
+    <origin xyz="0.05 -0.1425 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Lower right: 150 mm aft -->
+  <link name="beam_base_right_aft">
+    <visual>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_right_aft_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_right_aft"/>
+    <origin xyz="-0.075 -0.1425 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Lower front cross (300 mm along Y); inner face at x=+0.100, outer at +0.115 -->
+  <link name="beam_base_front">
+    <visual>
+      <geometry><box size="0.015 0.299 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.0008"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_front_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_front"/>
+    <origin xyz="0.1075 0.0 -0.015" rpy="0 0 0"/>
+  </joint>
+
+
+
+
+  <!-- ========== FRONT CASTER (primitives only — solid connected stack) ==========
+       beam → T (flush) → plate (flush) → neck → U-fork hood → twin Ø1.5" wheels.
+       No custom meshes. Tire on ground. -->
+  <!-- XL T under front beam: ears along beam (Y), stem aft into robot — separate from caster plate -->
+  <link name="bracket_front_caster_t">
+    <!-- Ears under beam_base_front -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.045 0.0015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- Stem 45 mm aft (-X) into robot -->
+    <visual>
+      <origin xyz="-0.03000 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.045 0.015 0.0015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.015 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.001"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.015 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.001"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.03000 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.001"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial><mass value="0.02"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="bracket_front_caster_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_front_caster_t"/>
+    <origin xyz="0.10750000 0.00000000 -0.02325000" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Caster mount plate (38 mm style) under stem, 20 mm forward of stem center toward beam -->
+  <link name="front_caster_plate">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.038 0.038 0.0025"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0125 0.0125 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.0029"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0125 -0.0125 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.0029"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.0125 0.0125 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.0029"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.0125 -0.0125 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.0029"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.0015" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.0008"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.03"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="front_caster_plate_joint" type="fixed">
+    <parent link="bracket_front_caster_t"/><child link="front_caster_plate"/>
+    <!-- Flush with beam_base_front forward face (x=0.115); plate half=19 mm → local x=-0.0115 -->
+    <origin xyz="-0.01150 0 -0.00200" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Single rotating assembly: neck + solid U-fork (all one link so nothing can float apart) -->
+  <link name="front_caster_yaw">
+    <!-- Hood shell mesh (unchanged shape); stem is a separate cylinder so it can be edited alone -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/front_caster_hood.stl" scale="1 1 1"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <!-- Stem only: thinner + longer to meet hood (do not bake into hood mesh) -->
+    <visual>
+      <origin xyz="0 0 -0.01450" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.03900"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.01700 0 -0.03595" rpy="1.5707963267948966 0 0"/>
+      <geometry><cylinder radius="0.02305" length="0.03050"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.08"/>
+      <origin xyz="-0.01700 0 -0.01079"/>
+      <inertia ixx="2e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="1.5e-5"/>
+    </inertial>
+  </link>
+  <joint name="front_caster_yaw_joint" type="continuous">
+    <parent link="front_caster_plate"/>
+    <child link="front_caster_yaw"/>
+    <origin xyz="0 0 -0.00525" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="0.05" friction="0.01"/>
+  </joint>
+
+  <link name="front_caster_wheels">
+    <!-- Same material as hood; stick out slightly past hood; axle not shown -->
+    <visual>
+      <origin xyz="0 0.00825 0" rpy="1.5707963267948966 0 0"/>
+      <geometry><cylinder radius="0.01905" length="0.01400"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.00825 0" rpy="1.5707963267948966 0 0"/>
+      <geometry><cylinder radius="0.01905" length="0.01400"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.5707963267948966 0 0"/>
+      <geometry><cylinder radius="0.01905" length="0.03050"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.06"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="front_caster_wheel_joint" type="continuous">
+    <parent link="front_caster_yaw"/>
+    <child link="front_caster_wheels"/>
+    <origin xyz="-0.01700 0 -0.03595" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <dynamics damping="0.02" friction="0.01"/>
+  </joint>
+
+
+
+
+  <!-- Lower rear cross; inner face at x=-0.150, outer at -0.165 -->
+  <link name="beam_base_rear">
+    <visual>
+      <geometry><box size="0.015 0.299 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.0008"/>
+    </inertial>
+  </link>
+  <joint name="beam_base_rear_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_base_rear"/>
+    <origin xyz="-0.1575 0.0 -0.015" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- ========== INNER LONGITUDINALS (James photo): 150+100, 120 mm c-c ========== -->
+  <!-- Parallel to side rails, sandwiched between front/rear 300s; centers y=±0.060. -->
+  <link name="beam_inner_left_fwd">
+    <visual>
+      <geometry><box size="0.099 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00004"/>
+    </inertial>
+  </link>
+  <joint name="beam_inner_left_fwd_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_inner_left_fwd"/>
+    <origin xyz="0.05 0.06 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <link name="beam_inner_left_aft">
+    <visual>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="beam_inner_left_aft_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_inner_left_aft"/>
+    <origin xyz="-0.075 0.06 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <link name="beam_inner_right_fwd">
+    <visual>
+      <geometry><box size="0.099 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00004" iyz="0" izz="0.00004"/>
+    </inertial>
+  </link>
+  <joint name="beam_inner_right_fwd_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_inner_right_fwd"/>
+    <origin xyz="0.05 -0.06 -0.015" rpy="0 0 0"/>
+  </joint>
+
+  <link name="beam_inner_right_aft">
+    <visual>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="beam_inner_right_aft_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_inner_right_aft"/>
+    <origin xyz="-0.075 -0.06 -0.015" rpy="0 0 0"/>
+  </joint>
+
+
+
+  <!-- Cage: 4x100 mm posts. Front at x=-0.015 (flush with aft face of beam_axle_top; ~130 mm ahead of rear posts); rear at x=-0.1425 (fully on side bars, clear of rear 300) (end of side bars, 15 mm forward of base outer back, flush with sides y=±0.1425) so rear base 300 stays clear for the mast. -->
+  <!-- ========== BASE CAGE — UPPER TIER (z=0.100) via 100 mm risers ========== -->
+  <!-- Same 100+150 side layout left/right; front/rear crosses 300 mm -->
+  <link name="beam_riser_rl">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_rl_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_rl"/>
+    <origin xyz="-0.1425 0.1425 0.0425" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_riser_rr">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_rr_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_rr"/>
+    <origin xyz="-0.1425 -0.1425 0.0425" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Inner 100mm posts on middle longitudinals, same row as front side posts -->
+  <link name="beam_riser_il">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_il_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_il"/>
+    <origin xyz="-0.015 0.06 0.0425" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_riser_ir">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_ir_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_ir"/>
+    <origin xyz="-0.015 -0.06 0.0425" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Inner 100mm posts 72mm aft of front inner row -->
+  <link name="beam_riser_il2">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_il2_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_il2"/>
+    <origin xyz="-0.102 0.06 0.0425" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_riser_ir2">
+    <visual><geometry><box size="0.015 0.015 0.099"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.04"/><inertia ixx="0.00003" ixy="0" ixz="0" iyy="0.00003" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_riser_ir2_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_riser_ir2"/>
+    <origin xyz="-0.102 -0.06 0.0425" rpy="0 0 0"/>
+  </joint>
+
+
+
+  <!-- Upper left/right sides: 100 fwd + 150 aft (same as lower) -->
+
+  <!-- Upper front/rear crosses: 300 mm (match base width) -->
+
+  <!-- Top side rails: 150 mm, aft end flush with rear post aft face (x=-0.150..0), slight overhang past front posts (~130 mm apart) -->
+  <link name="beam_top_left">
+    <visual><geometry><box size="0.149 0.015 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/></inertial>
+  </link>
+  <joint name="beam_top_left_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_left"/>
+    <origin xyz="-0.075 0.1425 0.115" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_top_right">
+    <visual><geometry><box size="0.149 0.015 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/></inertial>
+  </link>
+  <joint name="beam_top_right_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_right"/>
+    <origin xyz="-0.075 -0.1425 0.115" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Inner top F-B 200 mm rails: front flush with outer 150 fronts (x=0), extend aft to x=-0.200; under green PC brackets -->
+  <link name="beam_top_inner_left">
+    <visual><geometry><box size="0.199 0.015 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/></inertial>
+  </link>
+  <joint name="beam_top_inner_left_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_inner_left"/>
+    <origin xyz="-0.100 0.0925 0.115" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_top_inner_right">
+    <visual><geometry><box size="0.199 0.015 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/></inertial>
+  </link>
+  <joint name="beam_top_inner_right_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_inner_right"/>
+    <origin xyz="-0.100 -0.0925 0.115" rpy="0 0 0"/>
+  </joint>
+
+
+  <link name="beam_top_front">
+    <visual><geometry><box size="0.015 0.299 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.0008"/></inertial>
+  </link>
+  <joint name="beam_top_front_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_front"/>
+    <origin xyz="-0.015 0.0 0.1" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_top_rear">
+    <visual><geometry><box size="0.015 0.299 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.0008"/></inertial>
+  </link>
+  <joint name="beam_top_rear_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_top_rear"/>
+    <origin xyz="-0.1425 0.0 0.1" rpy="0 0 0"/>
+  </joint>
+
+
+
+
+  <!-- ========== WHEEL MOUNTS: MakerBeam XL L-brackets (James photo correction) ========== -->
+  <!-- Flat L in XZ; thickness 1.5 mm. Beam outer ±0.150; plate center ±0.15075. -->
+  <!-- Orientation (photo + James): LONG leg UP (vertical), SHORT leg on rail along X. -->
+  <!-- Upright: 3 holes (top small / middle M6 / bottom small). Shorts point AWAY along beam. -->
+  <!-- Pair per side: big-hole centers 50 mm apart along X at axle height (z=0) → L/R mount. -->
+  <!-- Verticals toward pair center; BotWheel T/B diamond stay on x=0 at z=±0.018. -->
+  <!-- Link frame origin = big-hole (M6) center. upper = +X (fwd), lower = −X (aft). -->
+
+  <!-- XL L left upper (+X): long UP, short points +X away -->
+  <link name="bracket_xl_left_upper">
+    <!-- Origin = middle M6. Plate thickness 1.5 mm (James). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 0 -0.015" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.003" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.012"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_xl_left_upper_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_xl_left_upper"/>
+    <origin xyz="0.018 0.15075 0.0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL L left lower (−X): long UP, short points −X away -->
+  <link name="bracket_xl_left_lower">
+    <!-- Origin = middle M6. Plate thickness 1.5 mm (James). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.015 0 -0.015" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.003" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.012"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_xl_left_lower_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_xl_left_lower"/>
+    <origin xyz="-0.018 0.15075 0.0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL L right upper (+X): long UP, short points +X away -->
+  <link name="bracket_xl_right_upper">
+    <!-- Origin = middle M6. Plate thickness 1.5 mm (James). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 0 -0.015" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.003" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.012"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_xl_right_upper_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_xl_right_upper"/>
+    <origin xyz="0.018 -0.15075 0.0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL L right lower (−X): long UP, short points −X away -->
+  <link name="bracket_xl_right_lower">
+    <!-- Origin = middle M6. Plate thickness 1.5 mm (James). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.015 0 -0.015" rpy="0 0 0"/>
+      <geometry><box size="0.030 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.003" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.0025"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.012"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_xl_right_lower_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_xl_right_lower"/>
+    <origin xyz="-0.018 -0.15075 0.0" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- 300 mm cross member at z=+0.033 (one XL hole above top diamond); T-brackets: lowest hole on top wheel hole, beam on next hole up -->
+  <link name="beam_axle_top">
+    <visual>
+      <geometry><box size="0.015 0.299 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.0008"/>
+    </inertial>
+  </link>
+  <joint name="beam_axle_top_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_axle_top"/>
+    <origin xyz="0.0 0.0 0.033" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Axle T-brackets: lowest hole on BotWheel top diamond (z=+0.018); crossbeam on hole one up (+15 mm) -->
+  <link name="bracket_axle_t_left">
+    <!-- vertical stem (3 holes tall) in XZ, thickness along Y -->
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- T cross flange at top of stem (along X) -->
+    <visual>
+      <origin xyz="0 0 0.030" rpy="0 0 0"/>
+      <geometry><box size="0.045 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- hole hints: lowest (=origin), mid (=beam), upper -->
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.030" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.02"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_axle_t_left_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_axle_t_left"/>
+    <origin xyz="0.0 0.15075 0.018" rpy="0 0 0"/>
+  </joint>
+  <link name="bracket_axle_t_right">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.0015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.030" rpy="0 0 0"/>
+      <geometry><box size="0.045 0.0015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.030" rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.02"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_axle_t_right_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_axle_t_right"/>
+    <origin xyz="0.0 -0.15075 0.018" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- ========== DRIVE WHEELS: ODrive BotWheel (hub-motor topology, v3) ========== -->
+  <!-- Ø171 x width 0.052 (guessed). Track 0.330; joints at y=±0.165, axis Y. -->
+  <!-- Tire bulk OUTBOARD of mount: inner face clears beam±0.150 + bracket 3 mm → ±0.153. -->
+  <!-- Left tire world Y +0.153..+0.205 (local −0.012..+0.040, center +0.014). -->
+  <!-- Right tire world Y −0.153..−0.205 (local +0.012..−0.040, center −0.014). -->
+  <!-- Visual: one tire + inner hub flange + 5 spoke boxes + 4x M6 on hub face. -->
+  <!-- No nested concentric full cylinders (was looking like wheels-in-wheels). -->
+  <link name="wheel_left">
+    <!-- BotWheel mesh: origin at mount flange face; tire outboard (-Z in mesh). -->
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry>
+        <mesh filename="meshes/botwheel_v14.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="wheel_tire"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0.0295 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.08565" length="0.0446"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="2.2"/><inertia ixx="0.005" ixy="0" ixz="0" iyy="0.008" iyz="0" izz="0.005"/>
+    </inertial>
+  </link>
+
+  <joint name="wheel_left_joint" type="continuous">
+    <parent link="base_link"/><child link="wheel_left"/>
+    <origin xyz="0.0 0.1515 0.0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="wheel_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="-1.57079632679 0 0"/>
+      <geometry>
+        <mesh filename="meshes/botwheel_v14.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="wheel_tire"/>
+    </visual>
+    <collision>
+      <origin xyz="0 -0.0295 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.08565" length="0.0446"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="2.2"/><inertia ixx="0.005" ixy="0" ixz="0" iyy="0.008" iyz="0" izz="0.005"/>
+    </inertial>
+  </link>
+
+  <joint name="wheel_right_joint" type="continuous">
+    <parent link="base_link"/><child link="wheel_right"/>
+    <origin xyz="0.0 -0.1515 0.0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+
+
+
+  <!-- ========== ELECTRONICS (fit 300 x 250 footprint) ========== -->
+  <link name="battery">
+    <visual><geometry><box size="0.070 0.190 0.070"/></geometry><material name="battery_green"/></visual>
+    <inertial><mass value="2.5"/><inertia ixx="0.008" ixy="0" ixz="0" iyy="0.003" iyz="0" izz="0.008"/></inertial>
+  </link>
+  <joint name="battery_joint" type="fixed">
+    <parent link="base_link"/><child link="battery"/>
+    <origin xyz="-0.059 0.0 0.0275" rpy="0 0 0"/>
+  </joint>
+
+
+
+  <!-- ODrive S1: HS +90° only; cover 54x69 matches OnShape after yaw; holes unscaled -->
+  <link name="odrive_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 1.57079632679"/>
+      <geometry>
+        <mesh filename="meshes/odrive_hs_legs_v3.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="hs_black"/>
+    </visual>
+    <!-- OnShape cover footprint after same +90° as HS: 54.4 x 69.1 mm -->
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/odrive_housing_cover.stl" scale="1 1 1"/></geometry>
+      <material name="odrive_housing"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.0055" rpy="0 0 0"/>
+      <geometry><box size="0.050 0.066 0.0016"/></geometry>
+      <material name="odrive_board"/>
+    </visual>
+    <!-- green +X / white -X unchanged -->
+    <visual>
+      <origin xyz="0.027 0 0.013" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.050 0.014"/></geometry>
+      <material name="odrive_term"/>
+    </visual>
+    <!-- DC-link electrolytics: 4× Ø10×12 mm cans in ONE ROW parallel to green terminal
+         (shop S1 photo: row along +X power edge, not 2×2). -->
+    <visual>
+      <origin xyz="0.015 0.018 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 0.006 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 -0.006 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 -0.018 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.027 0 0.013" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.036 0.012"/></geometry>
+      <material name="odrive_white"/>
+    </visual>
+    <inertial>
+      <mass value="0.15"/><inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="odrive_left_joint" type="fixed">
+    <parent link="base_link"/><child link="odrive_left"/>
+    <origin xyz="-0.106 0.09 0.0425" rpy="0 1.5707963267949 -3.1415926535898"/>
+  </joint>
+  <!-- ODrive S1: HS +90° only; cover 54x69 matches OnShape after yaw; holes unscaled -->
+  <link name="odrive_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 1.57079632679"/>
+      <geometry>
+        <mesh filename="meshes/odrive_hs_legs_v3.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="hs_black"/>
+    </visual>
+    <!-- OnShape cover footprint after same +90° as HS: 54.4 x 69.1 mm -->
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/odrive_housing_cover.stl" scale="1 1 1"/></geometry>
+      <material name="odrive_housing"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.0055" rpy="0 0 0"/>
+      <geometry><box size="0.050 0.066 0.0016"/></geometry>
+      <material name="odrive_board"/>
+    </visual>
+    <!-- green +X / white -X unchanged -->
+    <visual>
+      <origin xyz="0.027 0 0.013" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.050 0.014"/></geometry>
+      <material name="odrive_term"/>
+    </visual>
+    <!-- DC-link electrolytics: 4× Ø10×12 mm cans in ONE ROW parallel to green terminal
+         (shop S1 photo: row along +X power edge, not 2×2). -->
+    <visual>
+      <origin xyz="0.015 0.018 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 0.006 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 -0.006 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="0.015 -0.018 0.0123" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0050" length="0.0120"/></geometry>
+      <material name="odrive_cap"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.027 0 0.013" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.036 0.012"/></geometry>
+      <material name="odrive_white"/>
+    </visual>
+    <inertial>
+      <mass value="0.15"/><inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.00012"/>
+    </inertial>
+  </link>
+  <joint name="odrive_right_joint" type="fixed">
+    <parent link="base_link"/><child link="odrive_right"/>
+    <origin xyz="-0.106 -0.09 0.0425" rpy="0 1.5707963267949 -3.1415926535898"/>
+  </joint>
+
+  <!-- ODrive shop USB-CAN Adapter (CANable-class), centered on starboard odrive_right aft/cover face.
+       Product: https://shop.odriverobotics.com/products/usb-can-adapter
+       Datasheet mech (with case): Width 36.14 × Length 40.16 × Height 13.65 mm
+         https://docs.odriverobotics.com/v/latest/hardware/usb-can-datasheet.html
+       Layout from shop pinout photo: USB-C on one short end, green 4-pos screw terminal on opposite,
+       optional JST-GH + status LEDs under clear acrylic top / black base sandwich.
+       Local before joint yaw: X=width, Y=length (green at +Y), Z=height (out of cover).
+       Joint yaw −90° points green down (world −Z). Bottom on cover outer face z=0.025. -->
+  <link name="canable">
+    <!-- black case base (full footprint) -->
+    <visual>
+      <origin xyz="0 0 -0.0020" rpy="0 0 0"/>
+      <geometry><box size="0.03614 0.04016 0.00965"/></geometry>
+      <material name="canable_case"/>
+    </visual>
+    <!-- clear acrylic top plate -->
+    <visual>
+      <origin xyz="0 0 0.005325" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/canable_clear_top.stl" scale="1 1 1"/></geometry>
+      <material name="canable_clear"/>
+    </visual>
+    <!-- dark PCB slab visible under clear -->
+    <visual>
+      <origin xyz="0 0 0.0025" rpy="0 0 0"/>
+      <geometry><box size="0.032 0.034 0.0016"/></geometry>
+      <material name="odrive_board"/>
+    </visual>
+    <!-- green 4-pos CAN screw terminal (+Y end of length) -->
+    <visual>
+      <origin xyz="0 0.0155 0.0045" rpy="0 0 0"/>
+      <geometry><box size="0.020 0.0085 0.010"/></geometry>
+      <material name="odrive_term"/>
+    </visual>
+    <!-- USB-C receptacle (−Y end); silver shell ~9×7×3.5 mm class -->
+    <visual>
+      <origin xyz="0 -0.0215 0.0005" rpy="0 0 0"/>
+      <geometry><box size="0.0090 0.0070 0.0035"/></geometry>
+      <material name="canable_usb"/>
+    </visual>
+    <!-- white JST-GH 4-pos (near terminal, under clear) -->
+    <visual>
+      <origin xyz="0.008 0.006 0.0040" rpy="0 0 0"/>
+      <geometry><box size="0.006 0.0045 0.004"/></geometry>
+      <material name="odrive_white"/>
+    </visual>
+    <!-- status LED (TX/RX proxy) -->
+    <visual>
+      <origin xyz="-0.010 -0.008 0.0042" rpy="0 0 0"/>
+      <geometry><box size="0.0025 0.0015 0.0012"/></geometry>
+      <material name="led_green"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.03614 0.04016 0.01365"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.012"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.000002" ixy="0" ixz="0" iyy="0.000002" iyz="0" izz="0.000003"/>
+    </inertial>
+  </link>
+  <joint name="canable_joint" type="fixed">
+    <parent link="odrive_right"/><child link="canable"/>
+    <!-- Cover outer face at local z=0.025; CANable half-height 0.006825 → center 0.031825.
+         Yaw −π/2: green screw terminal (+Y in canable) → odrive +X → world −Z (down). -->
+    <origin xyz="0 0 0.031825" rpy="0 0 -1.5707963267948966"/>
+  </joint>
+
+
+
+
+
+  <!-- Seeed reComputer Industrial J4012-class (159x155x57 mm); single unit, no separate heatsink -->
+  <link name="pc">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.159 0.155 0.050"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <!-- top heatsink / fin pack (part of enclosure) -->
+    <visual>
+      <origin xyz="0 0 0.0285" rpy="0 0 0"/>
+      <geometry><box size="0.150 0.145 0.007"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.055 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.033 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.011 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.011 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.033 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.055 0 0.032" rpy="0 0 0"/>
+      <geometry><box size="0.008 0.140 0.012"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <!-- front face accent (ports strip) -->
+    <visual>
+      <origin xyz="0.078 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.004 0.120 0.030"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <inertial>
+      <mass value="1.57"/><inertia ixx="0.004" ixy="0" ixz="0" iyy="0.004" iyz="0" izz="0.005"/>
+    </inertial>
+  </link>
+  <joint name="pc_joint" type="fixed">
+    <parent link="base_link"/><child link="pc"/>
+    <origin xyz="-0.0705 0.0 0.1505" rpy="0 0 0"/>
+  </joint>
+  <!-- Seeed under-PC mounts: one-piece 1mm bent sheet, 2mm step -->
+  <link name="pc_mount_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/pc_mount_left_v3.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="seeed_green"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+  </link>
+  <joint name="pc_mount_left_joint" type="fixed">
+    <parent link="pc"/><child link="pc_mount_left"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="pc_mount_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/pc_mount_right_v3.stl" scale="1 1 1"/>
+      </geometry>
+      <material name="seeed_green"/>
+    </visual>
+    <inertial>
+      <mass value="0.04"/><inertia ixx="0.00005" ixy="0" ixz="0" iyy="0.00005" iyz="0" izz="0.00005"/>
+    </inertial>
+  </link>
+  <joint name="pc_mount_right_joint" type="fixed">
+    <parent link="pc"/><child link="pc_mount_right"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+
+
+
+
+
+
+
+
+
+  <!-- ========== MAST (independent bars vs base_link; visual 0.5mm end inset) ========== -->
+  <link name="beam_mast_lower">
+    <visual><geometry><box size="0.015 0.015 0.299"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_mast_lower_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_lower"/>
+    <origin xyz="-0.1575 0 0.1425" rpy="0 0 0"/>
+  </joint>
+
+
+
+
+
+
+  <!-- ========== MAST GATE CASTER (USCaster B0DM5KTTYF) — measured ==========
+       U-bracket 65 mm mast→back edge; shaft/spring centered 50 mm from mast;
+       caster trail/offset 25 mm from shaft; wheel Ø2" × 0.78". -->
+  <link name="gate_caster_bracket">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0035 0.0420 0.0699"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.03250 0 0.03070" rpy="0 0 0"/>
+      <geometry><box size="0.0615 0.0420 0.0045"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.03250 0 -0.03070" rpy="0 0 0"/>
+      <geometry><box size="0.0615 0.0420 0.0045"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0022 0 0.0220" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.003" length="0.0015"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0022 0 -0.0220" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.003" length="0.0015"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <!-- Dark shaft (axis of yaw swivel) -->
+    <visual>
+      <origin xyz="-0.04825 0 -0.00150" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0060" length="0.0889"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <!-- Spring body (dark) + 5 silver coil rings -->
+    <visual>
+      <origin xyz="-0.04825 0 0.00000" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0100" length="0.0549"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.04825 0 -0.02196" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0125" length="0.0028"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.04825 0 -0.01098" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0125" length="0.0028"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.04825 0 0.00000" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0125" length="0.0028"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.04825 0 0.01098" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0125" length="0.0028"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.04825 0 0.02196" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0125" length="0.0028"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.15"/><inertia ixx="2e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="gate_caster_bracket_joint" type="fixed">
+    <parent link="base_link"/><child link="gate_caster_bracket"/>
+    <origin xyz="-0.16675000 0.00000000 0.04173200" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gate_caster_yaw">
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.016" length="0.010"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 -0.006" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.014" length="0.014"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <inertial><mass value="0.05"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <!-- 360° swivel: yaw → fork (holster) → wheel; axis = shaft centerline -->
+  <joint name="gate_caster_yaw_joint" type="continuous">
+    <parent link="gate_caster_bracket"/>
+    <child link="gate_caster_yaw"/>
+    <origin xyz="-0.04825 0 -0.04595" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <dynamics damping="0.05" friction="0.01"/>
+  </joint>
+
+  <link name="gate_caster_fork">
+    <!-- Trailing U-fork holster: swivel collar + bridge + 2mm rounded cheeks (25 mm trail) -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/gate_caster_holster.stl" scale="1 1 1"/></geometry>
+      <material name="hs_black"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.0111 0 -0.0324" rpy="0 0 0"/>
+      <geometry><box size="0.0507 0.0288 0.0699"/></geometry>
+    </collision>
+    <inertial><mass value="0.08"/><inertia ixx="2e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="gate_caster_fork_joint" type="fixed">
+    <parent link="gate_caster_yaw"/><child link="gate_caster_fork"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <link name="gate_caster_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.02540" length="0.01981"/></geometry>
+      <material name="gate_caster_tread"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.01829" length="0.02081"/></geometry>
+      <material name="gate_caster_rim"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.00889" length="0.02381"/></geometry>
+      <material name="gate_caster_hub"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.01291 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.004"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.01291 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.005" length="0.004"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="1.57079632679 0 0"/>
+      <geometry><cylinder radius="0.02540" length="0.01981"/></geometry>
+    </collision>
+    <inertial><mass value="0.06"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="2e-5" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="gate_caster_wheel_joint" type="continuous">
+    <parent link="gate_caster_fork"/>
+    <child link="gate_caster_wheel"/>
+    <origin xyz="-0.02500 0.00000 -0.05588" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <dynamics damping="0.02" friction="0.01"/>
+  </joint>
+
+  <link name="beam_mast_mid">
+    <visual><geometry><box size="0.015 0.015 0.299"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_mast_mid_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_mid"/>
+    <origin xyz="-0.1575 0 0.4425" rpy="0 0 0"/>
+  </joint>
+
+  <link name="beam_mast_upper">
+    <visual><geometry><box size="0.015 0.015 0.299"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.10"/><inertia ixx="0.0008" ixy="0" ixz="0" iyy="0.0008" iyz="0" izz="0.00001"/></inertial>
+  </link>
+  <joint name="beam_mast_upper_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_upper"/>
+    <origin xyz="-0.1575 0 0.7425" rpy="0 0 0"/>
+  </joint>
+
+  <link name="beam_mast_top">
+    <visual><geometry><box size="0.149 0.015 0.015"/></geometry><material name="beam_black"/></visual>
+    <inertial><mass value="0.06"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00012" iyz="0" izz="0.00012"/></inertial>
+  </link>
+  <joint name="beam_mast_top_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_top"/>
+    <origin xyz="-0.075 0 0.885" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 50 mm crossbeam on top mast bar, 10 mm aft of tip -->
+  <link name="beam_mast_top_cross">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.050 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.02"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="beam_mast_top_cross_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_top_cross"/>
+    <origin xyz="-0.018000000000000002 0 0.8999999999999999" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL corner cube on top mast bar; 45 mm clear to tip crossbeam -->
+  <link name="cube_mast_top">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="cube_mast_top_joint" type="fixed">
+    <parent link="base_link"/><child link="cube_mast_top"/>
+    <origin xyz="-0.07799999999999999 0 0.9" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ReSpeaker mic array: Ø75×15 mm disc spanning tip crossbeam + top corner cube -->
+  <link name="respeaker">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0375" length="0.015"/></geometry>
+      <material name="respeaker"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0375" length="0.015"/></geometry>
+    </collision>
+  </link>
+  <joint name="respeaker_joint" type="fixed">
+    <parent link="base_link"/><child link="respeaker"/>
+    <origin xyz="-0.048 0 0.915" rpy="0 0 0"/>
+  </joint>
+
+  <link name="bracket_mast_t">
+    <!-- ears on mast top: 45 mm L-R (real XL T crossbar) -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.045 0.0015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- stem forward: 45 mm box like axle T (overall 45×45, clear stick 30 mm past ears) -->
+    <visual>
+      <origin xyz="0.015 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.045 0.015 0.0015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0015" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_t"/>
+    <origin xyz="-0.1575 0 0.89325" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL corner cube on mast front; bottom 115 mm above mast bottom -->
+  <link name="cube_mast_cross">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="cube_mast_cross_joint" type="fixed">
+    <parent link="base_link"/><child link="cube_mast_cross"/>
+    <origin xyz="-0.1425 0 0.1155" rpy="0 0 0"/>
+  </joint>
+  <!-- Bowtie: 150 mm horizontal on mast front; bottom 360 mm above mast bottom; on 15 mm XL corner cube -->
+  <link name="cube_mast_bowtie">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="cube_mast_bowtie_joint" type="fixed">
+    <parent link="base_link"/><child link="cube_mast_bowtie"/>
+    <origin xyz="-0.1425 0 0.345" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_mast_bowtie">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.149 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.04"/><inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-4"/></inertial>
+  </link>
+  <joint name="beam_mast_bowtie_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_bowtie"/>
+    <origin xyz="-0.1425 0 0.36" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Bent MakerBeam L on bowtie aft next to mast: 3×15 mm along bowtie, 30 mm bent 27° -->
+  <link name="bracket_bowtie_rs_l">
+    <!-- 45 mm along bowtie (+Y), covers beam height -->
+    <visual>
+      <origin xyz="0 0.015000000000 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- 30 mm flap bent 27° forward from bowtie top (mast-end cell) -->
+    <visual>
+      <origin xyz="0.006809857496 0 0.020865097863" rpy="0 0.471238898038 0"/>
+      <geometry><box size="0.0015 0.015 0.03"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.018"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="bracket_bowtie_rs_l_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_bowtie_rs_l"/>
+    <origin xyz="-0.150750000000 0.035000000000 0.360000000000" rpy="0 0 0"/>
+  </joint>
+
+<!-- MakerBeam XL right-angle (101732): flat planar L on CAMERA side of bent face
+       (stack: mast ← bent L ← flat L ← camera). Equal 45×45×1.5, 15 mm arms. -->
+  <!-- MakerBeam XL right-angle 101732 flat L on camera side of bent flap (27° plane) -->
+  <link name="bracket_bowtie_rs_l2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0.471238898038 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0.006809857496 -0.030000000000 0.013365097863" rpy="0 0.471238898038 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.014"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="bracket_bowtie_rs_l2_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_bowtie_rs_l2"/>
+    <origin xyz="-0.148681581039 0.035000000000 0.374863534681" rpy="0 0 0"/>
+  </joint>
+
+
+
+  <!-- 45×15×1.5 mm plate on bowtie aft under starboard T (fills the one-bracket aft gap). -->
+  <link name="plate_bowtie_rs_t">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.008"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="plate_bowtie_rs_t_joint" type="fixed">
+    <parent link="base_link"/><child link="plate_bowtie_rs_t"/>
+    <origin xyz="-0.150750000000 -0.040000000000 0.360000000000" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Upside-down XL T on bowtie aft (starboard): ears 45 mm on bowtie;
+       stem = 2×15 mm bent 27° from bowtie top (same bend as port L); lined up to stbd M3. -->
+  <link name="bracket_bowtie_rs_t">
+    <!-- Ears / crossbar on bowtie aft (3 segments) -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- Stem: bent 27° from bowtie top (2 segments) — the upright of the T -->
+    <visual>
+      <origin xyz="0.006809857496 0 0.020865097863" rpy="0 0.471238898038 0"/>
+      <geometry><box size="0.0015 0.015 0.03"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.015"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="bracket_bowtie_rs_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_bowtie_rs_t"/>
+    <origin xyz="-0.152250000000 -0.040000000000 0.360000000000" rpy="0 0 0"/>
+  </joint>
+<!-- Mast platform: pair of 150 mm F-B beams sandwiching mast; bottoms 250 mm up; T on mast back -->
+  <link name="bracket_mast_platform_t">
+    <!-- ears (L-R): beam ends butt & screw here — 45 mm crossbar -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- stem down mast: 45 mm box matching axle T / real 45×45 XL T -->
+    <visual>
+      <origin xyz="0 0 -0.015" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_platform_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_platform_t"/>
+    <origin xyz="-0.16575 0 0.250" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_mast_platform_l">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.04"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/></inertial>
+  </link>
+  <joint name="beam_mast_platform_l_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_platform_l"/>
+    <origin xyz="-0.090 0.015 0.250" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_mast_platform_r">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.149 0.015 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.04"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/></inertial>
+  </link>
+  <joint name="beam_mast_platform_r_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_platform_r"/>
+    <origin xyz="-0.090 -0.015 0.250" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 50 mm tip beam across platform bar fronts; centered (2.5 mm overhang each side) -->
+  <link name="beam_mast_platform_tip">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.050 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.02"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-5"/></inertial>
+  </link>
+  <joint name="beam_mast_platform_tip_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_platform_tip"/>
+    <origin xyz="-0.008 0 0.250" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- WhiBal G7 pocket white-balance card (WB7-PC): 55×85×1 mm on mast platform tip.
+       Rotated 90°: 85 mm L-R (overhangs tip), 55 mm F-B; flush with tip front; white/black on mast (aft) edge.
+       Grey field ≈ L*74 neutral (albedo ~0.46); white/black patches for sim WB / blackpoint. -->
+  <link name="whibal_g7">
+    <!-- Main grey field 55 mm F-B × 85 mm L-R × 1 mm thick -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.055 0.085 0.001"/></geometry>
+      <material name="whibal_grey"/>
+    </visual>
+    <!-- White reference rectangle (12×24 mm) on mast/aft edge, port; ~2 mm gap to black -->
+    <visual>
+      <origin xyz="-0.0195 0.013 0.0006" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.024 0.0002"/></geometry>
+      <material name="whibal_white"/>
+    </visual>
+    <!-- Black reference rectangle (12×24 mm) on mast/aft edge, starboard -->
+    <visual>
+      <origin xyz="-0.0195 -0.013 0.0006" rpy="0 0 0"/>
+      <geometry><box size="0.012 0.024 0.0002"/></geometry>
+      <material name="whibal_black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.055 0.085 0.001"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.005"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+  <joint name="whibal_g7_joint" type="fixed">
+    <parent link="base_link"/><child link="whibal_g7"/>
+    <!-- Front edge flush with tip front (x=-0.0005); 55 mm aft; top of tip z=0.2575 -->
+    <origin xyz="-0.028000000000 0.000000000000 0.258000000000" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- 150 mm XL crossbeam on platform top, just aft of WhiBal; front face flush with card aft edge -->
+  <link name="beam_mast_platform_card">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.149 0.015"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.04"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/></inertial>
+  </link>
+  <joint name="beam_mast_platform_card_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_platform_card"/>
+    <origin xyz="-0.063000000000 0.000000000000 0.265000000000" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- Speakers: Ø40×20 mm cylinders on platform card crossbeam; outer rims flush with L/R ends -->
+  <link name="speaker_l">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.020" length="0.020"/></geometry>
+      <material name="speaker"><color rgba="0.08 0.08 0.09 1"/></material>
+    </visual>
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="speaker_l_joint" type="fixed">
+    <parent link="base_link"/><child link="speaker_l"/>
+    <!-- On beam top; outer rim flush with +y beam end (center y=+0.0545) -->
+    <origin xyz="-0.063000000000 0.054500000000 0.282500000000" rpy="0 0 0"/>
+  </joint>
+  <link name="speaker_r">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.020" length="0.020"/></geometry>
+      <material name="speaker"><color rgba="0.08 0.08 0.09 1"/></material>
+    </visual>
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="speaker_r_joint" type="fixed">
+    <parent link="base_link"/><child link="speaker_r"/>
+    <!-- On beam top; outer rim flush with -y beam end (center y=-0.0545) -->
+    <origin xyz="-0.063000000000 -0.054500000000 0.282500000000" rpy="0 0 0"/>
+  </joint>
+
+
+
+    <!-- Anker 7-port USB 3.0 hub under beam_mast_platform_l (port / +y).
+       One black body (109×23×44 mm) with 7 mm perimeter corner radius only (no face↔side fillets) + blue USB-A ports on −Y, nudged slightly off center in Z.
+       Forward face flush with beam_mast_platform_tip (50 mm joiner) front (x=-0.0005); back flush with L-bar outboard (7.5 mm);
+       top against beam underside. Joint Y=π puts local +X aft toward mast. -->
+  <link name="anker_usb_hub">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/anker_usb_hub_body.stl" scale="1 1 1"/></geometry>
+      <material name="anker_matte"/>
+    </visual>
+    <!-- USB-A port 1 -->
+    <visual>
+      <origin xyz="0.0380 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 2 -->
+    <visual>
+      <origin xyz="0.0254 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 3 -->
+    <visual>
+      <origin xyz="0.0128 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 4 -->
+    <visual>
+      <origin xyz="0.0002 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 5 -->
+    <visual>
+      <origin xyz="-0.0124 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 6 -->
+    <visual>
+      <origin xyz="-0.0250 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <!-- USB-A port 7 -->
+    <visual>
+      <origin xyz="-0.0376 -0.0120 0.005" rpy="0 0 0"/>
+      <geometry><box size="0.0036 0.0020 0.0100"/></geometry>
+      <material name="usb_blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.109 0.023 0.044"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="0.00004" ixy="0" ixz="0" iyy="0.00016" iyz="0" izz="0.00018"/>
+    </inertial>
+  </link>
+  <joint name="anker_usb_hub_joint" type="fixed">
+    <parent link="base_link"/><child link="anker_usb_hub"/>
+    <origin xyz="-0.055 0.011 0.2205" rpy="0 3.141592653589793 0"/>
+  </joint>
+
+
+  <!-- OHLPRO-style tablet/phone holder: 55×46 base on speakers, Ø20 ball, lock,
+       rectangular backplate + L/R U-clamps with inward tips; pitched up under bowtie.
+       Portable screen 172.6×97.7×9.5 mm (landscape) in the clamp. -->
+  <link name="tablet_holder_base">
+    <!-- Base plate: platform behind card beam, aft edge flush with mast front -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.07950 0.046 0.004"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <!-- Cylinder post: centered on lock aft-face center, toward mast -->
+    <visual>
+      <origin xyz="0.005864280758 0 0.020162244286" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.008" length="0.03632"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <inertial>
+      <mass value="0.10"/>
+      <origin xyz="0.002932140379 0 0.007581122143"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="tablet_holder_base_joint" type="fixed">
+    <parent link="base_link"/><child link="tablet_holder_base"/>
+    <origin xyz="-0.110250000000 0.000000000000 0.259500000000" rpy="0 0 0"/>
+  </joint>
+
+  <link name="tablet_clamp">
+    <!-- Lock cylinder Ø35×25 mm on back of bracket (+ center) -->
+    <visual>
+      <origin xyz="-0.014500000000 0 0" rpy="0 1.57079632679 0"/>
+      <geometry><cylinder radius="0.0175" length="0.025"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.004 0.060 0.055"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.004 0.180 0.010"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <!-- LEFT upper: cheek same H as tip, outer +X flush with tip, outside screen -->
+    <visual>
+      <origin xyz="0.009500000000 -0.089650000000 0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.01250 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014250000000 -0.082950000000 0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.003 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+
+    <!-- LEFT lower: cheek same H as tip, outer +X flush with tip, outside screen -->
+    <visual>
+      <origin xyz="0.009500000000 -0.089650000000 -0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.01250 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014250000000 -0.082950000000 -0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.003 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+
+    <!-- RIGHT upper: cheek same H as tip, outer +X flush with tip, outside screen -->
+    <visual>
+      <origin xyz="0.009500000000 0.089650000000 0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.01250 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014250000000 0.082950000000 0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.003 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+
+    <!-- RIGHT lower: cheek same H as tip, outer +X flush with tip, outside screen -->
+    <visual>
+      <origin xyz="0.009500000000 0.089650000000 -0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.01250 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.014250000000 0.082950000000 -0.018000000000" rpy="0 0 0"/>
+      <geometry><box size="0.003 0.00670 0.018"/></geometry>
+      <material name="holder_black"/>
+    </visual>
+
+    <inertial>
+      <mass value="0.06"/>
+      <origin xyz="0.008000000000 0 0"/>
+      <inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/>
+    </inertial>
+  </link>
+  <joint name="tablet_clamp_joint" type="fixed">
+    <parent link="tablet_holder_base"/><child link="tablet_clamp"/>
+    <origin xyz="0.018122024251 0 0.052381664726" rpy="0 -1.099557428756 0"/>
+  </joint>
+
+  <link name="portable_screen">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0095 0.1726 0.0977"/></geometry>
+      <material name="screen_bezel"/>
+    </visual>
+    <visual>
+      <origin xyz="0.0049 0 0.002" rpy="0 0 0"/>
+      <geometry><box size="0.0004 0.158 0.088"/></geometry>
+      <material name="screen_panel"/>
+    </visual>
+    <inertial>
+      <mass value="0.15"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="2e-4"/>
+    </inertial>
+  </link>
+  <joint name="portable_screen_joint" type="fixed">
+    <parent link="tablet_clamp"/><child link="portable_screen"/>
+    <origin xyz="0.008000000000 0 0.000000000000" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Clamp + lock, pitched about ball toward under-bowtie -->
+
+
+
+  <!-- Mast splice: 50 mm posts on platform sandwich lower 300; stick 15 mm above its top -->
+  <link name="beam_mast_splice_l">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.050"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.02"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="beam_mast_splice_l_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_splice_l"/>
+    <origin xyz="-0.1575 0.015 0.2825" rpy="0 0 0"/>
+  </joint>
+  <link name="beam_mast_splice_r">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.050"/></geometry>
+      <material name="beam_black"/>
+    </visual>
+    <inertial><mass value="0.02"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="beam_mast_splice_r_joint" type="fixed">
+    <parent link="base_link"/><child link="beam_mast_splice_r"/>
+    <origin xyz="-0.1575 -0.015 0.2825" rpy="0 0 0"/>
+  </joint>
+  <!-- Mast back: existing upside-down T; plus sideways left/right Ts (45mm tops) -->
+  <link name="bracket_mast_splice_t">
+    <!-- upside-down: crossbar at bottom, stem up -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_splice_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_splice_t"/>
+    <origin xyz="-0.16575 0 0.285" rpy="0 0 0"/>
+  </joint>
+  <!-- Sideways T, base (stem) pointing left (-Y); 45mm top along mast -->
+  <link name="bracket_mast_splice_t_left">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.015 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_splice_t_left_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_splice_t_left"/>
+    <origin xyz="-0.16725 0 0.2675" rpy="0 0 0"/>
+  </joint>
+  <!-- Sideways T, base pointing right (+Y) -->
+  <link name="bracket_mast_splice_t_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.015 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_splice_t_right_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_splice_t_right"/>
+    <origin xyz="-0.16875 0 0.2675" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 2nd→3rd mast join: upside-down T on back; cross on last 15mm of mid 300, stem (2×15mm) on upper 300 -->
+  <link name="bracket_mast_mid_upper_t">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.045 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry><box size="0.0015 0.015 0.045"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial>
+      <mass value="0.01"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="bracket_mast_mid_upper_t_joint" type="fixed">
+    <parent link="base_link"/><child link="bracket_mast_mid_upper_t"/>
+    <origin xyz="-0.16575 0 0.585" rpy="0 0 0"/>
+  </joint>
+
+
+  <!-- Sensors on mast + top bar -->
+
+  <!-- E-stop on mast back at top: black Ø15×30, silver Ø20×20 (bottom at mast top), red Ø30×5 -->
+  <link name="estop">
+    <!-- black plastic holder on mast back -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0075" length="0.030"/></geometry>
+      <material name="pc_black"/>
+    </visual>
+    <!-- silver holder; bottom at mast top = top of black -->
+    <visual>
+      <origin xyz="0 0 0.025" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.010" length="0.020"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <!-- red button on silver -->
+    <visual>
+      <origin xyz="0 0 0.0375" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.015" length="0.005"/></geometry>
+      <material name="estop_red"/>
+    </visual>
+    <inertial>
+      <mass value="0.05"/><inertia ixx="0.00001" ixy="0" ixz="0" iyy="0.00001" iyz="0" izz="0.00001"/>
+    </inertial>
+  </link>
+  <joint name="estop_joint" type="fixed">
+    <parent link="base_link"/><child link="estop"/>
+    <origin xyz="-0.175 0 0.8725" rpy="0 0 0"/>
+  </joint>
+
+  <!-- XL corner cube under e-stop black holder -->
+  <link name="cube_estop">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.015 0.015 0.015"/></geometry>
+      <material name="bracket_silver"/>
+    </visual>
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial>
+  </link>
+  <joint name="cube_estop_joint" type="fixed">
+    <parent link="base_link"/><child link="cube_estop"/>
+    <origin xyz="-0.17250000000000001 0 0.850" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Lidar: near forward tip of top bar (plumb with wheel axle at world x=0) -->
+
+  <!-- Intel RealSense D435 — 90×25×25 mm pill; back taper + front bevel; optics per datasheet/ROS -->
+  <link name="realsense_d435">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/realsense_d435_body.stl" scale="1 1 1"/></geometry>
+      <material name="rs_aluminum"/>
+    </visual>
+    <!-- Rear M3 mounting points — 45 mm spacing, centered; tip +0.5 mm aft of back; max insert 3 mm -->
+    <visual>
+      <origin xyz="-0.012 0.0225 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0015" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="-0.012 -0.0225 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0015" length="0.002"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <!-- Left IR (infra1 / depth) — Ø5 mm, tip +0.5 mm past front -->
+    <visual>
+      <origin xyz="0.012 0.0175 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+    <!-- Right IR (infra2) -->
+    <visual>
+      <origin xyz="0.012 -0.0325 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+    <!-- RGB -->
+    <visual>
+      <origin xyz="0.012 0.0325 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_rgb_lens"/>
+    </visual>
+    <!-- IR pattern projector -->
+    <visual>
+      <origin xyz="0.012 -0.0075 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0016" length="0.002"/></geometry>
+      <material name="rs_projector"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.025 0.090 0.025"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.075"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+    </inertial>
+  </link>
+  <joint name="realsense_d435_joint" type="fixed">
+    <parent link="base_link"/><child link="realsense_d435"/>
+    <!-- Under tip of beam_mast_top: long axis along beam, lenses down; nudged aft so both
+         rear M3 cylinders sit fully under the bar (fwd screw edge flush with tip). -->
+    <origin xyz="-0.024500000000 0.000000000000 0.865000000000" rpy="0.000000000000 1.570796326795 -1.570796326795"/>
+  </joint>
+
+  <!-- realsense_d435: depth / infra1 / infra2 / color / projector frames for simulation.
+       Poses in mesh frame (geometric center, REP-103). Matches Intel nominal Y offsets
+       and camera_link at left-IR Y; X=0 mid-housing like realsense2_description.
+       Each has an *_optical child (rpy −π/2, 0, −π/2) for OpenCV/Gazebo cameras. -->
+  <link name="realsense_d435_depth">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435_depth_joint" type="fixed">
+    <parent link="realsense_d435"/><child link="realsense_d435_depth"/>
+    <origin xyz="0.00000000 0.01750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435_depth_optical"/>
+  <joint name="realsense_d435_depth_optical_joint" type="fixed">
+    <parent link="realsense_d435_depth"/><child link="realsense_d435_depth_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435_infra1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435_infra1_joint" type="fixed">
+    <parent link="realsense_d435"/><child link="realsense_d435_infra1"/>
+    <origin xyz="0.00000000 0.01750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435_infra1_optical"/>
+  <joint name="realsense_d435_infra1_optical_joint" type="fixed">
+    <parent link="realsense_d435_infra1"/><child link="realsense_d435_infra1_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435_infra2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435_infra2_joint" type="fixed">
+    <parent link="realsense_d435"/><child link="realsense_d435_infra2"/>
+    <origin xyz="0.00000000 -0.03250000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435_infra2_optical"/>
+  <joint name="realsense_d435_infra2_optical_joint" type="fixed">
+    <parent link="realsense_d435_infra2"/><child link="realsense_d435_infra2_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435_color">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_rgb_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435_color_joint" type="fixed">
+    <parent link="realsense_d435"/><child link="realsense_d435_color"/>
+    <origin xyz="0.00000000 0.03250000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435_color_optical"/>
+  <joint name="realsense_d435_color_optical_joint" type="fixed">
+    <parent link="realsense_d435_color"/><child link="realsense_d435_color_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435_projector">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_projector"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435_projector_joint" type="fixed">
+    <parent link="realsense_d435"/><child link="realsense_d435_projector"/>
+    <origin xyz="0.00000000 -0.00750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435_projector_optical"/>
+  <joint name="realsense_d435_projector_optical_joint" type="fixed">
+    <parent link="realsense_d435_projector"/><child link="realsense_d435_projector_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <!-- Intel RealSense D435i — same housing + IMU badge; identical optics -->
+  <link name="realsense_d435i">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="meshes/realsense_d435i_body.stl" scale="1 1 1"/></geometry>
+      <material name="rs_aluminum"/>
+    </visual>
+    <!-- D435i IMU marker (BMI055/BMI085) — visual only -->
+    <visual>
+      <origin xyz="-0.0095 0 0.01175" rpy="0 0 0"/>
+      <geometry><box size="0.004 0.008 0.0015"/></geometry>
+      <material name="rs_imu_badge"/>
+    </visual>
+    <!-- Left IR (infra1 / depth) — Ø5 mm, tip +0.5 mm past front -->
+    <visual>
+      <origin xyz="0.012 0.0175 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+    <!-- Right IR (infra2) -->
+    <visual>
+      <origin xyz="0.012 -0.0325 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+    <!-- RGB -->
+    <visual>
+      <origin xyz="0.012 0.0325 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0025" length="0.002"/></geometry>
+      <material name="rs_rgb_lens"/>
+    </visual>
+    <!-- IR pattern projector -->
+    <visual>
+      <origin xyz="0.012 -0.0075 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0016" length="0.002"/></geometry>
+      <material name="rs_projector"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.025 0.090 0.025"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.075"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-4" ixy="0" ixz="0" iyy="1e-4" iyz="0" izz="1e-4"/>
+    </inertial>
+  </link>
+  <joint name="realsense_d435i_joint" type="fixed">
+    <parent link="base_link"/><child link="realsense_d435i"/>
+    <!-- Last hole of flat L (30 mm toward mast / starboard); rear center on hole; 15 mm starboard of prior; 27° -->
+    <origin xyz="-0.130065887097 -0.017500000000 0.382213258422" rpy="0 0.471238898038 0"/>
+  </joint>
+
+  <!-- realsense_d435i: depth / infra1 / infra2 / color / projector frames for simulation.
+       Poses in mesh frame (geometric center, REP-103). Matches Intel nominal Y offsets
+       and camera_link at left-IR Y; X=0 mid-housing like realsense2_description.
+       Each has an *_optical child (rpy −π/2, 0, −π/2) for OpenCV/Gazebo cameras. -->
+  <link name="realsense_d435i_depth">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435i_depth_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_depth"/>
+    <origin xyz="0.00000000 0.01750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435i_depth_optical"/>
+  <joint name="realsense_d435i_depth_optical_joint" type="fixed">
+    <parent link="realsense_d435i_depth"/><child link="realsense_d435i_depth_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435i_infra1">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435i_infra1_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_infra1"/>
+    <origin xyz="0.00000000 0.01750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435i_infra1_optical"/>
+  <joint name="realsense_d435i_infra1_optical_joint" type="fixed">
+    <parent link="realsense_d435i_infra1"/><child link="realsense_d435i_infra1_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435i_infra2">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_ir_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435i_infra2_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_infra2"/>
+    <origin xyz="0.00000000 -0.03250000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435i_infra2_optical"/>
+  <joint name="realsense_d435i_infra2_optical_joint" type="fixed">
+    <parent link="realsense_d435i_infra2"/><child link="realsense_d435i_infra2_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435i_color">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_rgb_lens"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435i_color_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_color"/>
+    <origin xyz="0.00000000 0.03250000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435i_color_optical"/>
+  <joint name="realsense_d435i_color_optical_joint" type="fixed">
+    <parent link="realsense_d435i_color"/><child link="realsense_d435i_color_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <link name="realsense_d435i_projector">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><sphere radius="0.001"/></geometry>
+      <material name="rs_projector"/>
+    </visual>
+  </link>
+  <joint name="realsense_d435i_projector_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_projector"/>
+    <origin xyz="0.00000000 -0.00750000 0.00000000" rpy="0 0 0"/>
+  </joint>
+  <link name="realsense_d435i_projector_optical"/>
+  <joint name="realsense_d435i_projector_optical_joint" type="fixed">
+    <parent link="realsense_d435i_projector"/><child link="realsense_d435i_projector_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <!-- D435i BMI055/BMI085 IMU — nominal extrinsics from realsense2_description
+       _d435i_imu_modules.urdf.xacro (camera_link/depth_frame → IMU).
+       Mesh origin is housing geometric center; camera_link is +17.5 mm in Y (left IR).
+       IMU mesh pose = (-0.01174, 0.01198, 0.0051). Orientation matches camera body (REP-103).
+       Chain base_link → realsense_d435i → realsense_d435i_imu gives IMU↔base extrinsics. -->
+  <link name="realsense_d435i_imu">
+    <!-- Chip body (oriented object at true IMU) -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.004 0.004 0.0015"/></geometry>
+      <material name="rs_imu_badge"/>
+    </visual>
+    <!-- Axis triad so orientation is visible (+X fwd red-ish dark, +Y left, +Z up) -->
+    <visual>
+      <origin xyz="0.004 0 0" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.0004" length="0.008"/></geometry>
+      <material name="estop_red"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.004 0" rpy="1.5707963267948966 0 0"/>
+      <geometry><cylinder radius="0.0004" length="0.008"/></geometry>
+      <material name="seeed_green"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.004" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.0004" length="0.008"/></geometry>
+      <material name="rs_imu_badge"/>
+    </visual>
+    <inertial>
+      <mass value="0.001"/>
+      <origin xyz="0 0 0"/>
+      <inertia ixx="1e-8" ixy="0" ixz="0" iyy="1e-8" iyz="0" izz="1e-8"/>
+    </inertial>
+  </link>
+  <joint name="realsense_d435i_imu_joint" type="fixed">
+    <parent link="realsense_d435i"/><child link="realsense_d435i_imu"/>
+    <origin xyz="-0.01174000 0.01198000 0.00510000" rpy="0 0 0"/>
+  </joint>
+  <!-- Optical convention (OpenCV / RealSense SDK): +X right, +Y down, +Z forward -->
+  <link name="realsense_d435i_imu_optical"/>
+  <joint name="realsense_d435i_imu_optical_joint" type="fixed">
+    <parent link="realsense_d435i_imu"/><child link="realsense_d435i_imu_optical"/>
+    <origin xyz="0 0 0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+  <!-- ========== USB16MP01 RGB board camera (tip of beam_mast_top) ==========
+       32×32×1.6 mm PCB; lens stack ~25 mm PCB-front→glass; plastic velcro to tip face.
+       Board vertical (YZ), lens +X; connector on PCB back at top. Sits on D435 top overhang.
+       Photos: meshes/ref/rgb_cam_*.jpg -->
+  <link name="rgb_camera">
+    <!-- Plastic velcro pad: 2.5 mm thick, 25 mm L-R × 15 mm tall (matches tip-face
+         height so it does not poke into D435 below); JST at PCB top-back stays clear -->
+    <visual>
+      <origin xyz="-0.00205 0 -0.0085" rpy="0 0 0"/>
+      <geometry><box size="0.0025 0.025 0.015"/></geometry>
+      <material name="velcro_black"/>
+    </visual>
+    <!-- PCB 32×32×1.6 mm (X = thickness) -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.0016 0.032 0.032"/></geometry>
+      <material name="pcb_brown"/>
+    </visual>
+    <!-- Corner mounting holes Ø2 mm, ~2.5 mm in from edges -->
+    <visual>
+      <origin xyz="0 0.0135 0.0135" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.001" length="0.0018"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.0135 0.0135" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.001" length="0.0018"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0.0135 -0.0135" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.001" length="0.0018"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <visual>
+      <origin xyz="0 -0.0135 -0.0135" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.001" length="0.0018"/></geometry>
+      <material name="mount_hole"/>
+    </visual>
+    <!-- Black square lens holder ~20×20×8.5 mm -->
+    <visual>
+      <origin xyz="0.00505 0 -0.004" rpy="0 0 0"/>
+      <geometry><box size="0.0085 0.020 0.020"/></geometry>
+      <material name="lens_black"/>
+    </visual>
+    <!-- Side ear tabs (mount screws) L/R -->
+    <visual>
+      <origin xyz="0.00505 0.0125 -0.004" rpy="0 0 0"/>
+      <geometry><box size="0.0085 0.005 0.006"/></geometry>
+      <material name="lens_black"/>
+    </visual>
+    <visual>
+      <origin xyz="0.00505 -0.0125 -0.004" rpy="0 0 0"/>
+      <geometry><box size="0.0085 0.005 0.006"/></geometry>
+      <material name="lens_black"/>
+    </visual>
+    <!-- Ribbed/knurled barrel Ø14 × 10 mm (smooth cylinder stand-in) -->
+    <visual>
+      <origin xyz="0.0143 0 -0.004" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.007" length="0.010"/></geometry>
+      <material name="lens_black"/>
+    </visual>
+    <!-- Wider lens front/cap Ø16.5 × 6.5 mm -->
+    <visual>
+      <origin xyz="0.02255 0 -0.004" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.00825" length="0.0065"/></geometry>
+      <material name="lens_black"/>
+    </visual>
+    <!-- Glass (dark purple-ish) at lens front -->
+    <visual>
+      <origin xyz="0.0254 0 -0.004" rpy="0 1.5707963267948966 0"/>
+      <geometry><cylinder radius="0.007" length="0.0008"/></geometry>
+      <material name="lens_glass"/>
+    </visual>
+    <!-- White 4-pin JST-style connector on PCB BACK at TOP edge -->
+    <visual>
+      <origin xyz="-0.0038 -0.006 0.012" rpy="0 0 0"/>
+      <geometry><box size="0.006 0.010 0.0055"/></geometry>
+      <material name="jst_white"/>
+    </visual>
+    <collision>
+      <origin xyz="0.012 0 0" rpy="0 0 0"/>
+      <geometry><box size="0.028 0.032 0.032"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="0.012"/>
+      <origin xyz="0.008 0 0"/>
+      <inertia ixx="2e-6" ixy="0" ixz="0" iyy="3e-6" iyz="0" izz="3e-6"/>
+    </inertial>
+  </link>
+  <joint name="rgb_camera_joint" type="fixed">
+    <parent link="beam_mast_top"/><child link="rgb_camera"/>
+    <!-- Tip face of 150 mm top bar at world x=0; velcro 2.5 mm then PCB.
+         PCB bottom flush with D435 top / beam underside (z=0.8775).
+         Relative to beam_mast_top center (-0.075, 0, 0.885). -->
+    <origin xyz="0.0783 0 0.0085" rpy="0 0 0"/>
+  </joint>
+  <!-- Optical frame at lens front: +Z out of lens (+X robot), +X right, +Y down -->
+  <link name="rgb_camera_optical"/>
+  <joint name="rgb_camera_optical_joint" type="fixed">
+    <parent link="rgb_camera"/><child link="rgb_camera_optical"/>
+    <origin xyz="0.0258 0 -0.004" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
+  </joint>
+
+</robot>

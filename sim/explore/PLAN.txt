@@ -2,12 +2,11 @@
 
 Started: 2026-09-11 23:17 PT. Deadline = unix in sim/explore/deadline.txt (20h). Do not reset.
 
-## Status (eval 3, 30 min)
-Healthy. 18.45 h left. GPU 92 MiB. LIVE+HUD. Visit doughnut is in the 5 s score.
-Roll25: win=0.83, chord=1.10 m, path=5.1 m, cells=15.3, rooms=1.7, crash=0.28,
-prim_hot=0.11, prim_ms≈20. Path dropped vs pre-doughnut 7.3 m (less looping);
-rooms not stuck at 1 (mix of 1–2, some 30-cell one-room paces). **Hold.**
-Do not raise visit_coef yet. Do not cut max_v. crash<0.4. plant=0.
+## Status (eval 16, 30 min)
+Healthy. 11.89 h left. GPU 92 MiB. LIVE+HUD. Trainer+watchdog alive (launch 7).
+Roll25: win=0.93, chord=1.25 m, path=6.22 m, cells=18.6, rooms=1.88, crash=0.24,
+prim_hot=0.07, prim_ms≈22. Last 5 eps time-cuts, 2–3 rooms. Crash still <0.4.
+**Hold.** Do not raise visit_coef. Do not cut max_v. plant=0.
 
 ## Goal
 Pick a short-horizon command that is physically reachable now, but score the

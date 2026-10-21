@@ -1,0 +1,79 @@
+{
+ "_doc": "Kevin tire profiles: single source of truth (mirrored byte-identical in anglerdroid src/tire_profiles.json and kevin-urdf-twin simready/tire_profiles.json). Selected by robots/<robot>/robot.json \"wheels\" (env override KEVIN_WHEELS; KEVIN_TIRE = legacy alias, still read by the twin) (twin: also --tire flag / ?tire= URL param). Default soft_v3_2 since 2026-10-21 (James fitted the tyres 2026-10-20; KEVIN_TIRE=stock = old tyres). See docs/tire_profiles.md.",
+ "env": "KEVIN_TIRE",
+ "default": "soft_v3_2",
+ "aliases": {
+  "soft": "soft_v3_2",
+  "stock": "stock",
+  "botwheel": "stock"
+ },
+ "profiles": {
+  "stock": {
+   "label": "ODrive BotWheel stock rubber tire",
+   "wheel_r_loaded_m": 0.08565,
+   "wheel_r_free_m": 0.08565,
+   "robot_wheel_diameter_cm": null,
+   "wheel_mass_kg": 2.2,
+   "tire_extra_mass_kg": 0.0,
+   "ride_dz_m": 0.0,
+   "caster_spacer_m": 0.0,
+   "radial_k_n_per_mm": null,
+   "mj_tire_solref": [
+    0.004,
+    1
+   ],
+   "mj_tire_solimp": [
+    0.95,
+    0.99,
+    0.001
+   ],
+   "tire_friction": [
+    0.9,
+    0.005,
+    0.0001
+   ],
+   "twin_urdf": "urdf/kevin.urdf",
+   "suffix": "",
+   "status": "measured (twin geometry); robot_config keeps James's tape value 17.0 cm",
+   "tread_y_out_m": null,
+   "_tread_note": "null: the stock tyre's plan view is inside SIL12 (1.9 mm) -> no extra footprint corners",
+   "n_spokes": 0,
+   "spoke_ripple_m": 0.0
+  },
+  "soft_v3_2": {
+   "label": "KevinFlex soft over-tire v3.2 (95A TPU, 20 spokes)",
+   "wheel_r_loaded_m": 0.10065,
+   "wheel_r_free_m": 0.1038,
+   "robot_wheel_diameter_cm": 20.13,
+   "wheel_mass_kg": 2.37,
+   "tire_extra_mass_kg": 0.17,
+   "ride_dz_m": 0.015,
+   "caster_spacer_m": 0.015,
+   "radial_k_n_per_mm": 15.6,
+   "mj_tire_solref": [
+    0.0282,
+    1
+   ],
+   "mj_tire_solimp": [
+    0.5,
+    0.5,
+    0.001
+   ],
+   "_mj_note": "v311 (2026-10-21): solref 0.0282 -> axle settles at 0.10066 m, pitch -0.066 deg (stock -0.062) on the twin floor: free R 103.8 (STL) -> loaded 100.65 mm = stock 85.65 + 15 (James), 3.15 mm sink (~15.6 N/mm at ~49 N/wheel). v308 solref 0.0446 settled at 0.0966 on the twin floor (its 0.0999 note was measured with a different floor).",
+   "tire_friction": [
+    0.9,
+    0.005,
+    0.0001
+   ],
+   "twin_urdf": "urdf/kevin_soft_v3_2.urdf",
+   "suffix": "_soft_v3_2",
+   "status": "FITTED 2026-10-20 (James). Loaded R = stock + 15 mm per James (design +14.35 loaded / +18.15 free); caster lowered 15 mm by James (chassis level). Re-measure loaded radius (roll 10 turns: distance / 20 pi) and ride height; friction unmeasured (stock value kept).",
+   "n_spokes": 20,
+   "spoke_ripple_m": 0.0002,
+   "_ripple_note": "per-wheel axle-height ripple at n_spokes x wheel angle: +-0.2 mm ESTIMATED (stiffness ripple ~+-6 % of the 3.15 mm sink as the 32 mm spoke pitch passes under a ~50 mm contact patch); unmeasured: REALTEST item measures it. emu: KEVIN_EMU_RIPPLE (m, 0 = off).",
+   "tread_y_out_m": 0.2033,
+   "_tread_note": "outer tread edge from the axle centre line: wheel frame y 0.1515 + STL tread z 5.2..51.8 mm"
+  }
+ },
+ "_default_note": "\"default\" is read only by the twin's own simready/tire_profile.py when KEVIN_TIRE is unset; the robot code (src/robot_params.py) takes the wheels from robots/<robot>/robot.json (emu.world passes them to the twin via KEVIN_TIRE)."
+}

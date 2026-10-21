@@ -176,6 +176,20 @@ def test_command_parsing_wander():
     return True
 
 
+def test_command_parsing_turn_and_forward():
+    dh = DirectionalHelp()
+    cmd = dh.parse_command("kevin turn left")
+    assert cmd is not None
+    assert cmd[0] == "turn"
+    assert cmd[1]["bearing_deg"] > 0
+    cmd = dh.parse_command("go forward")
+    assert cmd is not None
+    assert cmd[0] == "go_forward"
+    assert cmd[1]["distance_m"] >= 1.0
+    print("✅ test_command_parsing_turn_and_forward passed")
+    return True
+
+
 def test_command_execution_in_stub():
     spoken = []
     stub = create_people_behavior(
@@ -205,6 +219,7 @@ def run_all_tests():
         test_command_parsing_come_here,
         test_command_parsing_go_away,
         test_command_parsing_wander,
+        test_command_parsing_turn_and_forward,
         test_command_execution_in_stub,
     ]
     failed = []

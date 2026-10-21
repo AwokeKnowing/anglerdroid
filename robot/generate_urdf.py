@@ -10,22 +10,29 @@ Creates:  robot/anglerdroid.urdf, robot/meshes/body.stl
 """
 import struct, os, math
 
-R = 0.0857          # wheel radius (m)
+R = 0.085           # wheel radius (m)
 WHEEL_W = 0.05      # wheel width
 WHEEL_GAP = 0.01    # frame-to-wheel gap
-FRAME_HW = 0.15     # frame half-width (30 cm / 2)
-TOTAL_HW = FRAME_HW + WHEEL_GAP + WHEEL_W  # 0.21
+HUB_Y = 0.177       # axle midpoint to hub (half-track 177 mm)
+FRAME_HW = HUB_Y - WHEEL_GAP - WHEEL_W / 2
+TOTAL_HW = HUB_Y + WHEEL_W / 2
 
 Z_BASE = 0.05 - R   # body base in URDF frame
 Z_TOP  = 0.22 - R   # body top in URDF frame
-X_BACK = -0.15
-X_FRONT = 0.13
+X_BACK = -0.18
+X_FRONT = 0.18
 X_SLOPE = 0.0
-Y_HW = 0.16         # body half-width (slightly wider than frame for visual)
+Y_HW = 0.165        # body half-width (33 cm)
 
 MAST_TOP = 1.00 - R
 ARM_Z0 = 0.97 - R
 ARM_Z1 = 1.00 - R
+# v310 tire switch (src/tire_profiles.json): body/mast stay fixed to the axle (constants above use stock R);
+# other wheels move the floor down: wheel visual, caster (spacer) and footprint follow the resolved loaded R.
+import sys as _sys   # resolved robot config (robots/<robot>/robot.json wheels; KEVIN_WHEELS overrides)
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+import robot_params as _RP
+R = float(_RP.V['wheel_r_loaded_m'])
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -106,7 +113,7 @@ def generate_urdf():
     arm_len = arm_x1 - arm_x0
     arm_z = (ARM_Z0 + ARM_Z1) / 2
 
-    caster_cx = X_BACK - 0.03
+    caster_cx = -0.19
     caster_z = 0.02 - R
 
     jetson_cx = (X_BACK + 0.01 + X_BACK + 0.11) / 2
@@ -137,7 +144,7 @@ def generate_urdf():
 {_cyl_visual("wheel_right", (0, wheel_cy_r, 0), R*0.97, WHEEL_W, "0.09 0.09 0.10 1")}
 
     <!-- Caster -->
-{_box_visual("caster", (caster_cx, 0, caster_z), (0.04, 0.03, 0.04), "0.16 0.16 0.18 1")}
+{_box_visual("caster", (caster_cx, 0, caster_z), (0.02, 0.08, 0.04), "0.16 0.16 0.18 1")}
 
     <!-- Mast -->
 {_box_visual("mast", (mast_cx, 0, mast_z), (0.03, 0.03, mast_h), "0.40 0.42 0.45 1")}
@@ -155,7 +162,7 @@ def generate_urdf():
 {_box_visual("jetson_nx", (jetson_cx, 0, jetson_z), (0.10, 0.08, 0.025), "0.16 0.22 0.16 1")}
 
     <!-- Base footprint (ground reference, transparent) -->
-{_box_visual("footprint", (0, 0, -R + 0.001), (0.28, 0.42, 0.002), "0.5 0.5 0.5 0.2")}
+{_box_visual("footprint", (0, 0, -R + 0.001), (0.38, 0.454, 0.002), "0.5 0.5 0.5 0.2")}
 
     <collision name="body_collision">
       <origin xyz="0 0 0" rpy="0 0 0"/>

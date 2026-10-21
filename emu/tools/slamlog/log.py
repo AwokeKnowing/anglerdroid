@@ -1,0 +1,105 @@
+"""Reader for a sensor log written by emu/tools/sensorlog.py (+ nav KEVIN_RECORD in <dir>/nav).
+All times are seconds on the sim/nav monotonic clock.  Poses are SE(2) base_link (axle centre) in the world frame (GT) or
+the nav frame (nav 'pose' / 'odom').  Camera extrinsics (optical -> base) come from the digital twin (same numbers the sim
+renders with)."""
+import glob, json, math, os
+import cv2, numpy as np
+
+R_RS1 = np.array([[-1.0, 0, 0], [0, 1, 0], [0, 0, -1]]); T_RS1 = np.array([-0.007, 0.0, 0.8619])
+_p = math.radians(27.0); R_RS2 = np.array([[0, -math.sin(_p), math.cos(_p)], [-1, 0, 0], [0, -math.cos(_p), -math.sin(_p)]])
+T_RS2 = np.array([-0.1301, 0.0, 0.3822])
+R_MAST = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])
+AXLE_H = 0.0856
+MAST_TRUE_SINCE = 1792259510      # 2026-10-17 10:51 PDT: emu/world.py started rendering the mast with the twin truth lens
+
+def depth_u16(base):
+    """Depth frame (uint16 mm) for a log file stem: PNG16, or the raw .npy that sensorlog v4 (SENSORLOG_ENC=gpu) writes
+    while recording (emu/tools/sensorlog_pack.py turns those into PNG later)."""
+    if os.path.exists(base + ".png"): return cv2.imread(base + ".png", cv2.IMREAD_UNCHANGED)
+    return np.load(base + ".npy")
+
+def wrap(a): return (np.asarray(a) + np.pi) % (2 * np.pi) - np.pi
+
+class Log:
+    def __init__(self, d):
+        self.d = d; self.info = json.load(open(os.path.join(d, "info.json")))
+        g, fr, dg = [], {}, []
+        for l in open(os.path.join(d, "index.jsonl")):
+            r = json.loads(l)
+            if "gt" in r:
+                g.append([r["t_mono"]] + r["gt"][:3] + [r["t_sim"]])
+                if "dog" in r: dg.append([len(g) - 1] + list(r["dog"][:3]))
+            else:
+                if r.get("depth", True): fr.setdefault(r["cam"], {})[r["stamp_ns"]] = r["file"]     # colour + depth pairs
+                if r["cam"] != "mast": fr.setdefault(r["cam"] + "_rgb", {})[r["stamp_ns"]] = r["file"]   # all colour (v5: 30 Hz)
+        g = np.array(g); self.gt_xy = g[:, 1:3]; self.gt_yaw = np.unwrap(g[:, 3])
+        # GT time: the pose belongs to sim time t_sim; t_mono (query midpoint) carries the UDP round trip (p99 +20 ms).
+        # Map t_sim -> monotonic by the lower envelope of (t_mono - t_sim) (latency only adds), fitted per 5 s chunk.
+        off = g[:, 0] - g[:, 4]; ch = np.floor((g[:, 4] - g[0, 4]) / 5.0); cx, cy = [], []
+        for c in np.unique(ch): m = ch == c; i = np.argmin(off[m]); cx.append(g[m, 4][i]); cy.append(off[m][i])
+        self.gt_t = g[:, 4] + (np.polyval(np.polyfit(cx, cy, 1), g[:, 4]) if len(cx) > 2 else off.min())
+        # dog GT (sensorlog v6+): world x, y, heading on the GT clock; None if the log has none
+        self.dog_t = self.gt_t[[int(r[0]) for r in dg]] if dg else None; self.dog_xyh = np.array([r[1:] for r in dg]) if dg else None
+        self.frames = {c: sorted((s * 1e-9, f) for s, f in v.items()) for c, v in fr.items()}
+        mast = self.info["mast"]; T_m = np.array(mast["pos"], float); T_m[2] -= AXLE_H   # mast pos is floor-relative
+        self.ext = dict(rs1=(R_RS1, T_RS1), rs2=(R_RS2, T_RS2), mast=(R_MAST, T_m))
+        dev = list(self.info["devices"].values()); self.streams = dev[0]["streams"]
+        self._nav = None
+
+    def gt(self, t):
+        t = np.asarray(t, float)
+        return np.stack([np.interp(t, self.gt_t, self.gt_xy[:, 0]), np.interp(t, self.gt_t, self.gt_xy[:, 1]), np.interp(t, self.gt_t, self.gt_yaw)], -1)
+
+    def dog(self, t):
+        """Dog GT (x, y, heading) at monotonic t (interpolated), or None for logs recorded before sensorlog v6."""
+        if self.dog_t is None: return None
+        t = np.asarray(t, float); h = np.unwrap(self.dog_xyh[:, 2])
+        return np.stack([np.interp(t, self.dog_t, self.dog_xyh[:, 0]), np.interp(t, self.dog_t, self.dog_xyh[:, 1]), np.interp(t, self.dog_t, h)], -1)
+
+    def mast_lens(self):
+        """(K 3x3, dist [k1,k2,p1,p2]) of the mast camera.  New logs carry the twin truth lens in info (emu/world.py
+        mast_info_lens).  Logs recorded before 2026-10-20 have only the 100 deg pinhole belief in info although the sim
+        (realism, since 2026-10-17) rendered the truth lens -> use emu.realism.mast_truth for those (KEVIN_LOG_MAST_BELIEF=1
+        keeps the recorded belief)."""
+        m = self.info["mast"]
+        pre_truth = os.path.getmtime(os.path.join(self.d, "info.json")) < MAST_TRUE_SINCE   # recorded before the sim rendered the truth lens
+        if "dist" in m or os.environ.get("KEVIN_LOG_MAST_BELIEF") == "1" or pre_truth:
+            K, _ = self.K("mast"); return K, np.array(m.get("dist", [0, 0, 0, 0]), float)
+        from emu import realism
+        t = realism.mast_truth(m["intr"]["w"], m["intr"]["h"])
+        return np.array([[t["fx"], 0, t["cx"]], [0, t["fy"], t["cy"]], [0, 0, 1.0]]), np.array([t["k1"], t["k2"], 0, 0], float)
+
+    def K(self, cam, stream="color"):
+        s = self.info["mast"]["intr"] if cam == "mast" else self.streams[stream]
+        return np.array([[s["fx"], 0, s["ppx"]], [0, s["fy"], s["ppy"]], [0, 0, 1.0]]), (s.get("w", 640), s.get("h", 480))
+
+    def rgb(self, f): return cv2.imread(os.path.join(self.d, f + ".jpg"))[..., ::-1]
+    def depth(self, f): return depth_u16(os.path.join(self.d, f)).astype(np.float32) * 1e-3
+
+    def depth_in_color(self, f):
+        """RS depth (848x480, depth optical frame) re-projected into the colour camera (640x480, x offset -15 mm), z-buffered."""
+        z = self.depth(f); Kd, _ = self.K("rs1", "depth"); Kc, (w, h) = self.K("rs1", "color")
+        tc = np.array(self.streams["color"]["pose"][1], float)
+        v, u = np.nonzero(z > 0); zz = z[v, u]
+        X = np.stack([(u - Kd[0, 2]) / Kd[0, 0] * zz, (v - Kd[1, 2]) / Kd[1, 1] * zz, zz], 1) - tc
+        uc = np.round(X[:, 0] / X[:, 2] * Kc[0, 0] + Kc[0, 2]).astype(int); vc = np.round(X[:, 1] / X[:, 2] * Kc[1, 1] + Kc[1, 2]).astype(int)
+        ok = (uc >= 0) & (uc < w) & (vc >= 0) & (vc < h); out = np.full((h, w), np.inf, np.float32)
+        np.minimum.at(out, (vc[ok], uc[ok]), X[ok, 2].astype(np.float32)); out[np.isinf(out)] = 0
+        return out
+
+    def nav(self):
+        """nav KEVIN_RECORD ticks: t (RS1 frame), t_od (time of the odom/pose data, 8f59e4a+), vl, vr, gz (EKF gyro z as nav saw it), raw gyro xyz, accel xyz, pose, odom."""
+        if self._nav is None:
+            cache = os.path.join(self.d, "nav_ticks.npz")
+            if os.path.exists(cache): self._nav = dict(np.load(cache))
+            else:
+                R = []
+                for f in sorted(glob.glob(os.path.join(self.d, "nav", "*.npz"))):
+                    try: z = np.load(f); m = json.loads(str(z["meta"]))
+                    except Exception: continue            # a tick cut off when nav was stopped (truncated npz)
+                    R.append([m["t"], m["vl"], m["vr"], m["gz"]] + list(z["gyro"]) + list(z["accel"]) + list(m["pose"]) + list(m["odom"]) + [m.get("imu_t") or m["t"], m.get("t_od", m["t"])])
+                R = np.array(R, float)
+                self._nav = dict(t=R[:, 0], vl=R[:, 1], vr=R[:, 2], gz=R[:, 3], gyro=R[:, 4:7], accel=R[:, 7:10], pose=R[:, 10:13], odom=R[:, 13:16], imu_t=R[:, 16], t_od=R[:, 17])
+                np.savez(cache, **self._nav)
+        if "t_od" not in self._nav: self._nav["t_od"] = self._nav["t"]      # logs before 8f59e4a: odom stamped at t_frame
+        return self._nav

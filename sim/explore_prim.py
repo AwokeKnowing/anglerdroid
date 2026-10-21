@@ -234,11 +234,11 @@ def rollout_5s(v_cmd, w_cmd, x0, y0, yaw0, box, hp, visit=None):
         trail[:, k_save:] = trail[:, k_save - 1:k_save]
     px_end = plus_x_batch(x, y, yaw, box)
     heat_end = visit_heat_batch(x, y, x0, y0, visit)
-    return path, throt, min_px, coll, close, px_end, trail, hot, hot_hit, heat_end
+    return path, throt, min_px, coll, close, px_end, trail, hot, hot_hit, heat_end, yaw
 
 
-def score_vw(v_cmd, w_cmd, x, y, yaw, box, hp, visit=None):
-    path, throt, min_px, coll, close, px_end, trail, hot, hot_hit, heat_end = rollout_5s(
+def score_vw(v_cmd, w_cmd, x, y, yaw, box, hp, visit=None, goal_xy=None):
+    path, throt, min_px, coll, close, px_end, trail, hot, hot_hit, heat_end, yaw_end = rollout_5s(
         v_cmd, w_cmd, x, y, yaw, box, hp, visit=visit,
     )
     prog = np.float32(hp.get("prim_progress", 0.55))
@@ -260,5 +260,13 @@ def score_vw(v_cmd, w_cmd, x, y, yaw, box, hp, visit=None):
         - vcoef * hot
         - vhit * hot_hit
     )
+    if goal_xy is not None:
+        gx, gy = float(goal_xy[0]), float(goal_xy[1])
+        d0 = np.hypot(np.float32(gx) - np.float32(x), np.float32(gy) - np.float32(y))
+        dend = np.hypot(np.float32(gx) - trail[:, -1, 0], np.float32(gy) - trail[:, -1, 1])
+        score += np.float32(hp.get("goal_coef", 1.15)) * (d0 - dend)
+        br = np.arctan2(np.float32(gy) - trail[:, -1, 1], np.float32(gx) - trail[:, -1, 0])
+        face = np.cos(yaw_end - br)
+        score += np.float32(hp.get("goal_face_coef", 0.35)) * face * (np.float32(1.0) - throt)
     score = np.where((path < 0.12) & (throt > 0.40), score - 1.6, score)
     return score.astype(np.float32), path, throt, trail, hot, hot_hit

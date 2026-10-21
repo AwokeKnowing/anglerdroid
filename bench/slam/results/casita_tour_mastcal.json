@@ -1,0 +1,16 @@
+{
+ "pairs": 150,
+ "matches": 8524,
+ "fx_est": 244.06,
+ "k1_est": -0.0483,
+ "k2_est": 0.008,
+ "hfov_est_deg": 108.86,
+ "fx_true": 240.34,
+ "k1_true": -0.05,
+ "k2_true": 0.008,
+ "hfov_true_deg": 109.97,
+ "belief_hfov_deg": 100.0,
+ "fx_belief": 268.51,
+ "rot_source": "kslam",
+ "cost": 0.2971056080745971
+}

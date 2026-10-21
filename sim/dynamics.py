@@ -8,9 +8,13 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from pathlib import Path
+import sys
 
-WHEELBASE_M = 0.34
-WHEEL_RADIUS_M = 0.08565
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+from robot_config import WHEELBASE_M, WHEEL_RADIUS_M  # noqa: E402
 V_MAX = 0.25
 W_MAX = 0.80
 V_MIN = -0.20  # match live MPPI reverse band

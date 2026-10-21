@@ -342,3 +342,263 @@ Configure alerts (e.g., via logging or remote monitoring) for:
 - `wheelbase.py`: Encoder health, CAN diagnostics
 - `vision.py`: Capture loop, SLAM integration
 - `TOPDOWN_NEAR_FIELD_REFLEX.md`: Safety-critical depth monitoring
+
+## 2026-10-19 — L4 offline candidates (sim-off overnight queue) + nav/SLAM decoupling status
+L4 = 80 s sim log (synced RS2 framesets, fixed odom stamps). ATE anchored at the first pose (no fit), plus SE(2)-aligned ATE; scored with
+`emu.tools.slamlog.ext_eval` / `baseline.py`. Results in `~/slamlogs/res/`.
+
+| method | n | ATE rmse m | ATE max m | head max ° | aligned m | notes |
+|---|---|---|---|---|---|---|
+| kslam (live SLAM2) | 1 | 0.113 | 0.246 | 4.6 | 0.086 | full run |
+| odometry (EKF) | 1 | 0.130 | 0.199 | 3.5 | 0.044 | full run |
+| lgfg fused (DISK+LightGlue VO + iSAM2, s/tau states) | 1 | 0.115 | – | 5.4 | 0.038 | |
+| DROID-SLAM RGB-D | 3 | 2.47–2.51 | 7.8–7.9 | 169–174 | 0.073–0.076 | heading flip breaks anchoring; wall p90 54–66 cm |
+| MASt3R-SLAM | 1 | 0.066 | 0.068 | 0.85 | 0.012 | **coverage 0.53** (52 keyframe poses, 77 relocalizations), scale 0.866, wall p90 2.0 cm |
+
+MASt3R-SLAM is accurate where it tracks but covers only half of the run, n=1 (the run hung at exit after saving; queue stopped
+before r2/r3). Not comparable to the full-run numbers until coverage is fixed. Nothing changed in the live default.
+
+Decoupling (`KEVIN_NAV_DECOUPLE=1`, default off; commits 941601a, 77d9904): driving/planner/envelope/LightNav in the odom frame on a
+30 s local grid; SLAM map used for named places only when a live-scan vs map agreement check passes. Goal bench n=2: flag off 6/6
+goals arrive; flag on 5/6 + 1 refusal (check fixed after). Injected 1 m/30° error detected (agreement 0.23) but a goal sent ~6 s
+after start was accepted (single-scan check aliases at startup). SLAM-off LightNav and 30 s lag tests not completed. Not default.
+
+## 2026-10-19 05:40-06:07 — goal interface step 1 (docs/ARCHITECTURE_LOOPS.md)
+`KEVIN_GOAL_SHM=1` (default off): LightNav runs as its own process (`nav/lightnav_proc.py`, fixed 250 ms loop) and writes an
+odometry-frame goal block that nav consumes (`nav/goalio.py`). Measured: loop lateness max 4 ms / p99 3.4 ms, 4.00 fps capture,
+predictions 220-480 ms, 0 errors.
+
+| goal bench (kitchen/bedroom/couch, final GT m) + LightNav 'find the kitchen' 90 s | goals arrived | LightNav final GT m |
+|---|---|---|
+| flag on, gshm1-3 | 3/3, 0/3, 3/3 | 1.70, 1.19, 1.56 |
+| flag off, base19_1-2 (same morning) | 3/3, 3/3 | 1.84, 1.01 |
+
+gshm2 failed before any LightNav use: robot boxed at the start ('local replan failed', axle clearance 0.06 m) — the place-goal
+path does not touch the new code, but cause not identified, so the default stays OFF until a clean n>=3.
+MASt3R-SLAM with odometry prior + exit fix prepared (`emu/tools/slamlog/odom_prior.py`, `~/slamlogs/res/queue2.sh`), not run:
+it needs ~17 GB GPU and LightNav holds 12.3 GB of 24.5 GB -> sim-off window.
+
+## 2026-10-19 07:41-08:22 PT — MASt3R-SLAM sim-off window (queue2: n=3, with/without wheel-odom prior, 1200 s cap)
+Exit-hang fix worked (every run exited, wall 139-184 s on L4, 337-345 s on L3) but left orphaned multiprocessing workers
+(killed afterwards; next fix: kill the process group). Real-depth injection not implemented -> not used.
+
+| log | method | n | ATE m | head max ° | aligned m | coverage | wall p90 cm | scale |
+|---|---|---|---|---|---|---|---|---|
+| L4 80 s | kslam live | 1 | 0.113 | 4.6 | 0.086 | 1.0 | 7.3 | – |
+| L4 | odometry | 1 | 0.130 | 3.5 | 0.044 | 1.0 | 12.7 | – |
+| L4 | lgfg fused | 1 | 0.115 | 5.4 | 0.038 | 1.0 | 13.9 | – |
+| L4 | MASt3R, no prior (r1-r3) | 3 | 0.061-0.066 | 0.85-0.98 | 0.011-0.012 | 0.50-0.53 | 2.0-2.1 | 0.87-0.88 |
+| L4 | MASt3R + odom prior (o1-o3) | 3 | 0.056-0.060 | 0.94-1.01 | 0.021-0.046 | **0.05** | 1.8 | 0.85-0.88 |
+| L3 150 s | kslam live | 1 | 0.182 | 12.4 | 0.112 | 1.0 | 11.0 | – |
+| L3 | odometry | 1 | 0.125 | 10.5 | 0.119 | 1.0 | 8.0 | – |
+| L3 | lgfg fused | 1 | 0.194 | 12.1 | 0.043 | 1.0 | 14.4 | – |
+| L3 | MASt3R, no prior (r1-r3) | 3 | 1.12 | 2.8 | 0.86 | **0.053** | 33.8 | 0.37 |
+| L3 | MASt3R + odom prior (o1-o3) | 3 | 1.12 | 2.8 | 0.86 | **0.053** | 33.8 | 0.37 |
+
+MASt3R ATE/heading are only over the poses it produced (coverage = fraction of RS2 frames with a pose). It is very accurate where
+it tracks (L4 heading < 1°, walls 2 cm) but loses tracking at the first fast spin and mostly fails to relocalize
+(L3: 14 keyframes, ~290 reloc attempts, identical with/without prior). The odometry initial-pose prior made L4 worse (coverage
+0.5 -> 0.05, n=3); prior convention checked against MASt3R's own relative rotations (agree to ~0.01 rad) so it is not a frame bug.
+Not a replacement for kslam as is. Next: real depth (metric scale) and feeding the prior into RELOC/keyframe selection, not just init.
+
+## 2026-10-19 09:18 — sim safety-core frame-age spikes (sim artefact, not the core)
+Spikes >100 ms came from emu.world's 1 kHz loop writing camera poses 30-236 ms late under CPU contention on cpus 0,1,4,5 (plus
+desktop apps on the depth/core cpus). simpin now keeps Chrome/Grok Bot app off cpus 2,3,6,7 and lowers Chrome/viewer priority:
+2 nav restarts x 130 s, 0 frames >100 ms (max 88 / 93 ms) vs 3 >100 ms per 200 s before. Safety core unchanged.
+
+## 2026-10-19 09:18-09:52 PT — goal-shm bench rerun (paired with flag-off), gshm2 trap analysis, MASt3R prep
+**gshm2 "boxed-in" (0/3 goals) is not caused by the goal-shm flag. It is a nav failure that already existed, and the root cause is not proven.**
+- Kevin was not boxed in at the start. On "go to the kitchen" he first went north, then turned back and looped east
+  (GT (3.67,2.24)->(3.27,3.73)->(5.25,2.48)->(5.81,3.4)->(5.38,4.79)). He stopped at (5.17,4.94) at t~19 s, 1.29 m from the kitchen.
+  The log then shows "local replan failed" x8, then "unreachable ... axle clearance 0.06 m". Bedroom and couch then failed instantly from that spot.
+- The same "unreachable: local planner found no path" result appears in 6 earlier flag-off benches (benchB1, postA2, postA3, postC2,
+  r3_cur2, r3_ta1). Place goals do not go through the goal-shm code path.
+- Hypothesis, unverified: at the start of that leg the dog was at (2.10,6.51), near the kitchen route. It may have blocked the direct
+  route, causing the reroute, and/or left stale occupied cells that closed the corridor. No map snapshot or dog trace exists for gshm2.
+  Instrumentation added (3bdc848): the GT trace now logs dog x,y, and gb3 runs use BENCH_MAPSNAP=1, so the next occurrence will show it.
+- Separate pre-existing pattern: legs where nav's "arrived in X s" is much shorter than the bench wall time (goal clock restarted
+  mid-leg, long detour). Found in 37 of 161 arrived legs across all benches, flag-off included (e.g. r3_ta2, fix61, dcon1).
+**Paired bench, both arms with nav launched at nice 0 through nice0.sh (BENCH_RESTART, /tmp/gb3.sh), n=3 each, same session:**
+| arm | goals | collisions | place-leg wall s (run1 / run2 / run3) | LightNav "find the kitchen" final GT m |
+|---|---|---|---|---|
+| KEVIN_GOAL_SHM=1 (gs21-23) | 9/9 | 0 | 8.6,20.5,36.1 / 8.5,15.7,65.1 / 8.5,58.9,44.6 | 0.87, 1.58, 0.34 |
+| flag off (base20_1-3) | 9/9 | 1 (bedroom run 3) | 15.6,28.3,26.6 / 8.6,38.1,57.2 / 8.7,49.3,28.3 | 2.52, 0.52, 1.99 |
+All runs including earlier ones: flag-on 18/21 goals (the 3 misses are gshm2), LightNav mean 1.21 m (n=6). Flag-off 15/15,
+LightNav mean 1.58 m (n=5). These are within noise of each other.
+**Default NOT flipped.** Reasons: (a) the viewer chat -> LightNav path was not tested with the flag on (the bench uses nav
+/api/command directly); (b) the session end state requires KEVIN_GOAL_SHM unset = off. James should decide. To flip it, change one line, nav/run.py:77.
+**MASt3R offline prep, done; NOT run (needs a sim-off window):**
+- Files: ~/slamcand/MASt3R-SLAM/main.py (backup main.py.pre_prep2; full diff ~/slamlogs/res/m3s_main_kevin_prep2.patch).
+  New env flags, all default off:
+  - M3S_ODOM prior is now rotation-only unless M3S_DEPTH is set (the map scale is arbitrary). With M3S_DEPTH, translation is converted to prev-camera
+    units (t/s_prev). This is a weak, untested hypothesis for the L4 prior regression (L4 Sim3 scale was 0.87).
+  - M3S_ODOM_COAST=1: when tracking fails but the odom rotation since the last keyframe is < HFOV, stay in TRACKING on the odom pose
+    instead of switching to RELOC.
+  - M3S_ODOM_KF=1: create a keyframe when 1 - odom_angle/HFOV < match_frac_thresh. This is the same threshold MASt3R already uses; no new weight.
+  - M3S_DEPTH=<dir>: real depth (uint16 mm, resized to the frame image). It sets the INIT keyframe's Sim3 scale to median(real z / pointmap z)
+    and logs KFSCALE per keyframe.
+  - Orphan kill: before os._exit, psutil terminates, then kills, all child processes.
+- Finding, measured offline from the odom priors: in L3 (16 frames) and L4 (18 frames), consecutive RS2 frames are rotated 20-56 deg apart.
+  Each of these coincides with a camera-log gap of 0.13-0.6 s during spins. The KF-overlap bound is 36 deg (1-0.333 x 54.2 deg HFOV),
+  so image-only tracking cannot bridge them. This is consistent with L3 losing tracking for good, and motivates COAST.
+- Next run: ~/slamlogs/res/queue3.sh. It is SIM-OFF ONLY and refuses to start if emu.world or LightNav is running.
+  Variants oc / dc / o / r, L3+L4, n=2, 1200 s cap per run, orphan pkill, ext_eval tum@30.
+**End state 09:52 PT:**
+- Live defaults: flag-off, NOLOGS=1. Nav pid 224290 at nice 0, started 09:44. World and depthcam at nice 0.
+- "stop" sent; Kevin idle (v 0, w 0).
+- Safety core frame age (ageprobe, 90 s, n=688): p50 48 / p90 54 / max 77 ms, 0% over 100 ms.
+- Viewer 200; cloudflared pid 10874 ready (1 connection). viewer_mode.json unchanged.
+- Nothing sent to the Orin; safety untouched.
+
+## 2026-10-19 14:09-14:30 PT — LightNav + MASt3R together with the sim up (James t583): NOT achieved under the 100 ms abort rule
+**Found first: the safety core process had been DEAD since 12:28 PT** (nav pid 224290, started 09:44).
+- Traceback: `nav/bus.py read: TimeoutError("bus kevin_sc_rs2: writer stuck")`, raised from nav/safety_core.py:296 `B["rs2"].read()`.
+  The seqlock reader gives up after 200 tries and raises; core_main does not catch it, so the core process exits. The camera
+  process (writer, cpu 7) was still alive.
+- Nav kept running and reported core alive=false, but nothing acts on that: no fail-stop, no alert, no respawn. Kevin was idle.
+  The wheels belong to the core, so the sim wheels just got no commands. The core was dead ~1 h 45 min.
+- Copy of the log: ~/m1_backup/dbg/live_nav_core_crash_1228.log. Restored by a nav restart via nice0.sh at 14:13; core alive, code idle.
+- I don't know what load at 12:28 caused it; nothing was running from me then.
+- PROPOSALS for James (safety core, NOT applied):
+  (a) In the core, treat a bus read timeout as "frame stale -> brake/hold" and keep looping, instead of letting the exception kill the process.
+  (b) In nav, when core_proc dies: stop all goals, raise a visible alarm, and only then (optionally) respawn the core.
+  (c) The same uncaught-raise path would exist on the bot.
+**Watchdog tool:** emu/tools/agewatch.py.
+- Same /api/state source as /tmp/ageprobe.py, but runs continuously: one summary line per 10 s and an ALERT line for any max(age1, age2) > 100 ms.
+- On an ALERT it SIGTERMs, then SIGKILLs, the process groups listed in /tmp/heavy.pgids.
+- Sampling: /api/state takes ~60 ms, so the watchdog sees ~25% of core decisions (the "gaps" column counts the misses).
+- At 0.03 s polling (40-80% of decisions seen) alerts were more frequent. The extra nav load may have caused some of them, so it now polls at 0.09 s, the same as ageprobe.
+- Log: ~/m1_backup/dbg/agewatch_1019pm.log.
+**LightNav low-memory restart (step 2):**
+- The 5-6 GB target is not reachable: the bf16 weights alone are 9.1 GB.
+- Note: `gpu_memory_utilization` is effectively not the limit, because LightNav sets the KV cache size directly (VLN_KV_CACHE_GIB, default 2 GiB).
+- Measured per-process GPU memory (nvidia-smi):
+  | LightNav config | GPU memory | request time |
+  |---|---|---|
+  | default: bf16, CUDA graphs, KV 2 GiB, 0.4 | 12.5-13.4 GB | 0.58-0.64 s |
+  | fp8_llm_only + eager + KV 0.5 GiB + 0.25 | 8.27 GB | 0.83-1.07 s |
+- The fp8 setup answered "ask find the kitchen" (Kevin moved; waypoints came back), but its nav quality was NOT benched.
+- Other GPU users: nav 0.45-0.47 GB; world/desktop graphics ~2.5 GB (3.0 GB total with LightNav off).
+- After the test I restored LightNav to the default command (live default, quality-benched): pid 751263, 12.5 GB; a request was verified at 14:24.
+**MASt3R capped (step 3): 3 attempts, all aborted by agewatch 10-21 s after launch, during model load (before any frame was tracked):**
+- Setup: L3 oc / dc, then oc again.
+  - All attempts: nice 19, torch memory fraction 0.22 (5.2 GiB per CUDA process), PYTORCH expandable segments.
+  - Attempts 1-2 on cpus 0,1,4,5. Attempt 3 at SCHED_IDLE on a single logical cpu (5), 1 thread, 30 ms/frame throttle.
+- No MASt3R GPU memory was ever recorded: it was killed before it registered on the GPU.
+- Spikes > 100 ms also happen WITHOUT MASt3R, every time a big model loads or exits:
+  LightNav load 14:14 (5 alerts, max 124 ms), LightNav kill+reload 14:22-14:23 (3), LightNav first request 14:24 (112 ms),
+  and two near-idle ones (14:15:26 at 108 ms, 14:20:27 at 101 ms, the latter 10 s after a MASt3R kill).
+  Steady idle with the 0.09 s probe: 14:18:15-14:20:05, n=600, max 91 ms, 0 alerts.
+- The SCHED_IDLE single-cpu attempt still triggered a spike, so CPU share is probably not the mechanism. Hypothesis (untested):
+  large GPU allocations and host-to-device weight transfers stall the world/depthcam renders on the same 3090.
+- No ATE table: nothing produced poses. Earlier sim-off numbers (queue2) stand.
+**Recommendation for full coverage on L3 (fast spins):**
+- In L3/L4 the odom priors show 16/18 frame pairs that are 20-56 deg apart, all at camera-log gaps of 0.13-0.6 s during spins. The keyframe-overlap
+  limit is 36 deg, so no image-only tracker (MASt3R, kslam visual) can bridge them.
+- Full coverage must come from wheel+gyro odometry as the always-on, fixed-rate backbone. Today the fused lgfg/odom estimate already has
+  coverage 1.0 on L3, ATE 0.125-0.194.
+- A learned SLAM (MASt3R) should be an async correction sensor: map->odom transform plus confidence, used as loop closure / relocalisation,
+  exactly the slot in ARCHITECTURE_LOOPS. Run it with the odom coast/keyframe hooks (queue3 "oc"/"dc").
+- Fix the RS2 log/frame gaps during spins at the source.
+- MASt3R on this box only fits sim-off, or with a second GPU (or the Orin later, read-only now).
+- Not yet measured: whether "oc" bridges the L3 spins. That needs one sim-off run: `VARS="oc dc" N=1 bash ~/slamlogs/res/queue3.sh`, ~15 min.
+**Tooling committed:** emu/tools/agewatch.py; emu/tools/slamlog/m3s/{queue3.sh, queue3c.sh, m3s_main_kevin_prep2.patch}.
+- main.py additions: M3S_MEM_FRAC, M3S_FRAME_SLEEP_MS, and a peak-memory print.
+- queue3c: nice 19 + SCHED_IDLE, CPUS/NT options, early kill on reloc storms, per-pid GPU log, kill-file registration.
+
+## 2026-10-19 evening: 30 Hz synced sim stream, L8 log, light methods (MASt3R dropped per James t596)
+
+Sim sensor stream (emu/world.py, commits cda48c9, 2a73f7c):
+- Colour was 12.4-14 Hz: the colour/IR/mast/viewer "slow lane" ran as a thread in the world process.  Slow-lane ms/s at
+  14 Hz: IR pairs 450, viewer 286, colour 141, mast 105.
+- Fixes: IR stereo pairs opt-in (KEVIN_EMU_IR=1; only KEVIN_SLAM=cuv and scripts/bench stereo read them), third-person
+  viewer in its own thread at 10 Hz, and the whole lane in its own forked process (KEVIN_EMU_SLOWPROC=1) so it no longer
+  shares the GIL with the 1 kHz physics loop that publishes depth poses.  Colour 28.8-30.0 Hz.
+- sensorlog keeps frames in RAM and encodes after the recording at nice 19 / 1 thread (encoding 60 img/s took ~1 core).
+- Safety frame age (agewatch, nav driving + 30 Hz sensorlog + encoding): max 99 ms, 0 > 100 ms.  Before: max 169 ms
+  while recording, 323 ms while encoding.
+- Tyre contact (7d65cd1): drive tyres collide as ellipsoids at the tread centreline (cylinder rim-edge contact hopped
+  +-6 mm -> yaw ripple + up to 1.5 % bias).  drive 0 pi/2: GT within 0.04 % of the wheel setpoint.
+
+Logs (RS2 frames): L3 8.9 Hz, gap max 0.50 s / 52 deg; L6 12.4 Hz, 0.167 s / 13.4 deg; L7 22.5 Hz, 0.134 s;
+L8 (70 s, spin-heavy, nav recording on) 28.8 Hz, gap median 0.033 p99 0.067 max 0.100 s, max 7.3 deg/frame.
+
+L8 results (ext metrics; coverage = fraction of frames with a pose):
+| method | ATE rmse | ATE max | worst heading | aligned | runtime | GPU |
+|---|---|---|---|---|---|---|
+| wheel+gyro odom (live) | 0.217 m | 0.506 m | 7.41 deg | 0.083 m | live | 0 |
+| kslam (live, odom+gyro + visual) | 0.088 m | 0.174 m | 3.41 deg | 0.053 m | live (nav) | shared |
+| o3d_rgbd RS2 (Open3D hybrid RGB-D VO, odom-prior init, no gating) | diverged (316 km) | - | 180 deg | - | 326 ms/frame CPU (0.1x RT) | 0 |
+| o3d_rgbd RS1 | diverged (1.3 km) | - | 180 deg | - | 327 ms/frame | 0 |
+o3d_rgbd: Open3D reports success on 2015/2016 steps but drifts upward from frame ~100 and blows up by frame 600; a
+step must be gated against the wheel+gyro prior (and projected to planar motion) before it is usable.  Not committed yet.
+MASt3R dropped (James t596).
+
+### 2026-10-19 18:55 PT — L8 (70 s, 28.8 Hz, 2016 framesets): ORB-SLAM3 RGB-D, planar depth ICP, o3d_rgbd
+
+All offline on i777 with the sim off, CPU only (no GPU used by any of these). ATE = SE(2) vs GT, not aligned unless stated. RTF = log duration / wall time (>1 = faster than real time).
+
+| method | cams | ATE m | max m | worst heading ° | aligned ATE m | ms/frame | RTF | notes |
+|---|---|---|---|---|---|---|---|---|
+| kslam (live, nav record) | RS1+RS2 | **0.088** | **0.174** | **3.41** | 0.053 | live | 1 (live) | best |
+| odom (wheel+gyro, live) | - | 0.217 | 0.506 | 7.41 | 0.083 | - | - | |
+| depth_icp, stride 10 | RS2 | 0.515 | 0.831 | 8.12 | **0.034** | 16.3 | 2.1 | 1535 accepted / 480 rejected |
+| depth_icp, stride 10 | RS1+RS2 | 0.409 | 0.801 | 12.17 | 0.084 | 32.4 | 1.07 | |
+| depth_icp, stride 6 | RS1+RS2 | 0.495 | 0.929 | 12.58 | 0.080 | 85.7 | 0.40 | |
+| depth_icp, stride 10 | RS1 | 0.804 | 1.609 | 22.2 | 0.122 | 13.0 | 2.7 | RS1 looks at the floor; few wall points |
+| ORB-SLAM3 RGB-D | RS2 | 4.95 | 11.08 | 163.7 | 4.10 | 60.4 | 1.16 | lost tracking; 3 maps, 1 reset; 94 % coverage |
+| ORB-SLAM3 RGB-D | RS1 | 6.01 | 9.40 | 180.0 | 3.19 | 69.4 | 1.0 | 152° tilt p90: wrong map |
+| o3d_rgbd (no gating) | RS2 / RS1 | 316 km / 1.3 km | - | 180 | - | 326 | 0.1 | diverged |
+
+Tools: `scripts/bench/run_orb_rgbd.py <export> <out.txt>` (headless `sim/orbslam3/rgbd/rgbd_kevin`, built by `build.sh` from the
+existing ORB_SLAM3 build in under 1 min); `python -m emu.tools.slamlog.cand.depth_icp <log> <out.json> [cams] [stride]`.
+
+Depth ICP (measured, RS2, per keyframe step vs GT): ICP error p50 7.5 mm / 0.22°, p90 36 mm / 1.38°, mean yaw bias −0.20°/keyframe (RS1
+−0.41°). The sim's wheel+gyro odometry is better than that over the same steps (GT correction p50 0.9 mm / 0.10°), so ICP mostly
+adds noise and bias. The odometry gate (ASSUMED bound: 2 cm + 5 % distance, 1° + 5 % rotation) doesn't help, because the bias sits inside it.
+The best aligned ATE (RS2, 0.034 m) shows the local shape is good. The global error comes from heading drift. The bias's cause is
+not found (candidates: twin/sim extrinsic mismatch, depth noise model, rotation smear). A ±33 ms stamp probe changed the
+results in inconsistent directions, so this is not a time offset I can claim. Depth stamps are physics capture time.
+
+ORB-SLAM3 RGB-D loses tracking on the synthetic texture and fast spins (7.3°/frame max). It starts new maps, and the saved trajectory
+mixes their frames. It isn't usable here without an IMU/odom-aided mode. o3d_rgbd: the cheap fix (odom gating) was not attempted.
+At 326 ms/frame it is ~10× too slow for real time even if fixed.
+
+Recommendation: keep kslam. None of the established light methods beats it, or even odometry, on L8. If a depth-geometry
+term is wanted, the RS2 planar ICP is real time at stride 10 (16 ms/frame, one core). It should be a factor inside kslam,
+weighted by its measured covariance, not a standalone odometry, and only once the −0.2°/keyframe bias is explained.
+
+### 2026-10-19 19:05 PT: depth-ICP yaw bias root cause
+The sim camera mounts, intrinsics and stamps match the twin (mounts within 0.05 mm / 0.000°, fovy 58 → fx 432.97, render vs
+ray-cast median −0.03 mm RS1 / −3.4 mm RS2, best stamp offset 0 ms). The bias is the planar point-to-point ICP under-estimating rotation
+(2.8 % of the yaw step on logged depth, 2.0 % on noise-free renders). No sim change, so kslam is unaffected.
+Tools: emu/tools/slamlog/camcheck.py, icpbias.py. Details are in docs/SLAM_LIFELONG.md §9.
+
+### 2026-10-19 20:00 PT: body pitch in the sim; where kslam's heading error comes from
+**Body attitude while driving** (live sim, base_link quaternion from the kevin_campose shm, read-only; go to kitchen, a 360° turn,
+go to couch; 2762 samples):
+- at rest: pitch −0.24°, base z 75.7 mm above world z = 0;
+- moving (> 0.1 m/s): |pitch| p50 0.34°, p95 1.43°, max 3.03°; |roll| p95 1.54°, max 1.67°; height change p95 10 mm.
+
+**RS2 floor-plane fit** (L9–L11, every 10th frame, fits with tilt > 11° discarded): tilt p95 1.8–2.6° (x) and 1.0–2.4° (y), offset p95 6–17 mm.
+
+**Safety-core ground clipping (report only, no change):**
+- **RS1 top-down** (nav.perceive.Ego._cliff) already fits the floor plane per frame and levels the cloud (LEVEL = True), so body pitch is handled.
+- **RS2 forward cone (Rs2Cloud.points)** uses the static extrinsic with hmin = 3 cm + 1.2 cm·z². On L9/L10/L11, 5.7 / 5.5 / 8.4 % of RS2 frames
+  have pixels that are floor by that frame's fitted plane (within 1.5 cm) but are labelled OBSTACLE: p99 133–300 px per frame, nearest 0.31 m.
+  These are phantom obstacles from pitch, beyond the 5 cm hard bands but inside the brake sweep at speed. A per-frame RS2 floor-plane
+  levelling (as RS1 does) would remove them. This is a proposal for the safety core and needs James's go-ahead.
+- Caveat: the plane fit can itself be wrong when little floor is visible.
+
+**kslam heading:** nav records pose = T∘odom. The odom heading already includes the Manhattan wall correction, so T_θ is the scan matcher's share.
+At the worst kslam heading point:
+
+| log | kslam heading error | odom heading error | matcher T_θ |
+|---|---|---|---|
+| L9 | 7.34° | 4.26° | +3.08° |
+| L10 | −8.75° | −1.89° | −6.86° |
+| L11 | 8.24° | 1.59° | +6.65° |
+
+So the error enters through the **CSM matcher**, not the wall-direction correction. By speed, most of the net matcher rotation is at v < 0.1 m/s
+(spins in place): on L11, +9.0° net, with only 18 % of steps moving toward GT. That points to scans matched while spinning
+(rotation during a frame, or a stale map at the clamp), not to body pitch, which is largest when accelerating forward. Not fixed yet.

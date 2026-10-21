@@ -51,7 +51,7 @@ def probe(eval_env, net, n_steps: int | None = None) -> dict:
     }
     fails = []
     why = []
-    spawn_hits = float(K.PAINT_N) + 3.0
+    spawn_hits = 1.5 if int(K.WAYPOINT_REWARD) == 1 else float(K.PAINT_N) + 3.0
     if out["hits_mean"] <= spawn_hits and out["spin_frac"] > 0.50 and out["disp_mean"] < 0.40:
         fails.append("spin_lock")
         why.append(
@@ -61,7 +61,7 @@ def probe(eval_env, net, n_steps: int | None = None) -> dict:
     if out["hits_mean"] <= spawn_hits and out["disp_mean"] < 0.80:
         fails.append("nest")
         why.append(
-            "never left spawn fog (hits=%.2f disp=%.2fm). staying put beats exploring."
+            "never left spawn (hits=%.2f disp=%.2fm). staying put beats exploring."
             % (out["hits_mean"], out["disp_mean"])
         )
     if out["prim_ent"] < 0.35 and out["mode_frac"] > 0.85:
@@ -104,15 +104,15 @@ def apply_fix(eval_env, train_env, net, diag: dict, entropy: float) -> tuple[flo
 
 
 def maybe_crash_spiral(st: dict, diag: dict) -> dict:
-    if float(st.get("crash_frac", 0.0)) > 0.65 and float(st.get("cover", 0.0)) < 0.20:
+    if float(st.get("crash_frac", 0.0)) > 0.65 and float(st.get("rewards", st.get("cover", 0.0))) < 0.20:
         diag = dict(diag)
         fails = list(diag.get("fails") or [])
         if "crash_spiral" not in fails:
             fails.append("crash_spiral")
             why = list(diag.get("why") or [])
             why.append(
-                "train crash=%.2f cover=%.3f — exploring is punished"
-                % (st["crash_frac"], st.get("cover", 0.0))
+                "train crash=%.2f rewards=%.3f — exploring is punished"
+                % (st["crash_frac"], st.get("rewards", st.get("cover", 0.0)))
             )
             diag["fails"] = fails
             diag["why"] = why

@@ -17,7 +17,6 @@ Atlas layout (960×960):
 
 import math
 import threading
-import concurrent.futures
 import time
 import numpy as np
 import cv2
@@ -33,7 +32,7 @@ from robot_config import (FRAME_W, FRAME_H,
                           RS1_VIZ_SCALE, RS1_VIZ_CX_SHIFT, SELF_MASK_VIZ_ALPHA,
                           WHEEL_HALF, FOOT_PAD_FWD, FOOT_PAD_BWD, FOOT_PAD_LAT,
                           MAST_RADIUS_PX)
-from cameras import RSCamera, WebCam, HAS_RS
+from cameras import RSCamera, WebCam, HAS_RS, FramePump, _grab_cpus, WAIT_FRAME_MS
 from safety import SafetyGuard
 from pose import PoseEstimator
 from globalmap import GlobalMap, MAP_W, MAP_H, ORIGIN_X, ORIGIN_Y, PX_SIZE as MAP_PX_SIZE
@@ -57,7 +56,7 @@ from perception import (
     export_policy_feed,
     label_rs1_ego_gpu, KEVIN_GPU_SCATTER,
     fuse_rs2_into_ego_gpu, KEVIN_GPU_FUSE,
-    EGO80_H, EGO80_W, label_from_z16, labels_to_ego_float,
+    EGO80_H, EGO80_W, label_frame_80, labels_to_ego_float,
     stamp_throttle_float, render_policy_bgr,
 )
 
@@ -71,7 +70,12 @@ DEBUG_CAMERAS = False
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(EGO_PX_SIZE)
-TD_FLOOR_CLIP = np.float32(0.91) # reject floor (farther than this Z). Fixed.
+import robot_params as _RP  # resolved robot config (floor clip + camera heights per wheels)
+# SAFETY-CRITICAL: RS1 sits ride_dz higher on soft tyres -> floor is that much farther; the resolved clip follows the
+# twin RS1 height so the obstacle threshold above the floor (4.1 cm, td_obstacle_h_m) is the same for every wheel.
+import twin_geometry as _TGF
+# 2026-10-13: from the twin: RS1 depth optical height above floor (0.9476 stock, incl. ride dz) - 0.041 m obstacle threshold (was 0.91 + dz)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])   # resolved, one clip everywhere: rs1_height_m - td_obstacle_h_m (0.041)
 # Known-pixel floor for "RS1 invalid → immobilize". Capture loop uses this.
 TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
 # One USB2 miss is not a dead camera. Hold last heightmap this many frames
@@ -81,7 +85,7 @@ TOPDOWN_HOLD_FRAMES = 10
 # --- RS2 (forward camera) → bird's-eye rotation ---
 # BEV warp still uses 25.6-90 (flatten onto the atlas). phys_h / floor vs
 # obstacle uses down-pitch from horizontal. 64.4° made bag floor a ~20°
-# slope (red cone wedge). Side-view fit 2026-09-14: 27.0° down, cam_h 0.475.
+# slope (red cone wedge). Twin-authoritative 2026-09-24: 27.0° down, cam_h 0.467863258422 (axle z + wheel_r).
 FW_PITCH_DEG = 25.6 - 90.0
 _fw_pitch_rad = math.radians(FW_PITCH_DEG)
 _fw_R, _ = cv2.Rodrigues(np.float64([_fw_pitch_rad, 0, 0]))
@@ -94,7 +98,7 @@ FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max obstacle height to accept (m)
 FW_FLOOR_CLIP  = np.float32(0.15)   # ego-forward < 15cm from camera → free (not obstacle)
 FW_PITCH_DOWN_DEG = 27.0
-FW_CAM_HEIGHT  = np.float32(0.475)  # RS2 height that puts bag floor at phys_h=0
+FW_CAM_HEIGHT  = np.float32(_RP.V["rs2_height_m"])  # twin (same value as before for stock: 0.467863)  # SAFETY-CRITICAL v310: + tire ride height (0 stock). twin-authoritative: RS2 optical z_base(0.382213258422) + wheel_r(0.08565); was 0.475 bag fit
 _fw_sin_pitch  = np.float32(math.sin(math.radians(FW_PITCH_DOWN_DEG)))
 _fw_cos_pitch  = np.float32(math.cos(math.radians(FW_PITCH_DOWN_DEG)))
 
@@ -104,8 +108,12 @@ _fw_cos_pitch  = np.float32(math.cos(math.radians(FW_PITCH_DOWN_DEG)))
 RS2_EXTRINSIC_Y = 0.0
 
 # Alignment offsets (pixels). TD_X_OFFSET adjustable via slider; FW_X locked to TD + delta.
-TD_X_OFFSET = -75
-FW_TD_X_DELTA = 132             # fw_x = td_x + this
+# 2026-10-13: derived from the twin (RS1 depth optical 0.7 cm BEHIND the axle) instead of the slider value -75
+# (which put RS1 3-4 cm ahead: in the emulator RS1 obstacles read 4.0 cm too far). TD = RCX - CROSSHAIR_CX + x_rs1/px.
+import twin_geometry as _TG
+TD_X_OFFSET = int(round(RCX - 159 + _TG.RS1_T[0] / 0.010))      # = -79 (stock)
+# FW (RS2) blit kept at its previous absolute position (57 px); NOT yet twin-derived - see docs/fullstack.md
+FW_TD_X_DELTA = 57 - TD_X_OFFSET  # fw_x = td_x + this (was 132 with TD -75)
 FW_Y_OFFSET = -1                # fixed
 
 
@@ -761,6 +769,11 @@ class Vision:
         self._pitch_cal_request = False
         self._pitch_cal_done = False
         self._lock = threading.Lock()
+        self._cap_seq = 0
+        self._cap_ev = threading.Event()
+        self._frame_age_ms = 0.0
+        self._grab_miss = 0
+        self._pumps = {}
         self._persistent_obs = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._viz_obs_premask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._viz_known_premask = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
@@ -863,7 +876,7 @@ class Vision:
         self._policy_feed_labels = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._policy_feed_height = np.zeros((FRAME_H, FRAME_W), dtype=np.uint8)
         self._policy_feed_valid = False
-        # 80×60 policy tensor (same look as sim k_obs). Extras ~3 Hz, not capture.
+        # 80×60 policy tensor (same look as sim k_obs). Capture @ 30 Hz.
         self._pol80_lab = np.zeros((EGO80_H, EGO80_W), dtype=np.uint8)
         self._pol80_f = np.zeros((EGO80_H, EGO80_W), dtype=np.float32)
         self._pol80_valid = False
@@ -1293,7 +1306,9 @@ class Vision:
             emit_on = os.environ.get('KEVIN_ORBSLAM3_EMITTER', '0').strip() == '1'
         try:
             if self.rs1_serial:
-                self._rs1 = RSCamera(self.rs1_serial, compute_pointcloud=True)
+                # cuVSLAM dual rig (default) also needs the top-down D435 IR pair; its emitter stays ON (safety depth)
+                _rs1_ir = self._slam_backend == 'cuvslam' and os.environ.get('KEVIN_CUVSLAM_RIG', 'dual').strip().lower() == 'dual'
+                self._rs1 = RSCamera(self.rs1_serial, compute_pointcloud=True, capture_ir=_rs1_ir)
             if self.rs2_serial:
                 self._rs2 = RSCamera(self.rs2_serial, compute_pointcloud=True,
                                      capture_ir=use_ir, emitter=emit_on)
@@ -1331,8 +1346,10 @@ class Vision:
                 from cuvslam_tracker import CuVSLAMTracker
                 rs2_profile = self._rs2.profile if self._rs2 else None
                 # Pass IMU pipeline to cuVSLAM for stereo-inertial mode
+                rs1_ir_ok = self._rs1 is not None and getattr(self._rs1, '_capture_ir', False)
                 self._cuvslam = CuVSLAMTracker(
                     rs2_profile=rs2_profile,
+                    rs1_profile=self._rs1.profile if rs1_ir_ok else None,
                     imu_pipeline=self._imu if self._imu and self._imu.ok else None)
                 print("vision: cuVSLAM backend active")
             except Exception as e:
@@ -1341,8 +1358,17 @@ class Vision:
                 self._cuvslam = None
 
         self._webcam = WebCam(self.rgb1_device_id)
-        self._grab_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=3, thread_name_prefix="camgrab")
+        cpus = _grab_cpus()
+        self._pumps = {}
+        if self._rs1:
+            self._pumps["rs1"] = FramePump(self._rs1, "rs1", cpu=cpus.get("rs1")).start()
+        if self._rs2:
+            self._pumps["rs2"] = FramePump(self._rs2, "rs2", cpu=cpus.get("rs2")).start()
+        if self._webcam is not None and self._webcam._cap is not None:
+            self._pumps["rgb"] = FramePump(self._webcam, "rgb", cpu=cpus.get("rgb")).start()
+        print("vision: frame pumps %s (wait=%dms, pin=%s)" % (
+            ",".join(self._pumps.keys()) or "none", WAIT_FRAME_MS,
+            cpus or "off"), flush=True)
 
         # Start high-rate odometry thread BEFORE capture loop
         # This ensures pose is continuously updated even if capture is slow
@@ -1361,7 +1387,7 @@ class Vision:
             target=self._vision_extras_loop, name="vision-extras", daemon=True)
         self._extras_thread.start()
         print("vision: odom thread started (target 100 Hz, wheel+IMU integration)")
-        print("vision: extras thread started (~3 Hz RGB hazards/faces side loop)")
+        print("vision: extras thread started (~3 Hz RGB only; ego80 is 30 Hz capture)")
         print("vision: capture thread started (slam=%s)" % self._slam_backend)
         if self._orbslam3_host:
             try:
@@ -1548,24 +1574,18 @@ class Vision:
             t0 = time.monotonic()
             with self._lock:
                 self.timestamp = time.time()
+            self._cap_seq += 1
+            self._cap_ev.set()
             time.sleep(max(0, interval - (time.monotonic() - t0)))
 
 
     def _update_policy_ego80(self):
-        """~3 Hz: 80×60 policy float from z16 (same path as bag rebuild / sim look)."""
-        d1 = getattr(self._rs1, "depth", None) if (self._rs1 and self._rs1.ok) else None
-        d2 = getattr(self._rs2, "depth", None) if (self._rs2 and self._rs2.ok) else None
-        if d1 is None:
-            self._pol80_valid = False
+        """30 Hz capture: 80×60 from this tick's decimated verts. Policy acts at 5 Hz."""
+        v1 = getattr(self._rs1, "verts", None) if (self._rs1 and self._rs1.ok) else None
+        v2 = getattr(self._rs2, "verts", None) if (self._rs2 and self._rs2.ok) else None
+        if v1 is None:
             return
-        intr1 = self._rs1.depth_intrinsics() if self._rs1 else None
-        intr2 = self._rs2.depth_intrinsics() if (self._rs2 and self._rs2.ok) else None
-        label_from_z16(
-            d1, d2,
-            intr1=intr1 or None,
-            intr2=intr2 or None,
-            labels_out=self._pol80_lab,
-        )
+        label_frame_80(v1, v2, labels_out=self._pol80_lab)
         labels_to_ego_float(self._pol80_lab, out=self._pol80_f)
         sf = self._safety if getattr(self, "_safety", None) is not None else None
         if sf is not None:
@@ -1577,6 +1597,10 @@ class Vision:
                 throt_r=max(0.0, 1.0 - float(sf.ang_scale)),
             )
         self._pol80_valid = True
+
+    def _dump_policy_ego80_png(self):
+        if not self._pol80_valid:
+            return
         now = time.monotonic()
         if now - self._pol80_png_t < 1.0:
             return
@@ -1603,9 +1627,8 @@ class Vision:
     def _vision_extras_loop(self):
         """~3 Hz side loop: RGB image detections off the 30Hz critical path.
 
-        Chessboard / bump RGB, faces, gestures belong here (or on i777).
-        Sticky results feed self._topdown_hazard* for safety. Named keepout
-        `checkered_door` is the primary avoid for the door mat.
+        Policy 80×60 is on capture at 30 Hz. This thread only dumps the PNG
+        and runs RGB bump / chessboard. Faces/gestures are PeopleLive.
         """
         interval = 1.0 / 3.0
         while getattr(self, '_extras_running', False) and getattr(self, '_running', False):
@@ -1628,7 +1651,7 @@ class Vision:
                               % (hazard_reason, self._topdown_hazard_corner_count,
                                  self._topdown_hazard_edge_count))
                     self._extras_hazard_log_n = n + 1
-                self._update_policy_ego80()
+                self._dump_policy_ego80_png()
             except Exception as e:
                 if not getattr(self, '_extras_err_n', 0):
                     print("vision-extras error: %s" % e)
@@ -1636,31 +1659,74 @@ class Vision:
             dt = time.monotonic() - t0
             time.sleep(max(0.0, interval - dt))
 
+    def _wait_pumps(self, last, timeout_s):
+        """Wait for a new RS1+RS2 frameset. RGB waits too but does not fail the tick."""
+        deadline = time.monotonic() + float(timeout_s)
+        now = dict(last)
+        ok = True
+        for name in ("rs1", "rs2", "rgb"):
+            p = self._pumps.get(name)
+            if p is None:
+                continue
+            rem = max(0.0, deadline - time.monotonic())
+            got = p.wait_new(last.get(name, 0), rem)
+            now[name] = p.seq
+            if name != "rgb" and not got:
+                ok = False
+        return ok, now
+
+    def wait_capture(self, last_seq, timeout_s=None):
+        """Main-loop clock: next processed capture, or None on timeout."""
+        if timeout_s is None:
+            timeout_s = WAIT_FRAME_MS * 1e-3
+        deadline = time.monotonic() + float(timeout_s)
+        while self._cap_seq <= last_seq and self._running:
+            rem = deadline - time.monotonic()
+            if rem <= 0.0:
+                return None
+            self._cap_ev.clear()
+            if self._cap_seq > last_seq:
+                return self._cap_seq
+            self._cap_ev.wait(rem)
+        if self._cap_seq > last_seq:
+            return self._cap_seq
+        return None
+
     def _capture_loop(self):
         black = np.zeros((FRAME_H, FRAME_W, 3), dtype=np.uint8)
         _loop_times = []
         _stage_times = []  # Track: grab, pose+hazard, rs1_checks, rs2, obs_comb, odom, gmap, safety, render
         _use_cuvslam = (self._cuvslam is not None)
 
+        _pump_last = {k: 0 for k in self._pumps}
+        _wait_s = WAIT_FRAME_MS * 1e-3
         while self._running:
             _t0 = time.monotonic()
             _t_start = _t0
             self._capture_budget.reset_frame()
 
             try:
-                # Critical path: RealSense only (parallel).
-                _rs = [c for c in (self._rs1, self._rs2) if c]
-                if len(_rs) <= 1:
-                    for c in _rs:
-                        c.grab()
+                # Camera clock: block until each RS pump publishes a new seq.
+                # Pumps wait_for_frames on their own cores while we process.
+                if not any(k in self._pumps for k in ("rs1", "rs2")):
+                    time.sleep(1.0 / TARGET_FPS)
+                    _ok = False
                 else:
-                    list(self._grab_pool.map(lambda c: c.grab(), _rs))
+                    _ok, _pump_last = self._wait_pumps(_pump_last, _wait_s)
+                    if not _ok:
+                        self._grab_miss += 1
             except Exception as e:
                 # Never let a camera glitch kill the capture thread (blank atlas forever).
                 if not getattr(self, '_grab_err_n', 0):
                     print("vision: grab error (continuing): %s" % e, flush=True)
                 self._grab_err_n = getattr(self, '_grab_err_n', 0) + 1
             _t_grab = time.monotonic()
+            ages = []
+            for name in ("rs1", "rs2"):
+                p = self._pumps.get(name)
+                if p is not None and p.pub_t > 0:
+                    ages.append((_t_grab - p.pub_t) * 1000.0)
+            self._frame_age_ms = max(ages) if ages else 0.0
             self._offer_raw_bag(_t_grab)
 
             # --- Pose update (cuVSLAM or wheel+visual from odom thread) ---
@@ -1669,8 +1735,10 @@ class Vision:
                 if (self._rs2 and self._rs2.ok
                         and self._rs2.ir_left is not None):
                     ts_ns = int(time.monotonic() * 1e9)
+                    r1 = self._rs1 if (self._rs1 and self._cuvslam.rig_mode == 'dual') else None
                     result = self._cuvslam.track(
-                        self._rs2.ir_left, self._rs2.ir_right, ts_ns)
+                        self._rs2.ir_left, self._rs2.ir_right, ts_ns,
+                        r1.ir_left if r1 else None, r1.ir_right if r1 else None)
                     if result is not None:
                         fused_yaw, fused_fwd = result
                 cap_x = self._cuvslam.x
@@ -2425,6 +2493,13 @@ class Vision:
                 self._immobilize_warned = None
             
             _t_safety = time.monotonic()
+            try:
+                self._update_policy_ego80()
+            except Exception as e:
+                if not getattr(self, "_pol80_err_n", 0):
+                    print("vision: ego80 30Hz: %s" % e, flush=True)
+                self._pol80_err_n = getattr(self, "_pol80_err_n", 0) + 1
+            self._pol80_ms = (time.monotonic() - _t_safety) * 1000.0
 
             # --- GPU atlas render (DROPPABLE: viz for humans/i777, not policy) ---
             # Policy needs heightmap/obs/safety (already published above) at 30Hz.
@@ -2494,15 +2569,11 @@ class Vision:
             _t_end = _t_render
 
             # === Stage timing collection ===
-            # Webcam last: never on RS grab clock or pose bucket
-            if self._webcam is not None:
-                try:
-                    self._webcam.grab()
-                except Exception:
-                    pass
+            self._cap_seq += 1
+            self._cap_ev.set()
 
             _stage_times.append((
-                (_t_grab - _t_start) * 1000.0,      # grab
+                (_t_grab - _t_start) * 1000.0,      # grab wait (camera clock)
                 (_t_hazard - _t_grab) * 1000.0,     # hazard_rgb + pose
                 (_t_rs1 - _t_hazard) * 1000.0,      # rs1_checks (near/overhang/soft + depth_topdown)
                 (_t_rs2 - _t_rs1) * 1000.0,         # rs2_process (GPU depth)
@@ -2511,6 +2582,7 @@ class Vision:
                 (_t_gmap_up - _t_odom) * 1000.0,    # gmap
                 (_t_safety - _t_gmap_up) * 1000.0,  # safety
                 (_t_render - _t_safety) * 1000.0,   # render
+                float(self._frame_age_ms),          # published-frame age at process start
             ))
             
             # Detailed report every 90 frames
@@ -2519,18 +2591,26 @@ class Vision:
                 avg = np.mean(recent, axis=0)
                 p95 = np.percentile(recent, 95, axis=0)
                 total = np.sum(avg)
-                labels = ["grab", "pose+hazard", "rs1_checks", "rs2_gpu", 
-                         "obs_comb", "odom", "gmap", "safety", "render"]
+                labels = ["wait", "pose+hazard", "rs1_checks", "rs2_gpu",
+                         "obs_comb", "odom", "gmap", "safety", "render", "age"]
+                work = avg[:9]
+                work_total = float(np.sum(work))
                 print("=" * 80)
-                print(f"CAPTURE TIMING (last 90 frames): TOTAL={total:.1f}ms ({1000/total:.1f} Hz)")
+                print(f"CAPTURE TIMING (last 90 frames): WORK={work_total:.1f}ms "
+                      f"age_p95={p95[9]:.1f}ms miss={self._grab_miss} "
+                      f"({1000.0 / max(work_total, 0.1):.1f} Hz work)")
                 print("=" * 80)
-                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%TOTAL':>8s}")
+                print(f"{'STAGE':15s} {'MEAN':>8s} {'P95':>8s} {'%WORK':>8s}")
                 print("-" * 80)
                 for i, label in enumerate(labels):
-                    pct = (avg[i] / total) * 100.0
-                    print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                    if i < 9:
+                        pct = (avg[i] / work_total) * 100.0 if work_total > 0 else 0.0
+                        print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms {pct:7.1f}%")
+                    else:
+                        print(f"{label:15s} {avg[i]:7.1f}ms {p95[i]:7.1f}ms")
                 print("=" * 80)
-                print(f"Target: 33.3ms/frame (30 Hz). Current: {total:.1f}ms ({1000/total:.1f} Hz)")
+                print(f"Target: 33.3ms/frame (30 Hz). Frame age p95 should be <33ms. "
+                      f"ego80={getattr(self, '_pol80_ms', 0.0):.1f}ms")
                 print("=" * 80)
 
             _loop_times.append((_t_grab - _t0, _t_rs1 - _t_grab,
@@ -2564,14 +2644,14 @@ class Vision:
                 pass
             self._orbslam3_ship = None
         self._extras_running = False
-        pool = getattr(self, "_grab_pool", None)
-        if pool is not None:
+        for p in list(self._pumps.values()):
             try:
-                pool.shutdown(wait=False, cancel_futures=True)
+                p.stop()
             except Exception:
                 pass
-            self._grab_pool = None
+        self._pumps = {}
         self._running = False
+        self._cap_ev.set()
         if self._thread:
             self._thread.join(timeout=2.0)
         bag = self._raw_bag

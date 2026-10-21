@@ -244,12 +244,8 @@ def test_detect_brown_border():
     print(f"    Brown confidence: {detector.brown_confidence:.2f}")
     print(f"    Brown perimeter: {detector.brown_perimeter:.1f}")
     
-    assert triggered, "Should detect brown border frame"
-    assert reason == 'brown_border', f"Expected reason='brown_border', got '{reason}'"
-    assert detector.brown_confidence > 0.3, f"Expected confidence >0.3, got {detector.brown_confidence:.2f}"
-    assert detector.brown_perimeter > 300, f"Expected perimeter >300, got {detector.brown_perimeter:.1f}"
-    
-    print("  ✅ PASS: Brown border detected")
+    assert reason != 'brown_border', "brown_border extras path is disabled"
+    print("  ✅ PASS: extras no longer fires brown_border")
 
 
 def test_brown_border_priority():
@@ -276,12 +272,8 @@ def test_brown_border_priority():
     print(f"    Brown confidence: {detector.brown_confidence:.2f}")
     print(f"    Corners checked: {detector.corner_count}")
     
-    assert triggered, "Should detect hazard"
-    assert reason == 'brown_border', f"Expected brown_border priority, got '{reason}'"
-    # Corners should be 0 because checkerboard detection is skipped when brown border found
-    assert detector.corner_count == 0, "Checkerboard detection should be skipped"
-    
-    print("  ✅ PASS: Brown border has priority, checkerboard skipped")
+    assert reason != 'brown_border', "brown_border extras path is disabled"
+    print("  ✅ PASS: brown_border no longer preempts bump/checkered")
 
 
 def test_no_brown_border():

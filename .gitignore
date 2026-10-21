@@ -228,3 +228,22 @@ sim/kevin_headon_*.png
 sim/kevin_drive_check_*.png
 sim/kevin_rs1_*.png
 sim/orbslam3/orbslam3_track
+
+# --- 2026-10-14 fullstack sim/SLAM layout: keep data out of git ---
+# emulator / robot run data lives in ~/.kevin (logs, recordings, clips, tables); never in the repo
+*.tgz
+*.deb
+*.npz
+*.pkl
+*.mp4
+kevin_logs/
+src/calibration.json
+src/calibration.json.tmp
+sim/unstuck/ledger.jsonl
+sim/kevin-urdf-twin/refs/
+sim/kevin-urdf-twin/meshes/odrive_s1_housing_asm.stl
+sim/kevin-urdf-twin/meshes/botwheel_onshape_raw.stl
+hardware/tires/v3_4/softtire_v3_4_tire_95a.stl
+
+# resolved robot config dumps (src/robot_params.py)
+run/

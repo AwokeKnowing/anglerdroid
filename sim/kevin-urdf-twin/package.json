@@ -1,0 +1,12 @@
+{
+  "name": "kevin-urdf-twin",
+  "version": "1.0.0",
+  "description": "Approximate but recognizable digital twin of James's MakerBeam XL diff-drive robot. Primitives only (box/cylinder). Units: **meters**. Frame: **x forward, y left, z up** (REP-103).",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
