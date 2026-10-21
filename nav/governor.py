@@ -50,7 +50,7 @@ def _band(P, rect):
     return bool(len(P)) and bool(((P[:, 0] >= x0) & (P[:, 0] <= x1) & (P[:, 1] >= y0) & (P[:, 1] <= y1)).any())
 
 
-def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0, escape=False):
+def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0, escape=False, t_extra=0.0):
     """P (N,2) robot frame (brain points U core points); bands: core band rects [[front], [rear]] (x0, y0, x1, y1)
     or None.  Returns (v, w, scale, need2, why)."""
     sd0 = float(sd(P).min()) if len(P) else np.inf
@@ -83,10 +83,10 @@ def governor(P, v, w, v_meas=0.0, w_meas=0.0, bands=None, factor=2.0, escape=Fal
             if abs(vs) < 1e-3 and abs(ws) < 1e-3: return True, 0.0
             ve = vs if not (v_meas * vs > 0 and abs(v_meas) > abs(vs)) else v_meas
             we = ws if not (w_meas * ws > 0 and abs(w_meas) > abs(ws)) else w_meas
-            poses, t_stop = brake_traj(ve, we, factor * T_R, aL, aT)
+            poses, t_stop = brake_traj(ve, we, factor * T_R + t_extra, aL, aT)
             if not len(P): return True, t_stop
             if "p" not in PREP:     # candidates once, for the largest travel of this call (full command, or measured if faster)
-                big = brake_traj(max(abs(v), abs(v_meas)), max(abs(w), abs(w_meas)), factor * T_R, aL, aT)[0]
+                big = brake_traj(max(abs(v), abs(v_meas)), max(abs(w), abs(w_meas)), factor * T_R + t_extra, aL, aT)[0]
                 PREP["p"] = decel_prep(P, sdP, max(traj_travel(big), traj_travel(poses)), MG)
             if PREP["p"] is None: return True, t_stop
             return not _plan_violates(PREP["p"], poses, MG, escape), t_stop

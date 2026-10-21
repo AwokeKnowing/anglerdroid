@@ -171,7 +171,7 @@ def run(name, rule, use_gov, age=None, seed=0, scenes=None, odo=0.0, perc=None):
             else: Pg = perceive(P, perc, rng); P = perceive(P, perc, rng)
             if use_gov:
                 v0_, w0_ = v_c, w_c
-                if rule == "core": v_c, w_c = GOV.governor(Pg, v_c, w_c, v_m, w_m, bands.rects(), escape=sc.get("escape", False))[:2]
+                if rule == "core": v_c, w_c = GOV.governor(Pg, v_c, w_c, v_m, w_m, bands.rects(), escape=sc.get("escape", False), t_extra=max(0.0, ag))[:2]
                 else: v_c, w_c = PD.governor(P, v_c, w_c)[:2]
                 if abs(v_c - v0_) > 1e-6 or abs(w_c - w0_) > 1e-6: log["gov_interv"] += 1
             if climit is not None: v_c, w_c = climit(v_c, w_c, t)

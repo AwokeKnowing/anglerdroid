@@ -760,7 +760,14 @@ class Brain:
                 # same rules as the core, 2x (nav/governor.py), with the core's own hard bands.  The brain's points
                 # (RS1 ego + RS2 + map memory) are a superset of the core's sources (RS1 ego + RS2).
                 cv = self.hw.core_viz(); bands = cv[1] if cv is not None else None
-                v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=self.slam.odom.v, w_meas=self.slam.odom.w, bands=bands,
+                # judge with the CORE's own inputs (its published state block): wheel-measured v/w and its frame age as extra
+                # lead, so governor-pass => core-pass on the same speed (SLAM odom lags the wheels).  KEVIN_GOV_CORE_STATE=0: old.
+                vm_, wm_, tx_ = self.slam.odom.v, self.slam.odom.w, 0.0
+                cs = self.hw.core_state() if os.environ.get("KEVIN_GOV_CORE_STATE", "1") == "1" and hasattr(self.hw, "core_state") else None
+                if cs and cs.get("hb_age") is not None and cs["hb_age"] < 0.2 and cs.get("v_m") is not None and cs.get("w_m") is not None:
+                    vm_, wm_ = cs["v_m"], cs["w_m"]; ag_ = [a for a in (cs.get("age1"), cs.get("age2")) if a is not None]
+                    tx_ = min(0.2, max(0.0, max(ag_))) if ag_ else 0.0
+                v, w, sc, need2, gw = governor(pts, self.v, self.w, v_meas=vm_, w_meas=wm_, bands=bands, t_extra=tx_,
                                               escape=self.mode in ("escape", "backout"))   # escapes may move along an obstacle already in the planner zone
                 self._gov_in = (pts, (xm, ym, self.navpose()[2]), bands)     # nav/escape.py searches on this exact point set
             info = dict(state="ok" if gw in ("ok", "idle") else "governed", scale=sc, need2=need2, gov=gw, clearance=float(self.env._sd(pts).min()) if len(pts) else None)
