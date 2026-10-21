@@ -83,7 +83,8 @@ def serve(brain, port=8080):
         def do_POST(self):
             if self.path != "/api/command": return self._send(b"{}", code=404)
             n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
-            c = brain.command(d.get("text", ""))
+            fr = d.get("frame")                                      # optional: "nav" = coordinates already in the nav frame (scripts/pilot.py)
+            c = brain.command(d.get("text", ""), frame=fr if fr == "nav" else None)
             self._send(json.dumps(c).encode())
 
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
