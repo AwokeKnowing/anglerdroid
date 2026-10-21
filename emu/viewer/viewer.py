@@ -65,6 +65,15 @@ def log(who, t):
     with lock: LOG.append([time.strftime("%H:%M:%S"), who, t]); del LOG[:-60]; LOGN[0] += 1
 
 SEQ = {"q": [], "gen": 0}; HUB = {"st": {}, "seq": 0}; CLIENTS = set(); CL_LOCK = threading.Lock()
+# idle when nobody is watching (no WebSocket client, no HTTP request for IDLE_S): the heavy panels (ego panel = a second
+# full RS1/RS2 perception pass, map render) pause and the hub polls nav at 2 Hz instead of 15 Hz.  Measured 2026-10-20 on
+# i777: with the viewer running unwatched the safety core frame age was p50 58-62 ms; with it paused p50 47-48 ms (the
+# viewer shares cpus 0,1,4,5 with emu.world and the nav brain).  The first request wakes everything (<= 0.5 s).
+LAST_REQ = [time.time()]; IDLE_S = float(os.environ.get("KEVIN_VIEWER_IDLE_S", "10"))
+def idle():
+    if IDLE_S <= 0: return False
+    with CL_LOCK: n = len(CLIENTS)
+    return n == 0 and time.time() - LAST_REQ[0] > IDLE_S
 
 def nav_cmd(t):
     try: r = json.loads(nav("/api/command", {"text": t}) or b"{}")
@@ -170,7 +179,7 @@ def hub():   # authoritative merged state for every client (WS broadcast + /stat
             try: c.send(msg)
             except Exception:
                 with CL_LOCK: CLIENTS.discard(c)
-        time.sleep(max(0.01, 1 / 15 - (time.time() - t0)))
+        time.sleep(max(0.01, (0.5 if idle() else 1 / 15) - (time.time() - t0)))
 
 def follower():
     last = 0
@@ -214,6 +223,7 @@ def egoloop():   # processed obstacle input, robot-centric: RS1 floor-leveled eg
     S_, ppm, ox, oy = 280, 70.0, 140, 170            # 4 m x 4 m, robot at (140,170), forward = up
     while True:
         t0 = time.time()
+        if idle(): time.sleep(0.5); continue
         try:
             tv, verts = hw.wait_rs1(200)
             if verts is None: continue
@@ -239,6 +249,7 @@ def egoloop():   # processed obstacle input, robot-centric: RS1 floor-leveled eg
 def mapper():
     while True:
         t0 = time.time()
+        if idle(): time.sleep(0.5); continue
         try:
             st = json.loads(nav("/api/state")); meta = json.loads(nav("/api/map.json")); png = nav("/api/map.png")
             M = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_GRAYSCALE); M = cv2.cvtColor(M, cv2.COLOR_GRAY2BGR)
@@ -350,6 +361,7 @@ class H(BaseHTTPRequestHandler):
     def _send(self, b, ct="application/json", code=200):
         self.send_response(code); self.send_header("Content-Type", ct); self.send_header("Content-Length", str(len(b))); self.send_header("Cache-Control", "no-store"); self.end_headers(); self.wfile.write(b)
     def do_GET(self):
+        LAST_REQ[0] = time.time()
         p = self.path.split("?")[0]
         if p == "/": return self._send(open(os.path.join(os.path.dirname(__file__), "live.html")).read().encode(), "text/html; charset=utf-8")
         if p == "/jpeg": return self._send(PAGE.encode(), "text/html; charset=utf-8")
@@ -483,6 +495,7 @@ class H(BaseHTTPRequestHandler):
         if p == "/favicon.ico": return self._send(b"", "image/x-icon")
         self._send(b"{}", code=404)
     def do_POST(self):
+        LAST_REQ[0] = time.time()
         n = int(self.headers.get("Content-Length", 0)); d = json.loads(self.rfile.read(n) or b"{}")
         if self.path == "/mode":
             if "send_all_vln" in d: set_mode(bool(d["send_all_vln"]), str(d.get("who") or "?")[:24])
