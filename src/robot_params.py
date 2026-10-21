@@ -151,6 +151,29 @@ def resolve(robot=None, wheels=None, env=None):
     # James 2026-10-21: = the vision value (was 0.91 + ride_dz in perception: 3.4 mm higher clip, 3.76 cm threshold)
     put("td_floor_clip_m", T["rs1_height_m"]["value"] - oh, "m", "derived: rs1_height_m - td_obstacle_h_m (RS1 depth < clip = obstacle)")
 
+    # ---- cameras (RealSense settings applied at pipeline start; scripts/rs_exposure_eval.py, scripts/color_card_eval.py) ----
+    K = C.get("cameras") or {}
+    mode = env.get("KEVIN_CAM_EXPOSURE") or K.get("exposure_mode", "legacy")
+    if mode not in ("auto_capped", "legacy"): raise RobotConfigError("cameras.exposure_mode = %r (auto_capped | legacy)" % mode)
+    put("cam_exposure_mode", mode, "", ("input: env KEVIN_CAM_EXPOSURE (override)" if env.get("KEVIN_CAM_EXPOSURE") else "input: %s cameras.exposure_mode" % rc)
+        + " (auto_capped: depth+colour AE, depth AE limit; legacy: manual 15 ms / gain 64 depth, 200 / 96 colour)")
+    put("cam_rs1_serial", str(K.get("rs1_serial", "")), "", "input: %s cameras.rs1_serial (top-down)" % rc)
+    put("cam_rs2_serial", str(K.get("rs2_serial", "")), "", "input: %s cameras.rs2_serial (forward)" % rc)
+    put("cam_depth_ae_limit_us", int(_num(K.get("depth_ae_limit_us", 30000), "cameras.depth_ae_limit_us", 1000, 33000)), "us",
+        "input: %s cameras.depth_ae_limit_us (< 33.3 ms frame period at 30 Hz)" % rc)
+    put("cam_rgb_ae_priority", int(_num(K.get("rgb_ae_priority", 0), "cameras.rgb_ae_priority", 0, 1)), "", "input: %s cameras.rgb_ae_priority (0 = constant frame rate)" % rc)
+    put("cam_rgb_white_balance_k", _num(K.get("rgb_white_balance_k", 4800), "cameras.rgb_white_balance_k", 2800, 6500), "K", "input: %s cameras.rgb_white_balance_k (fixed; auto WB off)" % rc)
+    def _roi(k):
+        r = K.get(k)
+        if r is None: return None
+        if len(r) != 4 or not (0 <= r[0] < r[2] <= 640 and 0 <= r[1] < r[3] <= 480): raise RobotConfigError("cameras.%s = %r invalid (x0 y0 x1 y1 in 640x480)" % (k, r))
+        return [int(v) for v in r]
+    for k in ("rs1_rgb_ae_roi", "rs2_rgb_ae_roi", "rs1_card_roi"):
+        put("cam_" + k, _roi(k), "px (x0, y0, x1, y1) colour 640x480", "input: %s cameras.%s" % (rc, k))
+    g = [_num(v, "cameras.rgb_card_gains", 0.5, 2.0) for v in K.get("rgb_card_gains", [1.0, 1.0, 1.0])]
+    if len(g) != 3: raise RobotConfigError("cameras.rgb_card_gains needs 3 values")
+    put("cam_rgb_card_gains", g, "(R, G, B)", "input: %s cameras.rgb_card_gains (%s)" % (rc, K.get("rgb_card_gains_cal", "uncalibrated")))
+
     # ---- footprint ---------------------------------------------------------------------------------------------------
     B = C.get("body") or {}
     try:

@@ -33,6 +33,57 @@ def _set_sensor_opt(sensor, option, value):
 
 
 
+def _set_roi(sens, roi):
+    """AE region of interest (x0, y0, x1, y1).  The firmware refuses it for a moment after AE toggles: retry briefly."""
+    if roi is None: return
+    r = rs.region_of_interest(); r.min_x, r.min_y, r.max_x, r.max_y = int(roi[0]), int(roi[1]), int(roi[2]) - 1, int(roi[3]) - 1
+    for _ in range(5):
+        try:
+            sens.as_roi_sensor().set_region_of_interest(r); return
+        except Exception:
+            time.sleep(0.1)
+    print("cameras: AE ROI %s not accepted" % (roi,), flush=True)
+
+
+def apply_exposure(profile, serial):
+    """Exposure / white balance from the resolved robot config (src/robot_params.py cam_*), applied once per pipeline.
+    auto_capped (2026-10-21): depth auto exposure with the firmware AE limit cam_depth_ae_limit_us (< the 33.3 ms frame
+    period, so 30 Hz holds); colour auto exposure with priority 0 (constant frame rate), AE ROI per camera (RS1: the WhiBal
+    card, RS2: the floor), fixed white balance cam_rgb_white_balance_k.  legacy: the pre-2026-10-21 manual settings
+    (depth 15 ms / gain 64, colour 200 / gain 96) -- they saturate the IR in daylight (scripts/rs_exposure_eval.py)."""
+    import robot_params as _RP
+    V = _RP.V; mode = V.get("cam_exposure_mode", "legacy"); o = rs.option
+    role = "rs1" if serial == V.get("cam_rs1_serial") else "rs2" if serial == V.get("cam_rs2_serial") else None
+    try:
+        dev = profile.get_device(); ds = dev.first_depth_sensor()
+        rgb = [x for x in dev.sensors if any(t in x.get_info(rs.camera_info.name).lower() for t in ("rgb", "color"))]
+    except Exception as e:
+        print("cameras: %s exposure setup skipped (%s)" % (serial, e), flush=True); return
+    def s(sens, k, v):
+        try:
+            if sens.supports(k): sens.set_option(k, v); return True
+        except Exception as e:
+            print("cameras: %s option %s=%s failed: %s" % (serial, k, v, e), flush=True)
+        return False
+    if mode == "legacy":
+        s(ds, o.enable_auto_exposure, 0); s(ds, o.exposure, 15000); s(ds, o.gain, 64)
+        for c in rgb: s(c, o.enable_auto_exposure, 0); s(c, o.exposure, 200); s(c, o.gain, 96); s(c, o.frames_queue_size, 1)
+        print("cameras: %s exposure legacy (manual)" % serial, flush=True); return
+    lim = int(V["cam_depth_ae_limit_us"]); capped = False
+    if s(ds, o.auto_exposure_limit_toggle, 1) | s(ds, o.auto_exposure_limit, lim):
+        capped = True
+    s(ds, o.enable_auto_exposure, 1)
+    if not capped:      # firmware without the AE limit: manual fallback that cannot stretch the frame period
+        s(ds, o.enable_auto_exposure, 0); s(ds, o.exposure, min(lim, 15000)); s(ds, o.gain, 32)
+    for c in rgb:
+        s(c, o.auto_exposure_priority, int(V["cam_rgb_ae_priority"])); s(c, o.enable_auto_exposure, 1)
+        s(c, o.enable_auto_white_balance, 0); s(c, o.white_balance, float(V["cam_rgb_white_balance_k"])); s(c, o.frames_queue_size, 1)
+        _set_roi(c, V.get("cam_%s_rgb_ae_roi" % role) if role else None)
+    print("cameras: %s %s exposure auto_capped: depth AE %s, colour AE prio %d ROI %s, WB %d K" % (
+        serial, role or "?", ("limit %d us" % lim) if capped else "MANUAL FALLBACK (no AE limit in firmware)",
+        int(V["cam_rgb_ae_priority"]), V.get("cam_%s_rgb_ae_roi" % role) if role else None, V["cam_rgb_white_balance_k"]), flush=True)
+
+
 def find_rgb_device():
     """Pick the USB RGB webcam V4L node (not RealSense).
 
@@ -152,44 +203,7 @@ class RSCamera:
         _set_sensor_opt(sensor, rs.option.receiver_gain, 16)
         if not emitter:
             print("cameras: %s IR emitter OFF (visual SLAM, not speckle)" % serial)
-        # Cap exposure so low-light AE cannot stretch past ~30Hz budget.
-        # Depth exposure is microseconds; 15000us = 15ms leaves headroom under 33ms.
-        try:
-            if sensor.supports(rs.option.enable_auto_exposure):
-                sensor.set_option(rs.option.enable_auto_exposure, 0)
-            if sensor.supports(rs.option.exposure):
-                sensor.set_option(rs.option.exposure, 15000)  # 15ms
-            if sensor.supports(rs.option.gain):
-                # bump gain a bit to compensate for capped exposure in dark rooms
-                r = sensor.get_option_range(rs.option.gain)
-                sensor.set_option(rs.option.gain, min(r.max, max(r.min, 64)))
-        except Exception as e:
-            print("cameras: depth exposure cap failed: %s" % e)
-
-        # Color sensor AE can also blow the frame period in low light.
-        try:
-            for sens in self.profile.get_device().sensors:
-                name = ""
-                try:
-                    name = sens.get_info(rs.camera_info.name).lower()
-                except Exception:
-                    pass
-                if "rgb" not in name and "color" not in name:
-                    continue
-                if sens.supports(rs.option.enable_auto_exposure):
-                    sens.set_option(rs.option.enable_auto_exposure, 0)
-                if sens.supports(rs.option.exposure):
-                    # D400 RGB exposure units are not always us; keep near default (~166)
-                    # but never unbounded AE. Prefer a mid value then raise gain.
-                    r = sens.get_option_range(rs.option.exposure)
-                    target = min(r.max, max(r.min, 200))
-                    sens.set_option(rs.option.exposure, target)
-                if sens.supports(rs.option.gain):
-                    r = sens.get_option_range(rs.option.gain)
-                    sens.set_option(rs.option.gain, min(r.max, max(r.min, 96)))
-                _set_sensor_opt(sens, rs.option.frames_queue_size, 1)
-        except Exception as e:
-            print("cameras: color exposure cap failed: %s" % e)
+        apply_exposure(self.profile, serial)       # resolved config: robots/<robot>/robot.json cameras (once, at start)
 
         self._compute_pc = compute_pointcloud
         if compute_pointcloud:

@@ -15,8 +15,99 @@
  },
  "body": {
   "_doc": "twin body outline in the axle frame (m): SIL12 polygon (kplan/MuJoCo) + simready lite deck corners. FOOTPRINT_SAFE = hull(sil12 + deck_corners + the wheels' tread corners (+-wheel_r_free, +-tread_y_out)).",
-  "sil12": [[-0.27371, -0.01022], [-0.16869, -0.15427], [-0.08009, -0.20998], [0.08319, -0.20998], [0.12372, -0.15418], [0.12629, -0.13818], [0.12629, 0.13818], [0.12372, 0.15418], [0.08319, 0.20998], [-0.08009, 0.20998], [-0.16869, 0.15427], [-0.27371, 0.01022]],
-  "deck_corners": [[-0.1995, -0.15], [-0.1995, 0.15]],
+  "sil12": [
+   [
+    -0.27371,
+    -0.01022
+   ],
+   [
+    -0.16869,
+    -0.15427
+   ],
+   [
+    -0.08009,
+    -0.20998
+   ],
+   [
+    0.08319,
+    -0.20998
+   ],
+   [
+    0.12372,
+    -0.15418
+   ],
+   [
+    0.12629,
+    -0.13818
+   ],
+   [
+    0.12629,
+    0.13818
+   ],
+   [
+    0.12372,
+    0.15418
+   ],
+   [
+    0.08319,
+    0.20998
+   ],
+   [
+    -0.08009,
+    0.20998
+   ],
+   [
+    -0.16869,
+    0.15427
+   ],
+   [
+    -0.27371,
+    0.01022
+   ]
+  ],
+  "deck_corners": [
+   [
+    -0.1995,
+    -0.15
+   ],
+   [
+    -0.1995,
+    0.15
+   ]
+  ],
   "safety_margin_m": 0.035
+ },
+ "cameras": {
+  "_doc": "RealSense settings, applied once at pipeline start by src/cameras.py (no per-frame work). 2026-10-21 (James: sun blinded the depth cameras): the old manual depth exposure 15 ms / gain 64 saturated the IR in daylight (fill RS1 0.16, RS2 0.01; 79-97 % IR px saturated); auto exposure with the firmware AE limit keeps 30 Hz (exposure can never exceed depth_ae_limit_us < 33.3 ms) and fills 0.66 / 0.63 (scripts/rs_exposure_eval.py). Colour: auto exposure with priority 0 (constant 30 Hz), AE ROI on the WhiBal card (RS1) / the floor (RS2), fixed white balance; rgb_card_gains = per-channel gains that make the card neutral at that white balance (scripts/color_card_eval.py; consumers apply them with src/color_cal.py). exposure_mode legacy = the pre-2026-10-21 manual settings (env KEVIN_CAM_EXPOSURE overrides).",
+  "rs1_serial": "815412070676",
+  "rs2_serial": "944622074292",
+  "exposure_mode": "auto_capped",
+  "depth_ae_limit_us": 30000,
+  "rgb_ae_priority": 0,
+  "rgb_white_balance_k": 4800,
+  "rs1_rgb_ae_roi": [
+   363,
+   222,
+   389,
+   252
+  ],
+  "rs2_rgb_ae_roi": [
+   40,
+   300,
+   600,
+   470
+  ],
+  "rs1_card_roi": [
+   363,
+   222,
+   389,
+   252
+  ],
+  "rgb_card_gains": [
+   0.9617,
+   1.1081,
+   0.9454
+  ],
+  "rgb_card_gains_cal": "2026-10-21 11:58 PDT, RS1 at 4800 K, AE ROI card, indirect daylight; held-out card patch 0.21 deg from neutral"
  }
 }
