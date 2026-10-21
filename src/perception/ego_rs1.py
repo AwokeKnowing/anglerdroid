@@ -14,14 +14,14 @@ from robot_config import (
 
 from .labels import UNKNOWN, SELF, CLEAR, OBSTACLE
 
-# Keep in sync with vision.TD_FLOOR_CLIP until shared config exists.
+# Same resolved value as vision.TD_FLOOR_CLIP (src/robot_params.py td_floor_clip_m).
 from pathlib import Path
 try:  # resolved robot config (src/robot_params.py: robots/<robot>/robot.json wheels + profiles)
     import robot_params as _RP
 except ImportError:
     import sys as _sys
     _sys.path.append(str(Path(__file__).resolve().parents[2] / 'src')); import robot_params as _RP
-TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved: td_floor_clip_ref_m 0.91 + ride_dz (soft 0.925)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved (one clip everywhere): rs1_height_m - 0.041 (stock 0.906595, soft 0.921595)
 
 
 def _blit_x(dst: np.ndarray, src: np.ndarray, dx: int) -> None:

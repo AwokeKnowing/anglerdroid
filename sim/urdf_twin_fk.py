@@ -14,12 +14,11 @@ from typing import Dict, Tuple
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-# v310 tire profile switch: KEVIN_TIRE=soft_v3_2 -> kevin_soft_v3_2.urdf (caster spacers, R 0.100 collision); default stock.
-import importlib.util as _ilu, sys as _sys
-_sp = _ilu.spec_from_file_location('tire_profile', str(REPO / 'src' / 'tire_profile.py'))
-_tp = _sys.modules.get('tire_profile') or _ilu.module_from_spec(_sp)
-if 'tire_profile' not in _sys.modules: _sys.modules['tire_profile'] = _tp; _sp.loader.exec_module(_tp)
-DEFAULT_URDF = REPO / "sim" / "kevin-urdf-twin" / _tp.TWIN_URDF
+# resolved robot config (src/robot_params.py): the selected wheels' twin URDF and radius.
+import sys as _sys
+if str(REPO / 'src') not in _sys.path: _sys.path.append(str(REPO / 'src'))
+import robot_params as _RP
+DEFAULT_URDF = REPO / "sim" / "kevin-urdf-twin" / _RP.V["twin_urdf"]
 
 # Names in the twin (RS1 = mast D435 looking down; RS2 = mid mast D435i).
 RS1_BODY = "realsense_d435"
@@ -200,7 +199,7 @@ def wheel_geometry(urdf_path: Path | None = None) -> dict:
     track = float(abs(t_l[1] - t_r[1]))
     return {
         "track": track,
-        "wheel_r": float(radius if radius is not None else 0.08565),
+        "wheel_r": float(radius if radius is not None else _RP.V["wheel_r_m"]),
         "y_left": float(t_l[1]),
         "y_right": float(t_r[1]),
         "hub_xyz_left": t_l.astype(np.float64),

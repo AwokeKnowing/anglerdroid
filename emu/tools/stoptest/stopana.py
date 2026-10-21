@@ -1,7 +1,12 @@
 import json, math, sys, numpy as np
-R = 0.08565 * 2 * math.pi
+import os as _os, sys as _sys
+_sys.path.append(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "..", "src")); _os.environ.setdefault("KEVIN_ROBOT_PARAMS_NOLOAD", "1")
+import robot_params as _RP
+def wheel_circ(d):
+    """wheel circumference (m) for a stop log: its "wheels"/"tire" key, else stock (logs before 2026-10-21 = stock tyres)."""
+    return 2 * math.pi * _RP.values(_RP.resolve(wheels=d.get("wheels") or d.get("tire") or "stock"))["wheel_r_m"]
 for fn in sys.argv[1:]:
-    d = json.load(open(fn)); G = d['gt']; L = d['nav']; X0, Y0, YAW = d['x0']; bx, by = d['box']
+    d = json.load(open(fn)); G = d['gt']; L = d['nav']; X0, Y0, YAW = d['x0']; bx, by = d['box']; R = wheel_circ(d)
     face = (bx - X0) * math.cos(YAW) + (by - Y0) * math.sin(YAW) - 0.15
     tg = np.array([g[0] for g in G]); s = np.array([(g[2] - X0) * math.cos(YAW) + (g[3] - Y0) * math.sin(YAW) for g in G]); gap = face - s - 0.126
     vg = np.array([g[5] for g in G]); inp = np.array([g[8][1][1] for g in G]) * R; spt = np.array([g[8][1][2] for g in G]) * R; wv = np.array([g[8][1][3] for g in G]) * R

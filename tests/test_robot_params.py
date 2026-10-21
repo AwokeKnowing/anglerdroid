@@ -32,7 +32,7 @@ def test_soft_matches_a4224de():
     assert close(s["vel_limit_tps"], 4.0 * k) and round(s["vel_limit_tps"], 3) == 3.404
     assert close(s["vel_ramp_tps2"], 3.0 * k) and round(s["vel_ramp_tps2"], 3) == 2.553
     assert close(s["vel_ramp_max_tps2"], 5.0 * k) and round(s["vel_ramp_max_tps2"], 3) == 4.255
-    assert close(s["cliff_z0_m"], 0.961) and close(s["td_floor_clip_m"], 0.925)
+    assert close(s["cliff_z0_m"], 0.961) and close(s["td_floor_clip_m"], 0.921595) and abs(s["td_floor_clip_m"] - 0.9216) < 5e-5 and "td_floor_clip_vision_m" not in s and "td_floor_clip_ref_m" not in s
     assert same_poly(s["footprint_safe"], SOFT_FP), s["footprint_safe"]
     assert close(s["rs1_height_m"], 0.962595) and close(s["rs2_height_m"], 0.482863) and close(s["mast_rgb_height_m"], 0.99115)
     assert abs(s["rs1_height_m"] - 0.9626) < 5e-5 and abs(s["rs2_height_m"] - 0.4829) < 5e-5 and abs(s["mast_rgb_height_m"] - 0.9912) < 5e-5
@@ -43,7 +43,7 @@ def test_soft_matches_a4224de():
 def test_stock_gives_old_numbers():
     s = V("stock")
     assert close(s["vel_limit_tps"], 4.0) and close(s["vel_ramp_tps2"], 3.0) and close(s["vel_ramp_max_tps2"], 5.0)
-    assert close(s["cliff_z0_m"], 0.946) and close(s["td_floor_clip_m"], 0.91) and close(s["td_floor_clip_vision_m"], 0.947595 - 0.041)
+    assert close(s["cliff_z0_m"], 0.946) and close(s["td_floor_clip_m"], 0.947595 - 0.041) and close(s["td_floor_clip_m"], 0.906595)
     assert same_poly(s["footprint_safe"], SIL12_DECK), s["footprint_safe"]
     assert close(s["rs1_height_m"], 0.947595) and close(s["rs2_height_m"], 0.467863) and close(s["mast_rgb_height_m"], 0.97615)
     assert close(s["wheel_r_m"], 0.08565) and close(s["axle_height_m"], 0.08565) and s["spoke_ripple_m"] == 0.0
@@ -86,10 +86,12 @@ import robot_params as RP, twin_geometry as TG, robot_config as RC, tire_profile
 import nav.safety_core as SC, nav.perceive as PE, nav.safety as NS
 import nav.kplan.core as KC
 from perception import ego_rs1, fast_ego80
+import vision
+import importlib.util as _u; _sp = _u.spec_from_file_location('ego80', 'sim/rl_nav/ego80.py'); ego80 = _u.module_from_spec(_sp); _sp.loader.exec_module(ego80)   # package __init__ needs warp
 import maploc
 print(json.dumps(dict(hash=RP.HASH, wheels=RP.V['wheels'], tg_ramp=TG.VEL_RAMP_TPS2, tg_lim=TG.VEL_LIMIT_TPS, sc=[SC.RAMP_NORMAL, SC.RAMP_MAX],
   cliff=PE.Ego.CLIFF_Z0, fp=TG.FOOTPRINT_SAFE.tolist(), sc_fp=SC.FOOTPRINT_SAFE.tolist(), ns_abrake=NS.A_BRAKE_MEAS, rc_d=RC.WHEEL_DIAMETER_CM,
-  tp=[TP.NAME, TP.RIDE_DZ_M], clip=[float(ego_rs1.TD_FLOOR_CLIP), float(fast_ego80.TD_FLOOR_CLIP)], fwh=fast_ego80.FW_CAM_H,
+  tp=[TP.NAME, TP.RIDE_DZ_M], clip=[float(ego_rs1.TD_FLOOR_CLIP), float(fast_ego80.TD_FLOOR_CLIP), float(vision.TD_FLOOR_CLIP), float(ego80.TD_FLOOR_CLIP)], fwh=fast_ego80.FW_CAM_H,
   h=[TG.height('rs1_depth'), TG.height('rs2_depth'), TG.height('rgb')], ml=maploc.AXLE_H, kc=KC.Limits.a_brake)))
 """
 
@@ -103,7 +105,8 @@ def test_consumers_read_resolved():
         assert o["tg_ramp"] == s["vel_ramp_tps2"] and o["tg_lim"] == s["vel_limit_tps"] and o["sc"] == [s["vel_ramp_tps2"], s["vel_ramp_max_tps2"]]
         assert o["cliff"] == s["cliff_z0_m"] and same_poly(o["fp"], s["footprint_safe"]) and same_poly(o["sc_fp"], s["footprint_safe"])
         assert close(o["ns_abrake"], s["a_brake_mps2"]) and close(o["rc_d"], s["wheel_diameter_cm"]) and o["tp"] == [w, s["ride_dz_m"]]
-        assert all(close(c, s["td_floor_clip_m"], 1e-6) for c in o["clip"]) and close(o["fwh"], s["rs2_height_m"])
+        assert len(o["clip"]) == 4 and all(close(c, s["td_floor_clip_m"], 1e-6) for c in o["clip"])   # one clip everywhere
+        assert close(s["rs1_height_m"] - s["td_floor_clip_m"], 0.041) and close(o["fwh"], s["rs2_height_m"])
         assert o["h"] == [s["rs1_height_m"], s["rs2_height_m"], s["mast_rgb_height_m"]] and o["ml"] == s["axle_height_m"]
         if o["kc"] is not None: assert close(o["kc"], s["a_brake_mps2"])
         print("consumers %s ok: hash %s" % (w, o["hash"]))

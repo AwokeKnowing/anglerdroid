@@ -1,10 +1,9 @@
 import json, math, sys, numpy as np
 exec(open(__import__('os').path.join(__import__('os').path.dirname(__file__), 'stopana2.py')).read().split('for fn in sys.argv[1:]:')[0])
-Rw = 0.08565 * 2 * math.pi
 print('| run | v | first seen (bumper->face) | frame capture: t, gap | (b) decision tick: t, gap, clr_est | (c) stop sent: t, gap | (d) sim input_vel=0: t | (e) wheel=0: t, gap | travel after (c) | eff. decel | min gap | contact |')
 allp, alla = [], []
 for fn in sys.argv[1:]:
-    d = json.load(open(fn)); G = d['gt']; L = d['nav']; bx, by = d['box']
+    d = json.load(open(fn)); G = d['gt']; L = d['nav']; bx, by = d['box']; Rw = wheel_circ(d)
     BOX = np.array([[bx - .15, by - .15], [bx + .15, by - .15], [bx + .15, by + .15], [bx - .15, by + .15]])
     tg = np.array([g[0] for g in G]); vg = np.array([g[5] for g in G]); inp = np.array([g[8][1][1] for g in G]) * Rw; wv = np.array([g[8][1][3] for g in G]) * Rw
     def gap(i):

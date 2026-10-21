@@ -30,7 +30,7 @@ try:  # resolved robot config (src/robot_params.py: robots/<robot>/robot.json wh
 except ImportError:
     import sys as _sys
     _sys.path.append(str(Path(__file__).resolve().parents[2] / 'src')); import robot_params as _RP
-TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved; must match the wheels the bag/robot ran on (stock 0.91)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved; must match the wheels the bag/robot ran on (stock 0.906595)
 # Live TD_X_OFFSET = -75 px @ 1 cm → −18.75 @ 4 cm. Not a center crop of 848.
 TD_X_OFFSET80 = -19
 

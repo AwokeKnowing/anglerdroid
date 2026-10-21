@@ -71,11 +71,11 @@ DEBUG_CAMERAS = False
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(EGO_PX_SIZE)
 import robot_params as _RP  # resolved robot config (floor clip + camera heights per wheels)
-# SAFETY-CRITICAL (v310): RS1 sits RIDE_DZ_M higher on soft tires -> floor is that much farther; clip follows the profile
-# so the obstacle threshold above the floor (~4.1 cm) is unchanged. Stock: exactly 0.91.
+# SAFETY-CRITICAL: RS1 sits ride_dz higher on soft tyres -> floor is that much farther; the resolved clip follows the
+# twin RS1 height so the obstacle threshold above the floor (4.1 cm, td_obstacle_h_m) is the same for every wheel.
 import twin_geometry as _TGF
 # 2026-10-13: from the twin: RS1 depth optical height above floor (0.9476 stock, incl. ride dz) - 0.041 m obstacle threshold (was 0.91 + dz)
-TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_vision_m"])   # resolved: rs1_height_m - td_obstacle_h_m (0.041)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])   # resolved, one clip everywhere: rs1_height_m - td_obstacle_h_m (0.041)
 # Known-pixel floor for "RS1 invalid → immobilize". Capture loop uses this.
 TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
 # One USB2 miss is not a dead camera. Hold last heightmap this many frames

@@ -28,9 +28,11 @@ MAST_TOP = 1.00 - R
 ARM_Z0 = 0.97 - R
 ARM_Z1 = 1.00 - R
 # v310 tire switch (src/tire_profiles.json): body/mast stay fixed to the axle (constants above use stock R);
-# soft_v3_2 moves the floor down: wheel visual, caster (spacer) and footprint follow the loaded R 0.100 (nominal).
-if os.environ.get('KEVIN_TIRE', 'stock') in ('soft', 'soft_v3_2'):
-    R = 0.100
+# other wheels move the floor down: wheel visual, caster (spacer) and footprint follow the resolved loaded R.
+import sys as _sys   # resolved robot config (robots/<robot>/robot.json wheels; KEVIN_WHEELS overrides)
+_sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'src'))
+import robot_params as _RP
+R = float(_RP.V['wheel_r_loaded_m'])
 
 DIR = os.path.dirname(os.path.abspath(__file__))
 

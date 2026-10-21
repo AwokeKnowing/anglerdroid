@@ -1,11 +1,11 @@
 import json, math, sys, glob, numpy as np
 exec(open('stopana2.py').read().split('for fn in sys.argv[1:]:')[0])
-Rw = 0.08565 * 2 * math.pi; M = 0.035
+M = 0.035
 def model(v, tr, a): return v * tr + v * v / (2 * a)
 out = []
 for pre in ('A26', 'B26'):
   for fn in sorted(glob.glob('stop/%s_*.json' % pre)):
-    d = json.load(open(fn)); G = d['gt']; L = d['nav']; bx, by = d['box']; v = d['v']
+    d = json.load(open(fn)); G = d['gt']; L = d['nav']; bx, by = d['box']; Rw = wheel_circ(d); v = d['v']
     BOX = np.array([[bx - .15, by - .15], [bx + .15, by - .15], [bx + .15, by + .15], [bx - .15, by + .15]])
     tg = np.array([g[0] for g in G]); vg = np.array([g[5] for g in G]); wv = np.array([g[8][1][3] for g in G]) * Rw
     def gap(i):

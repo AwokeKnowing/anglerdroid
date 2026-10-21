@@ -6,7 +6,7 @@ os.environ.setdefault("KEVIN_EMU_MODEL", "full"); os.environ.setdefault("KEVIN_E
 import mujoco
 from emu import envs, world
 sys.path.insert(0, world.TWIN); from kevin_drive import ODriveAxis
-WR = 0.08565
+RP = world._robot_params(); WHEELS = RP.V["wheels"]; WR = RP.V["wheel_r_m"]   # resolved robot config (KEVIN_WHEELS to change)
 def brake(m, V, R, x0=2.5, y0=2.0, yaw=math.pi / 2):
     d = mujoco.MjData(m); m.opt.noslip_iterations = 10
     jl, jr = m.joint("wheel_left_joint"), m.joint("wheel_right_joint")
@@ -40,7 +40,7 @@ def brake(m, V, R, x0=2.5, y0=2.0, yaw=math.pi / 2):
     return dict(V=V, R=R, a_cmd=R * 2 * math.pi * WR, v0=v0, t_stop=ts, d_stop=dist, a_mean=v0 * v0 / (2 * dist) if dist > 0 else float('nan'),
                 a_peak=float(-acc_s.min()), pitch_max=float(np.abs(Tb[:, 3]).max()), slip=slip, tipped=bool(Tb[:, 4].min() < 0.7))
 if __name__ == "__main__":
-    e = envs.build("casita", 0); m = mujoco.MjModel.from_xml_string(world.compose(e, "stock"))
+    e = envs.build("casita", 0); m = mujoco.MjModel.from_xml_string(world.compose(e, WHEELS))
     for V in (0.3, 0.45, 0.6):
         for R in (3.0, 5.0, 8.0, 12.0, 20.0):
             r = brake(m, V, R)

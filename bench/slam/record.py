@@ -77,7 +77,8 @@ def main():
     from emu import world as W, envs, realism
     class Sim(W.World):
         def _setup_io(self): pass          # no shm / sockets: fully isolated from the live emulator
-    ns = argparse.Namespace(env=a.env, seed=a.seed, tire="stock", ir=1, subpix=0.08, holes=0.004, min_z=0.175, band=True, rt=1.0)
+    RP = W._robot_params()                 # resolved robot config: sim wheels = the geometry the log records
+    ns = argparse.Namespace(env=a.env, seed=a.seed, tire=RP.V["wheels"], ir=1, subpix=0.08, holes=0.004, min_z=0.175, band=True, rt=1.0)
     S = Sim(ns); m, d = S.m, S.d; NP = W.NP
     sys.path.append(os.path.join(REPO, "src")); import twin_geometry as TG   # after the twin (its tire_profile wins, as in emu.world)
     for n in S.nodes: n.state = n.CLOSED; n.wd_en = False; n.ax.reset()
@@ -143,9 +144,9 @@ def main():
                 extr_twin_base_from_optical=dict(rs2_ir1=ext("rs2_ir1"), rs2_ir2=ext("rs2_ir2"), rs2_color=ext("rs2_color"), rs2_depth=ext("rs2_depth"), rs2_imu=ext("rs2_imu"), rs1_depth=ext("rs1_depth"), mast=ext("rgb")),
                 withheld_truth=dict(mast=W.MAST_TRUE if realism.REAL else dict(hfov_deg=W.MAST_HFOV, intr=mi), rs2_mount=W.RS2_TRUE),
                 robot_belief=dict(mast_hfov_deg=W.MAST_HFOV, rs2_pitch_deg=27.0), realism=realism.REAL,
-                twin=dict(wheel_r_m=TG.WHEEL_R_M, track_m=TG.TRACK_M, axle_h_m=TG.AXLE_H_M),
+                twin=dict(wheel_r_m=TG.WHEEL_R_M, track_m=TG.TRACK_M, axle_h_m=TG.AXLE_H_M), wheels=RP.V["wheels"], robot_config_hash=RP.HASH,
                 notes="gt.csv yaw/x/y = base_link in world; mast pinhole, no distortion; IR depth-aligned to ir1; color offset +15 mm y")
-    json.dump(meta, open(os.path.join(out, "meta.json"), "w"), indent=1)
+    json.dump(meta, open(os.path.join(out, "meta.json"), "w"), indent=1); RP.save_with(out)
     # ---- control (GT pure pursuit; data generation only)
     r_w = TG.WHEEL_R_M; track = TG.TRACK_M
     def cmd(v, w):

@@ -143,14 +143,13 @@ def resolve(robot=None, wheels=None, env=None):
     # ---- perception floor references ----------------------------------------------------------------------------------
     Q = C.get("perception") or {}
     cz = _num(Q.get("cliff_z0_ref_m"), "perception.cliff_z0_ref_m", 0.3, 2.0)
-    fc = _num(Q.get("td_floor_clip_ref_m"), "perception.td_floor_clip_ref_m", 0.3, 2.0)
     oh = _num(Q.get("td_obstacle_h_m"), "perception.td_obstacle_h_m", 0.005, 0.2)
     put("cliff_z0_ref_m", cz, "m", "input: %s perception.cliff_z0_ref_m (stock)" % rc)
     put("cliff_z0_m", cz + dz, "m", "derived: cliff_z0_ref_m + ride_dz_m (expected RS1 depth to the floor)")
-    put("td_floor_clip_ref_m", fc, "m", "input: %s perception.td_floor_clip_ref_m (stock)" % rc)
-    put("td_floor_clip_m", fc + dz, "m", "derived: td_floor_clip_ref_m + ride_dz_m (perception ego_rs1/fast_ego80 RS1 floor reject)")
-    put("td_obstacle_h_m", oh, "m", "input: %s perception.td_obstacle_h_m" % rc)
-    put("td_floor_clip_vision_m", T["rs1_height_m"]["value"] - oh, "m", "derived: rs1_height_m - td_obstacle_h_m (src/vision.py RS1 floor reject)")
+    put("td_obstacle_h_m", oh, "m", "input: %s perception.td_obstacle_h_m (RS1 points higher than this above the floor = obstacle)" % rc)
+    # ONE RS1 top-down floor clip for every consumer (safety core via perception.ego_rs1, fast_ego80, sim ego80, vision);
+    # James 2026-10-21: = the vision value (was 0.91 + ride_dz in perception: 3.4 mm higher clip, 3.76 cm threshold)
+    put("td_floor_clip_m", T["rs1_height_m"]["value"] - oh, "m", "derived: rs1_height_m - td_obstacle_h_m (RS1 depth < clip = obstacle)")
 
     # ---- footprint ---------------------------------------------------------------------------------------------------
     B = C.get("body") or {}

@@ -35,7 +35,7 @@ try:  # resolved robot config (src/robot_params.py: robots/<robot>/robot.json wh
 except ImportError:
     import sys as _sys
     _sys.path.append(str(Path(__file__).resolve().parents[2] / 'src')); import robot_params as _RP
-TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved: td_floor_clip_ref_m 0.91 + ride_dz (soft 0.925)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved (one clip everywhere): rs1_height_m - 0.041 (stock 0.906595, soft 0.921595)
 # Live TD_X_OFFSET = -75 px @ 1 cm → −18.75 @ 4 cm.
 TD_X_OFFSET80 = -19
 # RS2 down-pitch from horizontal. 25.6-90 used to feed phys_h by mistake

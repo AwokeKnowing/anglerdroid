@@ -1,5 +1,10 @@
 import json, math, sys, numpy as np
-R = 0.08565 * 2 * math.pi
+import os as _os, sys as _sys
+_sys.path.append(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "..", "..", "src")); _os.environ.setdefault("KEVIN_ROBOT_PARAMS_NOLOAD", "1")
+import robot_params as _RP
+def wheel_circ(d):
+    """wheel circumference (m) for a stop log: its "wheels"/"tire" key, else stock (logs before 2026-10-21 = stock tyres)."""
+    return 2 * math.pi * _RP.values(_RP.resolve(wheels=d.get("wheels") or d.get("tire") or "stock"))["wheel_r_m"]
 SIL = np.array([[-0.27371, -0.01022], [-0.16869, -0.15427], [-0.08009, -0.20998], [0.08319, -0.20998], [0.12372, -0.15418], [0.12629, -0.13818], [0.12629, 0.13818], [0.12372, 0.15418], [0.08319, 0.20998], [-0.08009, 0.20998], [-0.16869, 0.15427], [-0.27371, 0.01022]])
 def segd(p, a, b):
     ab = b - a; t = np.clip(((p - a) @ ab) / (ab @ ab), 0, 1); return np.linalg.norm(p - (a + t * ab))
