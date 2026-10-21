@@ -363,6 +363,14 @@ def _play(text: str, voice: str) -> None:
             samples = samples / peak
         path = os.path.join(tempfile.gettempdir(), "kevin_tts.wav")
         sf.write(path, samples, sr)
+        try:
+            import robot_params as _RP
+            _on = bool(_RP.V.get("audio_enabled", False))
+        except Exception:
+            _on = False
+        if os.environ.get("KEVIN_MUTE") == "1" or not _on:          # speaker muted until James enables audio.enabled
+            print("speech: MUTED (audio.enabled false / KEVIN_MUTE=1): not played, wav at %s" % path)
+            return
         paplay_vol = max(1, int(round(65536 * vol)))
         r = subprocess.run(
             ["paplay", f"--device={sink}", f"--volume={paplay_vol}", path],

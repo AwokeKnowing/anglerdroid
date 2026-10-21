@@ -10,6 +10,8 @@
   Test    python -m nav.voice --test "Kevin, ¿qué hora es?" --lang es [--no-post]   (Kokoro -> wav -> same pipeline)
           python -m nav.voice --wav file.wav [--no-post]
 
+Mute: nothing is played unless the resolved audio_enabled is true (robot.json audio.enabled, default false; env
+     KEVIN_AUDIO_ENABLED=1 overrides); KEVIN_MUTE=1 always mutes.  Muted TTS / chime wavs go to ~/kevin_bench/voice_muted/.
 Env: KEVIN_VOICE_PORT (8092), KEVIN_SPEAK_VOL (0.75), KEVIN_SPEAK_SINK, KEVIN_LISTEN_SRC, KEVIN_WHISPER ("base"),
      KEVIN_VOICE_THREADS (4), KEVIN_VOICE_EN ("am_michael"), KEVIN_VOICE_ES ("em_alex"), KEVIN_VOICE_POST (1).
 """
@@ -96,7 +98,27 @@ def _wav(path, s, sr):
     sf.write(path, s, sr)
 
 
+MUTED_DIR = os.path.expanduser("~/kevin_bench/voice_muted")
+
+
+def muted():
+    """True unless James enabled the speaker (resolved audio_enabled, default false); KEVIN_MUTE=1 always mutes."""
+    if E.get("KEVIN_MUTE") == "1": return True
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
+        import robot_params as RP
+        return not bool(RP.V.get("audio_enabled", False))
+    except Exception:
+        return True                                                 # config unreadable -> silent
+
+
 def play(path, secs):
+    """The only place audio leaves this process.  Muted: keep the wav under MUTED_DIR instead, play nothing."""
+    if muted():
+        import shutil
+        os.makedirs(MUTED_DIR, exist_ok=True); dst = os.path.join(MUTED_DIR, time.strftime("%H%M%S_") + os.path.basename(path))
+        shutil.copy(path, dst); _stat["sink"] = "MUTED"; _stat["muted_file"] = dst; log("muted: not played, saved %s" % dst)
+        return True
     sk = sink(); _stat["sink"] = sk or "default"
     _busy_until[0] = time.time() + secs + 0.6                       # mic deaf while talking (+ room tail)
     cmd = ["paplay", "--volume=%d" % max(1, int(65536 * VOL))] + (["--device=" + sk] if sk else []) + [path]
@@ -139,7 +161,7 @@ def _drain():
                 path = os.path.join(tempfile.gettempdir(), "kevin_say.wav"); _wav(path, s, sr)
                 dur = len(s) / float(sr); ok = play(path, dur)
                 j["res"].update(ok=ok, lang=j["lang"], voice=j["voice"] or VOICES.get(j["lang"], VOICES["en"]), synth_s=round(t1 - t0, 3),
-                                audio_s=round(dur, 2), first_audio_s=round(t1 - j["t_req"], 3), total_s=round(time.time() - j["t_req"], 3), sink=_stat["sink"])
+                                muted=muted(), file=_stat.get("muted_file") if muted() else None, audio_s=round(dur, 2), first_audio_s=round(t1 - j["t_req"], 3), total_s=round(time.time() - j["t_req"], 3), sink=_stat["sink"])
                 _stat["said"] += 1; log("said [%s] %r %s" % (j["lang"], j["text"][:80], j["res"]))
             except Exception as e:
                 j["res"].update(ok=False, error=repr(e)); log("say failed: %r" % e)
@@ -222,7 +244,7 @@ def serve(port):
             b = json.dumps(d, ensure_ascii=False).encode(); self.send_response(code); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
         def do_GET(self):
-            if self.path.split("?")[0] in ("/", "/status"): return self._send(dict(_stat, port=port, vol=VOL, voices=VOICES))
+            if self.path.split("?")[0] in ("/", "/status"): return self._send(dict(_stat, muted=muted(), port=port, vol=VOL, voices=VOICES))
             self._send({}, 404)
         def do_POST(self):
             p = self.path.split("?")[0]
@@ -236,7 +258,7 @@ def serve(port):
             self._send(dict(res, ok=res.get("ok", True)))
     srv = ThreadingHTTPServer(("0.0.0.0", port), H)
     threading.Thread(target=srv.serve_forever, daemon=True, name="voice-http").start()
-    log("TTS on http://0.0.0.0:%d/say (vol %.2f, voices %s, sink %s, mic %s)" % (port, VOL, VOICES, sink() or "default", mic())); return srv
+    log("TTS on http://0.0.0.0:%d/say (vol %.2f, voices %s, sink %s, mic %s, %s)" % (port, VOL, VOICES, sink() or "default", mic(), "MUTED (audio.enabled false / KEVIN_MUTE)" if muted() else "audio ENABLED")); return srv
 
 
 def _to16k(s, sr):

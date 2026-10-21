@@ -127,6 +127,18 @@ def find_rgb_device():
     return path
 
 
+def mast_upright(frame):
+    """Raw mast USB RGB frame -> upright, rotated by the resolved cam_mast_rotate_deg (180: mounted upside down).
+    Any channel order; returns a contiguous copy.  WebCam._ingest_bgr already flips 180 itself."""
+    try:
+        import robot_params as _RP
+        rot = int(_RP.V.get("cam_mast_rotate_deg", 180))
+    except Exception:
+        rot = 180
+    k = {0: 0, 90: -1, 180: 2, 270: 1}[rot]                      # degrees clockwise -> np.rot90 k
+    return np.ascontiguousarray(np.rot90(frame, k)) if k else frame.copy()
+
+
 def _open_rgb_capture(device_id):
     """Open V4L2 camera by path or int index. Tries path, then numeric fallback."""
     import re

@@ -56,7 +56,8 @@ class MastCam:
         if self.kind is None: self._open()
         if self.kind == "mast_sim": return self.blk.read()[2]["color"]
         if self.kind == "mast_usb":
-            ok, f = self.cap.read(); return f[..., ::-1].copy() if ok else None
+            from cameras import mast_upright
+            ok, f = self.cap.read(); return mast_upright(f[..., ::-1]) if ok else None   # mounted upside down
         _, _, _, color, *_ = self.hw.rs2_snapshot(); return color
 
 

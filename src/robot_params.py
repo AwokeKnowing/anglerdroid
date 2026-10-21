@@ -170,6 +170,14 @@ def resolve(robot=None, wheels=None, env=None):
         return [int(v) for v in r]
     for k in ("rs1_rgb_ae_roi", "rs2_rgb_ae_roi", "rs1_card_roi"):
         put("cam_" + k, _roi(k), "px (x0, y0, x1, y1) colour 640x480", "input: %s cameras.%s" % (rc, k))
+    rot = int(K.get("mast_rotate_deg", 180))
+    if rot not in (0, 90, 180, 270): raise RobotConfigError("cameras.mast_rotate_deg = %r (0 | 90 | 180 | 270)" % rot)
+    put("cam_mast_rotate_deg", rot, "deg", "input: %s cameras.mast_rotate_deg (mast USB RGB mounted upside down)" % rc)
+    # ---- audio (speaker) ----
+    A = C.get("audio") or {}
+    ae = env.get("KEVIN_AUDIO_ENABLED")
+    put("audio_enabled", (ae == "1") if ae in ("0", "1") else bool(A.get("enabled", False)), "",
+        "input: env KEVIN_AUDIO_ENABLED (override)" if ae in ("0", "1") else "input: %s audio.enabled (default false = muted; KEVIN_MUTE=1 always mutes)" % rc)
     g = [_num(v, "cameras.rgb_card_gains", 0.5, 2.0) for v in K.get("rgb_card_gains", [1.0, 1.0, 1.0])]
     if len(g) != 3: raise RobotConfigError("cameras.rgb_card_gains needs 3 values")
     put("cam_rgb_card_gains", g, "(R, G, B)", "input: %s cameras.rgb_card_gains (%s)" % (rc, K.get("rgb_card_gains_cal", "uncalibrated")))

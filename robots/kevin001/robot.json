@@ -77,8 +77,14 @@
   ],
   "safety_margin_m": 0.035
  },
+ "audio": {
+  "_doc": "Kevin's speaker (nav/voice.py TTS + chime, src/speech_io.py). enabled false = muted: nothing is played, TTS is synthesized to ~/kevin_bench/voice_muted/ instead. Only James turns this on (env KEVIN_AUDIO_ENABLED=1 overrides for one run; KEVIN_MUTE=1 always mutes).",
+  "enabled": false
+ },
  "cameras": {
   "_doc": "RealSense settings, applied once at pipeline start by src/cameras.py (no per-frame work). 2026-10-21 (James: sun blinded the depth cameras): the old manual depth exposure 15 ms / gain 64 saturated the IR in daylight (fill RS1 0.16, RS2 0.01; 79-97 % IR px saturated); auto exposure with the firmware AE limit keeps 30 Hz (exposure can never exceed depth_ae_limit_us < 33.3 ms) and fills 0.66 / 0.63 (scripts/rs_exposure_eval.py). Colour: auto exposure with priority 0 (constant 30 Hz), AE ROI on the WhiBal card (RS1) / the floor (RS2), fixed white balance; rgb_card_gains = per-channel gains that make the card neutral at that white balance (scripts/color_card_eval.py; consumers apply them with src/color_cal.py). exposure_mode legacy = the pre-2026-10-21 manual settings (env KEVIN_CAM_EXPOSURE overrides).",
+  "mast_rotate_deg": 180,
+  "_mast_rotate_doc": "the mast USB RGB camera is mounted upside down: raw frames are rotated 180 deg (James 2026-10-21); consumers use cameras.mast_upright()",
   "rs1_serial": "815412070676",
   "rs2_serial": "944622074292",
   "exposure_mode": "auto_capped",

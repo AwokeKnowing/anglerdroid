@@ -145,7 +145,7 @@ def grab_images(out, url, st):
         if sim:
             m = sim["mast"]; _, _, r = _emu_block(m["shm"], m["layout"]).read(); save("mast_rgb.png", r["color"][..., ::-1].copy(), "mast RGB (sim)")
         else:
-            from cameras import find_rgb_device
+            from cameras import find_rgb_device, mast_upright
             dev = find_rgb_device()
             if dev is None: raise RuntimeError("no USB mast camera found")
             cap = cv2.VideoCapture(dev); cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640); cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -153,7 +153,7 @@ def grab_images(out, url, st):
             for _ in range(8): ok, fr = cap.read()                # let auto-exposure settle
             cap.release()
             if not ok: raise RuntimeError("mast camera %s: no frame (busy?)" % dev)
-            save("mast_rgb.png", fr, "mast RGB (%s)" % dev)
+            save("mast_rgb.png", mast_upright(fr), "mast RGB (%s, raw rotated upright)" % dev)
     except Exception as e: missing["mast_rgb.png"] = repr(e)
     # local obstacle map = the safety core's own RS1 ego labels (robot frame, 1 cm/px), pose drawn
     try:
