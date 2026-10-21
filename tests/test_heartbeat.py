@@ -2,7 +2,8 @@
 python tests/test_heartbeat.py"""
 import os, sys, threading, time, types
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-sys.modules.setdefault("twin_geometry", types.SimpleNamespace(RS2_T=__import__("numpy").zeros(3), RS2_R=__import__("numpy").eye(3), RS2_PITCH_DOWN_DEG=0, AXLE_H_M=0.1))
+sys.path.insert(1, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
+import twin_geometry   # the real (resolved) geometry: nav.limits needs SAFETY_MARGIN, R_PASS, HALF_W ... (the old stub lacked them)
 import nav.hw as HW
 
 class FakeWB:
