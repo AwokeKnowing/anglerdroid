@@ -206,14 +206,11 @@ def _floor_model(root, asset, wb, env, level):
         "outdoor" if outdoor else "indoor", level, nc, nr, span * 1e3, mu, roll, len(getattr(env, "thresholds", [])) if level else 0, nrug, len(getattr(env, "blades", []))), flush=True)
 
 
-def _robot_tire_profile():
-    """the robot's src/tire_profile.py under its own module name: the twin's kevin_drive imports ITS tire_profile
-    (same module name, different API) from TWIN, so the robot copy must not take the 'tire_profile' slot."""
-    import importlib.util
-    if "_robot_tire_profile" not in sys.modules:
-        sp = importlib.util.spec_from_file_location("_robot_tire_profile", os.path.join(REPO, "src", "tire_profile.py"))
-        mod = importlib.util.module_from_spec(sp); sp.loader.exec_module(mod); sys.modules["_robot_tire_profile"] = mod
-    return sys.modules["_robot_tire_profile"]
+def _robot_params():
+    """the robot's resolved config (src/robot_params.py; unique module name, so the twin's own tire_profile is untouched)."""
+    if REPO + "/src" not in sys.path and os.path.join(REPO, "src") not in sys.path: sys.path.append(os.path.join(REPO, "src"))
+    import robot_params
+    return robot_params
 
 
 def compose(env: envs.Env, tire: str) -> str:
@@ -508,7 +505,7 @@ class World:
                 if mn.endswith(("rs_aluminum", "rs_ir_lens")): self.m.geom_group[i] = 5
         if self.m.nkey: mujoco.mj_resetDataKeyframe(self.m, self.d, 0)
         self.dt = self.m.opt.timestep
-        sys.path.insert(0, TWIN); os.environ.setdefault("KEVIN_TIRE", a.tire)
+        sys.path.insert(0, TWIN); os.environ["KEVIN_TIRE"] = a.tire   # the twin's own tire_profile follows the resolved wheels
         from kevin_drive import ODriveAxis      # twin's ODrive S1 model (ramp, PI, current + torque-speed limits)
         eps = {v["id"]: (k, v["type"]) for k, v in json.load(open(os.path.join(REPO, "src", "flat_endpoints.json")))["endpoints"].items()}
         self.nodes = [ODriveNode(0, -1, ODriveAxis, eps), ODriveNode(1, +1, ODriveAxis, eps)]   # left mounted mirrored (wheelbase invert_left)
@@ -553,8 +550,11 @@ class World:
         radius follows r0 + A cos(N theta + phi) with theta the wheel joint angle, N = n_spokes (20 in the STL), so the
         axle height (ride, pitch, roll and every camera pose) ripples at N x wheel rev/s.  A = KEVIN_EMU_RIPPLE (m),
         default the profile's spoke_ripple_m (an estimate); 0 = off.  Sim only; the twin XML is untouched."""
-        P = _robot_tire_profile().PROFILES[tire]; self.rip_n = int(P.get("n_spokes", 0))
-        self.rip_a = float(os.environ.get("KEVIN_EMU_RIPPLE", P.get("spoke_ripple_m", 0.0)))
+        RP = _robot_params(); self.robot_cfg = RP.resolve(wheels=tire); V = RP.values(self.robot_cfg)
+        self.robot_cfg_hash = RP.config_hash(self.robot_cfg); self.robot_cfg_dump = RP.dump(self.robot_cfg, self.robot_cfg_hash)
+        print("emu.world: robot config wheels %s hash %s dump %s" % (V["wheels"], self.robot_cfg_hash, self.robot_cfg_dump), flush=True)
+        self.rip_n = int(V["n_spokes"])
+        self.rip_a = float(os.environ.get("KEVIN_EMU_RIPPLE", V["spoke_ripple_m"]))
         self.rip = []
         if self.rip_n <= 0 or self.rip_a <= 0: return
         for nm, j, ph in (("wheel_left_tire", self.jl, 0.0), ("wheel_right_tire", self.jr, 1.3)):   # spokes not phase-locked L/R
@@ -612,7 +612,7 @@ class World:
             ser2: dict(name="Intel RealSense D435I", fps=FPS, shm="kevin_rs2", layout=[[n, list(s), d] for n, s, d in L2], imu="kevin_imu",
                        streams=dict(depth=st(di, [0, 0, 0]), color=st(ci, [-0.015, 0, 0]), ir1=st(di, [0, 0, 0]), ir2=st(di, [BASELINE, 0, 0])))},
             "mast": dict(shm="kevin_mast", layout=[["color", [MH, MW, 3], "u1"]], pos=MAST_POS, pitch_deg=0.0, hz=MAST_HZ, **mast_info_lens()),
-            "env": self.env.name, "seed": self.a.seed, "places": self.env.places, "start": self.env.start, "tire": self.a.tire,
+            "env": self.env.name, "seed": self.a.seed, "places": self.env.places, "start": self.env.start, "tire": self.a.tire, "robot_config_hash": getattr(self, "robot_cfg_hash", None),
             "mounts": dict(rs1=RS1_POS, rs2=RS2_POS, rs2_imu=RS2_IMU, rs2_pitch_deg=math.degrees(RS2_PITCH), rs2_true=RS2_TRUE), "pid": os.getpid(), "t0": time.monotonic()}
         np.savez_compressed("/dev/shm/kevin_gt_map.npz", occ=self.env.gt, origin=np.array(self.env.gt_origin), res=envs.GT_RES)
         shm.write_info(info)
@@ -1114,8 +1114,8 @@ def main():
     ap.add_argument("--holes", type=float, default=0.004, help="random depth dropout fraction")
     ap.add_argument("--min-z", type=float, default=0.175, help="D435 min-Z at 848x480")
     ap.add_argument("--no-band", dest="band", action="store_false", help="disable the left invalid band")
-    _TP = _robot_tire_profile()                       # default = src/tire_profiles.json (soft_v3_2 since 2026-10-21)
-    ap.add_argument("--tire", default=_TP.NAME, type=_TP.resolve); ap.add_argument("--ir", type=int, default=int(os.environ.get("KEVIN_EMU_IR", "0")),
+    _RPm = _robot_params()                            # default = the resolved robot config's wheels (robots/<robot>/robot.json)
+    ap.add_argument("--tire", default=_RPm.V["wheels"], type=lambda n: _RPm.wheels_name(None, n)[0]); ap.add_argument("--ir", type=int, default=int(os.environ.get("KEVIN_EMU_IR", "0")),
                     help="render the IR stereo pairs (4 x 848x480, 45 %% of the slow lane).  Only KEVIN_SLAM=cuv / scripts/bench stereo read them; default off")
     ap.add_argument("--rt", type=float, default=1.0, help="real-time factor (1.0 = wall clock; robot code assumes 1.0)")
     a = ap.parse_args()

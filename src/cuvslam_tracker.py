@@ -25,7 +25,6 @@ try:
 except ImportError:
     HAS_CUVSLAM = False
 
-from tire_profile import RIDE_DZ_M as _TIRE_DZ  # v310 tire switch
 # 2026-10-13 rig from the digital twin (source of truth). History: since d3f0a73 (2026-09-05) this module built
 # ONE RealSense stereo rig (RS2 IR1+IR2) with hand constants 0.97 m / 0.13 m / 64.4 deg; 0.13 + 64.4 describe the
 # forward D435i (bag-fit 25.6 deg down), 0.97 is ~the top-down D435 mast height -> mixed, and the quaternion

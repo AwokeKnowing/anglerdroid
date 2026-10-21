@@ -25,7 +25,7 @@ class ODriveAxisCAN:
     CMD_SET_INPUT_TORQUE = 0x0e
     CMD_CLEAR_ERRORS = 0x18
 
-    DEFAULT_VEL_RAMP_RATE = 3.0
+    DEFAULT_VEL_RAMP_RATE = 3.0   # stock-wheel values; the __main__ bench below uses the resolved ones (robot_params)
     DEFAULT_VEL_LIMIT = 4.0
     DEFAULT_WATCHDOG_TIMEOUT_S = 2.5
 
@@ -304,10 +304,11 @@ if __name__ == "__main__":
         time.sleep(0.8)
 
         # Apply ramp rate
-        left.set_vel_ramp_rate(ODriveAxisCAN.DEFAULT_VEL_RAMP_RATE)
-        right.set_vel_ramp_rate(ODriveAxisCAN.DEFAULT_VEL_RAMP_RATE)
-        left.set_vel_limit(ODriveAxisCAN.DEFAULT_VEL_LIMIT)
-        right.set_vel_limit(ODriveAxisCAN.DEFAULT_VEL_LIMIT)
+        import robot_params as _RP   # resolved: the selected wheels' turn limits (same rim m/s as the stock 3.0 / 4.0)
+        left.set_vel_ramp_rate(_RP.V["vel_ramp_tps2"])
+        right.set_vel_ramp_rate(_RP.V["vel_ramp_tps2"])
+        left.set_vel_limit(_RP.V["vel_limit_tps"])
+        right.set_vel_limit(_RP.V["vel_limit_tps"])
 
         # === SHARED BURST FEEDING (both nodes fed together) ===
         print("Joint burst-feeding zero velocity to BOTH nodes (3 seconds)...")

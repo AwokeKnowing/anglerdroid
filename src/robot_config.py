@@ -14,14 +14,13 @@ EGO_PX_SIZE = 0.010           # 1 px = 10 mm
 WHEEL_DIAMETER_CM = 17.0
 # v310 tire profile switch (src/tire_profile.py; env KEVIN_TIRE=stock|soft_v3_2, default stock = the line above unchanged).
 # soft_v3_2: 20.0 cm loaded (NOMINAL - re-measure by rolling 10 turns once fitted). RIDE_DZ_M = chassis/sensor rise vs stock.
-from tire_profile import NAME as TIRE_PROFILE, RIDE_DZ_M, WHEEL_DIAMETER_CM as _TIRE_WHEEL_D_CM  # noqa: E402
-if _TIRE_WHEEL_D_CM is not None:
-    WHEEL_DIAMETER_CM = float(_TIRE_WHEEL_D_CM)
+import robot_params as _RP  # noqa: E402  resolved robot config (robots/<robot>/robot.json wheels + profiles)
+TIRE_PROFILE, RIDE_DZ_M = _RP.V["wheels"], _RP.V["ride_dz_m"]
 # 2026-10-13 (James): the digital twin is the source of truth. Geometry comes from src/twin_geometry.json
 # (scripts/gen_twin_geometry.py, per KEVIN_TIRE profile) + src/calibration.json (reality->model hook).
 # Was: WHEEL_DIAMETER_CM 17.0 (tape), WHEEL_HALFTRACK_CM 17.7 -> track 0.354.
 import twin_geometry as _TG  # noqa: E402
-WHEEL_DIAMETER_CM = 200.0 * _TG.WHEEL_R_M          # stock 17.13 (R 0.08565); soft_v3_2 20.13 (R 0.10065, 2026-10-21)
+WHEEL_DIAMETER_CM = _RP.V["wheel_diameter_cm"]    # resolved: stock 17.13 (R 0.08565); soft_v3_2 20.13 (R 0.10065, 2026-10-21)
 WHEEL_HALFTRACK_CM = 50.0 * _TG.TRACK_M            # 18.1 (tire contact centre; twin track 0.362)
 WHEELBASE_CM = 2.0 * WHEEL_HALFTRACK_CM            # 36.2
 WHEEL_RADIUS_M = WHEEL_DIAMETER_CM / 200.0         # 0.08565

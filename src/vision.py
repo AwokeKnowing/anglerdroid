@@ -70,12 +70,12 @@ DEBUG_CAMERAS = False
 
 # --- RS1 (top-down camera) depth params ---
 TD_PX_SIZE = np.float32(EGO_PX_SIZE)
-from tire_profile import RIDE_DZ_M as _TIRE_DZ  # v310 tire switch
+import robot_params as _RP  # resolved robot config (floor clip + camera heights per wheels)
 # SAFETY-CRITICAL (v310): RS1 sits RIDE_DZ_M higher on soft tires -> floor is that much farther; clip follows the profile
 # so the obstacle threshold above the floor (~4.1 cm) is unchanged. Stock: exactly 0.91.
 import twin_geometry as _TGF
 # 2026-10-13: from the twin: RS1 depth optical height above floor (0.9476 stock, incl. ride dz) - 0.041 m obstacle threshold (was 0.91 + dz)
-TD_FLOOR_CLIP = np.float32(_TGF.height("rs1_depth") - 0.041)
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_vision_m"])   # resolved: rs1_height_m - td_obstacle_h_m (0.041)
 # Known-pixel floor for "RS1 invalid → immobilize". Capture loop uses this.
 TOPDOWN_MIN_KNOWN = 800  # px; healthy runs are typically >>10k
 # One USB2 miss is not a dead camera. Hold last heightmap this many frames
@@ -98,7 +98,7 @@ FW_PX_SIZE = np.float32(0.010)      # 1px = 1cm (fixed)
 FW_HEIGHT_CLIP = np.float32(1.30)   # max obstacle height to accept (m)
 FW_FLOOR_CLIP  = np.float32(0.15)   # ego-forward < 15cm from camera → free (not obstacle)
 FW_PITCH_DOWN_DEG = 27.0
-FW_CAM_HEIGHT  = np.float32(_TGF.height("rs2_depth"))  # twin (same value as before for stock: 0.467863)  # SAFETY-CRITICAL v310: + tire ride height (0 stock). twin-authoritative: RS2 optical z_base(0.382213258422) + wheel_r(0.08565); was 0.475 bag fit
+FW_CAM_HEIGHT  = np.float32(_RP.V["rs2_height_m"])  # twin (same value as before for stock: 0.467863)  # SAFETY-CRITICAL v310: + tire ride height (0 stock). twin-authoritative: RS2 optical z_base(0.382213258422) + wheel_r(0.08565); was 0.475 bag fit
 _fw_sin_pitch  = np.float32(math.sin(math.radians(FW_PITCH_DOWN_DEG)))
 _fw_cos_pitch  = np.float32(math.cos(math.radians(FW_PITCH_DOWN_DEG)))
 

@@ -6,9 +6,9 @@ import numpy as np
 from emu import world as W
 
 from emu import world as W
-TP = W._robot_tire_profile()
-class A: env = sys.argv[1] if len(sys.argv) > 1 else "apartment"; seed = 0; tire = TP.NAME; ir = 1; rt = 1.0
-R_W = TP.WHEEL_R_LOADED_M
+RP = W._robot_params()
+class A: env = sys.argv[1] if len(sys.argv) > 1 else "apartment"; seed = 0; tire = RP.V["wheels"]; ir = 1; rt = 1.0
+R_W = RP.V["wheel_r_m"]
 w = W.World(A()); m, d = w.m, w.d
 s0 = w.state(); print("start", {k: round(v, 3) for k, v in s0.items()})
 for _ in range(1000): w.step(time.monotonic())

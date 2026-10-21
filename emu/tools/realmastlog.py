@@ -14,13 +14,9 @@ MW, MH, MAST_POS = 640, 480, (0.0291, 0.0, 0.8905)
 
 
 def _tire():
-    """active tyre profile (KEVIN_TIRE, else tire_profiles.json default): maploc takes the camera height from it per log"""
-    try:   # same resolution as src/tire_profile.resolve, without importing it (no stderr notice, no module-name clash)
-        d = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tire_profiles.json")))
-        n = os.environ.get(d["env"], "").strip() or d["default"]; n = d["aliases"].get(n, n)
-        return n if n in d["profiles"] else None
-    except Exception:
-        return None
+    """selected wheels (resolved robot config): maploc takes the camera height from it per log"""
+    import robot_params as RP
+    return RP.V["wheels"]
 
 
 def lens():
@@ -45,7 +41,8 @@ def main():
     if not cap.isOpened(): raise SystemExit("realmastlog: cannot open %s" % dev)
     w, h = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     os.makedirs(os.path.join(d, "mast"), exist_ok=True)
-    json.dump(dict(real=True, device=dev, tire=_tire(), mast=dict(pos=list(MAST_POS), pitch_deg=0.0, hz=hz, frame_w=w, frame_h=h, **lens()),
+    import robot_params as RP; RP.save_with(d)   # resolved robot config next to the recording
+    json.dump(dict(real=True, device=dev, tire=_tire(), robot_config_hash=RP.HASH, mast=dict(pos=list(MAST_POS), pitch_deg=0.0, hz=hz, frame_w=w, frame_h=h, **lens()),
                    t0_mono=time.monotonic(), t0_wall=time.time()), open(os.path.join(d, "info.json"), "w"), indent=1)
     idx = open(os.path.join(d, "index.jsonl"), "a", buffering=1); n = bad = 0; t0 = time.monotonic(); nxt = t0
     print("realmastlog: %s %dx%d -> %s at %.0f Hz" % (dev, w, h, d, hz), flush=True)

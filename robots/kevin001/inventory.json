@@ -1,7 +1,6 @@
 {
   "robot_id": "kevin001",
   "platform": "kevin",
-  "tire_profile": "stock",
   "can_iface": "can1",
   "cameras": [
     {

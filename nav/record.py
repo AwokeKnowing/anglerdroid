@@ -9,7 +9,9 @@ LIGHT = os.environ.get("KEVIN_RECORD_LIGHT") == "1"
 
 class Recorder:
     def __init__(self, d):
-        self.d = os.path.abspath(d); os.makedirs(self.d, exist_ok=True); self.q = queue.Queue(maxsize=8); self.n = 0; self.dropped = 0
+        self.d = os.path.abspath(d); os.makedirs(self.d, exist_ok=True)
+        import robot_params as _RP; _RP.save_with(self.d)    # resolved robot config next to the ticks
+        self.q = queue.Queue(maxsize=8); self.n = 0; self.dropped = 0
         threading.Thread(target=self._w, daemon=True, name="record").start()
 
     def put(self, **kw):

@@ -66,6 +66,10 @@ def serve(brain, port=8080):
             p = self.path.split("?")[0]
             if p == "/": return self._send(PAGE.encode(), "text/html")
             if p == "/api/state": return self._send(json.dumps(brain.state(), default=float).encode())
+            if p in ("/api/robot_config", "/api/robot_config.txt"):      # resolved robot config (value, units, source) for a UI
+                import robot_params as _RP
+                if p.endswith(".txt"): return self._send(_RP.table(_RP.RESOLVED).encode(), "text/plain; charset=utf-8")
+                return self._send(json.dumps(dict(hash=_RP.HASH, dump=_RP.DUMP, resolved=_RP.RESOLVED), default=float).encode())
             if p == "/api/map.json":
                 cache["png"], cache["meta"] = map_png(brain); return self._send(json.dumps(cache["meta"]).encode())
             if p == "/api/safety.png":                                   # safety-core 2-D frame + bands + envelopes

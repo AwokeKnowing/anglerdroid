@@ -14,34 +14,35 @@ Localizer (v3: pixel render + directional chamfer DT) is kept for comparison.
 z, roll, pitch come from the twin (mast extrinsics); only x, y, yaw (+ map scale) are estimated."""
 import math, os, json, numpy as np, cv2, trimesh
 
-# base_link (= wheel axle) height above the floor = the tyre profile's loaded wheel radius (src/tire_profiles.json,
-# single source of truth; read directly, not via src/tire_profile.py, whose module name clashes with the twin's).
-# stock 0.08565 (twin rgb height_above_floor 0.97615 - xyz z 0.8905); soft_v3_2 0.10065 (+15 mm, commit 7fcec63).
-_TPJ = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src", "tire_profiles.json")))
-AXLE_H_STOCK = float(_TPJ["profiles"]["stock"]["wheel_r_loaded_m"])
+# base_link (= wheel axle) height above the floor = the resolved robot config's axle_height_m (src/robot_params.py: the
+# wheels' loaded radius; stock 0.08565 -> mast camera 0.97615 m, soft_v3_2 0.10065 -> 0.99115 m).
+import sys as _sys
+_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src")
+if os.path.abspath(_SRC) not in map(os.path.abspath, _sys.path): _sys.path.append(os.path.abspath(_SRC))
+import robot_params as _RP
 
 
 def tire_name(tire=None):
-    """profile name: tire (name or alias) if given, else the ACTIVE profile (KEVIN_TIRE env, else the json default)."""
-    n = (tire if tire is not None else os.environ.get(_TPJ["env"], "")).strip() or _TPJ["default"]
-    n = _TPJ["aliases"].get(n, n)
-    if n not in _TPJ["profiles"]: raise ValueError("unknown tire profile %r; use one of %s" % (n, list(_TPJ["profiles"])))
-    return n
+    """wheels profile name: `tire` (name or alias) if given, else the selected wheels (resolved config)."""
+    return _RP.V["wheels"] if tire is None else _RP.wheels_name(None, tire)[0]
 
 
 def axle_height(tire=None):
-    """base_link above the floor (m) for tyre profile `tire`; None = the active profile (use log_axle_height for logs)."""
-    return float(_TPJ["profiles"][tire_name(tire)]["wheel_r_loaded_m"])
+    """base_link above the floor (m) for wheels `tire` (resolved); None = the selected wheels."""
+    return float(_RP.V["axle_height_m"] if tire is None else _RP.values(_RP.resolve(wheels=tire))["axle_height_m"])
+
+
+AXLE_H_STOCK = axle_height("stock")
 
 
 def log_axle_height(info):
-    """per log: the tyre its info.json records (info["tire"], world.py / realmastlog.py); a log without it predates the
+    """per log: the wheels its info.json records (info["tire"], world.py / realmastlog.py); a log without it predates the
     soft tyres (7fcec63) -> stock."""
     t = (info or {}).get("tire")
     return axle_height(t) if t else AXLE_H_STOCK
 
 
-AXLE_H = axle_height()   # active profile (live / new recordings); offline harness picks per log (harness.log_axle)
+AXLE_H = axle_height()   # selected wheels (live / new recordings); offline harness picks per log (harness.log_axle)
 R_MAST = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]])     # optical -> base (twin)
 CREASE_DEG = 30.0
 CHI2_3_99 = 11.345

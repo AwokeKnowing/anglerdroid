@@ -8,12 +8,14 @@
 Every consumer (robot_config, vision, cuvslam_tracker, nav, emulator) reads these values; nothing is duplicated."""
 import json, math, os
 import numpy as np
-from tire_profile import NAME as TIRE_PROFILE
+import robot_params as _RP      # the one resolver (robots/<robot>/robot.json + profiles): plain resolved values
+_V = _RP.V
+TIRE_PROFILE = _V["wheels"]
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _G = json.load(open(os.path.join(_HERE, "twin_geometry.json")))["profiles"][TIRE_PROFILE]
 _CP = os.environ.get("KEVIN_CALIB", os.path.join(_HERE, "calibration.json"))
-CALIB = json.load(open(_CP)) if os.path.exists(_CP) else {}
+CALIB = json.load(open(_CP)) if os.path.exists(_CP) else {}      # frame corrections (scales are resolved in robot_params)
 
 
 def _rpy(r, p, y):
@@ -30,17 +32,13 @@ def frame(name):
     return t, R
 
 
-WHEEL_R_M = _G["wheel_r_m"] * CALIB.get("wheel_r_scale", 1.0)
-TRACK_M = _G["track_m"] * CALIB.get("track_scale", 1.0)
-# ODrive limits are set in TURNS (vel_ramp_rate turns/s^2, vel_limit turns/s).  The values were chosen on the stock
-# 85.65 mm wheel; the rim (m/s, m/s^2) values are kept for every tyre (2026-10-21, soft tyres R 100.65 mm):
-#   ramp 3.0 turns/s^2 = 1.614 m/s^2, ramp_max 5.0 = 2.691 m/s^2, vel_limit 4.0 turns/s = 2.153 m/s on the stock wheel.
-# KEVIN_VEL_RAMP (turns/s^2) still overrides the normal ramp.  Stock profile: exactly 3.0 / 5.0 / 4.0 as before.
-WHEEL_R_STOCK_M = 0.08565                            # twin stock tyre (src/tire_profiles.json 'stock')
-TPS_SCALE = WHEEL_R_STOCK_M / WHEEL_R_M              # turns per stock turn for the same rim speed (1.0 stock, 0.851 soft)
-VEL_RAMP_TPS2 = float(os.environ["KEVIN_VEL_RAMP"]) if os.environ.get("KEVIN_VEL_RAMP") else 3.0 * TPS_SCALE
-VEL_RAMP_MAX_TPS2 = 5.0 * TPS_SCALE
-VEL_LIMIT_TPS = 4.0 * TPS_SCALE
+# resolved (src/robot_params.py; inspect: python -m src.robot_params show).  ODrive limits are in TURNS, derived from the
+# robot.json rim targets per wheel: stock 3.0 / 5.0 turns/s^2, 4.0 turns/s; soft_v3_2 2.553 / 4.255, 3.404 (a4224de values).
+WHEEL_R_M = _V["wheel_r_m"]
+TRACK_M = _V["track_m"]
+VEL_RAMP_TPS2 = _V["vel_ramp_tps2"]          # KEVIN_VEL_RAMP override is applied by the resolver
+VEL_RAMP_MAX_TPS2 = _V["vel_ramp_max_tps2"]
+VEL_LIMIT_TPS = _V["vel_limit_tps"]
 # Angular velocity limit (James 2026-10-19): exactly 90 deg/s, for every w cap (planner, nav command cap, LightNav
 # follower via the planner, wheelbase/teleop clamp).  KEVIN_WMAX may only LOWER it.  At 30 Hz = 3 deg per camera frame.
 W_MAX_RADS = min(math.pi / 2, float(os.environ.get("KEVIN_WMAX", math.pi / 2)))
@@ -65,7 +63,7 @@ def limit_vw(v, w):
     w = max(-W_MAX_RADS, min(W_MAX_RADS, float(w))); v = float(v)
     if abs(v * w) > A_LAT: v = math.copysign(A_LAT / abs(w), v)
     return v, w
-AXLE_H_M = _G["axle_height_m"]                       # base_link height above floor (= loaded wheel R; includes ride dz)
+AXLE_H_M = _V["axle_height_m"]                       # base_link height above floor (= loaded wheel R; resolved)
 RS1_T, RS1_R = frame("rs1_depth")
 RS2_T, RS2_R = frame("rs2_depth")
 RS2_PITCH_DOWN_DEG = math.degrees(math.asin(-RS2_R[2, 2]))
@@ -75,9 +73,7 @@ GYRO_SCALE = float(CALIB.get("imu", {}).get("gyro_scale", 1.0))
 
 
 # Body outline from the twin (SIL12 footprint polygon used by kplan/MuJoCo, axle frame, m) and hull extents
-SIL12 = np.array([[-0.27371, -0.01022], [-0.16869, -0.15427], [-0.08009, -0.20998], [0.08319, -0.20998], [0.12372, -0.15418],
-                  [0.12629, -0.13818], [0.12629, 0.13818], [0.12372, 0.15418], [0.08319, 0.20998], [-0.08009, 0.20998],
-                  [-0.16869, 0.15427], [-0.27371, 0.01022]])
+SIL12 = np.array(_V["sil12"])     # robots/<robot>/robot.json body.sil12
 HULL_FRONT_M = 0.126      # SIL12 front face (chassis/dustpan collision front 0.117)
 HULL_AFT_M = 0.231        # gate caster bracket (collision); caster tire to 0.267, SIL12 tip 0.274
 CASTER_AFT_M = 0.274
@@ -85,8 +81,12 @@ HULL_HALF_W_M = 0.154     # chassis frame (wheels to 0.191)
 MAST_X_M = -0.1575        # chassis_mast collision centre
 
 
+_HEIGHT_KEYS = {"rs1_depth": "rs1_height_m", "rs2_depth": "rs2_height_m", "rgb": "mast_rgb_height_m"}
+
+
 def height(name):
-    return float(frame(name)[0][2] + AXLE_H_M)
+    """height above the floor of a twin frame (resolved value for rs1_depth / rs2_depth / rgb)."""
+    return float(_V[_HEIGHT_KEYS[name]]) if name in _HEIGHT_KEYS else float(frame(name)[0][2] + AXLE_H_M)
 
 
 def realsense_roles(rs=None):
@@ -117,36 +117,18 @@ def realsense_roles(rs=None):
     return r1, r2
 
 
-def _hull(P):
-    P = sorted(map(tuple, P))
-    def half(pts):
-        h = []
-        for p in pts:
-            while len(h) >= 2 and (h[-1][0] - h[-2][0]) * (p[1] - h[-2][1]) - (h[-1][1] - h[-2][1]) * (p[0] - h[-2][0]) <= 0: h.pop()
-            h.append(p)
-        return h
-    lo, up = half(P), half(P[::-1]); return np.array(lo[:-1] + up[:-1])
-
-
-# Safety footprint: SIL12 plus the simready (kevin_lite*.xml) chassis_top_deck corners (-0.1995, +-0.15), which stick
-# out ~3 cm beyond the SIL12 rear diagonals (URDF collision geometry is inside SIL12; the MuJoCo lite deck is not).
+# Safety footprint (resolved): hull(SIL12 + simready kevin_lite deck corners (-0.1995, +-0.15) + the wheels' tread corners
+# (+-wheel_r_free, +-tread_y_out; none for stock)).  2026-10-21 soft tyres: corners (+-0.1038, +-0.2033), James-approved a4224de.
 # TODO(twin): reconcile kevin_lite deck with the URDF; until then guard the larger of the two.
-FOOTPRINT_SAFE = _hull(np.vstack([SIL12, [[-0.1995, -0.15], [-0.1995, 0.15]]]))
-# 2026-10-21 (soft TPU tyres, free R 103.8 mm): the drive tyres' plan view (x +-free R, y 0.1567..0.2033: wheel frame
-# y 0.1515 + STL tread z 5.2..51.8 mm) sticks out of SIL12 by up to 12.7 mm at the front/rear diagonals of the wheel
-# (stock tyre: 1.9 mm inside).  The tyre corners join the safety hull.  SAFETY PARAMETER (James approval): stock unchanged.
-import tire_profile as _TPF
-TIRE_R_FREE_M = float(_TPF.P.get("wheel_r_free_m", _G["wheel_r_m"]))
-TIRE_Y_OUT_M = 0.2033
-FOOTPRINT_SAFE = _hull(np.vstack([FOOTPRINT_SAFE] + [[[sx * TIRE_R_FREE_M, sy * TIRE_Y_OUT_M]] for sx in (-1, 1) for sy in (-1, 1)]))
+FOOTPRINT_SAFE = np.array(_V["footprint_safe"])
 
 
 # ---- turn-aware planning radii (axle-centred; a diff-drive robot spins about the axle midpoint) ---------------------
 # The Nav2 costmap convention: the INSCRIBED radius bounds translation (the hull fits through a gap of 2*half-width),
 # the CIRCUMSCRIBED radius bounds rotation (spinning sweeps the disc of radius R_CIRC).  Every planner/turn threshold
 # is one of these plus the safety envelope margin, so nothing is a separately tuned number.
-SAFETY_MARGIN = 0.035                                        # nav.safety.Envelope stops the sweep inside this margin
-R_CIRC = float(np.hypot(FOOTPRINT_SAFE[:, 0], FOOTPRINT_SAFE[:, 1]).max())     # 0.274 (rear deck corners)
-HALF_W = float(np.abs(FOOTPRINT_SAFE[:, 1]).max())                             # 0.210 (wheels)
-R_ROTATE = R_CIRC + SAFETY_MARGIN    # axle clearance needed to spin in place without the envelope trimming it (0.309)
-R_PASS = HALF_W + SAFETY_MARGIN      # axle clearance needed to drive straight through without trimming (0.245)
+SAFETY_MARGIN = _V["safety_margin_m"]       # nav.safety.Envelope stops the sweep inside this margin
+R_CIRC = _V["r_circ_m"]            # 0.274 (rear deck corners)
+HALF_W = _V["half_w_m"]            # 0.210 (wheels)
+R_ROTATE = _V["r_rotate_m"]        # axle clearance needed to spin in place without the envelope trimming it (0.309)
+R_PASS = _V["r_pass_m"]            # axle clearance needed to drive straight through without trimming (0.245)

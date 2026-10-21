@@ -244,3 +244,6 @@ sim/kevin-urdf-twin/refs/
 sim/kevin-urdf-twin/meshes/odrive_s1_housing_asm.stl
 sim/kevin-urdf-twin/meshes/botwheel_onshape_raw.stl
 hardware/tires/v3_4/softtire_v3_4_tire_95a.stl
+
+# resolved robot config dumps (src/robot_params.py)
+run/

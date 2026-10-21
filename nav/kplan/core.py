@@ -9,7 +9,7 @@ import sys as _sys
 _SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'src')
 if _SRC_DIR not in _sys.path: _sys.path.append(_SRC_DIR)
 from twin_geometry import WHEEL_R_M as _WHEEL_R, SAFETY_MARGIN as _SAFETY_MARGIN, R_CIRC as _R_CIRC, W_MAX_RADS as _W_MAX, A_LON as _A_LON, A_LAT as _A_LAT, ALPHA_MAX as _ALPHA_MAX   # noqa: E402
-from twin_geometry import VEL_RAMP_TPS2   # noqa: E402  same knob/default as src/wheelbase.py set_vel_ramp_rate (KEVIN_VEL_RAMP; rim m/s^2 kept per tyre)
+import robot_params as _RP   # noqa: E402  resolved config (a_brake_mps2 = the ODrive vel ramp at the rim, same as src/wheelbase.py)
 
 class Limits:
     v_max=min(0.6, float(os.environ.get("KEVIN_VMAX", "0.6"))); v_min=-0.2;   # KEVIN_VMAX: bring-up speed cap   # reverse capped at 0.2 m/s (James 2026-10-13: too much reversing)
@@ -26,7 +26,7 @@ class Limits:
     # KEVIN_PLAN_OWNS_CLEARANCE=1: superseded proposal (plan-owns-clearance-2026-10-17, not validated: drives closer,
     # goals 7/12 vs 6/12 with 129 vs 32 samples < 3.5 cm).  Default OFF: the PR #62 values and kernel path.
     poc = os.environ.get("KEVIN_PLAN_OWNS_CLEARANCE", "0") == "1"
-    if poc: t_react=0.15; a_brake=VEL_RAMP_TPS2*2*math.pi*_WHEEL_R; d_safe=_SAFETY_MARGIN+0.01
+    if poc: t_react=0.15; a_brake=_RP.V["a_brake_mps2"]; d_safe=_SAFETY_MARGIN+0.01
     else:   a_brake=1.5; t_react=0.10; d_safe=0.03      # a_brake = nav.safety (drive decel ~1.6 m/s^2: ODrive vel_ramp 3 turns/s^2)
     r_circ=_R_CIRC
     d_full=0.50; v_near=0.15; d_near=0.05   # legacy comfort ramp, used only by plan_ref/v_cap_clear (CPU reference path)

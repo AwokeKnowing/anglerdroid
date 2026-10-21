@@ -30,14 +30,12 @@ EGO80_X0 = -EGO80_RCX * EGO80_PX          # -0.81
 EGO80_X1 = EGO80_X0 + EGO80_W * EGO80_PX  #  2.39
 EGO80_Y0 = -(EGO80_H - EGO80_RCY) * EGO80_PX  # -1.21
 EGO80_Y1 = EGO80_RCY * EGO80_PX                #  1.19
-try:  # v310 tire profile switch (src/tire_profile.py, env KEVIN_TIRE, default stock)
-    from tire_profile import RIDE_DZ_M as _TIRE_DZ
+try:  # resolved robot config (src/robot_params.py: robots/<robot>/robot.json wheels + profiles)
+    import robot_params as _RP
 except ImportError:
-    import importlib.util as _ilu, sys as _sys
-    _sp = _ilu.spec_from_file_location('tire_profile', str(Path(__file__).resolve().parents[2] / 'src' / 'tire_profile.py'))
-    _tp = _ilu.module_from_spec(_sp); _sys.modules.setdefault('tire_profile', _tp); _sp.loader.exec_module(_tp)
-    _TIRE_DZ = _tp.RIDE_DZ_M
-TD_FLOOR_CLIP = np.float32(0.91 + _TIRE_DZ)  # SAFETY-CRITICAL v310: follows tire ride height (stock 0.91)
+    import sys as _sys
+    _sys.path.append(str(Path(__file__).resolve().parents[2] / 'src')); import robot_params as _RP
+TD_FLOOR_CLIP = np.float32(_RP.V["td_floor_clip_m"])  # SAFETY-CRITICAL, resolved: td_floor_clip_ref_m 0.91 + ride_dz (soft 0.925)
 # Live TD_X_OFFSET = -75 px @ 1 cm → −18.75 @ 4 cm.
 TD_X_OFFSET80 = -19
 # RS2 down-pitch from horizontal. 25.6-90 used to feed phys_h by mistake
@@ -47,7 +45,7 @@ FW_PITCH_DOWN_DEG = 27.0
 _FW_PITCH = math.radians(FW_PITCH_DOWN_DEG)
 FW_SIN_P = math.sin(_FW_PITCH)
 FW_COS_P = math.cos(_FW_PITCH)
-FW_CAM_H = 0.467863258422 + _TIRE_DZ  # SAFETY-CRITICAL v310: + tire ride height (0 stock). twin: optical z_base 0.382213258422 + wheel_r 0.08565; was 0.475
+FW_CAM_H = float(_RP.V["rs2_height_m"])  # SAFETY-CRITICAL, resolved: twin RS2 optical z + axle height (stock 0.467863, soft 0.482863)
 FW_OBS_H0 = 0.05
 FW_OBS_H1 = 1.30
 FW_CAM_X = 0.15

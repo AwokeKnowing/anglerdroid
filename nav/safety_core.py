@@ -36,8 +36,9 @@ PAIR_WAIT_S = float(os.environ.get("KEVIN_SC_PAIR_WAIT", "0.010"))   # max wait 
 CMD_STALE_S = 0.3
 ERR_MAX = 30          # consecutive failing ticks (1 s) before the core zeroes the wheels and exits loudly
 T_CMD = 0.010                         # core decision -> CAN frame on the wire (assumed; measured: see log t_sent - t_dec)
-import twin_geometry as _TGR                    # 2026-10-21 PARAMETER (James approval): ramps in turns follow the tyre, rim m/s^2 kept
-RAMP_NORMAL, RAMP_MAX = _TGR.VEL_RAMP_TPS2, _TGR.VEL_RAMP_MAX_TPS2       # stock 3.0 / 5.0 turns/s^2 (unchanged); soft 2.553 / 4.255
+import robot_params as _RP                     # resolved robot config: plain numbers, read once here; missing/invalid = import fails = no core
+# 2026-10-21 PARAMETER (James approval a4224de): ramps in turns follow the wheels, rim m/s^2 kept: stock 3.0 / 5.0, soft_v3_2 2.553 / 4.255
+RAMP_NORMAL, RAMP_MAX = float(_RP.V["vel_ramp_tps2"]), float(_RP.V["vel_ramp_max_tps2"])
 BRAKE = {RAMP_NORMAL: (0.0987, 2.47), RAMP_MAX: (0.0926, 4.26)}     # (lag s, decel m/s^2), fits above
 BAND = 0.05; MARGIN = SAFETY_MARGIN; H_MAX = 1.0
 STATE_FIELDS = ["t_dec", "period", "age1", "age2", "v_cmd", "w_cmd", "v_m", "w_m", "v_out", "w_out", "code", "ramp", "free",
@@ -392,6 +393,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     """entry point of the safety core process (multiprocessing 'spawn')."""
     cpu = int(os.environ.get("KEVIN_SC_CPU", str((os.cpu_count() or 1) - 1)))
     rt = _realtime(cpu); print("safety_core: pid %d %s" % (os.getpid(), rt), flush=True)
+    print("safety_core: robot config %s wheels %s hash %s dump %s | ramp %.4f/%.4f turns/s^2" % (_RP.V["robot"], _RP.V["wheels"], _RP.HASH, _RP.DUMP, RAMP_NORMAL, RAMP_MAX), flush=True)
     from nav import bus
     from nav.perceive import Ego, Rs2Cloud
     B = bus.open_all(rs2_shape, create=False)

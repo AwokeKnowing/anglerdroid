@@ -15,6 +15,7 @@ from nav.hw import Hardware
 from nav.perceive import Ego, Rs2Cloud
 from nav.slam import Slam, GridMap, wrap, transform, carve_rays
 from nav.safety import Envelope, FrameClock
+import robot_params as _RP   # resolved robot config (logs hash + dump path at import)
 import twin_geometry as _TG
 _sl = os.environ.get("KEVIN_SAFETY_LOG"); _SLOG = open(_sl, "a", buffering=1) if _sl else None
 L_BODY = float(_TG.FOOTPRINT_SAFE[:, 0].max() - _TG.FOOTPRINT_SAFE[:, 0].min())   # 0.40 m nose to tail
@@ -109,7 +110,7 @@ class Brain:
         self.stats = Stats(); self.events = collections.deque(maxlen=50); self.tick = 0
         self._cmd_lock = threading.Lock(); self._pending = []
         from nav.predict import CmdPredictor
-        self.pred = CmdPredictor(_TG.VEL_RAMP_TPS2)
+        self.pred = CmdPredictor(_RP.V["vel_ramp_tps2"])
         self._ctl_cv = threading.Condition(); self._t_iss = 0.0; self._snap = None; self._snap_n = 0; self._latched_g = None
         self._rs2_seq = -1; self._rs2_rays = None; self._rs2_obs_h = np.zeros(0, np.float32); self._rs2_obs = np.zeros((0, 2), np.float32); self._rs2_floor = np.zeros((0, 2), np.float32); self._rs2_t = 0.0
         self.vln = None
