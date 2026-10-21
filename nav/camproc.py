@@ -54,12 +54,15 @@ def cam_main(serial, stereo, parent_pid, cpus):
                           **(dict(ir1=cam.ir_left, ir2=cam.ir_right) if has_ir else {}))
 
 
+from nav import bus  # noqa: E402
+
+
 class Rs2Bus:
     """The brain's view of RS2 (same attributes the brain used on RSCamera): latest full frame from sc_rs2img."""
     def __init__(self, B):
         self.B = B; i = B["rs2info"].read()[1]["f"]
         self._intr = dict(fx=float(i[0]), fy=float(i[1]), ppx=float(i[2]), ppy=float(i[3]), width=int(i[4]), height=int(i[5]))
-        self.depth = np.zeros((self._intr["height"], self._intr["width"]), np.uint16); self.color = np.zeros((480, 640, 3), np.uint8)
+        self.depth = np.zeros((self._intr["height"], self._intr["width"]), np.uint16); self.color = np.zeros(bus.RS2_COLOR_SHAPE, np.uint8)
         self.ir_left = self.ir_right = None; self.depth_stamp = 0.0; self._seq = B["rs2img"].seq; self._out = None
     def depth_intrinsics(self): return dict(self._intr)
     def wait(self, timeout):

@@ -130,9 +130,8 @@ def grab_images(out, url, st):
         f = bus.Block("rs2info", bus.layouts((480, 848))["rs2info"]).read()[1]["f"]; H2, W2 = int(f[5]), int(f[4])
         r = bus.Block("rs2img", bus.layouts((H2, W2))["rs2img"]).read(["depth", "color", "n"])[1]
         if int(r["n"][0]) == 0: raise RuntimeError("rs2img never written")
-        import robot_config as RC                                 # cameras.RSCamera.color is FRAME_H x FRAME_W (240x320); bus.write
-        col = r["color"].reshape(-1)[: RC.FRAME_H * RC.FRAME_W * 3].reshape(RC.FRAME_H, RC.FRAME_W, 3)   # packs it flat into the 480x640 slot
-        save("rs2_color.png", cv2.resize(col[..., ::-1], (640, 480), interpolation=cv2.INTER_NEAREST), "RS2 colour (bus, 320x240)")
+        col = r["color"]                                          # bus.RS2_COLOR_SHAPE = cameras.RSCamera.color (320x240)
+        save("rs2_color.png", cv2.resize(col[..., ::-1], (640, 480), interpolation=cv2.INTER_NEAREST), "RS2 colour (bus, %dx%d)" % (col.shape[1], col.shape[0]))
         save("rs2_depth.png", _depth_png(r["depth"].astype(np.float32) * 0.001, 0.2, 4.0), "RS2 depth 0.2-4.0 m")
     except Exception as e:
         try:                                                      # sim nav without the camera process: emu shm
