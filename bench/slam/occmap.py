@@ -58,10 +58,11 @@ class DepthScan:
 def build(seq, T_base, times, every=3, gt_shape=None, gt_org=None, cb=None):
     meta = json.load(open(os.path.join(seq, "meta.json"))); F = np.genfromtxt(os.path.join(seq, "frames.csv"), delimiter=",", names=True)
     ds = DepthScan(meta); g = Grid(gt_org, gt_shape); floor_z = -float(meta["twin"]["axle_h_m"])   # base_link sits at the axle
+    per_frame = len(times) > 0.6 * len(F["t"])        # keyframe-rate estimates (viw_fg: every 3rd frame, any phase) use all their poses
     for k, (fi, tf) in enumerate(zip(F["i"].astype(int), F["t"])):
-        if k % every: continue
+        if per_frame and k % every: continue
         j = np.searchsorted(times, tf - 1e-4)
-        if j >= len(times) or abs(times[j] - tf) > 0.04: continue
+        if j >= len(times) or abs(times[j] - tf) > (0.04 if per_frame else 0.02): continue
         d = cv2.imread(os.path.join(seq, "rs2_depth", "%06d.png" % fi), cv2.IMREAD_UNCHANGED)
         if d is None: continue
         P = ds.base_points(d); ob, fl = ds.split(P, floor_z); T = T_base[j]
