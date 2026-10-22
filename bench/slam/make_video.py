@@ -31,16 +31,17 @@ def main():
         for Tx, col in ((Tgf[j], (0, 170, 0)), (Tb, (0, 0, 230))):
             p0 = px(Tx[None, :2, 3])[0]; yaw = math.atan2(Tx[1, 0], Tx[0, 0]); p1 = (int(p0[0] + 18 * math.cos(yaw)), int(p0[1] - 18 * math.sin(yaw)))
             cv2.circle(img, tuple(int(v) for v in p0), 6, col, -1); cv2.line(img, tuple(int(v) for v in p0), p1, col, 2)
-        e = math.hypot(*(Tb[:2, 3] - Tgf[j][:2, 3])); de = abs((math.degrees(math.atan2(Tb[1, 0], Tb[0, 0]) - math.degrees(math.atan2(Tgf[j][1, 0], Tgf[j][0, 0])) + 180) % 360 - 180)
+        e = math.hypot(*(Tb[:2, 3] - Tgf[j][:2, 3])); de = abs((math.degrees(math.atan2(Tb[1, 0], Tb[0, 0])) - math.degrees(math.atan2(Tgf[j][1, 0], Tgf[j][0, 0])) + 180) % 360 - 180)
         mast = cv2.imread(os.path.join(seq, "rtx_mast", "%06d.jpg" % fi)); rs2 = cv2.imread(os.path.join(seq, "rtx_rs2", "%06d.jpg" % fi))
         left = np.zeros((Hh, 960, 3), np.uint8); left[:720] = cv2.resize(mast, (960, 720))
         ins = cv2.resize(rs2, (320, 240)); left[Hh - 250:Hh - 10, 960 - 330:960 - 10] = ins
         cv2.putText(left, "RTX mast camera (photoreal sim)  t=%.1fs" % tf, (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
         cv2.putText(left, "RTX RS2", (960 - 325, Hh - 256), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
-        cv2.putText(img, a.title, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
-        cv2.putText(img, "map from zero | red = estimate, green = truth", (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1, cv2.LINE_AA)
-        cv2.putText(img, "blue = twin walls (reference only)", (10, 76), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (150, 80, 40), 1, cv2.LINE_AA)
-        cv2.putText(img, "pose error %.2f m  %.1f deg" % (e, de), (10, Hh - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 200), 2, cv2.LINE_AA)
+        for li, (txt, col) in enumerate([(s_, (0, 0, 0)) for s_ in a.title.split("|")] + [("map from zero", (0, 0, 0)), ("red = estimate", (0, 0, 230)),
+                                        ("green = truth", (0, 140, 0)), ("blue = twin walls", (170, 90, 40)), ("(reference only)", (170, 90, 40))]):
+            cv2.putText(left, txt.strip(), (14, 62 + 24 * li), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 3, cv2.LINE_AA)
+            cv2.putText(left, txt.strip(), (14, 62 + 24 * li), cv2.FONT_HERSHEY_SIMPLEX, 0.62, col if col != (0, 0, 0) else (40, 40, 40), 1, cv2.LINE_AA)
+        cv2.putText(img, "err %.2f m %.1f deg" % (e, de), (6, Hh - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 200), 2, cv2.LINE_AA)
         vw.write(np.hstack([left, img]))
     occmap.build(seq, T, t, gt_shape=gt_occ.shape, gt_org=org, cb=cb); vw.release()
     if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0:

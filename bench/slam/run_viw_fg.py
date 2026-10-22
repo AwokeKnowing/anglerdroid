@@ -31,12 +31,15 @@ def adjoint(T):
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("seq"); ap.add_argument("res"); ap.add_argument("--no-visual", action="store_true"); ap.add_argument("--tag", default="")
     a = ap.parse_args(); seq, res = os.path.abspath(a.seq), os.path.abspath(a.res); os.makedirs(res, exist_ok=True)
-    meta = json.load(open(os.path.join(seq, "meta.json"))); rtx = json.load(open(os.path.join(seq, "rtx.json")))
+    meta = json.load(open(os.path.join(seq, "meta.json")))
+    rtx = json.load(open(os.path.join(seq, "rtx.json"))) if not a.no_visual else None
     F = np.genfromtxt(os.path.join(seq, "frames.csv"), delimiter=",", names=True); W = np.genfromtxt(os.path.join(seq, "wheel.csv"), delimiter=",", names=True)
     I = np.genfromtxt(os.path.join(seq, "imu_sync.csv"), delimiter=",", names=True)
     track = meta["twin"]["track_m"]; r_w = meta["twin"]["wheel_r_m"]
-    Tbi = Tm(meta["extr_twin_base_from_optical"]["rs2_imu"]); Tbc = np.array(rtx["rs2_640"]["T_base_optical"]); Tcb = np.linalg.inv(Tbc); Ad_bc = adjoint(Tbc)
-    c = rtx["rs2_640"]["intr"]; K = o3d.camera.PinholeCameraIntrinsic(c["w"], c["h"], c["f"], c["f"], c["cx"], c["cy"])
+    Tbi = Tm(meta["extr_twin_base_from_optical"]["rs2_imu"])
+    if rtx:
+        Tbc = np.array(rtx["rs2_640"]["T_base_optical"]); Tcb = np.linalg.inv(Tbc); Ad_bc = adjoint(Tbc)
+        c = rtx["rs2_640"]["intr"]; K = o3d.camera.PinholeCameraIntrinsic(c["w"], c["h"], c["f"], c["f"], c["cx"], c["cy"])
     p = gtsam.PreintegrationCombinedParams.MakeSharedU(9.81)
     p.setGyroscopeCovariance((0.003 / math.sqrt(200)) ** 2 * np.eye(3)); p.setAccelerometerCovariance((0.03 / math.sqrt(200)) ** 2 * np.eye(3))
     p.setIntegrationCovariance(1e-8 * np.eye(3)); p.setBiasOmegaCovariance((3e-5) ** 2 * np.eye(3)); p.setBiasAccCovariance((1e-4) ** 2 * np.eye(3))
@@ -98,7 +101,7 @@ def main():
     np.savetxt(os.path.join(res, name + ".tum"), np.array(out), fmt="%.6f")
     bfin = est.atConstantBias(B(len(kf) - 1))
     json.dump(dict(frame="base", per_frame=False, note="GTSAM iSAM2: IMU preintegration + wheel%s factors, keyframes 5 Hz, online estimates" % ("" if a.no_visual else " + Open3D RGB-D odometry"),
-                   visual_edges_ok=nvis_ok, visual_edges=nvis, gyro_bias_final=list(map(float, bfin.gyroscope())), drawn_gyro_bias=meta["drawn_errors"]["gyro_bias"],
+                   visual_edges_ok=nvis_ok, visual_edges=nvis, gyro_bias_final=list(map(float, bfin.gyroscope())), drawn_gyro_bias=meta.get("drawn_errors", {}).get("gyro_bias"),
                    runtime="%.1f ms/keyframe total (%.1f ms Open3D), %d keyframes, %.1f s wall (%.1f input fps)" % (1e3 * wall / len(kf), 1e3 * np.mean(tvis) if tvis else 0, len(kf), wall, len(F["t"]) / wall)),
               open(os.path.join(res, name + ".json"), "w"), indent=1)
     print(name, "done", len(out), "kf, vis ok", nvis_ok, "/", nvis, "wall %.0f s" % wall, flush=True)
