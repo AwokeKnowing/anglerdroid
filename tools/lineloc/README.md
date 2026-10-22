@@ -30,11 +30,15 @@ Odometry noise is maploc's fitted model (`Q(d)`, variance linear in path and rot
 
 ## Files
 - `lineloc.py`: Camera, LineMap, LineLoc (detector, classification, association, resection, MSAC, GN, gating).
-- `mapbuild.py`: STL → `casita_lines.npz` (corners, horizontal edges, visibility grid).
+- `mapbuild.py`: STL → `casita_lines.npz` (corners, horizontal edges, visibility grid). Defaults (2026-10-21): the resolved
+  world mesh (`LL_STL`, else `src/world_params.py` <- `worlds/casita/world.json`, currently `sim/casitahouse31-walls-laser-zfix.stl`)
+  and the selected wheels' mast camera height (`src/robot_params.py` `mast_rgb_height_m`, soft_v3_2 0.99115; was a fixed stock 0.97615).
+  `casita_lines.npz` is gitignored: rebuild with `python3 mapbuild.py` after a model change.
 - `synth.py`: Lambert-shaded ray-cast renders of the model through the twin lens from known poses.
 - `test_lineloc.py`: resection exactness, undistort round trip, vertical classification under tilt, synthetic poses (exact map:
   median < 1 cm), and a smoke test of the defaults. Run with `python3 -m pytest -q`.
-- `bench.py`: replay of the sim logs (odometry EKF + lineloc), errors vs GT. Configure with `LL_*` env vars.
+- `bench.py`: replay of the sim logs (odometry EKF + lineloc), errors vs GT. Configure with `LL_*` env vars. The camera height is
+  per log (mast pos + the log's tyre axle height; was a fixed stock +0.08565, 1.5 cm low for soft-tyre logs).
 - `poselib_cmp.py`: per-frame comparison against PoseLib PnPL (6-DoF, BSD-3; the line solver LIMAP uses).
 - `real_check.py`, `orin_timing.py`: read-only real-robot check and Orin CPU timing.
 - `diag*.py`, `ovl.py`, `dbg*.py`: diagnostics used during development.

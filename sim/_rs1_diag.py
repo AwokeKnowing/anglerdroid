@@ -9,7 +9,8 @@ import warp as wp
 wp.init()
 from house_mesh import load_indexed, wall_segments_xy, VisualMeshCaster
 
-stl = Path("/home/james/gits/awokeknowing/anglerdroid/sim/casitahouse-walls-fixed.stl")
+from house_mesh import FIXED_STL  # the resolved world mesh (src/world_params.py)
+stl = FIXED_STL
 verts, faces = load_indexed(stl)
 print("verts", verts.shape, "z", float(verts[:,2].min()), float(verts[:,2].max()))
 segs = wall_segments_xy(verts, faces)

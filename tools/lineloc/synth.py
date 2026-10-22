@@ -4,8 +4,9 @@ from mapbuild import load
 from lineloc import Camera, se2_cam
 
 class Renderer:
-    def __init__(self, stl, ceiling=2.28):
+    def __init__(self, stl, ceiling=None):
         m = load(stl); V, F = m.vertices, m.faces; lo, hi = V.min(0) - 1, V.max(0) + 1; n = len(V)
+        if ceiling is None: ceiling = float(V[:, 2].max())   # ceiling at the wall tops (was a fixed 2.28)
         q = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
         V = np.vstack([V, np.c_[q, np.zeros(4)], np.c_[q, np.full(4, ceiling)]])
         F = np.vstack([F, [[n, n + 1, n + 2], [n, n + 2, n + 3]], [[n + 4, n + 6, n + 5], [n + 4, n + 7, n + 6]]])

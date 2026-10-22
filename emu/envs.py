@@ -8,7 +8,7 @@ textures so stereo VSLAM has features, like real rooms do.
   python -m emu.envs list | python -m emu.envs png <name> [seed]   (writes GT map preview)
 """
 from __future__ import annotations
-import math, os, hashlib
+import math, os, sys, hashlib
 from dataclasses import dataclass, field
 import numpy as np
 
@@ -284,10 +284,19 @@ def env_doors(seed):
     b.e.start = (2.0, 1.0, math.pi / 2); b.e.extent = (-0.2, -0.2, 3 * len(W) + 1.2, 5.2); return b.e
 
 
+def _world_params():
+    """the resolved world config (src/world_params.py): which house mesh, derived wall-top / ceiling heights."""
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    if src not in sys.path: sys.path.append(src)
+    import world_params
+    return world_params
+
+
 def env_casita(seed):
-    """James's real house walls (sim/casitahouse-walls-fixed.stl), textured, with furniture placed in open space."""
+    """James's real house walls (the resolved world mesh: src/world_params.py <- worlds/casita/world.json), textured,
+    with furniture placed in open space."""
     import trimesh
-    stl = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sim", "casitahouse-walls-fixed.stl")
+    wp = _world_params(); stl = wp.walls_stl()
     m = trimesh.load(stl); ext = m.bounds; sz = ext[1] - ext[0]
     scale = 0.001 if sz.max() > 100 else 1.0
     b = B("casita", seed)
@@ -295,6 +304,7 @@ def env_casita(seed):
     W, H = sz[0] * scale, sz[1] * scale
     b.e.extent = (-0.2, -0.2, W + 0.2, H + 0.2)
     b.e._mesh = (m, scale, -ext[0] * scale)
+    b.e.ceiling_z, b.e.lamp_z = wp.V["ceiling_z"], wp.V["lamp_z"]   # derived from the mesh (wall tops), not assumed
     # ---- furnishing (2026-10-14, James): realistic sizes; rooms read off the wall STL section at 0.5 m
     #   living room (south, y 0-4.7) | front door = west wall gap y 3.1-4.8 | kitchen x 3.4-7, y 3-7.3 (around the
     #   angled island) | laundry + back door x 4.6-7, y 7.3-8.4 | hallway | bedroom 1 (NW) | bedroom 2 (NE)

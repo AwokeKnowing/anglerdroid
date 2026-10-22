@@ -11,7 +11,8 @@ G = s.grid; lo = G.L
 rr = min(R, key=lambda r: abs(r["t"] - r0 - tq)); x, y, th = rr["pose"]; print("nav pose", rr["pose"], "mode", rr["mode"], "T", s.T)
 # GT start (first gt row = robot at rest at nav start) -> walls into the nav frame
 gt0 = [json.loads(l) for l in open(lg + "/index.jsonl") if '"gt"' in l][0]["gt"]
-stl = "sim/casitahouse-walls-fixed.stl"; m = trimesh.load(stl); ext = m.bounds; sc = 0.001 if (ext[1] - ext[0]).max() > 100 else 1.0; off = -ext[0] * sc
+from emu.envs import _world_params
+stl = _world_params().walls_stl(); m = trimesh.load(stl); ext = m.bounds; sc = 0.001 if (ext[1] - ext[0]).max() > 100 else 1.0; off = -ext[0] * sc
 sec = m.section(plane_origin=[0, 0, (0.3 - off[2]) / sc], plane_normal=[0, 0, 1])
 c, s_ = math.cos(-gt0[2]), math.sin(-gt0[2])
 def w2n(P): d = P - np.array(gt0[:2]); return np.stack([c * d[:, 0] - s_ * d[:, 1], s_ * d[:, 0] + c * d[:, 1]], 1)

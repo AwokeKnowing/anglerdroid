@@ -22,6 +22,13 @@ if os.path.abspath(_SRC) not in map(os.path.abspath, _sys.path): _sys.path.appen
 import robot_params as _RP
 
 
+def world_stl():
+    """the house mesh: env ML_STL, else the resolved world mesh (src/world_params.py <- worlds/casita/world.json)."""
+    if os.environ.get("ML_STL"): return os.environ["ML_STL"]
+    import world_params
+    return world_params.walls_stl()
+
+
 def tire_name(tire=None):
     """wheels profile name: `tire` (name or alias) if given, else the selected wheels (resolved config)."""
     return _RP.V["wheels"] if tire is None else _RP.wheels_name(None, tire)[0]
@@ -54,10 +61,14 @@ def se2(x, y, yaw, z=None):
 
 
 class StructMap:
-    """Wall STL (+ floor z=0 and ceiling planes) in sim world coordinates."""
-    def __init__(self, stl, ceiling_z=2.29, pad=1.0, zmin=-1.0):
+    """Wall STL (+ floor z=0 and ceiling planes) in sim world coordinates.  ceiling_z=None: derived from the mesh
+    (wall tops + 1 cm, the src/world_params.py rule; was a fixed 2.29 for the 2.28 m model)."""
+    def __init__(self, stl=None, ceiling_z=None, pad=1.0, zmin=-1.0):
         self.zmin = zmin       # only map edges above this height (e.g. above furniture: wall/ceiling structure)
+        stl = stl or world_stl(); self.stl = stl
         m = trimesh.load(stl); ext = m.bounds; scale = 0.001 if (ext[1] - ext[0]).max() > 100 else 1.0
+        if ceiling_z is None: ceiling_z = float(ext[1][2] - ext[0][2]) * scale + 0.01
+        self.ceiling_z = ceiling_z
         off = -ext[0] * scale; V = m.vertices * scale + off; F = m.faces
         x0, y0 = V[:, 0].min() - pad, V[:, 1].min() - pad; x1, y1 = V[:, 0].max() + pad, V[:, 1].max() + pad
         n = len(V); quad = np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]])

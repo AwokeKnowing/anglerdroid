@@ -12,7 +12,19 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-FIXED_STL = Path(__file__).resolve().parent / "casitahouse-walls-fixed.stl"
+
+def _world_walls_stl() -> Path:
+    """the resolved house mesh (src/world_params.py <- worlds/casita/world.json; env KEVIN_WALLS_STL overrides)."""
+    import sys
+    if str(REPO / "src") not in sys.path: sys.path.append(str(REPO / "src"))
+    import world_params
+    return Path(world_params.walls_stl())
+
+
+# the repo's house mesh (read-only source fallback for the legacy Newton scripts).  Never a repair destination:
+# repair_house_stl writes REPAIRED_STL (run/, gitignored) so the committed models are never overwritten.
+FIXED_STL = _world_walls_stl()
+REPAIRED_STL = REPO / "run" / "house_walls_repaired.stl"
 DEFAULT_SRC = Path("/home/james/Desktop/casitahouse-walls.stl")
 
 # Last repair report, filled by repair_house_stl / load_repaired_house.
@@ -274,7 +286,8 @@ def repair_tris(tris: np.ndarray) -> tuple[np.ndarray, np.ndarray, dict]:
 
 def repair_house_stl(src: Path | None = None, dest: Path | None = None) -> Path:
     src = Path(src or DEFAULT_SRC)
-    dest = Path(dest or FIXED_STL)
+    dest = Path(dest or REPAIRED_STL)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     tris = read_binary_stl(src)
     verts, faces, report = repair_tris(tris)
     write_binary_stl(dest, verts[faces])

@@ -163,7 +163,7 @@ def add_house(builder: newton.ModelBuilder, stl_path: Path):
     src = Path(stl_path)
     if not src.exists() and FIXED_STL.exists():
         src = FIXED_STL
-    fixed = repair_house_stl(src, FIXED_STL)
+    fixed = repair_house_stl(src)   # -> run/house_walls_repaired.stl (never the repo models)
     verts, faces = load_indexed(fixed)
     verts = np.ascontiguousarray(verts, dtype=np.float32)
     verts[:, 2] -= float(verts[:, 2].min())

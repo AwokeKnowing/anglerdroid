@@ -221,7 +221,7 @@ ITEMS = ["outlet", "switch", "poster0", "poster1", "poster2", "grille", "clock",
 
 def windows(env):
     """Window openings of the wall mesh: a sill (up-facing horizontal face group, z 0.25-1.5) under a header
-    (down-facing group, z 1.55-2.27) with overlapping footprint, wall-thin (<= 15 cm) -> [(lo_xy, hi_xy, z_sill, z_head)]."""
+    (down-facing group, z 1.55 .. ceiling - 2 cm) with overlapping footprint, wall-thin (<= 15 cm) -> [(lo_xy, hi_xy, z_sill, z_head)]."""
     import trimesh
     m0, sc, off = env._mesh; m = m0.copy(); m.merge_vertices(); V = m.vertices * sc + off; F = m.faces; N = m.face_normals
     zc = V[F].mean(1)[:, 2]; adj = m.face_adjacency
@@ -232,7 +232,7 @@ def windows(env):
         return [(V[F[c]].reshape(-1, 3)[:, :2].min(0), V[F[c]].reshape(-1, 3)[:, :2].max(0), float(zc[c].mean())) for c in comps]
     out = []
     for a0, a1, zs in groups(1, 0.25, 1.5):
-        for b0, b1, zh in groups(-1, 1.55, 2.27):
+        for b0, b1, zh in groups(-1, 1.55, getattr(env, "ceiling_z", 2.29) - 0.02):
             lo, hi = np.maximum(a0, b0), np.minimum(a1, b1); d = hi - lo
             if d.min() > 0.02 and d.min() <= 0.15 and d.max() > 0.3 and not any(np.allclose(lo, o[0]) and np.allclose(hi, o[1]) for o in out):
                 out.append((lo, hi, zs, zh))
@@ -258,9 +258,10 @@ def casita_items(env, wall_box, D, seed=11):
         a = rng.uniform(0, 2 * P)                                                # cluster of small framed photos
         for j, (du, dz, w, h) in enumerate(((-0.25, 1.55, 0.2, 0.25), (0.0, 1.45, 0.25, 0.18), (0.22, 1.6, 0.18, 0.22), (0.05, 1.72, 0.15, 0.12))):
             wall_box(x, y, a + du / 2.5, dz, 0.012, w, h, "art%d" % (j % 4), maxd=4.0)
-        D.append(("cylinder", (x + 0.3, y + 0.3, 2.265), (0.17, 0.025), 0.0, "lampshade", "ceiling"))   # flush-mount fixture
-        D.append(("cylinder", (x - 0.6, y - 0.4, 2.275), (0.06, 0.015), 0.0, "smoke", "ceiling"))
-        D.append(("box", (x - 0.2, y + 0.9, 2.287), (0.15, 0.25, 0.003), 0.0, "grille", "ceiling"))
+        cz = getattr(env, "ceiling_z", 2.29)                                   # ceiling underside (world_params)
+        D.append(("cylinder", (x + 0.3, y + 0.3, cz - 0.025), (0.17, 0.025), 0.0, "lampshade", "ceiling"))   # flush-mount fixture
+        D.append(("cylinder", (x - 0.6, y - 0.4, cz - 0.015), (0.06, 0.015), 0.0, "smoke", "ceiling"))
+        D.append(("box", (x - 0.2, y + 0.9, cz - 0.003), (0.15, 0.25, 0.003), 0.0, "grille", "ceiling"))
     for lo, hi, zs, zh in windows(env):     # venetian blinds, lowered over the top ~55 % of every window
         c = (lo + hi) / 2; d = hi - lo; hgt = 0.55 * (zh - zs); along_x = d[0] > d[1]
         size = (d[0] / 2, 0.005, hgt / 2) if along_x else (0.005, d[1] / 2, hgt / 2)

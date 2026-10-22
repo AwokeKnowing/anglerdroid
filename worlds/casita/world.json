@@ -1,0 +1,14 @@
+{
+  "_doc": "World (house) configuration: the ONE place that names the house model. Read only through src/world_params.py (env KEVIN_WORLD picks the world, default casita; KEVIN_WALLS_STL overrides the mesh path for experiments). Every height below the STL (wall tops, ceiling plane, lamps) is DERIVED from the mesh by world_params, never hardcoded in consumers.",
+  "world": "casita",
+  "walls_stl": "sim/casitahouse31-walls-laser-zfix.stl",
+  "walls_stl_note": "sim/casitahouse31-walls-laser-zfix.NOTE.md",
+  "walls_stl_history": {
+    "sim/casitahouse-walls-fixed.stl": "until 2026-10-21: casitahouse26.blend Walls (laser plan, wall tops 2.28 m); kept for comparison / rollback (set walls_stl back or KEVIN_WALLS_STL)",
+    "sim/casitahouse31-walls-laser.stl": "casitahouse31.blend (last laser version before the 2019 8 cm grid snap), heights as modelled",
+    "sim/casitahouse31-walls-laser-zfix.stl": "2026-10-21: v31 plan + heights fitted to 3 mast frames with the camera at 0.99115 m (see NOTE)"
+  },
+  "frame": "sim world = STL with its bounding-box min at the origin (x east, y north, z up, floor = wall bottom = 0)",
+  "ceiling_above_wall_top_m": 0.01,
+  "lamp_below_wall_top_m": 0.13
+}

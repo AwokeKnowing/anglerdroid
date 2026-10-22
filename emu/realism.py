@@ -155,7 +155,7 @@ def casita_wall_objs(stl, scale, off):
     """Wall STL -> one OBJ per paint region, per-face planar UVs in metres (u along the wall, v = height)."""
     import trimesh
     d = os.path.join(CACHE, "casita_walls"); os.makedirs(d, exist_ok=True)
-    tag = "%d_%g" % (int(os.path.getmtime(stl)), scale) + ("" if TEX == "v1" else "_" + TEX)
+    tag = "%s_%d_%g" % (os.path.splitext(os.path.basename(stl))[0], int(os.path.getmtime(stl)), scale) + ("" if TEX == "v1" else "_" + TEX)
     done = [p for p in sorted(glob.glob(os.path.join(d, tag + "_*.obj"))) if "_" not in os.path.basename(p)[len(tag) + 1:-4]]   # not another set's
     if done: return [(p, os.path.basename(p)[len(tag) + 1:-4]) for p in done]
     m = trimesh.load(stl); V = m.vertices * scale + off; F = m.faces; N = m.face_normals
@@ -260,9 +260,10 @@ def casita_decor(env):
     if TEX != "v1":     # v2: everyday wall/ceiling fixtures (outlets, switches, posters, clocks, light fixtures, vents)
         from emu import texture_v2
         texture_v2.casita_items(env, wall_box, D)
-    # ceiling (group 1 -> hidden in the third-person viewer), just above the 2.28 m wall tops
-    x0, y0, x1, y1 = env.extent
-    D.append(("box", ((x0 + x1) / 2, (y0 + y1) / 2, 2.30), ((x1 - x0) / 2 + 0.3, (y1 - y0) / 2 + 0.3, 0.01), 0.0, "ceiling", "ceiling"))
+    # ceiling (group 1 -> hidden in the third-person viewer): underside at env.ceiling_z, just above the wall tops
+    # (src/world_params.py derives both from the wall mesh; 2.29 = the pre-2026-10-21 model's 2.28 m tops + 1 cm)
+    x0, y0, x1, y1 = env.extent; cz = getattr(env, "ceiling_z", 2.29)
+    D.append(("box", ((x0 + x1) / 2, (y0 + y1) / 2, cz + 0.01), ((x1 - x0) / 2 + 0.3, (y1 - y0) / 2 + 0.3, 0.01), 0.0, "ceiling", "ceiling"))
     return D
 
 
@@ -270,7 +271,7 @@ def casita_lights(env):
     """[(attrs)] MuJoCo <light> attributes: sun + ceiling lamps per room."""
     L = [dict(name="sun", directional="true", castshadow="true" if SHADOW > 0 else "false", pos="-6 -4 8", dir="0.55 0.35 -0.76", diffuse="0.75 0.70 0.62", specular="0.2 0.2 0.2")]
     for nm, (x, y) in (("lamp_living", (2.8, 2.2)), ("lamp_kitchen", (5.3, 5.2)), ("lamp_hall", (2.0, 7.2)), ("lamp_bed1", (1.8, 11.8)), ("lamp_bed2", (5.4, 11.8)), ("lamp_laundry", (5.6, 7.9))):
-        L.append(dict(name=nm, pos="%g %g 2.15" % (x, y), dir="0 0 -1", diffuse="0.42 0.38 0.30", specular="0.05 0.05 0.05",
+        L.append(dict(name=nm, pos="%g %g %g" % (x, y, getattr(env, "lamp_z", 2.15)), dir="0 0 -1", diffuse="0.42 0.38 0.30", specular="0.05 0.05 0.05",
                       attenuation="0.6 0.25 0.08", cutoff="80", exponent="2", castshadow="false"))   # sun-only shadows: 30 Hz budget
     return L
 

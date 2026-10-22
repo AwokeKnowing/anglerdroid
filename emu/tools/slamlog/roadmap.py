@@ -10,7 +10,7 @@ Per log:
     end = skeleton end (room end / dead end), door = clearance local minimum along an edge below half the clearance of
     both its ends (a pinch).  Edges: skeleton paths between nodes, length, heading; snapped to the Manhattan axis when the
     deviation is within atan(clearance / length) (the corridor admits no finer heading).
- 4. same pipeline on the GT wall section (sim/casitahouse-walls-fixed.stl at 0.5 m) restricted to the explored area ->
+ 4. same pipeline on the GT wall section (the resolved world mesh, src/world_params.py, at 0.5 m) restricted to the explored area ->
     GT nodes.  Metrics: nodes matched within MATCH_M; wrong edges = edges crossing a GT wall cell; routes between random
     node pairs (Dijkstra) valid = no GT wall within R_CIRC along the route.
  5. node relocalization: every revisit of a node (trajectory leaves > 2 m and returns within NODE_R) matches the scan at
@@ -159,7 +159,8 @@ def graph(free, theta_m, origin, traj=None):
 
 def gt_walls(L, shape, origin):
     import trimesh
-    stl = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), "sim", "casitahouse-walls-fixed.stl")
+    from emu.envs import _world_params
+    stl = _world_params().walls_stl()   # the resolved world mesh (worlds/casita/world.json)
     m = trimesh.load(stl); ext = m.bounds; sc = 0.001 if (ext[1] - ext[0]).max() > 100 else 1.0; off = -ext[0] * sc
     sec = m.section(plane_origin=[0, 0, (0.5 - off[2]) / sc], plane_normal=[0, 0, 1]); occ = np.zeros(shape, np.uint8)
     for e in sec.entities:

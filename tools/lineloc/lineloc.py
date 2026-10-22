@@ -21,10 +21,37 @@ HUBER_K = 1.345
 
 def wrap(a): return (a + np.pi) % (2 * np.pi) - np.pi
 
+
+def _src():
+    import os, sys
+    p = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+    if p not in sys.path: sys.path.append(p)
+
+
+def world_stl():
+    """the house mesh: env LL_STL, else the resolved world mesh (src/world_params.py <- worlds/casita/world.json)."""
+    import os
+    if os.environ.get("LL_STL"): return os.environ["LL_STL"]
+    _src(); import world_params
+    return world_params.walls_stl()
+
+
+def axle_height(tire=None):
+    """base_link (axle) above the floor for wheels `tire` (None = the selected wheels; src/robot_params.py)."""
+    _src(); import robot_params as RP
+    return float(RP.V["axle_height_m"] if tire is None else RP.values(RP.resolve(wheels=tire))["axle_height_m"])
+
+
+def mast_height(tire=None):
+    """mast RGB camera centre above the floor for wheels `tire` (None = selected; stock 0.97615, soft_v3_2 0.99115)."""
+    _src(); import robot_params as RP
+    return float(RP.V["mast_rgb_height_m"] if tire is None else RP.values(RP.resolve(wheels=tire))["mast_rgb_height_m"])
+
 class Camera:
-    def __init__(self, fx, fy, cx, cy, dist=(0, 0, 0, 0), R_bc=None, t_bc=(0.0291, 0, 0.97615)):
+    def __init__(self, fx, fy, cx, cy, dist=(0, 0, 0, 0), R_bc=None, t_bc=None):
         self.fx, self.fy, self.cx, self.cy = fx, fy, cx, cy; self.k = np.array(list(dist) + [0] * (4 - len(dist)), float)[:4]
         self.R_bc = np.array([[0.0, 0, 1], [-1, 0, 0], [0, -1, 0]]) if R_bc is None else np.asarray(R_bc, float)  # optical -> base (level)
+        if t_bc is None: t_bc = (0.0291, 0, mast_height())   # selected wheels (was a fixed stock 0.97615)
         self.t_bc = np.asarray(t_bc, float)    # camera centre in the base frame, z = height above the floor
 
     @staticmethod

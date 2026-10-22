@@ -1,6 +1,6 @@
 # nav/maploc: mast-camera localisation against the known casita map (baseline, sim-first)
 
-The map is the twin's wall STL (sim/casitahouse-walls-fixed.stl) plus floor (z 0) and ceiling (z 2.29) planes. It has no furniture.
+The map is the twin's wall STL (the resolved world mesh: `src/world_params.py` <- `worlds/casita/world.json`, currently sim/casitahouse31-walls-laser-zfix.stl; env `ML_STL` overrides) plus floor (z 0) and ceiling (wall tops + 1 cm, derived from the mesh: 2.1997 for zfix, 2.29 for the old casitahouse-walls-fixed.stl) planes. It has no furniture.
 The state is (x, y, yaw) plus, optionally, ln(global map scale). Wheel odometry is the prediction and the metric reference.
 Only the forward mast RGB camera is used.
 

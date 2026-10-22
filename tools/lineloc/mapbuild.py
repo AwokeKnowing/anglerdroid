@@ -2,6 +2,7 @@
   vertical edges  -> corners (x, y, z0, z1)          (main cue: bearings)
   horizontal edges-> 3D segments (A, B)               (secondary cue: image lines at known heights)
   visibility      -> per 10 cm grid cell, which features a mast camera there can see (Embree rays)
+python3 mapbuild.py [STL] [CAM_H]   (defaults: the resolved world mesh, the selected wheels' mast camera height)
 Frame = sim world = STL normalised with its bbox min at the origin (as emu.envs.env_casita / maploc.StructMap)."""
 import sys, json, math, numpy as np, trimesh
 CREASE_DEG = 30.0
@@ -39,7 +40,12 @@ def merge_collinear(A, B, tol=0.01, ang=2.0):
         segs = out
     return np.array([s[0] for s in segs]), np.array([s[1] for s in segs])
 
-def build(stl, cam_h=0.97615, cell=0.10, out="casita_lines.npz"):
+def build(stl=None, cam_h=None, cell=0.10, out="casita_lines.npz"):
+    """stl None = the resolved world mesh (LL_STL / src/world_params.py); cam_h None = the selected wheels' mast camera
+    height (src/robot_params.py mast_rgb_height_m; was a fixed stock 0.97615)."""
+    from lineloc import world_stl, mast_height
+    stl = stl or world_stl(); cam_h = mast_height() if cam_h is None else cam_h
+    print("mapbuild:", stl, "cam_h %.5f" % cam_h)
     m = load(stl); A, B = feature_edges(m); d = B - A; L = np.linalg.norm(d, axis=1); dz = np.abs(d[:, 2]) / np.maximum(L, 1e-9)
     vm = (dz > 0.995); hm = (dz < 0.02) & (L > 0.05)
     VA, VB = merge_collinear(A[vm], B[vm]); keep = np.linalg.norm(VB - VA, axis=1) > 0.25; VA, VB = VA[keep], VB[keep]
@@ -80,4 +86,4 @@ def build(stl, cam_h=0.97615, cell=0.10, out="casita_lines.npz"):
     print("cells", len(C), "inside", inside.sum(), "mean visible V/H", visV[inside].sum(1).mean(), visH[inside].sum(1).mean())
 
 if __name__ == "__main__":
-    build(sys.argv[1] if len(sys.argv) > 1 else "/workspace/vl/mlw/mlx/casitahouse-walls-fixed.stl")
+    build(sys.argv[1] if len(sys.argv) > 1 else None, cam_h=float(sys.argv[2]) if len(sys.argv) > 2 else None)

@@ -101,7 +101,7 @@ def vertical_vp(cam_lens, segs_list, W, H):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--image", required=True); ap.add_argument("--annot", required=True)
-    ap.add_argument("--stl", required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--stl", default=None, help="default: the resolved world mesh (src/world_params.py)"); ap.add_argument("--out", required=True)
     ap.add_argument("--init", default='{"x":3.3,"y":1.0,"yaw_deg":85}')
     ap.add_argument("--mast-height", type=float, default=None, help="m; default = resolved mast_rgb_height_m (src/robot_params)")
     ap.add_argument("--f0", type=float, default=None, help="initial focal px at this resolution (default twin truth DFOV 118)")

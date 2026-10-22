@@ -1,7 +1,8 @@
 # casita_fit: mast RGB <-> casita wall model (pose, tilt, lens check)
 
-Fits `sim/casitahouse-walls-fixed.stl` (same frame as `emu/envs.env_casita`: bbox min at the origin, x east,
-y north, z up, wall tops z = 2.28) to one upright mast frame by **line reprojection**:
+Fits the resolved house mesh (`--stl`, default `src/world_params.py` <- `worlds/casita/world.json`, currently
+`sim/casitahouse31-walls-laser-zfix.stl`; same frame as `emu/envs.env_casita`: bbox min at the origin, x east,
+y north, z up, wall tops = mesh z extent, 2.1897 for zfix / 2.28 for the old `casitahouse-walls-fixed.stl`) to one upright mast frame by **line reprojection**:
 
 * image lines: OpenCV LSD (`LSD_REFINE_STD`), hand-matched to model 3D edges in `annot_*.json`
   (each entry: model line A-B, image segments, `role` = `fit` or held-out `check`; rejected candidates are listed in `_doc`);
@@ -15,7 +16,7 @@ y north, z up, wall tops z = 2.28) to one upright mast frame by **line reproject
 ```
 PY=.venv-newton/bin/python   # cv2 + scipy + trimesh (embree)
 $PY tools/casita_fit/fit.py --image ~/kevin_bench/casita/mast_1600x1200.png --annot tools/casita_fit/annot_1213.json \
-    --stl sim/casitahouse-walls-fixed.stl --out ~/kevin_bench/casita/out
+    --stl sim/casitahouse-walls-fixed.stl --out ~/kevin_bench/casita/out    # annot_1213.json uses the OLD model (2.28 m tops) coords; omit --stl = world mesh
 $PY tools/casita_fit/overlay.py --image ~/kevin_bench/casita/mast_1600x1200.png --annot tools/casita_fit/annot_1213.json \
     --stl sim/casitahouse-walls-fixed.stl --report ~/kevin_bench/casita/out/fit_report.json --stage A --out ~/kevin_bench/casita/out/overlay.png
 ```

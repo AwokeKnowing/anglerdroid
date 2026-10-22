@@ -5,7 +5,7 @@ Does not drive Kevin. Loads the house STL, logs wall segments and a hard
 front-door disk to the native Rerun on :9877 so we can mark that area as
 no-go once live pose is aligned.
 
-  KEVIN_WALLS_STL_PRIOR  default: sim/casitahouse-walls-fixed.stl
+  KEVIN_WALLS_STL_PRIOR  default: the resolved world mesh (src/world_params.py <- worlds/casita/world.json)
   RERUN_CONNECT          default: rerun+http://127.0.0.1:9877/proxy
 """
 from __future__ import annotations
@@ -22,7 +22,9 @@ import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "src")
 
-DEFAULT_STL = os.path.join(REPO, "sim", "casitahouse-walls-fixed.stl")
+if SRC not in sys.path: sys.path.append(SRC)
+import world_params  # noqa: E402  the resolved house mesh (worlds/casita/world.json)
+DEFAULT_STL = world_params.walls_stl()
 # Casita south door opening (visit_wander portal median).
 DOOR_XY = (-0.60, -2.81)
 DOOR_R_M = 0.90

@@ -60,7 +60,7 @@ def render(img, m, cam, ann, fill=True, all_edges=True, title=""):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--image", required=True); ap.add_argument("--annot", required=True); ap.add_argument("--stl", required=True)
+    ap.add_argument("--image", required=True); ap.add_argument("--annot", required=True); ap.add_argument("--stl", default=None, help="default: the resolved world mesh (src/world_params.py)")
     ap.add_argument("--report", required=True); ap.add_argument("--stage", default="A"); ap.add_argument("--out", required=True)
     a = ap.parse_args()
     img = cv2.imread(a.image); H, W = img.shape[:2]; m = load_casita(a.stl); ann = json.load(open(a.annot))

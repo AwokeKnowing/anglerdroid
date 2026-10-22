@@ -21,7 +21,7 @@ def tbc(n=None):
 PITCH = math.radians(float(os.environ.get("ML_PITCH_DEG", 0.0)))   # static body pitch (+ = nose down, about base y)
 _Ry = np.array([[math.cos(PITCH), 0, math.sin(PITCH)], [0, 1, 0], [-math.sin(PITCH), 0, math.cos(PITCH)]])
 Tbc = tbc()   # stock default (diagnostics use tbc(n) / log_axle(n) per log)
-smap = StructMap("mlx/casitahouse-walls-fixed.stl", zmin=float(os.environ.get("ML_ZMIN", -1)))
+smap = StructMap(None, zmin=float(os.environ.get("ML_ZMIN", -1)))   # ML_STL or the resolved world mesh (world_params)
 MAP_DISTORT = float(os.environ.get("ML_MAP_DISTORT", 1.0))     # synthetic: model built this factor too large (true metric scale = 1/k)
 if MAP_DISTORT != 1.0: smap.mesh.apply_scale(MAP_DISTORT)
 def wrap(a): return (a + np.pi) % (2 * np.pi) - np.pi

@@ -1,10 +1,11 @@
 """Unit tests (python3 -m pytest -q test_lineloc.py)."""
 import math, json, numpy as np, pytest, cv2
-from lineloc import Camera, LineMap, LineLoc, wrap, se2_cam
+from lineloc import Camera, LineMap, LineLoc, wrap, se2_cam, world_stl
 import os
-STL = os.environ.get("LL_STL", "/workspace/vl/mlw/mlx/casitahouse-walls-fixed.stl")
+STL = world_stl()   # LL_STL or the resolved world mesh
 mi = json.load(open(os.environ.get("LL_MAST", "/workspace/vl/mlx/mast.json")))
-def twin_cam(): return Camera(mi["intr"]["fx"], mi["intr"]["fy"], mi["intr"]["ppx"], mi["intr"]["ppy"], mi["dist"], t_bc=(0.0291, 0, 0.97615))
+_CAM_H = float(np.load("casita_lines.npz")["cam_h"]) if os.path.exists("casita_lines.npz") else None   # the map's camera height
+def twin_cam(): return Camera(mi["intr"]["fx"], mi["intr"]["fy"], mi["intr"]["ppx"], mi["intr"]["ppy"], mi["dist"], t_bc=None if _CAM_H is None else (0.0291, 0, _CAM_H))
 
 def test_resect_exact():
     rng = np.random.default_rng(1)

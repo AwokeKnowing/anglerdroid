@@ -19,8 +19,8 @@ Optional static walls mesh (STL) prior for SLAM/localization assistance. Helps l
 ### Basic Setup
 
 ```bash
-# Enable walls prior
-export KEVIN_WALLS_STL_PRIOR=/path/to/casitahouse-walls-fixed.stl
+# Enable walls prior (default without the env: the resolved world mesh, src/world_params.py <- worlds/casita/world.json)
+export KEVIN_WALLS_STL_PRIOR=/path/to/casitahouse31-walls-laser-zfix.stl
 
 # Run Kevin with SLAM enabled
 python3 src/vision.py

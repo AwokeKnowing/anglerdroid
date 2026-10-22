@@ -126,7 +126,7 @@ def draw(ax, m, cam, p, ann, res, title, W):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--annot", required=True); ap.add_argument("--stl", required=True); ap.add_argument("--report", required=True)
+    ap.add_argument("--annot", required=True); ap.add_argument("--stl", default=None, help="default: the resolved world mesh (src/world_params.py)"); ap.add_argument("--report", required=True)
     ap.add_argument("--stages", default="A,E"); ap.add_argument("--out", required=True)
     a = ap.parse_args()
     ann = json.load(open(a.annot)); rep = json.load(open(a.report)); W, H = rep["W"], rep["H"]; m = load_casita(a.stl)

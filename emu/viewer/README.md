@@ -101,7 +101,7 @@ ghost of the true Kevin; the HUD shows the SLAM-vs-truth error.  "Send all to Li
 1. **Check server console** (where `python3 emu/viewer/viewer.py` runs):
    ```
    [viewer] exporting scene: env=casita, extent=(-0.2, -0.2, 9.9, 7.5), geoms=54
-   [viewer] loading mesh: /workspace/sim/casitahouse-walls-fixed.stl
+   [viewer] loading mesh: /workspace/sim/casitahouse31-walls-laser-zfix.stl   (the resolved world mesh: worlds/casita/world.json)
    [viewer] mesh loaded: 1523 verts, 3044 faces, scale=0.001
    [viewer] mesh exported: 1523 verts, 3044 faces
    [viewer] scene.json ready: 54 geoms
@@ -121,7 +121,7 @@ ghost of the true Kevin; the HUD shows the SLAM-vs-truth error.  "Send all to Li
 
 3. **Common fixes:**
    - Install trimesh: `pip3 install trimesh`
-   - Check STL exists: `ls sim/casitahouse-walls-fixed.stl`
+   - Check STL exists: `python3 -m src.world_params show` (walls_stl; fails closed if missing)
    - Verify coordinate system: MuJoCo Z-up → Three.js Y-up `[x,y,z]→[x,z,y]`
 
 **Expected output for casita:**

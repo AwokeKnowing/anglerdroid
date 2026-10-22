@@ -1,17 +1,28 @@
 """Camera + casita model geometry for the mast-RGB <-> casita line fit.
 
-World = casita frame of sim/casitahouse-walls-fixed.stl after the same normalisation emu/envs.env_casita uses
-(min corner of the bounding box at the origin, metres): x east, y north, z up, floor z=0, wall tops z=2.28.
+World = casita frame of the resolved house mesh (src/world_params.py <- worlds/casita/world.json, currently
+sim/casitahouse31-walls-laser-zfix.stl) after the same normalisation emu/envs.env_casita uses (min corner of the
+bounding box at the origin, metres): x east, y north, z up, floor z=0, wall tops = the mesh z extent (zfix 2.1897;
+the old casitahouse-walls-fixed.stl 2.28).
 Camera pose = (x, y, z, yaw, pitch, roll): yaw = heading of the optical axis from +x (CCW, rad); pitch + = nose DOWN;
 roll + = clockwise in the image (right side down).  Lens = Brown radial k1, k2 on normalised coords (the twin's
 emu.realism.mast_truth model), principal point free or fixed.
 """
 from __future__ import annotations
+import os, sys
 import numpy as np, trimesh
 
 
-def load_casita(stl, drop_slivers=True):
-    m = trimesh.load(stl, force="mesh")
+def world_stl():
+    """default --stl: the resolved world mesh (env KEVIN_WALLS_STL overrides; src/world_params.py)."""
+    p = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
+    if p not in sys.path: sys.path.append(p)
+    import world_params
+    return world_params.walls_stl()
+
+
+def load_casita(stl=None, drop_slivers=True):
+    m = trimesh.load(stl or world_stl(), force="mesh")
     sc = 0.001 if (m.bounds[1] - m.bounds[0]).max() > 100 else 1.0
     m.apply_scale(sc); m.apply_translation(-m.bounds[0])
     if drop_slivers:   # zero-area faces left by the STL repair: invisible in a renderer, but rays hit them
