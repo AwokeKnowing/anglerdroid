@@ -11,6 +11,8 @@ import argparse, json, math, os, subprocess, sys, time
 import numpy as np
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))); sys.path[:0] = [REPO]
 BIN = os.path.join(REPO, "sim/rtabmap/rtabmap_kevin")
+RT = os.path.expanduser(os.environ.get("RTABMAP_RT", "~/slambench/z/rtabmap_rt/lib"))   # vendored ldd closure of the micromamba env (disk)
+ENV = dict(os.environ, LD_LIBRARY_PATH=RT + ":" + os.environ.get("LD_LIBRARY_PATH", "")) if os.path.isdir(RT) else None
 from scipy.spatial.transform import Rotation as Rot
 
 
@@ -46,7 +48,7 @@ def main():
                 sd = [0.005 * ds + 1e-4, 0.001 * ds + 1e-4, 1e-4, 1e-4, 1e-4, 2.12e-4 * math.sqrt(max(dt, 0)) + 0.0035 * dt + 1e-5]
                 rows.append([t, x, y, 0.0, *q, *sd]); prev = (t, x, y)
             of = os.path.join(wd, "odom.txt"); np.savetxt(of, np.array(rows), fmt="%.8f"); args.append(of)
-        t0 = time.time(); p = subprocess.run(args, cwd=wd, stdout=open(os.path.join(wd, "log.txt"), "w"), stderr=subprocess.STDOUT); wall = time.time() - t0
+        t0 = time.time(); p = subprocess.run(args, cwd=wd, stdout=open(os.path.join(wd, "log.txt"), "w"), stderr=subprocess.STDOUT, env=ENV); wall = time.time() - t0
         log = open(os.path.join(wd, "log.txt"), errors="replace").read(); line = [l for l in log.split("\n") if l.startswith("RTABMAP_KEVIN")]
         on = os.path.join(wd, "out_online.txt"); D = np.loadtxt(on, ndmin=2) if os.path.exists(on) and os.path.getsize(on) else np.zeros((0, 8))
         np.savetxt(os.path.join(res, name + ".tum"), D, fmt="%.6f")

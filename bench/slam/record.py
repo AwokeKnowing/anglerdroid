@@ -32,7 +32,12 @@ ROUTES = {
     "tour":  ["living room", "@spin", "kitchen", "@spin", "hallway", "bedroom", "@spinr", "hallway", "kitchen table", "living room", "@spin"],
     "spins": ["living room", "@spin", "@spinr", "@spin", "kitchen", "@spin", "@spin", "@spinr", "living room", "@spinr"],
     "long":  ["living room", "front door", "kitchen", "laundry", "hallway", "bedroom", "desk", "bedroom 2", "hallway", "kitchen table", "couch", "@spin", "living room"],
+    # genuinely different routes: own start pose (START) and path through other rooms
+    "bedrooms": ["hallway", "bedroom", "desk", "@spin", "bedroom", "hallway", "laundry", "kitchen", "@spinr", "kitchen table"],
+    "kitchen_loop": ["kitchen", "front door", "living room", "couch", "@spinr", "living room", "kitchen", "laundry", "@spin", "kitchen table"],
+    "door_long": ["living room", "kitchen table", "laundry", "hallway", "bedroom 2", "@spin", "hallway", "bedroom", "@spinr", "hallway"],
 }
+START = {"bedrooms": (5.0, 11.0, math.pi), "kitchen_loop": (5.6, 4.95, -math.pi / 2), "door_long": (0.9, 4.0, 0.0)}   # x, y, yaw (else env.start)
 
 
 def astar(free_cost, start, goal):
@@ -84,6 +89,8 @@ def main():
     sys.path.append(os.path.join(REPO, "src")); import twin_geometry as TG   # after the twin (its tire_profile wins, as in emu.world)
     for n in S.nodes: n.state = n.CLOSED; n.wd_en = False; n.ax.reset()
     e = S.env
+    if a.route in START:                   # new start pose: teleport (keeps ride height vs the ground) and plan from there
+        S.teleport(*START[a.route]); mujoco.mj_forward(m, d); e.start = START[a.route]
     # ---- route on the GT clearance map
     clr = e.clearance; need = 0.30
     cost = np.where(clr >= need, 1.0 + 0.6 / np.maximum(clr, 0.05), np.inf)

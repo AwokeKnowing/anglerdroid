@@ -152,31 +152,25 @@
    "_src": "black/white 30 cm checker (generated); colours ASSUMED"
   },
   "kitchen_floor": {
-   "color": [
-    0.55,
-    0.52,
-    0.47
-   ],
-   "roughness": 0.4,
-   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+   "tex": "Tiles107_1K-JPG",
+   "tile": 1.2,
+   "bump": 0.4,
+   "roughness": 0.35,
+   "_src": "ASSUMED tile (not yet seen in frames); was flat colour"
   },
   "laundry_floor": {
-   "color": [
-    0.55,
-    0.52,
-    0.47
-   ],
-   "roughness": 0.4,
-   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+   "tex": "Tiles107_1K-JPG",
+   "tile": 1.2,
+   "bump": 0.4,
+   "roughness": 0.35,
+   "_src": "ASSUMED tile (not yet seen in frames); was flat colour"
   },
   "bath_floor": {
-   "color": [
-    0.55,
-    0.52,
-    0.47
-   ],
-   "roughness": 0.4,
-   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+   "tex": "Marble012_1K-JPG",
+   "tile": 0.6,
+   "bump": 0.2,
+   "roughness": 0.2,
+   "_src": "ASSUMED tile (not yet seen in frames); was flat colour"
   },
   "fixture_diffuser": {
    "color": [
@@ -191,6 +185,102 @@
     40.0
    ],
    "_src": "ASSUMED flush dome LED diffuser luminance (relative; AE normalises)"
+  },
+  "twin_bedding": {
+   "tex": "Fabric061_1K-JPG",
+   "tint": [
+    0.9,
+    0.9,
+    0.95
+   ],
+   "tile": 0.8,
+   "bump": 0.5,
+   "roughness": 0.9,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_bedding2": {
+   "tex": "Fabric026_1K-JPG",
+   "tint": [
+    0.8,
+    0.85,
+    1.0
+   ],
+   "tile": 0.8,
+   "bump": 0.5,
+   "roughness": 0.9,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_floor_tile": {
+   "tex": "Tiles107_1K-JPG",
+   "tile": 1.2,
+   "bump": 0.4,
+   "roughness": 0.35,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_bath_tile": {
+   "tex": "Marble012_1K-JPG",
+   "tile": 0.6,
+   "bump": 0.2,
+   "roughness": 0.2,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_art0": {
+   "tex": "TwinArt0",
+   "normal": false,
+   "tile": 0.8,
+   "roughness": 0.5,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_art1": {
+   "tex": "TwinArt1",
+   "normal": false,
+   "tile": 0.8,
+   "roughness": 0.5,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_art3": {
+   "tex": "TwinArt3",
+   "normal": false,
+   "tile": 0.6,
+   "roughness": 0.5,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_poster": {
+   "tex": "TwinPoster1",
+   "normal": false,
+   "tile": 0.5,
+   "roughness": 0.6,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_cabinet": {
+   "tex": "TwinCabinet",
+   "normal": false,
+   "tile": 0.8,
+   "roughness": 0.5,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_book": {
+   "tex": "TwinBook",
+   "normal": false,
+   "tile": 0.3,
+   "roughness": 0.7,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_rug": {
+   "tex": "TwinRug1",
+   "normal": false,
+   "tile": 1.0,
+   "roughness": 0.95,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
+  },
+  "twin_switch": {
+   "color": [
+    0.85,
+    0.85,
+    0.82
+   ],
+   "roughness": 0.4,
+   "_src": "ASSUMED look for undressed rooms (CC0 ambientCG / emu procedural art)"
   }
  },
  "walls": {
@@ -552,6 +642,2342 @@
    ],
    "yaw_deg": 0,
    "mat": "screen"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.6,
+    6.2,
+    0.73
+   ],
+   "size": [
+    1.1,
+    0.75,
+    0.04
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.1,
+    5.875,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.1,
+    6.525,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.1,
+    5.875,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.1,
+    6.525,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    4.86,
+    6.2,
+    0.43
+   ],
+   "size": [
+    0.42,
+    0.42,
+    0.04
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    4.7,
+    6.04,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    4.7,
+    6.36,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.02,
+    6.04,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.02,
+    6.36,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    4.66,
+    6.2,
+    0.7
+   ],
+   "size": [
+    0.04,
+    0.4,
+    0.5
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.34,
+    6.2,
+    0.43
+   ],
+   "size": [
+    0.42,
+    0.42,
+    0.04
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.5,
+    6.36,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.5,
+    6.04,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.18,
+    6.36,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.18,
+    6.04,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    6.54,
+    6.2,
+    0.7
+   ],
+   "size": [
+    0.04,
+    0.4,
+    0.5
+   ],
+   "yaw_deg": 180.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.6,
+    5.62,
+    0.43
+   ],
+   "size": [
+    0.42,
+    0.42,
+    0.04
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.76,
+    5.46,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.44,
+    5.46,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.76,
+    5.78,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.44,
+    5.78,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.6,
+    5.42,
+    0.7
+   ],
+   "size": [
+    0.04,
+    0.4,
+    0.5
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.6,
+    6.78,
+    0.43
+   ],
+   "size": [
+    0.42,
+    0.42,
+    0.04
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.44,
+    6.94,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.76,
+    6.94,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.44,
+    6.62,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.76,
+    6.62,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    5.6,
+    6.98,
+    0.7
+   ],
+   "size": [
+    0.04,
+    0.4,
+    0.5
+   ],
+   "yaw_deg": -90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_fabric2",
+   "c": [
+    1.4,
+    12.7,
+    0.27
+   ],
+   "size": [
+    2.0,
+    1.6,
+    0.54
+   ],
+   "yaw_deg": 0.0,
+   "mat": "twin_bedding",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.7,
+    13.5,
+    0.73
+   ],
+   "size": [
+    1.2,
+    0.6,
+    0.04
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.15,
+    13.25,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.15,
+    13.75,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    3.25,
+    13.25,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    3.25,
+    13.75,
+    0.355
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.71
+   ],
+   "yaw_deg": 0.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_dark",
+   "c": [
+    2.7,
+    13.65,
+    0.95
+   ],
+   "size": [
+    0.54,
+    0.06,
+    0.36
+   ],
+   "yaw_deg": 0.0,
+   "mat": "screen",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.7,
+    12.95,
+    0.43
+   ],
+   "size": [
+    0.42,
+    0.42,
+    0.04
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.86,
+    12.79,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.54,
+    12.79,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.86,
+    13.11,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.54,
+    13.11,
+    0.205
+   ],
+   "size": [
+    0.05,
+    0.05,
+    0.41
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_wood",
+   "c": [
+    2.7,
+    12.75,
+    0.7
+   ],
+   "size": [
+    0.04,
+    0.4,
+    0.5
+   ],
+   "yaw_deg": 90.0,
+   "mat": "wood",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_fabric2",
+   "c": [
+    5.6,
+    12.3,
+    0.27
+   ],
+   "size": [
+    2.0,
+    1.6,
+    0.54
+   ],
+   "yaw_deg": 0.0,
+   "mat": "twin_bedding2",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    2.0,
+    10.3245,
+    1.5
+   ],
+   "size": [
+    0.016,
+    0.8,
+    0.6
+   ],
+   "yaw_deg": -90.0,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    5.0,
+    9.9297,
+    1.5
+   ],
+   "size": [
+    0.016,
+    0.6,
+    0.45
+   ],
+   "yaw_deg": -90.0,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    2.0,
+    8.5317,
+    1.5
+   ],
+   "size": [
+    0.016,
+    0.6,
+    0.6
+   ],
+   "yaw_deg": 90.0,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    0.213,
+    11.2,
+    1.96
+   ],
+   "size": [
+    0.18,
+    1.0,
+    0.2
+   ],
+   "yaw_deg": 180.0,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_tile",
+   "c": [
+    7.099,
+    6.6,
+    1.2
+   ],
+   "size": [
+    0.008,
+    1.8,
+    0.6
+   ],
+   "yaw_deg": 0.0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_cabinet",
+   "c": [
+    5.0,
+    6.7841,
+    1.82
+   ],
+   "size": [
+    0.34,
+    1.6,
+    0.66
+   ],
+   "yaw_deg": 90.0,
+   "mat": "twin_cabinet",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_tile",
+   "c": [
+    5.0,
+    7.295,
+    1.2
+   ],
+   "size": [
+    0.008,
+    1.6,
+    0.6
+   ],
+   "yaw_deg": 90.0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_dark",
+   "c": [
+    2.4,
+    13.4,
+    0.77
+   ],
+   "size": [
+    0.4,
+    0.28,
+    0.024
+   ],
+   "yaw_deg": 11.459,
+   "mat": "screen",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    6.228,
+    7.7584,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -8.513,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    6.228,
+    7.7921,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -1.637,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.7295,
+    9.0749,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 99.814,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    5.5677,
+    9.075,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 106.689,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.7211,
+    7.9833,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 171.515,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    4.7211,
+    7.8345,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 178.391,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    4.7228,
+    8.177,
+    1.5871
+   ],
+   "size": [
+    0.008,
+    0.4555,
+    0.5107
+   ],
+   "yaw_deg": 162.921,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.9743,
+    7.428,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 273.732,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    6.0197,
+    7.428,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 280.608,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    5.9307,
+    7.8432,
+    1.7973
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 294.025,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    6.0813,
+    7.7707,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 347.399,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    6.2058,
+    7.7692,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 353.129,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    6.218,
+    7.7731,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 354.275,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    3.5396,
+    11.1959,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -6.772,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    3.5396,
+    11.4539,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 0.103,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    1.6646,
+    13.9396,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 83.934,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    0.125,
+    11.2613,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 188.419,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    1.5807,
+    10.3184,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 279.074,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    1.7234,
+    10.3183,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 285.95,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    1.9053,
+    13.8633,
+    1.6683
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 78.173,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    2.7771,
+    14.6242,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 66.547,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    2.1927,
+    13.9303,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 72.277,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    2.1383,
+    13.9302,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 73.423,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    3.5396,
+    11.0987,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -3.535,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    3.5396,
+    11.2957,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 3.34,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    3.5389,
+    12.3774,
+    1.5765
+   ],
+   "size": [
+    0.008,
+    0.4743,
+    0.5018
+   ],
+   "yaw_deg": 35.693,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    2.5718,
+    14.633,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 78.928,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    2.101,
+    13.9396,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 85.803,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    0.1249,
+    10.8428,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 191.377,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    0.1248,
+    10.6145,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 198.253,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    2.0228,
+    10.3184,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 277.927,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    2.133,
+    10.3183,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 284.803,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    3.4626,
+    11.4433,
+    1.8698
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 8.851,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    7.1011,
+    10.6843,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -8.544,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.6961,
+    12.9035,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 99.07,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    4.4561,
+    12.9036,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 105.946,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    3.6684,
+    10.8367,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 186.993,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    3.6683,
+    10.6712,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 193.869,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    3.6704,
+    11.0372,
+    1.3975
+   ],
+   "size": [
+    0.008,
+    0.3232,
+    0.4054
+   ],
+   "yaw_deg": 178.399,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.098,
+    9.9237,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 275.205,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    5.2304,
+    9.9236,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 282.081,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    6.3158,
+    9.2054,
+    1.5632
+   ],
+   "size": [
+    0.008,
+    0.3543,
+    0.4946
+   ],
+   "yaw_deg": 306.249,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    4.0379,
+    12.8951,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 116.917,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    3.7854,
+    12.8958,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 122.647,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    3.7311,
+    12.896,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 123.793,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    6.7833,
+    3.5379,
+    1.5366
+   ],
+   "size": [
+    0.008,
+    0.31,
+    0.4202
+   ],
+   "yaw_deg": 32.15,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    3.5397,
+    12.2797,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -10.648,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    3.5396,
+    12.3578,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -3.772,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    3.1292,
+    14.6329,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 84.14,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    2.8604,
+    14.6329,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 91.016,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    0.1249,
+    12.8925,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 169.936,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_poster1",
+   "c": [
+    0.1267,
+    13.3365,
+    1.5676
+   ],
+   "size": [
+    0.008,
+    0.4591,
+    0.4479
+   ],
+   "yaw_deg": 161.342,
+   "mat": "twin_poster",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    2.5458,
+    10.3184,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 260.344,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    1.1602,
+    10.3764,
+    1.7412
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 229.313,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    0.8894,
+    10.3243,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 225.913,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    1.2581,
+    10.3252,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 231.643,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    1.3247,
+    10.3254,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 232.789,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    2.0013,
+    8.5377,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 89.951,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    1.8159,
+    8.5377,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 96.826,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    0.125,
+    6.9206,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 182.424,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.2059,
+    4.3894,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 310.197,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    6.5291,
+    5.5367,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -9.258,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    7.101,
+    5.7835,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -2.382,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.1937,
+    6.7837,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 96.859,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    4.2404,
+    4.1174,
+    1.7999
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 268.084,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    4.4809,
+    4.2152,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 276.129,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    4.62,
+    4.3762,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 281.859,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    4.6452,
+    4.4054,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 283.005,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    7.101,
+    4.9187,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -1.195,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    7.101,
+    5.0993,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 5.681,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.4537,
+    6.7251,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 94.711,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    5.1188,
+    7.2971,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 101.586,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.8751,
+    4.2961,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 222.05,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    4.9335,
+    4.3479,
+    1.7634
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 222.097,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    6.228,
+    7.7998,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": -0.014,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    6.228,
+    7.9237,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 6.862,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.4523,
+    9.0749,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 78.804,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    5.2963,
+    9.0748,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 85.679,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    4.7211,
+    7.8077,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 179.079,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    4.7211,
+    7.7501,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 185.954,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_outlet",
+   "c": [
+    5.143,
+    7.428,
+    0.3
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 261.294,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_switch",
+   "c": [
+    5.1881,
+    7.428,
+    1.2
+   ],
+   "size": [
+    0.004,
+    0.07,
+    0.115
+   ],
+   "yaw_deg": 268.17,
+   "mat": "twin_switch",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_book",
+   "c": [
+    5.1592,
+    8.9968,
+    1.8767
+   ],
+   "size": [
+    0.16,
+    0.8,
+    0.19
+   ],
+   "yaw_deg": 91.952,
+   "mat": "twin_book",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art0",
+   "c": [
+    5.2,
+    7.7824,
+    1.55
+   ],
+   "size": [
+    0.024,
+    0.2,
+    0.25
+   ],
+   "yaw_deg": 270.118,
+   "mat": "twin_art0",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art1",
+   "c": [
+    5.2018,
+    7.7823,
+    1.45
+   ],
+   "size": [
+    0.024,
+    0.25,
+    0.18
+   ],
+   "yaw_deg": 275.847,
+   "mat": "twin_art1",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_decor_art3",
+   "c": [
+    5.2022,
+    7.7823,
+    1.72
+   ],
+   "size": [
+    0.024,
+    0.15,
+    0.12
+   ],
+   "yaw_deg": 276.993,
+   "mat": "twin_art3",
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    1.325,
+    8.652,
+    0.6
+   ],
+   "size": [
+    2.45,
+    0.004,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    1.325,
+    9.948,
+    0.6
+   ],
+   "size": [
+    2.45,
+    0.004,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    0.102,
+    9.3,
+    0.6
+   ],
+   "size": [
+    0.004,
+    1.3,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    2.548,
+    9.3,
+    0.6
+   ],
+   "size": [
+    0.004,
+    1.3,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    5.9,
+    9.102,
+    0.6
+   ],
+   "size": [
+    2.5,
+    0.004,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    5.9,
+    9.948,
+    0.6
+   ],
+   "size": [
+    2.5,
+    0.004,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    4.652,
+    9.525,
+    0.6
+   ],
+   "size": [
+    0.004,
+    0.85,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_bath_wainscot",
+   "c": [
+    7.148,
+    9.525,
+    0.6
+   ],
+   "size": [
+    0.004,
+    0.85,
+    1.2
+   ],
+   "yaw_deg": 0,
+   "mat": "twin_bath_tile",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed (sits at the bath zone edge = wall line, ASSUMED)"
+  },
+  {
+   "name": "twin_hall_runner",
+   "c": [
+    2.0,
+    7.0,
+    0.0015
+   ],
+   "size": [
+    0.8,
+    2.4,
+    0.003
+   ],
+   "yaw_deg": 90,
+   "mat": "twin_rug",
+   "_src": "ASSUMED surface-only dressing (<= 1 cm proud, cannot disagree with sim depth); not observed"
   }
  ],
  "drapes": [
@@ -659,6 +3085,28 @@
     0
    ],
    "yaw_deg": 180
+  },
+  {
+   "name": "twin_plant0",
+   "asset": "ph/potted_plant_02/potted_plant_02_1k.usdc",
+   "pos": [
+    0.45,
+    10.45,
+    0
+   ],
+   "yaw_deg": 0,
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
+  },
+  {
+   "name": "twin_plant1",
+   "asset": "ph/potted_plant_02/potted_plant_02_1k.usdc",
+   "pos": [
+    6.7,
+    10.35,
+    0
+   ],
+   "yaw_deg": 0,
+   "_src": "ASSUMED (twin mirror): pose/size = MuJoCo twin geom (emu/envs.py env_casita / realism.casita_decor); look not observed"
   }
  ],
  "lights": [
