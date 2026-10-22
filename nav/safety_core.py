@@ -413,11 +413,12 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
     s1 = s2 = 0; cap1p = None; cap2 = None; cap2p = None; P2 = np.zeros((0, 2), np.float32); r1 = {}; r2 = {}; n2 = 0; lat2 = None
     ramp_now = RAMP_NORMAL; t_prev = None; brakes = 0; viz_t = 0.0; ps = 0; n_stuck = 0; errs = 0
     lchk = LIM.LimitCheck(TRACK_M)                                 # brain commands beyond the SAFETY accel limits = planner bug
+    t_wr = 0.0; t_end_prev = None                                  # previous tick's state/viz/log write time, loop end
     while True:
         try:
             if os.getppid() != parent_pid: wb.twist(0.0, 0.0); wb.shutdown(); return     # brain gone -> stop, exit
             fs = cam.wait_frameset(int(CADENCE_MAX_S * 1e3))           # next RS1 frame, or wake up and stop
-            t_recv = time.monotonic(); new1 = fs is not None and cam.ingest(fs)
+            t_recv = time.monotonic(); new1 = fs is not None and cam.ingest(fs); t_ing = time.monotonic()
             if new1:
                 cam.publish(); B["rs1"].write(verts=cam.verts, n=len(cam.verts), stamp=cam.depth_stamp, t_recv=t_recv)
             t_dec = time.monotonic()
@@ -427,6 +428,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
             sq, c = B["cmd"].try_read()
             if sq is None: v_c = w_c = 0.0; t_c = -1e9; n_stuck += 1      # cmd writer paused mid-write -> treated as stale
             else: v_c, w_c, t_c = float(c["v"][0]), float(c["w"][0]), float(c["t"][0])
+            t_rd = time.monotonic()
             code = None
             if t_dec - t_c > CMD_STALE_S: v_c = w_c = 0.0; code_c = "cmd_stale"
             else:
@@ -470,6 +472,7 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
                        and cap2p + 1.0 / HZ <= ref + 0.5 / HZ and cap2p + 1.0 / HZ + lat2 <= t_end)
                 if not due or time.monotonic() >= t_end: break
                 time.sleep(0.0005)
+            t_pair = time.monotonic()
             if best is not None:
                 n2, j, cap2 = best
                 per2 = None if cap2p is None else cap2 - cap2p; cap2p = cap2
@@ -508,9 +511,14 @@ def core_main(rs1_serial, rs2_intr, rs2_shape, parent_pid, log_path=None):
                 viz_t = t_dec
             if LOG is not None:
                 LOG.write(json.dumps([round(x, 4) if isinstance(x, float) and math.isfinite(x) else (None if isinstance(x, float) else x) for x in
-                                      [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, t_dec - t_recv, tB - tA, tC - tB, tD - tC, t_sent - tD]]) + "\n")
+                                      [t_dec, period, age1, age2, v_c, w_c, v_m, w_m, v_o, w_o, code, ramp, free, need, sd0, bf, br, npts, t_sent, per, per2, valid, t_dec - t_recv, tB - tA, tC - tB, tD - tC, t_sent - tD]]
+                                     # 27.. (us resolution): ingest (copy+decimate+pointcloud), publish+rs1 bus, wheel/CAN+cmd read,
+                                     # RS2 pairing wait, rs2.points, prev tick state/viz/log write, frame wait
+                                     + [round(x, 6) for x in (t_ing - t_recv, t_dec - t_ing, t_rd - t_dec, t_pair - tB, tC - t_pair, t_wr,
+                                                              t_recv - t_end_prev if t_end_prev is not None else 0.0)]) + "\n")
                 ps += 1
                 if ps % 30 == 0: LOG.flush()
+            t_end_prev = time.monotonic(); t_wr = t_end_prev - t_sent
             errs = 0
         except Exception:
             # never die silently: zero the wheels, report, keep looping; persistent failure -> zero + exit loudly (nav
