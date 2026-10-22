@@ -81,6 +81,32 @@ def resolve(world=None, env=None):
     return R
 
 
+# ---------------------------------------------------------------- floor zones (pure stdlib)
+def floor_zones(world=None, env=None):
+    """world.json "floor_zones" -> dict(default=<material>, zones=[dict(name, material, poly=[[x, y], ...])]) in the world
+    frame; validated (>= 3 vertices, positive area = counter-clockwise).  Worlds without the block: everything 'carpet'."""
+    cfg = json.load(open(config_path(world, env)))
+    F = cfg.get("floor_zones") or {"default": "carpet", "zones": []}
+    for z in F.get("zones", []):
+        P = z["poly"]
+        if len(P) < 3: raise WorldConfigError("floor zone %s: < 3 vertices" % z["name"])
+        a = sum(P[i][0] * P[(i + 1) % len(P)][1] - P[(i + 1) % len(P)][0] * P[i][1] for i in range(len(P))) / 2
+        if a <= 0: raise WorldConfigError("floor zone %s: polygon must be counter-clockwise (area %.3f)" % (z["name"], a))
+    return {"default": F.get("default", "carpet"), "zones": [dict(name=z["name"], material=z["material"], poly=[list(map(float, q)) for q in z["poly"]]) for z in F.get("zones", [])]}
+
+
+def floor_material_at(x, y, F=None):
+    """material of the floor at world (x, y): first zone containing the point (even-odd test), else the default."""
+    F = F or floor_zones()
+    for z in F["zones"]:
+        P = z["poly"]; inside = False
+        for i in range(len(P)):
+            (x0, y0), (x1, y1) = P[i], P[i - 1]
+            if (y0 > y) != (y1 > y) and x < (x1 - x0) * (y - y0) / (y1 - y0) + x0: inside = not inside
+        if inside: return z["material"]
+    return F["default"]
+
+
 # ---------------------------------------------------------------- counters (pure stdlib)
 def _num(c, d, k, default=None): return c[k] if k in c else d.get(k, default)
 

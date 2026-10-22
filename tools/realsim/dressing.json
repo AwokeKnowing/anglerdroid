@@ -1,0 +1,803 @@
+{
+ "_doc": "Casita dressing for tools/realsim/usd_scene.py. MEASURED: lamp xy (back-projected saturated blobs, final_poses.py), carpet/wall chroma ratios (median linear colours of model-classified pixels in mast frames). ASSUMED: absolute albedos, lamp power/kelvin, furniture placement (eyeballed from mast frames), batten pitch. Futon/glider/table/rug/door/counter blockout and drapes ported from the Cycles prototype (placed there by floor back-projection of pose-A pixels).",
+ "materials": {
+  "wall_paint": {
+   "tex": "Plaster001_1K-JPG",
+   "tint": [
+    1.18,
+    1.22,
+    1.2
+   ],
+   "tile": 1.0,
+   "bump": 0.3,
+   "roughness": 0.85
+  },
+  "wallpaper": {
+   "tex": "DamaskPlaceholder",
+   "normal": false,
+   "roughness": 0.7,
+   "tile": 0.6
+  },
+  "carpet": {
+   "tex": "CarpetRidged",
+   "color_suffix": "_Beige.jpg",
+   "tint": [
+    0.45,
+    0.53,
+    0.52
+   ],
+   "tile": 2.0,
+   "bump": 1.0,
+   "_src": "ambientCG Carpet011 recoloured beige, 4x4 re-tiled with baked ridges (carpet_ridges.py)",
+   "_tint_src": "matched: real carpet/wall median ratio and chroma (colour_match.py)"
+  },
+  "ceiling": {
+   "color": [
+    0.92,
+    0.92,
+    0.91
+   ],
+   "roughness": 0.9
+  },
+  "counter_dark": {
+   "color": [
+    0.05,
+    0.045,
+    0.04
+   ],
+   "roughness": 0.35
+  },
+  "counter_white": {
+   "color": [
+    0.78,
+    0.78,
+    0.75
+   ],
+   "roughness": 0.4
+  },
+  "sheer": {
+   "color": [
+    0.85,
+    0.84,
+    0.8
+   ],
+   "roughness": 0.9,
+   "opacity": 0.85
+  },
+  "white_table": {
+   "color": [
+    0.8,
+    0.8,
+    0.78
+   ],
+   "roughness": 0.5
+  },
+  "black": {
+   "color": [
+    0.03,
+    0.03,
+    0.03
+   ],
+   "roughness": 0.4
+  },
+  "screen": {
+   "color": [
+    0.02,
+    0.02,
+    0.025
+   ],
+   "roughness": 0.1,
+   "emissive": [
+    0.05,
+    0.07,
+    0.1
+   ]
+  },
+  "blinds": {
+   "color": [
+    0.8,
+    0.8,
+    0.78
+   ],
+   "roughness": 0.9,
+   "_src": "ASSUMED white blinds/drapes (night, closed)"
+  },
+  "wood": {
+   "tex": "Wood051_1K-JPG",
+   "tint": [
+    0.75,
+    0.45,
+    0.25
+   ],
+   "tile": 0.33,
+   "bump": 0.3,
+   "_src": "Cycles prototype (pine futon / oak glider)"
+  },
+  "cushion_cream": {
+   "color": [
+    0.62,
+    0.58,
+    0.5
+   ],
+   "roughness": 0.85
+  },
+  "pillow_orange": {
+   "color": [
+    0.55,
+    0.12,
+    0.04
+   ],
+   "roughness": 0.9
+  },
+  "rug_zigzag": {
+   "color": [
+    0.25,
+    0.25,
+    0.27
+   ],
+   "roughness": 0.9
+  },
+  "door_white": {
+   "color": [
+    0.78,
+    0.77,
+    0.72
+   ],
+   "roughness": 0.4
+  },
+  "checker_tile": {
+   "tex": "Checker30cm",
+   "tile": 0.6,
+   "roughness": 0.35,
+   "_src": "black/white 30 cm checker (generated); colours ASSUMED"
+  },
+  "kitchen_floor": {
+   "color": [
+    0.55,
+    0.52,
+    0.47
+   ],
+   "roughness": 0.4,
+   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+  },
+  "laundry_floor": {
+   "color": [
+    0.55,
+    0.52,
+    0.47
+   ],
+   "roughness": 0.4,
+   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+  },
+  "bath_floor": {
+   "color": [
+    0.55,
+    0.52,
+    0.47
+   ],
+   "roughness": 0.4,
+   "_src": "ASSUMED light vinyl/tile; finish not yet seen in frames"
+  },
+  "fixture_diffuser": {
+   "color": [
+    0.9,
+    0.9,
+    0.9
+   ],
+   "roughness": 0.6,
+   "emissive": [
+    40.0,
+    40.0,
+    40.0
+   ],
+   "_src": "ASSUMED flush dome LED diffuser luminance (relative; AE normalises)"
+  }
+ },
+ "walls": {
+  "accent_rule": {
+   "min_abs_nx": 0.3,
+   "min_abs_ny": 0.3
+  }
+ },
+ "ceiling_battens": {
+  "x0": 0.0,
+  "pitch": 0.61,
+  "n_min": 0,
+  "n_max": 12,
+  "w": 0.05,
+  "h": 0.012
+ },
+ "boxes": [
+  {
+   "name": "futon_frame",
+   "c": [
+    4.16,
+    3.393,
+    0.2
+   ],
+   "size": [
+    2.05,
+    0.85,
+    0.3
+   ],
+   "yaw_deg": 136.53,
+   "mat": "wood"
+  },
+  {
+   "name": "futon_back",
+   "c": [
+    4.383,
+    3.629,
+    0.62
+   ],
+   "size": [
+    2.05,
+    0.12,
+    0.55
+   ],
+   "yaw_deg": 136.53,
+   "mat": "wood"
+  },
+  {
+   "name": "futon_arm-1",
+   "c": [
+    4.86,
+    2.729,
+    0.45
+   ],
+   "size": [
+    0.12,
+    0.85,
+    0.4
+   ],
+   "yaw_deg": 136.53,
+   "mat": "wood"
+  },
+  {
+   "name": "futon_arm1",
+   "c": [
+    3.459,
+    4.057,
+    0.45
+   ],
+   "size": [
+    0.12,
+    0.85,
+    0.4
+   ],
+   "yaw_deg": 136.53,
+   "mat": "wood"
+  },
+  {
+   "name": "futon_seat",
+   "c": [
+    4.139,
+    3.372,
+    0.42
+   ],
+   "size": [
+    1.7899999999999998,
+    0.73,
+    0.14
+   ],
+   "yaw_deg": 136.53,
+   "mat": "cushion_cream"
+  },
+  {
+   "name": "futon_backcush",
+   "c": [
+    4.75,
+    3.144,
+    0.66
+   ],
+   "size": [
+    0.58,
+    0.18,
+    0.42
+   ],
+   "yaw_deg": 136.53,
+   "mat": "cushion_cream"
+  },
+  {
+   "name": "futon_backcush",
+   "c": [
+    4.314,
+    3.557,
+    0.66
+   ],
+   "size": [
+    0.58,
+    0.18,
+    0.42
+   ],
+   "yaw_deg": 136.53,
+   "mat": "cushion_cream"
+  },
+  {
+   "name": "futon_backcush",
+   "c": [
+    3.879,
+    3.969,
+    0.66
+   ],
+   "size": [
+    0.58,
+    0.18,
+    0.42
+   ],
+   "yaw_deg": 136.53,
+   "mat": "cushion_cream"
+  },
+  {
+   "name": "futon_pillow",
+   "c": [
+    4.79,
+    2.968,
+    0.62
+   ],
+   "size": [
+    0.42,
+    0.14,
+    0.38
+   ],
+   "yaw_deg": 127.93,
+   "mat": "pillow_orange"
+  },
+  {
+   "name": "futon_pillow",
+   "c": [
+    3.701,
+    4.0,
+    0.62
+   ],
+   "size": [
+    0.42,
+    0.14,
+    0.38
+   ],
+   "yaw_deg": 145.12,
+   "mat": "pillow_orange"
+  },
+  {
+   "name": "table_top",
+   "c": [
+    1.55,
+    3.08,
+    0.74
+   ],
+   "size": [
+    0.76,
+    1.83,
+    0.04
+   ],
+   "yaw_deg": 0,
+   "mat": "white_table"
+  },
+  {
+   "name": "table_leg",
+   "c": [
+    1.22,
+    2.25,
+    0.36
+   ],
+   "size": [
+    0.03,
+    0.03,
+    0.72
+   ],
+   "yaw_deg": 0,
+   "mat": "white_table"
+  },
+  {
+   "name": "table_leg",
+   "c": [
+    1.22,
+    3.92,
+    0.36
+   ],
+   "size": [
+    0.03,
+    0.03,
+    0.72
+   ],
+   "yaw_deg": 0,
+   "mat": "white_table"
+  },
+  {
+   "name": "table_leg",
+   "c": [
+    1.88,
+    2.25,
+    0.36
+   ],
+   "size": [
+    0.03,
+    0.03,
+    0.72
+   ],
+   "yaw_deg": 0,
+   "mat": "white_table"
+  },
+  {
+   "name": "table_leg",
+   "c": [
+    1.88,
+    3.92,
+    0.36
+   ],
+   "size": [
+    0.03,
+    0.03,
+    0.72
+   ],
+   "yaw_deg": 0,
+   "mat": "white_table"
+  },
+  {
+   "name": "glider_arm",
+   "c": [
+    4.25,
+    2.05,
+    0.65
+   ],
+   "size": [
+    0.1,
+    0.75,
+    0.06
+   ],
+   "yaw_deg": 14.32,
+   "mat": "wood"
+  },
+  {
+   "name": "glider_seat",
+   "c": [
+    4.55,
+    2.1,
+    0.45
+   ],
+   "size": [
+    0.55,
+    0.65,
+    0.12
+   ],
+   "yaw_deg": 14.32,
+   "mat": "cushion_cream"
+  },
+  {
+   "name": "glider_back",
+   "c": [
+    4.8,
+    2.17,
+    0.75
+   ],
+   "size": [
+    0.08,
+    0.65,
+    0.55
+   ],
+   "yaw_deg": 14.32,
+   "mat": "wood"
+  },
+  {
+   "name": "door_slab",
+   "c": [
+    0.5,
+    4.05,
+    0.99
+   ],
+   "size": [
+    0.04,
+    0.8000000000000003,
+    1.98
+   ],
+   "yaw_deg": 0,
+   "mat": "door_white"
+  },
+  {
+   "name": "counter_wall",
+   "c": [
+    1.42,
+    4.7,
+    0.49
+   ],
+   "size": [
+    1.66,
+    0.4,
+    0.98
+   ],
+   "yaw_deg": 0,
+   "mat": "wall_paint"
+  },
+  {
+   "name": "counter_top",
+   "c": [
+    1.42,
+    4.66,
+    1.0
+   ],
+   "size": [
+    1.72,
+    0.52,
+    0.04
+   ],
+   "yaw_deg": 0,
+   "mat": "counter_dark"
+  },
+  {
+   "name": "monitor_l",
+   "c": [
+    2.05,
+    0.33,
+    1.02
+   ],
+   "size": [
+    0.6,
+    0.04,
+    0.36
+   ],
+   "yaw_deg": 0,
+   "mat": "screen"
+  },
+  {
+   "name": "monitor_r",
+   "c": [
+    2.7,
+    0.33,
+    1.02
+   ],
+   "size": [
+    0.6,
+    0.04,
+    0.36
+   ],
+   "yaw_deg": 0,
+   "mat": "screen"
+  }
+ ],
+ "drapes": [
+  {
+   "rail": [
+    0.9,
+    0.2,
+    2.5,
+    0.2
+   ],
+   "z0": 0.2,
+   "z1": 2.15,
+   "depth": 0.06,
+   "mat": "sheer",
+   "_src": "Cycles prototype: south windows x 1.0-2.4"
+  },
+  {
+   "rail": [
+    5.3,
+    0.2,
+    6.9,
+    0.2
+   ],
+   "z0": 0.2,
+   "z1": 2.15,
+   "depth": 0.06,
+   "mat": "sheer",
+   "_src": "Cycles prototype: south windows x 5.4-6.8"
+  }
+ ],
+ "furniture": [
+  {
+   "name": "frame1",
+   "asset": "ph/hanging_picture_frame_01/hanging_picture_frame_01_1k.usdc",
+   "pos": [
+    4.79,
+    3.424,
+    1.5
+   ],
+   "yaw_deg": -41.06,
+   "scale": 0.6,
+   "_src": "room face of the diagonal wall ray-probed in the walls STL; arrangement eyeballed from mast frames"
+  },
+  {
+   "name": "frame2",
+   "asset": "ph/hanging_picture_frame_03/hanging_picture_frame_03_1k.usdc",
+   "pos": [
+    4.337,
+    3.818,
+    1.45
+   ],
+   "yaw_deg": -41.06,
+   "_src": "room face of the diagonal wall ray-probed in the walls STL; arrangement eyeballed from mast frames"
+  },
+  {
+   "name": "frame3",
+   "asset": "ph/hanging_picture_frame_02/hanging_picture_frame_02_1k.usdc",
+   "pos": [
+    3.96,
+    4.147,
+    1.5
+   ],
+   "yaw_deg": -41.06,
+   "scale": 0.6,
+   "_src": "room face of the diagonal wall ray-probed in the walls STL; arrangement eyeballed from mast frames"
+  },
+  {
+   "name": "plant",
+   "asset": "ph/potted_plant_02/potted_plant_02_1k.usdc",
+   "pos": [
+    3.442,
+    4.161,
+    0
+   ],
+   "yaw_deg": -41.06,
+   "_src": "room face of the diagonal wall ray-probed in the walls STL; arrangement eyeballed from mast frames"
+  },
+  {
+   "name": "couch",
+   "asset": "ph/Sofa_01/Sofa_01_1k.usdc",
+   "pos": [
+    0.6,
+    2.0,
+    0
+   ],
+   "yaw_deg": 90
+  },
+  {
+   "name": "pillows",
+   "asset": "ph/throw_pillows_01/throw_pillows_01_1k.usdc",
+   "pos": [
+    0.62,
+    2.0,
+    0.42
+   ],
+   "yaw_deg": 90,
+   "scale": 0.8
+  },
+  {
+   "name": "desk",
+   "asset": "ph/metal_office_desk/metal_office_desk_1k.usdc",
+   "pos": [
+    2.4,
+    0.55,
+    0
+   ],
+   "yaw_deg": 180
+  }
+ ],
+ "lights": [
+  {
+   "name": "lr_east",
+   "xy": [
+    5.17,
+    2.2
+   ],
+   "intensity": 40000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "measured: A looks + t5_719 blobs",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights); real frames are cool grey-white",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "lr_west",
+   "xy": [
+    1.15,
+    1.08
+   ],
+   "intensity": 40000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "measured: 5 group-B blobs, spread +-0.25 m",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights); real frames are cool grey-white",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "west_mid",
+   "xy": [
+    1.1,
+    4.4
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "measured, low confidence (spread +-0.5 m)",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights); real frames are cool grey-white",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "hall",
+   "xy": [
+    0.55,
+    6.9
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "measured: 4 A looks",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights); real frames are cool grey-white",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "kitchen",
+   "xy": [
+    5.3,
+    5.2
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "ASSUMED (emu/realism.py), not observed",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights); real frames are cool grey-white",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  }
+ ],
+ "cameras": [
+  {
+   "name": "mast",
+   "w": 800,
+   "h": 600,
+   "f": 252.95249,
+   "cx": 399.75,
+   "cy": 299.75,
+   "k1": -0.028701410450345806
+  },
+  {
+   "name": "rs2_640",
+   "w": 640,
+   "h": 480,
+   "f": 625.2,
+   "cx": 319.5,
+   "cy": 239.5
+  },
+  {
+   "name": "rs2_848",
+   "w": 848,
+   "h": 480,
+   "f": 625.2,
+   "cx": 423.5,
+   "cy": 239.5
+  }
+ ],
+ "render": {
+  "omni:rtx:rtpt:spp": [
+   "int",
+   1
+  ],
+  "omni:rtx:rtpt:maxBounces": [
+   "uint",
+   3
+  ]
+ },
+ "outer_shell": {
+  "mat": "blinds",
+  "margin": 0.06
+ },
+ "carpet_ridges": {
+  "enabled": true,
+  "amp_m": 0.005,
+  "width_m": 0.08,
+  "length_m": 1.0,
+  "density_per_m2": 2.0,
+  "dir_deg": 90.0,
+  "dir_jitter_deg": 6,
+  "seed": 7,
+  "_src": "shape from James (1 cm x 8 cm x 100 cm, lengthwise); amplitude 5 mm set between his estimate and the 21 Oct RS2 measurement (p1-p99 4.6-11 mm, RMS 1-1.7 mm); direction ASSUMED along the house long axis (+y): not resolved by the measurement"
+ }
+}

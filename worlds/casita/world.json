@@ -12,5 +12,41 @@
   "counters": "worlds/casita/counters.json",
   "counters_note": "2026-10-21: counters/built-ins as parameterised solids (src/world_params.py counter_parts / house_stl); the walls STL is unchanged",
   "ceiling_above_wall_top_m": 0.01,
-  "lamp_below_wall_top_m": 0.13
+  "lamp_below_wall_top_m": 0.13,
+  "floor_zones": {
+    "_doc": "Floor finish per region (James 2026-10-21: whole house carpeted EXCEPT the checkered area by the front door, the kitchen, the bathrooms and the laundry room by the back door = hard floors). World frame of world_params (walls bbox min at the origin, x east, y north, m). Polygons are simple (non-self-intersecting), counter-clockwise; anything outside every zone is 'default'. Extents are ASSUMED from the walls plan + mast frames (room boundaries at doorways/wall lines) until James confirms; materials name tools/realsim/dressing.json looks (renderer) and can drive friction in the sim later.",
+    "default": "carpet",
+    "zones": [
+      {
+        "name": "entry_checker",
+        "material": "checker_tile",
+        "poly": [[0.5, 3.0], [1.9, 3.0], [1.9, 4.9], [0.5, 4.9]],
+        "note": "checkered tiles inside the front door (x=0.53, y 3.65-4.45): union of the sim's entry plate (emu/envs.py hard_zones x 0-1.3, y 3.0-4.9) and the checker seen in the mast frames (back-projected to x 1.07-1.83, y 3.5-4.8)"
+      },
+      {
+        "name": "kitchen",
+        "material": "kitchen_floor",
+        "poly": [[3.55, 4.67], [5.32, 2.99], [7.2, 2.99], [7.2, 7.3], [3.4, 7.3], [3.4, 4.81]],
+        "note": "NE of the diagonal (damask) wall up to the laundry wall (the sim plate emu/envs.py x 3.4-7.0, y 3.0-7.3 is a rectangle that also covers the living-room triangle SW of that wall, where the real futon stands on carpet); west edge at the hallway ASSUMED x=3.4"
+      },
+      {
+        "name": "laundry",
+        "material": "laundry_floor",
+        "poly": [[4.6, 7.3], [7.2, 7.3], [7.2, 8.4], [4.6, 8.4]],
+        "note": "laundry by the back door (= sim plate x 4.6-7.0, y 7.3-8.4, extended to the east wall)"
+      },
+      {
+        "name": "bath_1",
+        "material": "bath_floor",
+        "poly": [[0.1, 8.65], [2.55, 8.65], [2.55, 9.95], [0.1, 9.95]],
+        "note": "ASSUMED: room between the hallway and the bedroom on the west side"
+      },
+      {
+        "name": "bath_2",
+        "material": "bath_floor",
+        "poly": [[4.65, 9.1], [7.15, 9.1], [7.15, 9.95], [4.65, 9.95]],
+        "note": "ASSUMED: room south of bedroom 2"
+      }
+    ]
+  }
 }
