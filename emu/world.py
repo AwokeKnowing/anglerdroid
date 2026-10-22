@@ -114,9 +114,10 @@ def _intr(w, h, fovy):
 #   offset, slick floor (tire friction x0.6 -> real skid in pivots / on contact).
 NOISE_LEVELS = {
     "ideal":       dict(floor=0, r_err=0.0,   tr_err=0.0,  quant=0,     g_white=0.003, g_bias=0.002,  g_scale=0.0,  g_rw=0.0,    g_drift=0.0,  a_white=0.03, imu_dt=0.0,   cam_jit=0.0,    tire_mu=1.0, can_jit=0.0),
-    "realistic":   dict(floor=1, r_err=0.005, tr_err=0.015, quant=16384, g_white=0.003, g_bias=0.0035, g_scale=0.01, g_rw=3e-5,  g_drift=0.0,  a_white=0.03, imu_dt=0.003, cam_jit=0.001,  tire_mu=1.0, can_jit=0.002),
+    "realistic":   dict(floor=1, r_err=0.005, tr_err=0.015, quant=16384, g_white=0.003, g_bias=0.0035, g_scale=0.01, g_rw=3e-5,  g_drift=0.0,  a_white=0.03, imu_dt=0.003, cam_jit=0.001,  tire_mu=1.0, can_jit=0.002, yaw_eps=0.058),
     "pessimistic": dict(floor=2, r_err=0.015, tr_err=0.04,  quant=16384, g_white=0.006, g_bias=0.017,  g_scale=0.03, g_rw=1.5e-4, g_drift=2e-6, a_white=0.06, imu_dt=0.010, cam_jit=0.003,  tire_mu=0.8, can_jit=0.005),
 }
+PHYS_YAW_EPS = -0.024     # MuJoCo casita carpet: physics wheel yaw / true yaw - 1 (measured, see World.__init__ trerr)
 NOISE = os.environ.get("KEVIN_EMU_NOISE", "ideal")
 NP = NOISE_LEVELS[NOISE]
 
@@ -528,7 +529,16 @@ class World:
         self.rng = np.random.default_rng(a.seed + 1)
         self.gbias = self.rng.normal(0, NP["g_bias"], 3).astype(np.float32)
         self.gscale = (1.0 + self.rng.normal(0, NP["g_scale"], 3)).astype(np.float32); self.grw = np.zeros(3, np.float32)
-        self.rerr = 1.0 + self.rng.normal(0, NP["r_err"], 2); self.trerr = 1.0 + self.rng.normal(0, NP["tr_err"])
+        # effective-track (yaw) error of the REPORTED wheel speeds, trerr divides the differential part: reported wheel
+        # yaw = physics wheel yaw / trerr.  The real robot's wheels OVER-report yaw on the house carpet by +5.8 % +- 1.0 %
+        # (vs gyro, real logs 2026-10), while the MuJoCo carpet contact makes the twin turn MORE than its wheels say
+        # (measured 2026-10-22, 12 s pivots/arcs on the casita carpet: wheel/true yaw -2.35 / -2.49 / -2.28 %).  So the
+        # sign was wrong (sim eps_w -3..-5 % incl. the zero-mean draw).  The mean of trerr now maps physics -> the real
+        # +5.8 %; the per-seed spread stays tr_err.  Measurement-level (UMBmark E_b), the physics is untouched.
+        # KEVIN_EMU_YAW_EPS overrides the target (0 = the old zero-mean model).
+        yeps = float(os.environ.get("KEVIN_EMU_YAW_EPS", NP.get("yaw_eps", 0.0)))
+        tr0 = (1.0 + PHYS_YAW_EPS) / (1.0 + yeps) if yeps else 1.0
+        self.rerr = 1.0 + self.rng.normal(0, NP["r_err"], 2); self.trerr = tr0 * (1.0 + self.rng.normal(0, NP["tr_err"]))
         self.enc_pos = [0.0, 0.0]; self._rng_cam = np.random.default_rng(a.seed + 7)
         print("emu.world: noise=%s r_err=%s tr_err=%.4f g_bias=%s g_scale=%s" % (NOISE, np.round(self.rerr - 1, 4), self.trerr - 1, np.round(self.gbias, 4), np.round(self.gscale - 1, 4)), flush=True)
         self.collisions = 0; self._in_contact = False; self.paused = False; self.blind = set()

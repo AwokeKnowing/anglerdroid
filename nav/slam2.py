@@ -49,6 +49,23 @@ try: ODOM_ALPHA = json.load(open(os.path.join(os.path.dirname(__file__), "..", "
 except Exception: ODOM_ALPHA = [0.07, 0.0, 0.00025, 0.0011]
 K = 1.0                         # fraction of each scan correction applied
 PRIOR = (0.15, math.radians(6))
+# ---- lifelong mode (KEVIN_SLAM2_LIFE=1, 2026-10-22; design Page 'Kevin unified long-term SLAM', bench/slam/life24.py)
+# The default mode grows without bound: a keyframe every 20 cm / 8 deg forever, a full GN over all of them and a full
+# field + planning-map re-render on every closure.  Lifelong mode, all standard and with the literature's defaults:
+#  * reduced pose graph (Johannsson et al. 2013): at a keyframe trigger, if a node already exists within NODE_D /
+#    NODE_A of the current pose, no node is added -- the chain re-anchors to it with one odometry edge (one per node
+#    pair) -> node count bounded by the AREA visited, not by time;
+#  * node refresh (short/long-term memory, Biber & Duckett 2005, the simplest form): a re-anchored node close to the
+#    current view takes the newest scan (old scan removed from the field), so moved furniture leaves the map;
+#  * robust loop edges: Dynamic Covariance Scaling (Agarwal et al. 2013), Phi = 1 (the paper's default);
+#  * warm-started vectorised GN (bounded by the node count), and on a closure only the nodes that moved are re-added
+#    to the matching field (the planning map re-renders only if a node moved > REMAP_D);
+#  * save()/load() of the graph (persistence across restarts).
+LIFE = os.environ.get("KEVIN_SLAM2_LIFE", "0") == "1"
+NODE_D, NODE_A = 0.5, math.radians(30)
+DCS_PHI = 1.0
+REFRESH_D, REFRESH_A, REFRESH_S = 0.25, math.radians(15), 60.0
+REMAP_D = 0.05
 
 
 def _voxel(P, v=0.04, n=NPTS, seed=0):
@@ -59,9 +76,10 @@ def _voxel(P, v=0.04, n=NPTS, seed=0):
 
 
 class KF:
-    __slots__ = ("odom", "pose", "obs", "free", "path", "carve")
-    def __init__(self, odom, pose, obs, free, path, carve=None):
+    __slots__ = ("odom", "pose", "obs", "free", "path", "carve", "t", "t_obs")
+    def __init__(self, odom, pose, obs, free, path, carve=None, t=0.0):
         self.odom, self.pose, self.obs, self.free, self.path, self.carve = odom, pose, obs, free, path, carve
+        self.t = self.t_obs = t
 
 
 class Field:
@@ -139,31 +157,43 @@ def search(fieldmaps, forg, P, guess, lin, lstep, ang, astep, prior=None, refine
     return (guess[0] + dxy[0], guess[1] + dxy[1], wrap(guess[2] + dth)), out[-1][0], out[-1][1]
 
 
-def optimize(poses, edges, fixed=0, iters=10):
-    """2D pose graph, Gauss-Newton. edges: (i, j, z=(dx,dy,dth) of j in i, info diag (3,))."""
+def optimize(poses, edges, fixed=0, iters=10, robust=None, tol=1e-4):
+    """2D pose graph, Gauss-Newton. edges: (i, j, z=(dx,dy,dth) of j in i, info diag (3,)).
+    robust: bool per edge -> Dynamic Covariance Scaling (Agarwal 2013): weight s^2, s = min(1, 2 Phi / (Phi + chi2)).
+    Vectorised (numpy + scipy sparse).  Returns poses (and sets optimize.last_scale = per-edge s)."""
     import scipy.sparse as sp, scipy.sparse.linalg as sla
     X = np.array(poses, float); n = len(X)
+    if not edges: return [tuple(p) for p in X]
+    I = np.array([e[0] for e in edges]); J = np.array([e[1] for e in edges])
+    Z = np.array([e[2] for e in edges], float); INF = np.array([e[3] for e in edges], float)
+    RB = np.zeros(len(edges), bool) if robust is None else np.asarray(robust, bool)
+    sc = np.ones(len(edges))
     for _ in range(iters):
-        rows, cols, vals = [], [], []; b = np.zeros(3 * n); H_diag = {}
-        Hd = {}
-        def addH(a, bb, M):
-            for r in range(3):
-                for c in range(3):
-                    rows.append(3 * a + r); cols.append(3 * bb + c); vals.append(M[r, c])
-        for i, j, z, inf in edges:
-            xi, xj = X[i], X[j]; c, s = math.cos(xi[2]), math.sin(xi[2])
-            R_T = np.array([[c, s], [-s, c]]); dt = xj[:2] - xi[:2]
-            e = np.r_[R_T @ dt - z[:2], wrap(xj[2] - xi[2] - z[2])]
-            dR = np.array([[-s, c], [-c, -s]])
-            A = np.zeros((3, 3)); A[:2, :2] = -R_T; A[:2, 2] = dR @ dt; A[2, 2] = -1
-            B = np.zeros((3, 3)); B[:2, :2] = R_T; B[2, 2] = 1
-            Om = np.diag(inf)
-            addH(i, i, A.T @ Om @ A); addH(i, j, A.T @ Om @ B); addH(j, i, B.T @ Om @ A); addH(j, j, B.T @ Om @ B)
-            b[3 * i:3 * i + 3] += A.T @ Om @ e; b[3 * j:3 * j + 3] += B.T @ Om @ e
-        addH(fixed, fixed, np.eye(3) * 1e9)
-        H = sp.csr_matrix((vals, (rows, cols)), shape=(3 * n, 3 * n))
-        dx = sla.spsolve(H.tocsc(), -b); X += dx.reshape(n, 3); X[:, 2] = (X[:, 2] + np.pi) % (2 * np.pi) - np.pi
-        if np.abs(dx).max() < 1e-4: break
+        xi, xj = X[I], X[J]; c, s_ = np.cos(xi[:, 2]), np.sin(xi[:, 2]); dt = xj[:, :2] - xi[:, :2]
+        e = np.stack([c * dt[:, 0] + s_ * dt[:, 1] - Z[:, 0], -s_ * dt[:, 0] + c * dt[:, 1] - Z[:, 1],
+                      (xj[:, 2] - xi[:, 2] - Z[:, 2] + np.pi) % (2 * np.pi) - np.pi], 1)
+        chi2 = (e * e * INF).sum(1)
+        sc = np.where(RB, np.minimum(1.0, 2 * DCS_PHI / (DCS_PHI + chi2)), 1.0)
+        W = INF * (sc * sc)[:, None]
+        m = len(I); A = np.zeros((m, 3, 3)); B = np.zeros((m, 3, 3))
+        A[:, 0, 0] = -c; A[:, 0, 1] = -s_; A[:, 0, 2] = -s_ * dt[:, 0] + c * dt[:, 1]
+        A[:, 1, 0] = s_; A[:, 1, 1] = -c; A[:, 1, 2] = -c * dt[:, 0] - s_ * dt[:, 1]; A[:, 2, 2] = -1
+        B[:, 0, 0] = c; B[:, 0, 1] = s_; B[:, 1, 0] = -s_; B[:, 1, 1] = c; B[:, 2, 2] = 1
+        AtW = A.transpose(0, 2, 1) * W[:, None, :]; BtW = B.transpose(0, 2, 1) * W[:, None, :]
+        blocks = [(I, I, AtW @ A), (I, J, AtW @ B), (J, I, BtW @ A), (J, J, BtW @ B)]
+        rr, cc, vv = [], [], []
+        o = np.arange(3)
+        for a_, b_, M in blocks:
+            rr.append((3 * a_[:, None, None] + o[None, :, None]).repeat(3, 2).ravel())
+            cc.append((3 * b_[:, None, None] + o[None, None, :]).repeat(3, 1).ravel()); vv.append(M.ravel())
+        rr.append(3 * fixed + o); cc.append(3 * fixed + o); vv.append(np.full(3, 1e9))
+        H = sp.csc_matrix((np.concatenate(vv), (np.concatenate(rr), np.concatenate(cc))), shape=(3 * n, 3 * n))
+        b = np.zeros(3 * n)
+        np.add.at(b, (3 * I[:, None] + o).ravel(), np.einsum("mij,mj->mi", AtW, e).ravel())
+        np.add.at(b, (3 * J[:, None] + o).ravel(), np.einsum("mij,mj->mi", BtW, e).ravel())
+        dx = sla.spsolve(H, -b); X += dx.reshape(n, 3); X[:, 2] = (X[:, 2] + np.pi) % (2 * np.pi) - np.pi
+        if np.abs(dx).max() < tol: break
+    optimize.last_scale = sc
     return [tuple(p) for p in X]
 
 
@@ -323,19 +353,26 @@ class Slam2:
             tc = time.perf_counter(); self.grid.integrate(pm, obs, np.zeros((0, 2), np.float32), obs_h, carve_rays(rays, self.grid.res), w_hit=0.0)
             self.stats["carve_ms"] = round((time.perf_counter() - tc) * 1e3, 1)
             self.stats["carved"] = self.grid.n_carved; self.stats["carved_tot"] = self.stats.get("carved_tot", 0) + self.grid.n_carved
-        last = self.kfs[-1] if self.kfs else None
-        if last is None or math.hypot(podom[0] - last.odom[0], podom[1] - last.odom[1]) > KF_D or abs(wrap(podom[2] - last.odom[2])) > KF_A:
-            self._insert(podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free,
-                         getattr(self, "_carve", None))
+        if LIFE:
+            tr = getattr(self, "_trig", None)
+            if tr is None or math.hypot(podom[0] - tr[0], podom[1] - tr[1]) > KF_D or abs(wrap(podom[2] - tr[2])) > KF_A:
+                self._trig = podom
+                self._life_trigger(t, podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free,
+                                   getattr(self, "_carve", None))
+        else:
+            last = self.kfs[-1] if self.kfs else None
+            if last is None or math.hypot(podom[0] - last.odom[0], podom[1] - last.odom[1]) > KF_D or abs(wrap(podom[2] - last.odom[2])) > KF_A:
+                self._insert(podom, pm, P, _voxel(np.asarray(free, np.float32), 0.06, 1500, 1) if len(free) else free,
+                             getattr(self, "_carve", None), t=t)
         self.stats["ms"] = round((time.perf_counter() - t0) * 1e3, 2)
 
-    def _insert(self, podom, pm, obs, free, carve=None):
+    def _insert(self, podom, pm, obs, free, carve=None, t=0.0):
         if self.kfs:
             a = self.kfs[-1]; self._path += math.hypot(podom[0] - a.odom[0], podom[1] - a.odom[1])
             z = compose(inverse(a.pose), pm); d = math.hypot(z[0], z[1])
             inf = np.array([1 / (0.01 + 0.03 * d) ** 2] * 2 + [1 / (0.005 + 0.02 * abs(z[2]) + 0.01 * d) ** 2])
             self.edges.append((len(self.kfs) - 1, len(self.kfs), z, inf))
-        self.kfs.append(KF(podom, pm, obs, free, self._path, carve)); self.stats["kfs"] = len(self.kfs)
+        self.kfs.append(KF(podom, pm, obs, free, self._path, carve, t)); self.stats["kfs"] = len(self.kfs)
         self.field.add(pm, obs)
         if len(self.kfs) - self._last_loop_kf > 10: self._try_loop()
 
@@ -377,3 +414,129 @@ class Slam2:
         self.field = f
         with self.grid.lock:
             self.grid.L[:] = g.L; self.grid.seen[:] = g.seen; self.grid.Hlo[:] = g.Hlo; self.grid.Hhi[:] = g.Hhi; self.grid.version += 1
+
+    # ------------------------------------------------------------------ lifelong mode (LIFE)
+    def _odom_info(self, d, dth):
+        return np.array([1 / (0.01 + 0.03 * d) ** 2] * 2 + [1 / (0.005 + 0.02 * abs(dth) + 0.01 * d) ** 2])
+
+    def _life_trigger(self, t, podom, pm, P, free, carve):
+        """Keyframe trigger (every KF_D / KF_A of odometry) in lifelong mode: re-anchor to a nearby node or add one."""
+        self._recent = getattr(self, "_recent", None) or __import__("collections").deque(maxlen=8)
+        self._recent.append((pm, P))
+        if self.kfs:
+            a, da, oa, pa = self._anchor
+            dpath = math.hypot(podom[0] - oa[0], podom[1] - oa[1]); self._path += dpath
+            # edge measurement = the scan-matched pose relative to the anchor node (as the default mode's chain edges);
+            # its information comes from the odometry travelled since the anchor
+            z = compose(inverse(self.kfs[a].pose), pm); self._anchor = (a, da, podom, self._path)
+            self._anchor_d = getattr(self, "_anchor_d", 0.0) + dpath
+            ac = getattr(self, "_anchor_acc", 0.0) + abs(wrap(podom[2] - oa[2])); self._anchor_acc = ac
+            Xp = self._node_xy(); dd = np.hypot(Xp[:, 0] - pm[0], Xp[:, 1] - pm[1])
+            ang = np.abs((self._node_th() - pm[2] + np.pi) % (2 * np.pi) - np.pi)
+            ok = (dd < NODE_D) & (ang < NODE_A)
+            if ok.any():
+                j = int(np.argmin(np.where(ok, dd + 0.3 * ang, np.inf))); dj = compose(inverse(self.kfs[j].pose), pm)
+                if j != a:
+                    key = (min(a, j), max(a, j))
+                    if key not in self._pairs:
+                        zaj = compose(z, inverse(dj)); inf = self._odom_info(self._anchor_d, self._anchor_acc)
+                        self._pairs.add(key); self.edges.append((a, j, zaj, inf)); self._robust.append(False)
+                self._anchor = (j, dj, podom, self._path); self._anchor_d = 0.0; self._anchor_acc = 0.0
+                self.stats["reanchor"] = self.stats.get("reanchor", 0) + 1
+                k = self.kfs[j]
+                if (math.hypot(dj[0], dj[1]) < REFRESH_D and abs(dj[2]) < REFRESH_A and t - k.t_obs > REFRESH_S
+                        and len(P) > 60 and getattr(self, "_last_acc", None) is podom):
+                    # node refresh: the newest view replaces the node's scan (only right after an accepted match)
+                    self.field.add(k.pose, k.obs, -1); k.obs = transform(P, dj).astype(np.float32); k.t_obs = t
+                    self.field.add(k.pose, k.obs); self.stats["refresh"] = self.stats.get("refresh", 0) + 1
+                return
+            inf = self._odom_info(self._anchor_d, self._anchor_acc)
+            self.edges.append((a, len(self.kfs), z, inf)); self._robust.append(False); self._pairs.add((a, len(self.kfs)))
+        else:
+            self._pairs = set(); self._robust = []
+        self.kfs.append(KF(podom, pm, P, free, self._path, carve, t)); n = len(self.kfs) - 1
+        self._anchor = (n, (0.0, 0.0, 0.0), podom, self._path); self._anchor_d = 0.0; self._anchor_acc = 0.0
+        self._xy = None; self.stats["kfs"] = len(self.kfs); self.field.add(pm, P)
+        if n - self._last_loop_kf > 3: self._try_loop_life(n)
+
+    def _node_xy(self):
+        if getattr(self, "_xy", None) is None or len(self._xy) != len(self.kfs):
+            self._xy = np.array([k.pose for k in self.kfs], float)
+        return self._xy[:, :2]
+    def _node_th(self): self._node_xy(); return self._xy[:, 2]
+
+    def _check_consistency(self, i, j, z, inf):
+        """A re-anchor edge between nodes far apart along the path is a loop: if it is inconsistent with the current
+        graph (chi2 > 99 % 3-dof), re-optimise."""
+        if abs(self.kfs[i].path - self.kfs[j].path) < 4.0: return
+        e = np.array(compose(inverse(z), compose(inverse(self.kfs[i].pose), self.kfs[j].pose))); e[2] = wrap(e[2])
+        if float((e * e * inf).sum()) > CHI2_99_3: self._optimize_life("reanchor")
+
+    def _try_loop_life(self, n):
+        cur = self.kfs[n]; Xp = self._node_xy(); paths = np.array([k.path for k in self.kfs])
+        dd = np.hypot(Xp[:, 0] - cur.pose[0], Xp[:, 1] - cur.pose[1])
+        c = np.nonzero((dd < 2.0) & (cur.path - paths > 4.0))[0]
+        if len(c) == 0: return
+        t0 = time.perf_counter(); j = int(c[np.argmin(dd[c])])
+        sub = Field(); near = np.nonzero((np.hypot(Xp[:, 0] - Xp[j, 0], Xp[:, 1] - Xp[j, 1]) < 2.0) & (cur.path - paths > 4.0))[0]
+        for k in near: sub.add(self.kfs[k].pose, self.kfs[k].obs)
+        Q = np.concatenate([transform(Pk, compose(inverse(cur.pose), pk)) for pk, Pk in self._recent if len(Pk)])
+        Q = _voxel(Q.astype(np.float32), 0.04, 1500)
+        est, sc, s_g = search(sub.fields(), sub.origin, Q, cur.pose, 0.6, 0.06, math.radians(10), math.radians(1.5), prior=(1.0, math.radians(20)))
+        self.stats["loop_ms"] = round((time.perf_counter() - t0) * 1e3, 1); self.stats["loop_score"] = round(sc, 3)
+        self.stats["loop_tries"] = self.stats.get("loop_tries", 0) + 1
+        if sc < LOOP_MIN: return
+        corr = math.hypot(est[0] - cur.pose[0], est[1] - cur.pose[1])
+        if corr > 0.15 + 0.03 * (cur.path - self.kfs[j].path): return
+        z = compose(inverse(self.kfs[j].pose), est)
+        self.edges.append((j, n, z, np.array([1 / 0.03 ** 2, 1 / 0.03 ** 2, 1 / math.radians(1.0) ** 2]))); self._robust.append(True)
+        self._pairs.add((j, n)); self._last_loop_kf = n; self.stats["loops"] += 1
+        self.loop_log = getattr(self, "loop_log", []); self.loop_log.append((self.kfs[j].t, cur.t, tuple(z), len(self.edges) - 1))
+        self._optimize_life("loop")
+
+    def _optimize_life(self, why):
+        t1 = time.perf_counter(); old = [k.pose for k in self.kfs]
+        new = optimize(old, self.edges, robust=self._robust)
+        sc = optimize.last_scale; rb = np.asarray(self._robust, bool)
+        self.stats["loops_downweighted"] = int((rb & (sc < 0.5)).sum())
+        self.stats["opt_ms"] = round((time.perf_counter() - t1) * 1e3, 1); self.stats["opts"] = self.stats.get("opts", 0) + 1
+        self.loop_scale = sc
+        sh = np.hypot(*(np.array(new)[:, :2] - np.array(old)[:, :2]).T)
+        self.stats["loop_shift_m"] = round(float(sh.max()), 3)
+        for k, p, o, m in zip(self.kfs, new, old, sh):
+            if m > 0.01 or abs(wrap(p[2] - o[2])) > math.radians(0.3):
+                self.field.add(o, k.obs, -1); self.field.add(p, k.obs)
+            k.pose = p
+        self._xy = None
+        a, da, oa, pa = self._anchor
+        self.T = compose(compose(self.kfs[a].pose, da), inverse(oa))
+        if sh.max() > REMAP_D: self._rebuild_grid()
+
+    def _rebuild_grid(self):
+        g = GridMap(res=self.grid.res, size_m=self.grid.n * self.grid.res, origin=tuple(self.grid.origin))
+        g.Hlo[:] = self.grid.Hlo; g.Hhi[:] = self.grid.Hhi
+        for k in self.kfs:
+            for _ in range(3): g.integrate(k.pose, k.obs, k.free, None, k.carve)
+        with self.grid.lock:
+            self.grid.L[:] = g.L; self.grid.seen[:] = g.seen; self.grid.version += 1
+        self.stats["remaps"] = self.stats.get("remaps", 0) + 1
+
+    def save(self, path):
+        """Persist the graph (nodes: odom, pose, scan, path, t; edges; robust flags; T)."""
+        import pickle
+        with self._lock:
+            d = dict(v=1, T=self.T, path=self._path, kfs=[(k.odom, k.pose, k.obs, k.free, k.path, k.t, k.t_obs) for k in self.kfs],
+                     edges=[(i, j, tuple(z), np.asarray(f).tolist()) for i, j, z, f in self.edges], robust=list(getattr(self, "_robust", [])),
+                     anchor=getattr(self, "_anchor", None))
+        tmp = path + ".tmp"; pickle.dump(d, open(tmp, "wb"), protocol=4); os.replace(tmp, path)
+
+    def load(self, path):
+        import pickle
+        d = pickle.load(open(path, "rb"))
+        with self._lock:
+            self.kfs = []; self.field = Field()
+            for od, po, ob, fr, pa, t, to in d["kfs"]:
+                k = KF(od, po, ob, fr, pa, None, t); k.t_obs = to; self.kfs.append(k); self.field.add(po, ob)
+            self.edges = [(i, j, z, np.array(f)) for i, j, z, f in d["edges"]]; self._robust = d["robust"]
+            self._pairs = set((min(i, j), max(i, j)) for i, j, _, _ in self.edges); self._path = d["path"]; self._xy = None
+        self._rebuild_grid()
