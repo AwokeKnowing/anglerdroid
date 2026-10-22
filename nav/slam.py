@@ -39,7 +39,7 @@ class Odom:
     QG, QS, QB = 0.004 ** 2, 1e-6 ** 2, 2e-5 ** 2           # per second: yaw-rate noise, scale-error / bias random walk
     SIG_WD = 0.0052                                         # rad/s wheel yaw-rate jitter at standstill (realistic sim, measured)
     def __init__(self, track=None):
-        self.pose = (0.0, 0.0, 0.0); self.v = 0.0; self.w = 0.0; self.t = None
+        self.pose = (0.0, 0.0, 0.0); self.v = 0.0; self.w = 0.0; self.t = None; self._wd_prev = None
         import twin_geometry as TG; self.track = track or TG.TRACK_M
         self.hist = deque(maxlen=300); self.bias = 0.0; self._still = 0
         self.ekf = os.environ.get("KEVIN_ODOM_EKF", "1") == "1"
@@ -90,8 +90,16 @@ class Odom:
                     else: self.n_zupt_rej = getattr(self, "n_zupt_rej", 0) + 1        # really rotating: keep the gyro
         else: w = wd
         if self.t is not None:
-            x, y, th = self.pose; thm = th + 0.5 * w * dt   # gyro rate = mean over the gap (hw.yaw_rate)
-            self.pose = (x + v * dt * math.cos(thm), y + v * dt * math.sin(thm), wrap(th + w * dt))
+            # distance over the step = trapezoid of the wheel speeds at its two ends.  The speeds are SAMPLES (the core's
+            # latest encoder estimate when the brain ticks); the old rectangle used only the newest one over the whole
+            # step, so a brain stall (0.3-0.8 s gaps under load, L21_zfix) during a stop lost the distance driven in the
+            # gap: 3 stalls lost 0.30 m.  The gyro rate is already the mean over the step (hw.yaw_inc); the wheel yaw rate
+            # (no gyro / ZUPT) is a sample like v, so it gets the same rule.
+            vs = 0.5 * (self.v + v)
+            ws = 0.5 * (self._wd_prev + wd) if (gyro_w is None or w == wd) and self._wd_prev is not None else w
+            x, y, th = self.pose; thm = th + 0.5 * ws * dt   # gyro rate = mean over the gap (hw.yaw_rate)
+            self.pose = (x + vs * dt * math.cos(thm), y + vs * dt * math.sin(thm), wrap(th + ws * dt))
+        self._wd_prev = wd
         self.t, self.v, self.w = t, v, w
         self.hist.append((t, self.pose))
         return self.pose
