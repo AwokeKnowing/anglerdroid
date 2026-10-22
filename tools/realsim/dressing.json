@@ -746,6 +746,57 @@
     "r": 0.17,
     "h": 0.07
    }
+  },
+  {
+   "name": "bed1",
+   "xy": [
+    1.8,
+    11.8
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "ASSUMED (emu/realism.py casita_lights lamp_bed1), not observed: SLAM bench needs the rooms the tour visits lit",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights)",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "bed2",
+   "xy": [
+    5.4,
+    11.8
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "ASSUMED (emu/realism.py casita_lights lamp_bed2), not observed: SLAM bench needs the rooms the tour visits lit",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights)",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
+  },
+  {
+   "name": "laundry",
+   "xy": [
+    5.6,
+    7.9
+   ],
+   "intensity": 30000,
+   "kelvin": 4000,
+   "radius": 0.12,
+   "drop": 0.09,
+   "_src": "ASSUMED (emu/realism.py casita_lights lamp_laundry), not observed: SLAM bench needs the rooms the tour visits lit",
+   "_kelvin_src": "ASSUMED neutral-white LED (James: LED ceiling lights)",
+   "fixture": {
+    "r": 0.17,
+    "h": 0.07
+   }
   }
  ],
  "cameras": [

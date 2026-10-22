@@ -64,7 +64,9 @@ def score(seq, tum, meta_m, meta_seq):
     Tgt, ok = interp_gt(tg, Tg, t); t, Te, Tgt = t[ok], Te[ok], Tgt[ok]
     frame = meta_m.get("frame", "base"); sf = bool(meta_m.get("scale_free", False)); s = 1.0
     if frame.startswith("cam:"):
-        e = meta_seq["extr_twin_base_from_optical"][frame[4:]]; Tbc = np.eye(4); Tbc[:3, :3] = e["R"]; Tbc[:3, 3] = e["t"]; Tcb = np.linalg.inv(Tbc)
+        if "T_base_optical" in meta_m: Tbc = np.array(meta_m["T_base_optical"], float)   # e.g. RTX cameras (render_rtx.py rtx.json)
+        else: e = meta_seq["extr_twin_base_from_optical"][frame[4:]]; Tbc = np.eye(4); Tbc[:3, :3] = e["R"]; Tbc[:3, 3] = e["t"]
+        Tcb = np.linalg.inv(Tbc)
         Tgc = Tgt @ Tbc                                                       # GT camera poses
         if sf:                                                                # bring the estimate to metric GT world
             s, R, tt = umeyama(Te[:, :3, 3], Tgc[:, :3, 3], True)

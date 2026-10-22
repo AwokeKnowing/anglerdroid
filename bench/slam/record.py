@@ -68,6 +68,7 @@ def main():
     ap.add_argument("--rs2-pitch", type=float, default=27.0, help="TRUE forward D435i pitch (twin believes 27)")
     ap.add_argument("--v", type=float, default=0.30); ap.add_argument("--w", type=float, default=0.8)
     ap.add_argument("--max-s", type=float, default=600.0)
+    ap.add_argument("--light", action="store_true", help="depth only (no IR pair, no MuJoCo RGB): cameras come from the RTX renderer (tools/realsim, bench/slam/render_rtx.py)")
     a = ap.parse_args()
     mf = float(os.environ.get("KEVIN_REC_MIN_FREE_GB", "20"))
     if shutil.disk_usage(os.path.expanduser("~")).free / 2**30 < mf: sys.exit("record: <%g GB free, refusing" % mf)
@@ -103,7 +104,7 @@ def main():
     print("record: %d segments" % len(segs), flush=True)
     # ---- output
     out = os.path.abspath(os.path.expanduser(a.out)); os.makedirs(out, exist_ok=True)
-    for sd in ("rs2_color", "rs2_depth", "rs2_ir1", "rs2_ir2", "mast", "rs1_depth"): os.makedirs(os.path.join(out, sd), exist_ok=True)
+    for sd in (("rs2_depth",) + (("rs1_depth",) if a.rs1 else ()) + (() if a.light else ("rs2_color", "rs2_ir1", "rs2_ir2", "mast"))): os.makedirs(os.path.join(out, sd), exist_ok=True)
     fgt = open(os.path.join(out, "gt.csv"), "w"); fgt.write("t,x,y,yaw,z,roll,pitch,v,w\n")
     fwh = open(os.path.join(out, "wheel.csv"), "w"); fwh.write("t,vl,vr\n")
     fim = open(os.path.join(out, "imu.csv"), "w"); fim.write("t,gx,gy,gz,ax,ay,az\n")
@@ -210,9 +211,10 @@ def main():
             cv2.imwrite(os.path.join(out, "rs2_depth", nm + ".png"), depth("rs2_ir1"))
             wz_now[0] = float(d.qvel[5])
             if a.rs1: cv2.imwrite(os.path.join(out, "rs1_depth", nm + ".png"), depth("rs1_depth"))
-            cv2.imwrite(os.path.join(out, "rs2_color", nm + ".jpg"), cv2.cvtColor(fxa("c", rgb(Rc, "rs2_color")), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(out, "mast", nm + ".jpg"), cv2.cvtColor(fxa("m", rgb(Rm, "mast_rgb")), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
-            cv2.imwrite(os.path.join(out, "rs2_ir1", nm + ".png"), ir("rs2_ir1")); cv2.imwrite(os.path.join(out, "rs2_ir2", nm + ".png"), ir("rs2_ir2"))
+            if not a.light:
+                cv2.imwrite(os.path.join(out, "rs2_color", nm + ".jpg"), cv2.cvtColor(fxa("c", rgb(Rc, "rs2_color")), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+                cv2.imwrite(os.path.join(out, "mast", nm + ".jpg"), cv2.cvtColor(fxa("m", rgb(Rm, "mast_rgb")), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+                cv2.imwrite(os.path.join(out, "rs2_ir1", nm + ".png"), ir("rs2_ir1")); cv2.imwrite(os.path.join(out, "rs2_ir2", nm + ".png"), ir("rs2_ir2"))
             ffr.write("%d,%.4f\n" % (fi, d.time)); fi += 1
             if fi % 150 == 0:
                 x, y, th = pose(); print("record: t=%.1f frames=%d seg %d/%d pose %.2f %.2f %.0f collisions %d (%.1fx rt)" % (d.time, fi, si, len(segs), x, y, math.degrees(th), S.collisions, d.time / (time.time() - t_wall)), flush=True)
