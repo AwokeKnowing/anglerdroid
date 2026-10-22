@@ -21,6 +21,12 @@ HUBER_K = 1.345
 
 def wrap(a): return (a + np.pi) % (2 * np.pi) - np.pi
 
+# keyframe rule of the fusion layer (README step 8): update only after >= KF_D m / KF_A rad of motion since the last update,
+# or KF_T s.  Identical views carry no new information about the (static) map-model error; updating on them anyway treats
+# a systematic error as independent noise every frame, the covariance collapses (L20, slow turn in place: sd 3 mm) and the
+# NIS gate then passes fixes that are 7-12 cm off.  bench.py applies it (LL_KF=0 to disable).
+KF_D, KF_A, KF_T = 0.02, math.radians(1.0), 1.0
+
 
 def _src():
     import os, sys

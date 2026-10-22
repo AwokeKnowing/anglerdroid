@@ -76,6 +76,26 @@ the prior alone 3.49 / 7.40 cm.
 **Orin NX CPU** (13:50 PDT, nomotor HAL running, load average 5–7, `nice 19`, 1 thread, real 640×480 frames):
 LSD@0.5 15.8 ms; lineloc V 26 ms; VH 37 ms. With LSD@0.8: V 46 ms, VH 59 ms.
 
+**Bench defaults (2026-10-21).** `bench.py` now passes only the `LL_*` variables that are set, so it runs LineLoc's own
+defaults (the table above) with keyframes on (`lineloc.KF_*`; `LL_KF=0` disables).  It used to carry its own defaults
+(LSD 0.8, all horizontal edges, σ_map 0, MSAC relocalisation after 10 rejects, no keyframes): L20 3.31 / 60.4 cm instead of
+1.55 / 6.77, from covariance collapse while turning in place (sd 3 mm, then 7-12 cm off fixes pass the NIS gate) and a false
+MSAC relocalisation (60 cm).  L19's 18 cm at the end with the new map was the same configuration.
+
+**zfix map (casitahouse31-walls-laser-zfix, camera 0.99115 m), deployed defaults, 3 runs each (identical).**  L23-L25 are
+fresh soft-tyre clips in the zfix world (counters off); L19/L20 were recorded in the older world, so the old map is their match.
+| log | map | localized | pos med / p95 / max (cm) | odometry med (cm) |
+|---|---|---|---|---|
+| L19 | old / new | 93% / 92% | 1.52 / 4.49 / 6.69  vs  1.86 / 7.19 / 10.97 | 3.51 |
+| L20 | old / new | 98% / 96% | 1.55 / 6.77 / 9.80  vs  1.28 / 4.15 / 6.29 | 2.37 |
+| L23_zfix | old / new | 91% / 93% | 4.01 / 17.96 / 31.47  vs  2.38 / 7.11 / 10.04 | 25.2 |
+| L24_zfix | old / new | 86% / 91% | 3.84 / 8.25 / 16.36  vs  2.61 / 6.66 / 9.92 | 23.9 |
+| L25_zfix | old / new | 95% / 95% | 2.34 / 23.01 / 34.70  vs  2.15 / 5.75 / 10.40 | 20.5 |
+
+`test_synthetic_defaults_smoke` fails with the zfix map (frame 264: a 3.3σ prior draw, 16.7 cm off, gives an accepted
+9.2 cm fix from only 4 verticals, posterior sd 3.2 cm, Mahalanobis² 17.5).  The limit was left at 7 cm: the fix is
+overconfident, which is a lineloc weakness, not a test problem.
+
 ## What was learned
 - **Vertical bearings alone** are precise when correctly associated (sub-pixel residuals at GT) and give ≈ 1 cm median
   tracking. Range along the viewing direction is weakly observed, though: posterior sd is 2–18 cm along-track in some frames.

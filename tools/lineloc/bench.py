@@ -1,7 +1,7 @@
 """Replay sim recordings: odometry-primary SE(2) EKF with lineloc updates from the mast camera; errors vs GT.
 python3 bench.py OUTDIR L18 L19 L20 ...   (config via env LL_*)"""
 import sys, os, json, time, math, numpy as np, cv2
-from lineloc import Camera, LineMap, LineLoc, wrap, axle_height
+from lineloc import Camera, LineMap, LineLoc, wrap, axle_height, KF_D as KF_D_, KF_A as KF_A_, KF_T as KF_T_
 VL = os.environ.get("LL_VL", "/workspace/vl")    # sim recordings: mlx/<log>/poses.npz + <log>/mast/*.jpg
 CT, CR = np.array([9.94e-04, 2.45e-04]), np.array([1.00e-09, 4.42e-04])     # maploc odometry noise model (fitted on L12-L14)
 def Q(d): a = np.array([abs(d[0]) + abs(d[1]), abs(d[2])]); return np.diag([a @ CT + 1e-8, a @ CT + 1e-8, a @ CR + 1e-8])
@@ -18,18 +18,26 @@ def errs(est, gt):
     return dict(pos_med=float(np.median(e)), pos_p95=float(np.percentile(e, 95)), pos_max=float(e.max()), yaw_med=float(np.median(y)), yaw_p95=float(np.percentile(y, 95)), yaw_max=float(y.max()))
 def env(k, d, f=float): return f(os.environ.get(k, d))
 mi = json.load(open(f"{VL}/mlx/mast.json"))
-KF = env("LL_KF", 0, int) == 1; KF_D, KF_A, KF_T = env("LL_KFD", 0.02), math.radians(env("LL_KFA", 1.0)), env("LL_KFT", 1.0)
+# keyframe rule (fusion layer, lineloc.KF_*): on by default, as in every README result; LL_KF=0 updates on every frame
+KF = env("LL_KF", 1, int) == 1; KF_D, KF_A, KF_T = env("LL_KFD", KF_D_), math.radians(env("LL_KFA", math.degrees(KF_A_))), env("LL_KFT", KF_T_)
+# LL_* overrides of LineLoc's own defaults (the deployed configuration, lineloc.LineLoc.__init__).  Only variables that are
+# SET are passed: the bench used to carry its own default values (LSD 0.8, all horizontals, sigma_map 0, MSAC
+# relocalisation after 10 rejects, no keyframes), which silently differed from the library and the README (L20: 3.31 /
+# 60.4 cm instead of 1.55 / 6.77; L19 18 cm and L20 7-12 cm accepted off-fixes, from covariance collapse without keyframes
+# and false MSAC relocalisations)
+_OVR = dict(LL_SIGMA=("sigma_px", float), LL_NSEG=("n_seg", int), LL_MINLEN=("min_len", float), LL_LSDS=("lsd_scale", float),
+            LL_RANSAC=("ransac", int), LL_H=("use_h", lambda v: int(v) == 1), LL_V=("use_v", lambda v: int(v) == 1), LL_MINV=("min_v", int),
+            LL_MINALL=("min_all", int), LL_NLOST=("n_lost", int), LL_RDRAWS=("reloc_draws", int), LL_RXY=("reloc_xy", float),
+            LL_RYAW=("reloc_yaw_deg", float), LL_UNIQ=("uniq", float), LL_HJ=("h_junction", lambda v: int(v) == 1), LL_HMIN=("h_minlen", float),
+            LL_SMAP=("sigma_map", float))
+def overrides(): return {k: f(os.environ[e]) for e, (k, f) in _OVR.items() if e in os.environ}
 def log_tire(n):
     z = np.load(f"{VL}/mlx/{n}/poses.npz"); return str(z["tire"]) if "tire" in z.files and str(z["tire"]) else "stock"
 def make(tire="stock"):
     # mast pos is relative to base_link = the axle, which sits at the log's tyre loaded radius (stock 0.08565, soft_v3_2
     # 0.10065; src/robot_params.py).  Was a fixed stock +0.08565: soft-tyre logs had the camera 1.5 cm too low.
     cam = Camera(mi["intr"]["fx"], mi["intr"]["fy"], mi["intr"]["ppx"], mi["intr"]["ppy"], mi["dist"], t_bc=(mi["pos"][0], mi["pos"][1], mi["pos"][2] + axle_height(tire)))
-    return LineLoc(LineMap(os.environ.get("LL_MAP", "casita_lines.npz")), cam, sigma_px=env("LL_SIGMA", 1.5), n_seg=env("LL_NSEG", 200, int),
-                   min_len=env("LL_MINLEN", 20), lsd_scale=env("LL_LSDS", 0.8), ransac=env("LL_RANSAC", 0, int),
-                   use_h=env("LL_H", 1, int) == 1, use_v=env("LL_V", 1, int) == 1, min_v=env("LL_MINV", 2, int), min_all=env("LL_MINALL", 3, int),
-                   n_lost=env("LL_NLOST", 10, int), reloc_draws=env("LL_RDRAWS", 64, int), reloc_xy=env("LL_RXY", 0.25), reloc_yaw_deg=env("LL_RYAW", 5.0),
-                   uniq=env("LL_UNIQ", 0.0), h_junction=env("LL_HJ", 0, int) == 1, h_minlen=env("LL_HMIN", 0), sigma_map=env("LL_SMAP", 0.0))
+    return LineLoc(LineMap(os.environ.get("LL_MAP", "casita_lines.npz")), cam, **overrides())
 def run(n, loc):
     z = np.load(f"{VL}/mlx/{n}/poses.npz"); g, od_raw = z["gt"], z["odom"]; od = anchor(od_raw, g[0])
     p = g[0].copy(); P = np.diag([0.02 ** 2, 0.02 ** 2, math.radians(1) ** 2]); est = [p.copy()]; ms = []; acc = 0; why = {}; nv = []; nre = 0; last = p.copy(); t_last = z["t"][0]; nup = 0
@@ -53,4 +61,5 @@ if __name__ == "__main__":
         loc = make(log_tire(n)); loc.n_fail = 0; est, r = run(n, loc); r["tire"] = log_tire(n); r["cam_z"] = float(loc.cam.t_bc[2]); np.save(f"{out}/{n}_est.npy", est); res[n] = r
         L = r["lineloc"]; O = r["odom"]
         print(f"{n}: loc {r['localized']*100:.0f}%  med {L['pos_med']*100:.2f} p95 {L['pos_p95']*100:.2f} max {L['pos_max']*100:.2f} cm  yaw med {L['yaw_med']:.2f} p95 {L['yaw_p95']:.2f} | odom med {O['pos_med']*100:.2f} max {O['pos_max']*100:.2f} | {r['ms_med']:.1f}/{r['ms_p95']:.1f}/{r['ms_max']:.1f} ms  {r['why']}", flush=True)
+    res["_config"] = dict(keyframes=KF, kf=[KF_D, math.degrees(KF_A), KF_T], overrides=overrides(), map=os.environ.get("LL_MAP", "casita_lines.npz"))
     json.dump(res, open(f"{out}/summary.json", "w"), indent=1)
