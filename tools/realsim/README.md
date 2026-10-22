@@ -22,3 +22,6 @@ Run (i777): `XDG_CACHE_HOME=/dev/shm/ovcache` (shader cache, ~0.9 GB, lost on re
 new material permutations a few minutes; warm start ~5 s).  Venv `~/.venv-ovrtx` (ovrtx 0.6.0, ovstage 0.3.0).
 30 fps setting: `omni:rtx:post:dlss:execMode = "performance"` (DLSS-SR; DLSS-RR/NR and frame generation are not
 available on the 3090 / driver 595.99).
+
+Live bridge (both cameras per step, sim + nav running): DLSS performance + maxBounces 3 = 28.5 fps; add
+`--settings '{"omni:rtx:post:dlss:execMode":["token","performance"],"omni:rtx:rtpt:maxBounces":["uint",2]}'` for 33.8 fps.
