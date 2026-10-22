@@ -1,0 +1,3 @@
+lineloc  accepted  94.4%  pos med 2.61 p95 6.64 cm  yaw med 0.297 p95 1.282 deg  9.6 ms
+poselib  accepted  99.9%  pos med 2.91 p95 28.32 cm  yaw med 0.298 p95 179.620 deg  11.3 ms
+prior    accepted 100.0%  pos med 3.49 p95 7.40 cm  yaw med 0.737 p95 1.925 deg
