@@ -18,7 +18,7 @@ def world_stl():
     p = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "src"))
     if p not in sys.path: sys.path.append(p)
     import world_params
-    return world_params.walls_stl()
+    return world_params.house_stl()   # walls + counters (worlds/casita/counters.json)
 
 
 def load_casita(stl=None, drop_slivers=True):

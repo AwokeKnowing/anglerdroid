@@ -9,6 +9,8 @@
     "sim/casitahouse31-walls-laser-zfix.stl": "2026-10-21: v31 plan + heights fitted to 3 mast frames with the camera at 0.99115 m (see NOTE)"
   },
   "frame": "sim world = STL with its bounding-box min at the origin (x east, y north, z up, floor = wall bottom = 0)",
+  "counters": "worlds/casita/counters.json",
+  "counters_note": "2026-10-21: counters/built-ins as parameterised solids (src/world_params.py counter_parts / house_stl); the walls STL is unchanged",
   "ceiling_above_wall_top_m": 0.01,
   "lamp_below_wall_top_m": 0.13
 }

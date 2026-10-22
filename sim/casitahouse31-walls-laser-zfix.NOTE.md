@@ -5,7 +5,7 @@ Source: sim/casitahouse31-walls-laser.stl (laser plan, unchanged x/y). Only thes
 - level 2.140 -> 2.053 (28 verts)                           [ASSUMED: moved with the header, not measured]
 - door heads AND window tops 1.880 -> 1.923 (250 verts)     [measured on the front door only: 1.9234 +- 0.0039, per frame 1.926/1.924/1.923;
                                                               window tops/closet doors ASSUMED to share the door-head level]
-Unchanged (not measured): sills 0.682/0.744/1.278, counter 0.802 (image says 0.63 at the model plan position, see report), shelves etc.
+Unchanged (not measured): sills 0.682/0.744/1.278, counter 0.802, shelves etc.  Counter heights: see worlds/casita/counters.json (2026-10-21: pass-through counter top re-measured 0.78-0.83 = model 0.802 kept; the earlier "0.63" was the white face top under a 0.12 m dark front band, read with a ~8-10 px low floor offset in that image region).
 Fit: 3 mast frames (12:13, 12:05, 09:52, same pose), camera z fixed 0.99115 (robot_params mast_rgb_height_m), plan scale 1, shared f/k1, per-frame pose5.
 
 Heights FITTED (measured) vs ASSUMED: fitted = wall tops 2.1897, header 2.0728, front-door head 1.9234; assumed = the 2.053 level

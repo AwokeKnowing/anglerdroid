@@ -305,6 +305,12 @@ def env_casita(seed):
     b.e.extent = (-0.2, -0.2, W + 0.2, H + 0.2)
     b.e._mesh = (m, scale, -ext[0] * scale)
     b.e.ceiling_z, b.e.lamp_z = wp.V["ceiling_z"], wp.V["lamp_z"]   # derived from the mesh (wall tops), not assumed
+    # counters / built-ins (worlds/casita/counters.json via world_params.counter_parts): solid boxes + cylinders, so they
+    # collide (MuJoCo), render solid and fill the 2D GT raster; the wall STL alone only gives their outlines (hollow shells).
+    for p in wp.counter_parts():
+        if p["kind"] == "box": b.box(p["cx"], p["cy"], (p["z0"] + p["z1"]) / 2, p["hx"], p["hy"], (p["z1"] - p["z0"]) / 2, p["yaw"], p["mat"])
+        else: b.cyl(p["cx"], p["cy"], p["r"], p["z1"] - p["z0"], z0=p["z0"], mat=p["mat"])
+    b.e.counters = wp.V["counters_json"]
     # ---- furnishing (2026-10-14, James): realistic sizes; rooms read off the wall STL section at 0.5 m
     #   living room (south, y 0-4.7) | front door = west wall gap y 3.1-4.8 | kitchen x 3.4-7, y 3-7.3 (around the
     #   angled island) | laundry + back door x 4.6-7, y 7.3-8.4 | hallway | bedroom 1 (NW) | bedroom 2 (NE)

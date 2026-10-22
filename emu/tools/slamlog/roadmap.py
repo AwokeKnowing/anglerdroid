@@ -160,7 +160,7 @@ def graph(free, theta_m, origin, traj=None):
 def gt_walls(L, shape, origin):
     import trimesh
     from emu.envs import _world_params
-    stl = _world_params().walls_stl()   # the resolved world mesh (worlds/casita/world.json)
+    stl = _world_params().house_stl()   # the resolved world mesh + counters (worlds/casita/world.json, counters.json)
     m = trimesh.load(stl); ext = m.bounds; sc = 0.001 if (ext[1] - ext[0]).max() > 100 else 1.0; off = -ext[0] * sc
     sec = m.section(plane_origin=[0, 0, (0.5 - off[2]) / sc], plane_normal=[0, 0, 1]); occ = np.zeros(shape, np.uint8)
     for e in sec.entities:

@@ -26,7 +26,7 @@ def world_stl():
     """the house mesh: env ML_STL, else the resolved world mesh (src/world_params.py <- worlds/casita/world.json)."""
     if os.environ.get("ML_STL"): return os.environ["ML_STL"]
     import world_params
-    return world_params.walls_stl()
+    return world_params.house_stl()   # walls + counters (worlds/casita/counters.json)
 
 
 def tire_name(tire=None):
