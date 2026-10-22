@@ -157,3 +157,54 @@ def labels_to_obs_known(
     known[clear | obstacle] = 255
     obs[obstacle] = height_cm[obstacle]
     return obs, known
+
+
+def cell_index_rs1(x, y, *, out_h: int = FRAME_H, out_w: int = FRAME_W, px_size: float = float(EGO_PX_SIZE)):
+    """Camera-centred flat cell index for every RS1 vertex, exactly as label_rs1_ego computes it (same float32
+    ops, element-wise), plus the in-bounds mask.  Used by the depth-space cull path (nav/perceive.Ego, flag
+    KEVIN_EGO_DEPTHCULL) so the cell transform is shared by the map and safety label passes."""
+    scale = np.float32(1.0 / px_size)
+    with np.errstate(invalid="ignore"):
+        ja = (x * scale + np.float32(out_w * 0.5)).astype(np.uint32)
+        ia = (y * scale + np.float32(out_h * 0.5)).astype(np.uint32)
+    inb = (ia < np.uint32(out_h)) & (ja < np.uint32(out_w))
+    return ia * np.uint32(out_w) + ja, inb
+
+
+def label_rs1_ego_cells(
+    flat_clear, flat_obs, h_obs,
+    *,
+    out_h: int = FRAME_H,
+    out_w: int = FRAME_W,
+    under_boxes=None,
+    self_boxes=None,
+    height_out: np.ndarray | None = None,
+    labels_out: np.ndarray | None = None,
+    work_labels: np.ndarray | None = None,
+    work_height: np.ndarray | None = None,
+    x_offset: int = 0,
+):
+    """label_rs1_ego from pre-classified cells (flat camera-centred indices of CLEAR vertices, of OBSTACLE vertices
+    and their uint8 heights).  Same scatter order (CLEAR, then OBSTACLE over it, tallest height wins), same
+    180 deg flip, x_offset blit and SELF paint -> bit-identical labels/heights for the same classification."""
+    cam_l = work_labels if work_labels is not None else np.zeros((out_h, out_w), dtype=np.uint8)
+    cam_h = work_height if work_height is not None else np.zeros((out_h, out_w), dtype=np.uint8)
+    cam_l.fill(0)
+    cam_h.fill(0)
+    fl, fh = cam_l.reshape(-1), cam_h.reshape(-1)
+    fl[flat_clear] = CLEAR
+    if len(flat_obs):
+        fl[flat_obs] = OBSTACLE
+        np.maximum.at(fh, flat_obs, h_obs)
+    labels = labels_out if labels_out is not None else np.zeros((out_h, out_w), dtype=np.uint8)
+    height = height_out if height_out is not None else np.zeros((out_h, out_w), dtype=np.uint8)
+    labels.fill(0)
+    height.fill(0)
+    if x_offset == 0:
+        np.copyto(labels, cam_l[::-1, ::-1])
+        np.copyto(height, cam_h[::-1, ::-1])
+    else:
+        _blit_x(labels, np.asarray(cam_l[::-1, ::-1]), int(x_offset))
+        _blit_x(height, np.asarray(cam_h[::-1, ::-1]), int(x_offset))
+    _paint_self(labels, under_boxes, self_boxes)
+    return labels, height

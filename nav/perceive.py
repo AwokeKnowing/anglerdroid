@@ -54,7 +54,22 @@ class Ego:
         # +1 cm band / wheel+caster boxes, where door jambs sit when squeezing through a 0.55-0.65 m door)
         self.over_ok = inside & ~((self.X < -0.11) & (self.X > -0.22) & (np.abs(self.Y) < 0.06))
 
+    # KEVIN_EGO_DEPTHCULL=1 (default off): same labels, computed in depth space.  The floor cutoff is applied to the
+    # raw RS1 Z per pixel instead of to a levelled copy of the cloud: with the per-frame floor plane z = c0 x + c1 y
+    # + c2 and the per-pixel ray (rx, ry) = (x/z, y/z) (measured rays, i.e. the exact decimated grid / pixel-centre
+    # convention of the SDK cloud), levelled Z = z (1 - c0 rx - c1 ry), so a pixel is OBSTACLE iff
+    # z < clip / (1 - c0 rx - c1 ry) and CLIFF iff z > (c2 + CLIFF_DZ) / (1 - c0 rx - c1 ry).  1/D is the per-pixel
+    # floor-cutoff image; it is regenerated every frame from the tilt fit (one 45k-element pass).  Pixels inside a
+    # 0.1 mm margin of either cutoff are re-decided with the original float expressions, so the result is
+    # bit-identical to the transform path (tests/test_ego_depthcull.py); only the cell transform is shared by the
+    # map and safety label passes and the levelled cloud copy is never built.
+    DEPTHCULL = os.environ.get("KEVIN_EGO_DEPTHCULL", "0") == "1"   # TC_Z (0.80) < clip is assumed: synthetic points are always OBSTACLE
+    DC_MARGIN = 1e-4
+
     def update(self, verts):
+        if self.DEPTHCULL:
+            r = self._update_dc(verts)
+            if r is not None: return r
         v2 = self._too_close(verts)
         self.lab_map = None
         if self.too_close_px or self.cliff_px:
@@ -75,6 +90,11 @@ class Ego:
         v = np.asarray(verts, np.float32); self.cliff_px = 0
         if v.ndim != 2 or len(v) == 0: return verts
         z = v[:, 2]; ok = z > 0.01
+        self._init_rays(v)
+        self._ray[ok] = v[ok, :2] / z[ok, None]                # measured rays override (exact frame convention)
+        return self._too_close_rest(v, ok)
+
+    def _init_rays(self, v):
         if not hasattr(self, "_shape"):
             self._shape = next(((h, len(v) // h) for h in (160, 120, 240, 480, 180) if len(v) % h == 0 and 1.2 < len(v) / h / h < 2.0), None)
         if not hasattr(self, "_ray") or len(self._ray) != len(v):
@@ -91,7 +111,9 @@ class Ego:
                 if os.environ.get("KEVIN_HAL") == "sim" and (H, W) == (160, 282):
                     L[68:92, 254:] = True      # sim twin: a robot part inside min-Z at the right image edge (always 0, ~240 px)
                 self._legit = L.ravel()
-        self._ray[ok] = v[ok, :2] / z[ok, None]                # measured rays override (exact frame convention)
+
+    def _too_close_sel(self, ok):
+        """too-close bookkeeping; returns the bool mask of re-inserted pixels (or None)."""
         inv = ~ok & ~self._legit & np.isfinite(self._ray[:, 0])
         self._inv_n = np.where(inv, np.minimum(self._inv_n + 1, 255), 0).astype(np.uint8)
         # whole-view occlusion (hand / cloth over the lens, lens fogged): immobilise, independent of any map
@@ -105,7 +127,13 @@ class Ego:
             big = np.zeros(n, bool); big[1:] = st[1:, cv2.CC_STAT_AREA] >= self.TC_MIN_PX
             sel = big[lab].ravel()
             if sel.any():
-                v = v.copy(); v[sel, :2] = self._ray[sel] * self.TC_Z; v[sel, 2] = self.TC_Z; self.too_close_px = int(sel.sum())
+                self.too_close_px = int(sel.sum()); return sel
+        return None
+
+    def _too_close_rest(self, v, ok):
+        sel = self._too_close_sel(ok)
+        if sel is not None:
+            v = v.copy(); v[sel, :2] = self._ray[sel] * self.TC_Z; v[sel, 2] = self.TC_Z
         return self._cliff(v, ok)
 
     # Negative obstacles (curb edge, stair, drop-off): RS1 looks straight down, so ground that is >= CLIFF_DZ farther
@@ -119,7 +147,14 @@ class Ego:
     def _cliff(self, v, ok):
         self.cliff_px = 0
         if self._shape is None: return v
-        z = v[:, 2]; fl = ok & (np.abs(z - self.CLIFF_Z0) < 0.06)
+        z = v[:, 2]; coef = self._fit_floor(v, ok)
+        dz = z - (v[:, 0] * coef[0] + v[:, 1] * coef[1] + coef[2])
+        self.floor_tilt = (float(coef[0]), float(coef[1]))
+        return self._cliff_level(v, ok, z, coef, dz)
+
+    def _fit_floor(self, v, ok, z=None):
+        """robust per-frame floor plane z = c0 x + c1 y + c2 (RS1 camera frame) on <= ~3000 floor px."""
+        z = v[:, 2] if z is None else z; fl = ok & (np.abs(z - self.CLIFF_Z0) < 0.06)
         coef = np.array([0.0, 0.0, self.CLIFF_Z0], np.float32)
         if fl.sum() > 500:
             fi = np.flatnonzero(fl); fi = fi[::max(1, len(fi) // 3000)]      # plane fit on <= ~3000 floor px (safety core budget)
@@ -128,8 +163,10 @@ class Ego:
                 coef = np.linalg.lstsq(A, zf, rcond=None)[0]; r = np.abs(A @ coef - zf); k = r < max(0.01, np.percentile(r, 70))
                 A, zf = A[k], zf[k]
             if abs(coef[0]) > 0.2 or abs(coef[1]) > 0.2: coef = np.array([0.0, 0.0, self.CLIFF_Z0], np.float32)   # > ~11 deg: implausible fit
-        dz = z - (v[:, 0] * coef[0] + v[:, 1] * coef[1] + coef[2])
-        self.floor_tilt = (float(coef[0]), float(coef[1]))
+        self.floor_coef = coef
+        return coef
+
+    def _cliff_level(self, v, ok, z, coef, dz):
         if self.LEVEL and (coef[0] or coef[1]):     # level the cloud: body pitch/roll on slopes/bumps must not tip the
             v = v.copy(); v[ok, 2] -= v[ok, 0] * coef[0] + v[ok, 1] * coef[1]   # floor into OBSTACLE / below the clip
             z = v[:, 2]
@@ -146,6 +183,72 @@ class Ego:
                 v = v.copy(); r = v[sel, :2] / z[sel, None]
                 v[sel, :2] = r * self.TC_Z; v[sel, 2] = self.TC_Z; self.cliff_px = int(sel.sum())
         return v
+
+    def _update_dc(self, verts):
+        """Depth-space cull path of update() (KEVIN_EGO_DEPTHCULL=1); None -> caller falls back to the transform path."""
+        import perception.ego_rs1 as E
+        v = np.asarray(verts, np.float32); self.cliff_px = 0
+        if v.ndim != 2 or len(v) == 0: return None
+        self._init_rays(v)
+        if self._shape is None: return None
+        x, y, z = (np.ascontiguousarray(v[:, k]) for k in range(3))          # column copies: contiguous vector ops
+        ok = z > 0.01
+        R = self._ray
+        rx, ry = np.divide(x, z, out=np.zeros_like(x), where=ok), np.divide(y, z, out=np.zeros_like(y), where=ok)   # == R[ok] = v[ok,:2] / z[ok,None]
+        R[ok, 0] = rx[ok]; R[ok, 1] = ry[ok]
+        rx, ry = np.ascontiguousarray(R[:, 0]), np.ascontiguousarray(R[:, 1])
+        tc = self._too_close_sel(ok)
+        coef = self._fit_floor(v, ok, z)
+        self.floor_tilt = (float(coef[0]), float(coef[1]))
+        clip = float(E.TD_FLOOR_CLIP); m = self.DC_MARGIN
+        # per-pixel cutoff image for this tilt: 1/D, D = 1 - c0 rx - c1 ry  (rays: exact decimated pixel grid)
+        D = 1.0 - (np.float32(coef[0]) * rx + np.float32(coef[1]) * ry)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            zD = z * D                                                       # ~levelled Z (only used against margins)
+        lev = bool(self.LEVEL and (coef[0] or coef[1]))
+        def zlev(i):                                                         # exact levelled Z, original float ops
+            zz = z[i].copy()
+            if lev: zz -= x[i] * coef[0] + y[i] * coef[1]
+            return zz
+        # cliff: exact dz on the candidates only (dz > CLIFF_DZ  <=>  zD > c2 + CLIFF_DZ)
+        ci = np.flatnonzero(ok & (zD > float(coef[2]) + self.CLIFF_DZ - m))
+        dzc = z[ci] - (x[ci] * coef[0] + y[ci] * coef[1] + coef[2])
+        c = np.zeros(len(v), bool); c[ci[dzc > self.CLIFF_DZ]] = True
+        if not hasattr(self, "_cl_n") or len(self._cl_n) != len(v): self._cl_n = np.zeros(len(v), np.uint8)
+        self._cl_n = np.where(c, np.minimum(self._cl_n + 1, 255), 0).astype(np.uint8)
+        cand = self._cl_n >= self.CLIFF_FRAMES; csel = None
+        if cand.sum() >= self.CLIFF_MIN_PX:
+            H, W = self._shape
+            n, lab, st, _ = cv2.connectedComponentsWithStats(cand.reshape(H, W).astype(np.uint8), connectivity=8)
+            big = np.zeros(n, bool); big[1:] = st[1:, cv2.CC_STAT_AREA] >= self.CLIFF_MIN_PX
+            sel = big[lab].ravel()
+            if sel.any(): csel = sel; self.cliff_px = int(sel.sum())
+        # one cell transform for both label passes (xy are not changed by levelling)
+        flat, inb = E.cell_index_rs1(x, y)
+        def hgt(zz): return np.clip(((clip - zz) * 100.0).astype(np.int32), 1, 100).astype(np.uint8)
+        kw = dict(labels_out=self.lab, height_out=self.hgt, work_labels=self.wl, work_height=self.wh, x_offset=int(TD_X_OFFSET))
+        self.lab_map = None
+        if self.too_close_px or self.cliff_px:          # map pass: measured, unlevelled verts (as the transform path)
+            vm = ok & inb; ob = vm & ~(z >= clip)
+            E.label_rs1_ego_cells(flat[vm & ~ob], flat[ob], hgt(z[ob]), **kw)
+            self.lab_map = self.lab.copy()
+        # safety pass: levelled verts + synthetic too-close / cliff points
+        meas = ok & inb if csel is None else ok & inb & ~csel
+        oi = np.flatnonzero(meas & (zD < clip + m))                          # obstacle candidates
+        zo = zlev(oi); vo = zo > 0.01; fo = zo >= clip
+        clear_mask = meas.copy(); clear_mask[oi[~fo | ~vo]] = False          # non-candidates are floor by construction
+        isob = vo & ~fo
+        fl_obs = [flat[oi[isob]]]; h_obs = [hgt(zo[isob])]
+        for sel, cliff in ((tc, False), (csel, True)):                     # synthetic points: z = TC_Z < clip -> OBSTACLE
+            if sel is None: continue
+            si = np.flatnonzero(sel)
+            xy = (v[si, :2] / zlev(si)[:, None] * self.TC_Z) if cliff else (R[si] * self.TC_Z)
+            xy = xy.astype(np.float32); zs = np.full(len(si), self.TC_Z, np.float32)
+            fs, ib = E.cell_index_rs1(xy[:, 0], xy[:, 1])
+            fl_obs.append(fs[ib]); h_obs.append(hgt(zs[ib]))
+        E.label_rs1_ego_cells(flat[clear_mask], np.concatenate(fl_obs), np.concatenate(h_obs), **kw)
+        self.dc_cand = len(oi) + len(ci)
+        return self.lab
 
     def valid_fraction(self):
         if getattr(self, "occluded", False): return 0.0             # safety: no_depth -> immobilised
