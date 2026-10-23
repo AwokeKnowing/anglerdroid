@@ -441,6 +441,10 @@ def main():
             P("M slam2 ate %.3f/%.3f iou %.3f n %d | rtab ate %.3f/%.3f iou %.3f n %s | odom ate %.3f | %.2fx rt" % (
                 rec["slam2"]["ate_win"], rec["slam2"]["ate_cum"], rec["slam2"]["map_occ_iou"], len(slam.kfs), rec["rtab"]["ate_win"], rec["rtab"]["ate_cum"], rec["rtab"]["map_occ_iou"],
                 rec["rtab"].get("nodes"), rec["odom"]["ate_win"], rec["harness"]["rt_factor"]))
+            # disk: RTAB's LTM database is the only thing that grows (~0.45 GB/sim-h); freeze RTAB 1 GB above the floor
+            # (reported, slam2 + GT keep running), stop the whole run only at the floor itself.
+            if rt is not None and not rtab_capped and rec["harness"]["disk_free_gb"] < a.min_free_gb + 1:
+                rtab_capped = True; P("disk free < %g GB: RTAB frozen from here (reported)" % (a.min_free_gb + 1)); rec["rtab"]["capped"] = "disk"
             if rec["harness"]["disk_free_gb"] < a.min_free_gb: P("disk free < %g GB: stopping" % a.min_free_gb); break
     slam.save(os.path.join(out, "slam2.pkl"))
     if rt is not None: rt.close()
