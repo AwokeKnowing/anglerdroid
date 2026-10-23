@@ -1,7 +1,7 @@
 # slam2 vs RTAB-Map — "24 h" life benchmark on i777 (RTX), stopped early at ~6.2–6.7 sim-h
 
 Harness: `bench/slam/life24.py --hours 24 --rtab-param Rtabmap/TimeThr=700 --rtab-param Mem/BinDataKept=false --rtab-rss-cap-gb 6`,
-seeds 0/1/2, slam2 = main@3d78f68 (sync, pre async-LC). Started 16:2x PDT 2026-10-22, stopped 22:08–22:12 PDT (~5.5 h wall, rt factor 1.15–1.26x).
+seeds 0/1/2, slam2 = main@3d78f68 (sync, pre async-LC). Started ~16:39 PDT (seed1 restarted ~17:20) 2026-10-22, stopped 22:08–22:12 PDT (~5.5 h wall, rt factor 1.15–1.26x).
 Raw data: `~/slambench/res24h/seed{0,1,2}/` (metrics.jsonl, err_1hz.csv, frames/, snap/, rtabmap.db, slam2.pkl).
 
 ## How it was stopped / resume
