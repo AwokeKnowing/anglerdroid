@@ -85,6 +85,9 @@ def main():
     wrap_fn(S2.Field, "add", lambda st: st[-1][0] if st else "fadd")
     cats = ("match", "field", "grid", "loop", "opt", "remap", "voxel", "fadd")
 
+    # solver warm-up (scipy.sparse import + first factorisation), like Slam2's CUDA warm-up; not counted
+    _o = getattr(S2.optimize, "__wrapped__", S2.optimize); _inf = np.array([1e4, 1e4, 1e4])
+    _o([(0, 0, 0), (1, 0, 0), (2, 0, 0)], [(0, 1, (1, 0, 0), _inf), (1, 2, (1, 0, 0), _inf), (0, 2, (2, 0, 0), _inf)], robust=[False, False, True])
     s = S2.Slam2(GridMap(), match=True); s._run = False          # no worker thread: we call _step ourselves (= the worker)
     with s._cv: s._job = None
     proc = None
