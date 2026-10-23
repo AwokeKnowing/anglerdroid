@@ -66,11 +66,36 @@ NODE_D, NODE_A = 0.5, math.radians(30)
 DCS_PHI = 1.0
 REFRESH_D, REFRESH_A, REFRESH_S = 0.25, math.radians(15), 60.0
 REMAP_D = 0.05
+# ---- asynchronous loop closure (KEVIN_SLAM2_ASYNC_LC=1, 2026-10-22; LIFE mode).  The loop-closure search + pose-graph
+# solve + planning-map re-render ran inside the per-scan update (Orin: 115-170 ms on a loop-search update).
+# Standard back-end/front-end split (e.g. Cartographer, ORB-SLAM's loop thread): at a node insert the main update only
+# snapshots the graph and hands it to a worker thread; the front end keeps matching against the current field.  When the
+# worker is done, a later update applies the result: the loop edge is added, solved nodes take their new poses, nodes added
+# since the snapshot are carried by the rigid correction of the node they grew from (the submit-time anchor), the matching
+# field is patched incrementally (moved nodes only) and re-rendered lazily, the pre-rendered planning map is swapped in.
+# One job in flight; node inserts while it runs do not start another search.
+# KEVIN_SLAM2_ASYNC_LAG=N > 0: deterministic variant for tests/benches -- apply exactly N updates after the submit (waits
+# for the worker if needed), so results do not depend on thread timing.
+# Default ON (bench/slam/orin_bench.py replays, 2026-10-22): LAG=1 reproduces the synchronous trajectory (max 1.9 cm /
+# 0.7 deg for the one update in between, final 0; same nodes/loops); free-thread runs differ from sync by less than i777
+# vs Orin sync does; Orin loop-search updates 135 -> 30 ms mean, updates > 100 ms 28 -> 0.  KEVIN_SLAM2_ASYNC_LC=0 = old path.
+ASYNC_LC = os.environ.get("KEVIN_SLAM2_ASYNC_LC", "1") == "1"
+ASYNC_LAG = int(os.environ.get("KEVIN_SLAM2_ASYNC_LAG", "0"))
+_TL = threading.local()            # per-thread search() outputs (the loop worker searches concurrently with the front end)
 
 
 def _voxel(P, v=0.04, n=NPTS, seed=0):
     if len(P) == 0: return P
-    k = np.unique(np.floor(P / v).astype(np.int64), axis=0, return_index=True)[1]; P = P[k]
+    q = np.floor(P / v).astype(np.int64)
+    # == np.unique(q, axis=0, return_index=True)[1] (rows in lexicographic order, first occurrence of each) via a single
+    # mixed-radix int64 key, which preserves that order: identical indices, ~5-10x faster than the row-wise unique
+    lo = q.min(0); span = q.max(0) - lo + 1
+    if q.ndim == 2 and float(np.prod(span.astype(np.float64))) < 2.0 ** 62:
+        key = q[:, 0] - lo[0]
+        for c in range(1, q.shape[1]): key = key * span[c] + (q[:, c] - lo[c])
+        k = np.unique(key, return_index=True)[1]
+    else: k = np.unique(q, axis=0, return_index=True)[1]
+    P = P[k]
     if len(P) > n: P = P[np.random.default_rng(seed).choice(len(P), n, replace=False)]
     return P.astype(np.float32)
 
@@ -153,7 +178,7 @@ def search(fieldmaps, forg, P, guess, lin, lstep, ang, astep, prior=None, refine
     n = float(len(P)); bs = max(best, 1e-3)
     Hxy = np.array([[h[0], h[1]], [h[1], h[2]]]); hth = max(2 * best - v[8] - v[9], 0.0) / math.radians(2) ** 2
     Info = np.zeros((3, 3)); Info[:2, :2] = n * Hxy / bs; Info[2, 2] = n * hth / bs
-    search.last_raw = (x0, y0, t0); search.last_info = Info
+    search.last_raw = (x0, y0, t0); search.last_info = Info; _TL.raw, _TL.info = (x0, y0, t0), Info
     return (guess[0] + dxy[0], guess[1] + dxy[1], wrap(guess[2] + dth)), out[-1][0], out[-1][1]
 
 
@@ -207,6 +232,13 @@ class Slam2:
         if torch is not None:             # CUDA/kernel warm-up now, not on the first scan (it held the GIL ~0.6 s)
             f = {sg: np.zeros((int(2 * WIN / RES) + 2,) * 2, np.float32) for sg in SIG}
             search(f, np.array([-WIN, -WIN]), np.zeros((10, 2), np.float32), (0.0, 0.0, 0.0), 0.24, 0.04, 0.07, 0.017)
+        try:                              # solver warm-up too (scipy.sparse import + first factorisation: ~0.3 s on the 1st closure)
+            _i = np.full(3, 1e4)
+            optimize([(0, 0, 0), (1, 0, 0), (2, 0, 0)], [(0, 1, (1, 0, 0), _i), (1, 2, (1, 0, 0), _i), (0, 2, (2, 0, 0), _i)], robust=[False, False, True])
+        except Exception as e: print("slam2 solver warm-up: %r" % e)
+        self.async_lc, self.lc_lag = ASYNC_LC, ASYNC_LAG; self._lc = None; self._lc_gen = 0; self._nstep = 0; self.lc_log = []
+        self._lc_stream = torch.cuda.Stream() if (torch is not None and DEV == "cuda") else None
+        self._hp_stream = torch.cuda.Stream(priority=-3) if (self._lc_stream is not None and self.async_lc) else None   # max priority (CUDA clamps)
         # KEVIN_SLAM_REC=<file>: every job the worker PROCESSES (the exact replay input; submit() drops jobs while busy),
         # plus T before it, streamed as pickle records by a writer thread (nav exits via os._exit: no atexit dump)
         self._recq = None
@@ -250,7 +282,7 @@ class Slam2:
     def reset_to_grid(self):
         """Map loaded: forget this session's keyframes, match against the loaded map until relocalized."""
         with self._lock:
-            self.kfs = []; self.edges = []; self.field = Field(); self._path = 0.0; self._last_loop_kf = -100
+            self.kfs = []; self.edges = []; self.field = Field(); self._path = 0.0; self._last_loop_kf = -100; self._lc_gen += 1
         self.seed_from_grid()
 
     def seed_from_grid(self):
@@ -287,8 +319,19 @@ class Slam2:
         self._Pc, self._Pc_odom = P, podom
         return P
 
-    def _step(self, t, podom, obs, free, obs_h=None, rays=None):
-        t0 = time.perf_counter(); self._carve = None
+    def _step(self, *a, **kw):
+        if self._hp_stream is None: return self._step_body(*a, **kw)
+        # async loop closure: the per-update path runs on a high-priority CUDA stream so the worker's big loop-search
+        # kernels (low-priority stream) do not halve its throughput (Orin, measured: match 54 -> 31 ms under a busy worker).
+        # Event-ordered against the default stream both ways, so callers/other threads see the usual ordering.
+        dflt = torch.cuda.default_stream(); self._hp_stream.wait_stream(dflt)
+        try:
+            with torch.cuda.stream(self._hp_stream): return self._step_body(*a, **kw)
+        finally: dflt.wait_stream(self._hp_stream)
+
+    def _step_body(self, t, podom, obs, free, obs_h=None, rays=None):
+        t0 = time.perf_counter(); self._carve = None; self._nstep += 1
+        if self._lc is not None: self._lc_poll()            # async loop closure finished: apply before predicting
         pm = compose(self.T, podom)
         if MATCH_TEST == "chi2": self._Pcov(podom)        # propagate prediction covariance every odom step
         lp = getattr(self, "_lastjob", None); self._lastjob = (t, podom)
@@ -307,7 +350,7 @@ class Slam2:
         obs = np.asarray(obs, np.float32); P = _voxel(obs[np.hypot(obs[:, 0], obs[:, 1]) < MAXR]) if len(obs) else obs
         if not still and self.do_match and (len(self.kfs) >= 3 or getattr(self, 'seeded', False)) and len(P) > 60:
             est, sc, s_g = search(self.field.fields(), self.field.origin, P, pm, 0.24, 0.04, math.radians(4), math.radians(1))
-            raw, info = search.last_raw, search.last_info
+            raw, info = _TL.raw, _TL.info
             # odometry prior: how far may the scan pull us?  Wheel odom is good to ~3 % of distance + slip events,
             # so the allowed correction grows with odometry travelled since the last accepted match (and resets on it).
             la = getattr(self, "_last_acc", None) or podom
@@ -317,7 +360,7 @@ class Slam2:
                 r = min(1.0, 0.25 + 0.15 * dd)                 # widen with uncertainty, not blindly to 1 m (maze aliasing)
                 e2, s2, _ = search(self.field.fields(), self.field.origin, P, pm, r, 0.08, math.radians(12), math.radians(2), prior=(max(0.3, r), math.radians(10)))
                 self.stats["wide"] = self.stats.get("wide", 0) + 1
-                if s2 > sc + 0.1: est, sc = e2, s2; raw, info = search.last_raw, search.last_info
+                if s2 > sc + 0.1: est, sc = e2, s2; raw, info = _TL.raw, _TL.info
             self.stats["matches"] += 1; self.stats["score"] = round(sc, 3)
             if MATCH_TEST == "chi2":
                 # standard EKF-style check: innovation (match - odom prediction) vs predicted covariance
@@ -473,26 +516,106 @@ class Slam2:
         if float((e * e * inf).sum()) > CHI2_99_3: self._optimize_life("reanchor")
 
     def _try_loop_life(self, n):
+        if self._lc is not None: self.stats["lc_busy"] = self.stats.get("lc_busy", 0) + 1; return   # one search in flight
+        snap = self._lc_snapshot(n)
+        if snap is None: return
+        if not self.async_lc: return self._lc_apply(self._lc_compute(snap))
+        box = []
+        def run():
+            try:
+                if self._lc_stream is not None:
+                    with torch.cuda.stream(self._lc_stream): box.append(self._lc_compute(snap))
+                else: box.append(self._lc_compute(snap))
+            except Exception as e: print("slam2 loop worker error: %r" % e)
+        th = threading.Thread(target=run, daemon=True, name="slam2-loop")
+        self._lc = (th, box, self._nstep, self._lc_gen, time.perf_counter()); th.start()
+
+    def _lc_poll(self):
+        th, box, n0, gen, t0 = self._lc
+        if self.lc_lag > 0:
+            if self._nstep - n0 < self.lc_lag: return
+            th.join()
+        elif th.is_alive(): return
+        self._lc = None
+        if gen != self._lc_gen or not box: return          # graph reset / loaded meanwhile, or the worker failed
+        r = box[0]; self.stats["lc_lag"] = self._nstep - n0
+        self.lc_log.append((n0, self._nstep, r["ok"], round((time.perf_counter() - t0) * 1e3, 1)))
+        self._lc_apply(r)
+
+    def _lc_snapshot(self, n):
+        """Loop candidate (main thread, cheap) + everything the search/solve needs, by reference (node scans are replaced,
+        never mutated in place)."""
         cur = self.kfs[n]; Xp = self._node_xy(); paths = np.array([k.path for k in self.kfs])
         dd = np.hypot(Xp[:, 0] - cur.pose[0], Xp[:, 1] - cur.pose[1])
         c = np.nonzero((dd < 2.0) & (cur.path - paths > 4.0))[0]
-        if len(c) == 0: return
-        t0 = time.perf_counter(); j = int(c[np.argmin(dd[c])])
-        sub = Field(); near = np.nonzero((np.hypot(Xp[:, 0] - Xp[j, 0], Xp[:, 1] - Xp[j, 1]) < 2.0) & (cur.path - paths > 4.0))[0]
-        for k in near: sub.add(self.kfs[k].pose, self.kfs[k].obs)
-        Q = np.concatenate([transform(Pk, compose(inverse(cur.pose), pk)) for pk, Pk in self._recent if len(Pk)])
+        if len(c) == 0: return None
+        j = int(c[np.argmin(dd[c])])
+        near = np.nonzero((np.hypot(Xp[:, 0] - Xp[j, 0], Xp[:, 1] - Xp[j, 1]) < 2.0) & (cur.path - paths > 4.0))[0]
+        return dict(n=n, j=j, cur=cur.pose, path_n=cur.path, path_j=self.kfs[j].path, pose_j=self.kfs[j].pose, t_n=cur.t, t_j=self.kfs[j].t,
+                    sub=[(self.kfs[k].pose, self.kfs[k].obs) for k in near], recent=list(self._recent),
+                    poses=[k.pose for k in self.kfs], edges=list(self.edges), robust=list(self._robust),
+                    nodes=[(k.obs, k.free, k.carve) for k in self.kfs])
+
+    def _lc_compute(self, s):
+        """Loop search + pose-graph solve (+ planning-map re-render if the map moved) on a snapshot.  Pure: touches no
+        live state, so it runs on the worker thread (or inline when synchronous)."""
+        t0 = time.perf_counter(); cur = s["cur"]; sub = Field()
+        for p, o in s["sub"]: sub.add(p, o)
+        Q = np.concatenate([transform(Pk, compose(inverse(cur), pk)) for pk, Pk in s["recent"] if len(Pk)])
         Q = _voxel(Q.astype(np.float32), 0.04, 1500)
-        est, sc, s_g = search(sub.fields(), sub.origin, Q, cur.pose, 0.6, 0.06, math.radians(10), math.radians(1.5), prior=(1.0, math.radians(20)))
-        self.stats["loop_ms"] = round((time.perf_counter() - t0) * 1e3, 1); self.stats["loop_score"] = round(sc, 3)
-        self.stats["loop_tries"] = self.stats.get("loop_tries", 0) + 1
-        if sc < LOOP_MIN: return
-        corr = math.hypot(est[0] - cur.pose[0], est[1] - cur.pose[1])
-        if corr > 0.15 + 0.03 * (cur.path - self.kfs[j].path): return
-        z = compose(inverse(self.kfs[j].pose), est)
-        self.edges.append((j, n, z, np.array([1 / 0.03 ** 2, 1 / 0.03 ** 2, 1 / math.radians(1.0) ** 2]))); self._robust.append(True)
-        self._pairs.add((j, n)); self._last_loop_kf = n; self.stats["loops"] += 1
-        self.loop_log = getattr(self, "loop_log", []); self.loop_log.append((self.kfs[j].t, cur.t, tuple(z), len(self.edges) - 1))
-        self._optimize_life("loop")
+        est, sc, s_g = search(sub.fields(), sub.origin, Q, cur, 0.6, 0.06, math.radians(10), math.radians(1.5), prior=(1.0, math.radians(20)))
+        r = dict(snap=s, ok=False, loop_ms=round((time.perf_counter() - t0) * 1e3, 1), score=round(sc, 3))
+        if sc < LOOP_MIN: return r
+        if math.hypot(est[0] - cur[0], est[1] - cur[1]) > 0.15 + 0.03 * (s["path_n"] - s["path_j"]): return r
+        e = (s["j"], s["n"], compose(inverse(s["pose_j"]), est), np.array([1 / 0.03 ** 2, 1 / 0.03 ** 2, 1 / math.radians(1.0) ** 2]))
+        t1 = time.perf_counter(); rb = s["robust"] + [True]
+        new = optimize(s["poses"], s["edges"] + [e], robust=rb); scale = optimize.last_scale
+        sh = np.hypot(*(np.array(new)[:, :2] - np.array(s["poses"])[:, :2]).T)
+        r.update(ok=True, edge=e, new=new, scale=scale, rb=np.asarray(rb, bool), opt_ms=round((time.perf_counter() - t1) * 1e3, 1))
+        if sh.max() > REMAP_D: r["grid"] = self._lc_build_grid(new, s["nodes"])
+        return r
+
+    def _lc_build_grid(self, poses, nodes):
+        g = GridMap(res=self.grid.res, size_m=self.grid.n * self.grid.res, origin=tuple(self.grid.origin))
+        with self.grid.lock: g.Hlo[:] = self.grid.Hlo; g.Hhi[:] = self.grid.Hhi   # KF scans are 2-D: keep live height evidence
+        for p, (o, f, c) in zip(poses, nodes):
+            for _ in range(3): g.integrate(p, o, f, None, c)                     # KFs ~1/4 of scans: weight them up
+        return g
+
+    def _lc_apply(self, r):
+        """Main thread: add the loop edge, move the nodes, patch the field, swap in the re-rendered planning map."""
+        s = r["snap"]; st = self.stats
+        st["loop_ms"] = r["loop_ms"]; st["loop_score"] = r["score"]; st["loop_tries"] = st.get("loop_tries", 0) + 1
+        if not r["ok"]: return
+        n, j, Ns = s["n"], s["j"], len(s["poses"])
+        self.edges.append(r["edge"]); self._robust.append(True); self._pairs.add((j, n)); self._last_loop_kf = n; st["loops"] += 1
+        self.loop_log = getattr(self, "loop_log", []); self.loop_log.append((s["t_j"], s["t_n"], tuple(r["edge"][2]), len(self.edges) - 1))
+        new = list(r["new"])
+        if len(self.kfs) > Ns:      # nodes added while the solve ran: rigidly carried by the correction of node n (the anchor at submit)
+            D = compose(new[n], inverse(s["poses"][n])); new += [compose(D, k.pose) for k in self.kfs[Ns:]]
+        sc = r["scale"]; st["loops_downweighted"] = int((r["rb"] & (sc < 0.5)).sum())
+        st["opt_ms"] = r["opt_ms"]; st["opts"] = st.get("opts", 0) + 1; self.loop_scale = sc
+        old = [k.pose for k in self.kfs]
+        sh = np.hypot(*(np.array(new)[:, :2] - np.array(old)[:, :2]).T); st["loop_shift_m"] = round(float(sh.max()), 3)
+        for k, p, o, m in zip(self.kfs, new, old, sh):
+            if m > 0.01 or abs(wrap(p[2] - o[2])) > math.radians(0.3):
+                self.field.add(o, k.obs, -1); self.field.add(p, k.obs)       # field re-renders lazily on the next match
+            k.pose = p
+        self._xy = None
+        a, da, oa, pa = self._anchor
+        self.T = compose(compose(self.kfs[a].pose, da), inverse(oa))
+        if sh.max() > REMAP_D:
+            g = r.get("grid")
+            if g is None: g = self._lc_build_grid([k.pose for k in self.kfs], [(k.obs, k.free, k.carve) for k in self.kfs])
+            else:
+                for k in self.kfs[Ns:]:
+                    for _ in range(3): g.integrate(k.pose, k.obs, k.free, None, k.carve)
+            self._lc_swap_grid(g)
+
+    def _lc_swap_grid(self, g):
+        with self.grid.lock:
+            self.grid.L[:] = g.L; self.grid.seen[:] = g.seen; self.grid.version += 1
+        self.stats["remaps"] = self.stats.get("remaps", 0) + 1
 
     def _optimize_life(self, why):
         t1 = time.perf_counter(); old = [k.pose for k in self.kfs]
@@ -534,7 +657,7 @@ class Slam2:
         import pickle
         d = pickle.load(open(path, "rb"))
         with self._lock:
-            self.kfs = []; self.field = Field()
+            self.kfs = []; self.field = Field(); self._lc_gen += 1
             for od, po, ob, fr, pa, t, to in d["kfs"]:
                 k = KF(od, po, ob, fr, pa, None, t); k.t_obs = to; self.kfs.append(k); self.field.add(po, ob)
             self.edges = [(i, j, z, np.array(f)) for i, j, z, f in d["edges"]]; self._robust = d["robust"]

@@ -13,6 +13,9 @@ Per job: wall ms of _step (cuda-synchronised), split by EXCLUSIVE time into
   other  rest (chi2/Kalman, covariance, trigger bookkeeping, ...)
 --core-load: a separate process burning 20 ms CPU per 33.3 ms period (the measured live 30 Hz core budget), CPU only
              (approximation of the core's load; it does not model its GPU/USB/RealSense work).
+--async-lc 0|1 [--lag N]: KEVIN_SLAM2_ASYNC_LC / KEVIN_SLAM2_ASYNC_LAG (loop closure on a worker thread; LAG>0 = apply exactly
+             N updates after submit, deterministic).  Only main-thread (per-update) time is split/counted; worker time is
+             reported as closure latency (lc: updates and ms from submit to apply).
 --realtime : feed jobs at their recorded timestamps and report how many a 1-deep latest-wins queue (Slam2.submit) drops."""
 from __future__ import annotations
 import argparse, gzip, json, math, os, pickle, platform, sys, time
@@ -51,21 +54,25 @@ def main():
     ap = argparse.ArgumentParser(); ap.add_argument("jobs", nargs="?"); ap.add_argument("--life", default="1")
     ap.add_argument("--out", default=None); ap.add_argument("--core-load", action="store_true"); ap.add_argument("--realtime", action="store_true")
     ap.add_argument("--limit", type=int, default=0); ap.add_argument("--compare", nargs=2)
+    ap.add_argument("--async-lc", default=None); ap.add_argument("--lag", type=int, default=0)
     a = ap.parse_args()
     if a.compare: return compare(*a.compare)
     os.environ["KEVIN_SLAM2_LIFE"] = a.life
+    if a.async_lc is not None: os.environ["KEVIN_SLAM2_ASYNC_LC"] = a.async_lc
+    os.environ["KEVIN_SLAM2_ASYNC_LAG"] = str(a.lag)
     if os.environ.get("KEVIN_TORCH_SITE"): sys.path.append(os.environ["KEVIN_TORCH_SITE"])
     sys.path[:0] = [REPO]
     J = load(a.jobs)
     if a.limit: J = J[:a.limit]
-    import torch, nav.slam2 as S2, nav.slam as S1
+    import threading, torch, nav.slam2 as S2, nav.slam as S1
     from nav.slam import GridMap
-    sync = (lambda: torch.cuda.synchronize()) if S2.DEV == "cuda" else (lambda: None)
+    sync = (lambda: torch.cuda.current_stream().synchronize()) if S2.DEV == "cuda" else (lambda: None)
     # ---- exclusive-time instrumentation
-    acc = {}; stack = []
+    acc = {}; stack = []; MAIN = threading.get_ident()
     def wrap_fn(owner, name, cat):
         f = getattr(owner, name)
         def g(*args, **kw):
+            if threading.get_ident() != MAIN: return f(*args, **kw)      # loop worker thread: not per-update time
             c = cat(stack) if callable(cat) else cat
             t0 = time.perf_counter(); stack.append([c, 0.0])
             try: return f(*args, **kw)
@@ -78,8 +85,8 @@ def main():
     wrap_fn(S2, "search", lambda st: "loop" if in_loop(st) else "match")
     wrap_fn(S2.Field, "fields", lambda st: "loop" if in_loop(st) else "field")
     wrap_fn(S2, "optimize", "opt")
-    for n_ in ("_try_loop", "_try_loop_life"): wrap_fn(S2.Slam2, n_, "loop")
-    for n_ in ("_rebuild", "_rebuild_grid"): wrap_fn(S2.Slam2, n_, "remap")
+    for n_ in ("_try_loop", "_try_loop_life", "_lc_compute", "_lc_apply"): wrap_fn(S2.Slam2, n_, "loop")
+    for n_ in ("_rebuild", "_rebuild_grid", "_lc_build_grid", "_lc_swap_grid"): wrap_fn(S2.Slam2, n_, "remap")
     wrap_fn(GridMap, "integrate", lambda st: "remap" if any(s[0] == "remap" for s in st) else "grid")
     wrap_fn(S2, "_voxel", lambda st: st[-1][0] if st else "voxel")
     wrap_fn(S2.Field, "add", lambda st: st[-1][0] if st else "fadd")
@@ -109,6 +116,11 @@ def main():
         pose.append(S2.compose(s.T, j[1]))
         if a.realtime and a.limit == 0 and len(ms) % 2000 == 0: print("..", len(ms), flush=True)
     if proc is not None: proc.terminate(); proc.join()
+    if s._lc is not None: s._lc[0].join()                     # a closure still in flight at the end: not applied
+    L = np.array(s.lc_log, float).reshape(-1, 4)              # (submit step, apply step, accepted, submit->apply ms)
+    lc = dict(async_lc=s.async_lc, lag_mode=s.lc_lag, tries=s.stats.get("loop_tries", 0), busy_skips=s.stats.get("lc_busy", 0))
+    if len(L): lc.update(lag_updates_mean=round(float((L[:, 1] - L[:, 0]).mean()), 2), lag_updates_max=int((L[:, 1] - L[:, 0]).max()),
+                         lag_ms_mean=round(float(L[:, 3].mean()), 1), lag_ms_max=round(float(L[:, 3].max()), 1))
     ms = np.array(ms); split = np.array(split); lf = np.array(loopflag)
     pct = lambda x, q: round(float(np.percentile(x, q)), 2) if len(x) else None
     r = dict(host=platform.node(), machine=platform.machine(), torch=torch.__version__, dev=S2.DEV,
@@ -121,13 +133,13 @@ def main():
              split_p95_ms={c: round(float(np.percentile(split[:, i], 95)), 2) for i, c in enumerate(cats + ("other",))},
              split_max_ms={c: round(float(split[:, i].max()), 1) for i, c in enumerate(cats + ("other",))},
              nodes=len(s.kfs), edges=len(s.edges), loops=s.stats.get("loops", 0), opts=s.stats.get("opts", 0), remaps=s.stats.get("remaps", 0),
-             accepted=s.stats.get("accepted", 0), matches=s.stats.get("matches", 0),
+             lc=lc, accepted=s.stats.get("accepted", 0), matches=s.stats.get("matches", 0),
              maxrss_mb=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1),
              gpu_mem_peak_mb=round(torch.cuda.max_memory_allocated() / 2**20, 1) if S2.DEV == "cuda" else None)
     print(json.dumps(r))
     if a.out:
         json.dump(r, open(a.out, "w"), indent=1)
-        np.savez(a.out.replace(".json", ".npz"), ms=ms, split=split, loop=lf, pose=np.array(pose), nodes=len(s.kfs), loops=s.stats.get("loops", 0),
+        np.savez(a.out.replace(".json", ".npz"), ms=ms, split=split, loop=lf, pose=np.array(pose), lc_log=L, nodes=len(s.kfs), loops=s.stats.get("loops", 0),
                  t=np.array([j[0] for j in J[:len(ms)]]) if not a.realtime else np.zeros(0))
 
 
